@@ -62,17 +62,24 @@ def _human_dur(sec: float) -> str:
     return f"{sec:.2f} s"
 
 def _pick_key_tags(scored: pd.DataFrame, drift: Optional[pd.DataFrame]) -> List[str]:
-    # Prefer worst drift; fallback to highest variance signals among numeric, excluding derived columns
     derived = {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}
-    tags = []
-    if drift is not None and "Tag" in drift.columns:
-        tags = drift.sort_values("DriftZ", ascending=False)["Tag"].tolist()
-    if not tags:
-        numcols = [c for c in scored.columns if c not in derived]
-        if numcols:
-            v = scored[numcols].var().sort_values(ascending=False)
-            tags = v.index.tolist()
-    return tags[:SPARKS_N]
+    if drift is not None and "Tag" in drift.columns and "DriftZ" in drift.columns:
+        cand = drift.dropna(subset=["DriftZ"]).sort_values("DriftZ", ascending=False)["Tag"].tolist()
+        if cand:
+            return cand[:SPARKS_N]
+    # variance fallback over numeric, non-derived columns
+    numcols = []
+    for c in scored.columns:
+        if c in derived: 
+            continue
+        s = pd.to_numeric(scored[c], errors="coerce")
+        if s.notna().sum() > 0:
+            numcols.append(c)
+    if numcols:
+        v = scored[numcols].apply(pd.to_numeric, errors="coerce").var().sort_values(ascending=False)
+        return [c for c in v.index.tolist() if c not in derived][:SPARKS_N]
+    return []
+
 
 # ---------- Plots ----------
 def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: Optional[pd.DataFrame]) -> str:
@@ -100,7 +107,8 @@ def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: O
     if events is not None and not events.empty:
         for r in events.itertuples():
             ax.axvspan(r.Start, r.End, color="#f59e0b", alpha=0.25)
-            ax.text(r.Start, min(0.98, r.PeakScore+0.02), f"{r.PeakScore:.2f}", fontsize=8, color="#f59e0b")
+            if hasattr(r, "PeakScore"):
+                ax.text(r.Start, min(0.98, getattr(r, "PeakScore", 0)+0.02), f"{getattr(r, 'PeakScore', 0):.2f}", fontsize=8, color="#f59e0b")
 
     # Mask overlay (red band at the bottom)
     if masks is not None and "Ts" in masks.columns and "Mask" in masks.columns:
@@ -119,12 +127,12 @@ def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: O
         ax.set_ylabel("Heads")
         ax.grid(alpha=0.25); ax.legend(loc="upper right", fontsize=8)
 
-    # Row 3: regime ribbon
+    # Row 3: regime ribbon (FIXED pcolormesh shapes)
     if has_reg:
         ax = axes[axi]; axi += 1
         reg = scored["Regime"].astype(int)
 
-        # Use date numbers + pcolormesh (avoids int overflow from ns timestamps)
+        # Use date numbers + pcolormesh (avoid int overflow from ns timestamps)
         x = mdates.date2num(ts)
         if len(x) >= 2:
             dx = np.diff(x)
@@ -136,8 +144,15 @@ def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: O
             # single-point fallback: create a tiny 1-minute span
             edges = np.array([x[0], x[0] + 1/1440])
 
-        Z = np.vstack([reg.values, reg.values])  # 2 rows required by pcolormesh
-        ax.pcolormesh(edges, [0, 1], Z, cmap="tab20", shading="auto")
+        # Make Z single-row so Y needs exactly 2 edges → avoids mismatch
+        Z = reg.values[np.newaxis, :]           # shape (1, N)
+        y_edges = np.array([0, 1])              # length 2 = M+1 when M=1
+
+        # Safety check: X edges must be N+1
+        if edges.shape[0] != Z.shape[1] + 1:
+            raise ValueError(f"Regime ribbon: edges length {edges.shape[0]} must be one more than Z columns {Z.shape[1]}")
+
+        ax.pcolormesh(edges, y_edges, Z, cmap="tab20", shading="auto")
         ax.set_yticks([]); ax.set_ylabel("Regime"); ax.grid(False)
 
     # Row 4: corr/cpd
@@ -227,7 +242,6 @@ def plot_sparklines(scored: pd.DataFrame, tags: List[str], fused: Optional[pd.Se
         if t in scored.columns:
             s = scored[t].astype(float)
         else:
-            # if original tag not in scored matrix, just skip
             ax.axis("off"); continue
         # normalize (z)
         z = (s - s.mean()) / (s.std() + 1e-9)
@@ -255,19 +269,31 @@ def plot_drift_bars(drift: pd.DataFrame) -> str:
 # ---------- DQ & Timings ----------
 def compute_dq(raw_df: pd.DataFrame, tags: List[str]) -> pd.DataFrame:
     rows = []
-    for t in tags:
-        if t not in raw_df.columns: continue
-        s = raw_df[t].astype(float)
+    for t in tags or []:
+        if t not in raw_df.columns:
+            continue
+        s = pd.to_numeric(raw_df[t], errors="coerce").astype(float)
         n = len(s)
-        if n == 0: continue
+        if n == 0:
+            continue
         flat = (s.diff().abs() < 1e-12).sum() / n * 100.0
         drop = s.isna().sum() / n * 100.0
-        # crude spikes: |Δ| > 5*IQR of diffs
         d = s.diff().dropna().abs()
         iqr = (d.quantile(0.75) - d.quantile(0.25)) + 1e-9
-        spikes = (d > 5*iqr).sum()
-        rows.append({"Tag": t, "Flatline%": flat, "Dropout%": drop, "Spikes": int(spikes)})
-    return pd.DataFrame(rows).sort_values(["Flatline%","Dropout%","Spikes"], ascending=[False, False, False])
+        spikes = int((d > 5 * iqr).sum())
+        rows.append({"Tag": t, "Flatline%": flat, "Dropout%": drop, "Spikes": spikes})
+
+    # Guard: if nothing to report, return empty frame with expected columns
+    if not rows:
+        return pd.DataFrame(columns=["Tag", "Flatline%", "Dropout%", "Spikes"])
+
+    df = pd.DataFrame(rows)
+    # Ensure all expected cols exist before sort (paranoia)
+    for c in ["Flatline%", "Dropout%", "Spikes"]:
+        if c not in df.columns:
+            df[c] = np.nan
+    return df.sort_values(["Flatline%", "Dropout%", "Spikes"], ascending=[False, False, False])
+
 
 def timings_table(runlog: Optional[pd.DataFrame]) -> Tuple[str, List[Dict]]:
     if runlog is None or runlog.empty:
@@ -309,8 +335,7 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
     drift  = _safe_read_csv(drift_csv)
     masks  = _safe_read_csv(masks_csv)
 
-    # Try to load raw df for event spectra (use same CSV as scored input but pre-feature file is not saved).
-    # We'll approximate with a nearest index alignment to scored itself for tag raw values if present.
+    # Try to load raw df for event spectra (approximate with scored columns)
     raw_df = scored.copy()
 
     # Metadata: manifest + runlog
@@ -331,7 +356,8 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
     regimes_seen = int(scored["Regime"].nunique()) if "Regime" in scored.columns else 0
     mask_cov = None
     if masks is not None and not masks.empty:
-        mask_cov = 100.0 * (masks["Mask"].astype(int).sum() / max(1, len(masks)))
+        if "Mask" in masks.columns:
+            mask_cov = 100.0 * (masks["Mask"].astype(int).sum() / max(1, len(masks)))
 
     # Timeline story
     img_timeline = plot_timeline(scored, events, masks)
@@ -352,16 +378,15 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
         last = events.tail(EVENT_CARDS_N)
         cards = []
         for r in last.itertuples():
-            ev = pd.Series({"Start": r.Start, "End": r.End, "PeakScore": r.PeakScore})
+            ev = pd.Series({"Start": r.Start, "End": r.End, "PeakScore": getattr(r, "PeakScore", np.nan)})
             img_ev_time = plot_event_time(scored, ev)
             # Top tags proxy: biggest |z| change inside event
-            # (use normalized z of available raw_df columns)
             use_cols = [c for c in raw_df.columns if c not in
                         {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}]
             clip_ev = raw_df.loc[(raw_df.index >= r.Start) & (raw_df.index <= r.End), use_cols]
             clip_pre = raw_df.loc[(raw_df.index >= r.Start - (r.End - r.Start)) & (raw_df.index <= r.Start), use_cols]
             top_tags = []
-            if not clip_ev.empty and not clip_pre.empty:
+            if not clip_ev.empty and not clip_pre.empty and len(use_cols):
                 zv = ((clip_ev - clip_ev.mean()) / (clip_ev.std() + 1e-9)).abs().mean().sort_values(ascending=False)
                 top_tags = zv.head(5).index.tolist()
             img_ev_spec = plot_event_spectrum(scored, raw_df, ev, top_tags[:5])
@@ -370,7 +395,7 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
             <div class="meta">
               <b>Start</b> {r.Start} &nbsp; <b>End</b> {r.End} &nbsp;
               <b>Duration</b> {(pd.to_datetime(r.End)-pd.to_datetime(r.Start))} &nbsp;
-              <b>Peak</b> {r.PeakScore:.2f}
+              <b>Peak</b> {getattr(r, "PeakScore", float('nan')):.2f}
             </div>"""
             top = ""
             if top_tags:
@@ -391,7 +416,6 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
     dq_html = ""
     dq = compute_dq(raw_df, key_tags)
 
-    # build dq table cleanly
     if not dq.empty:
         trs = "\n".join(
             f"<tr><td>{r.Tag}</td>"
@@ -401,7 +425,6 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
             for r in dq.rename(columns={"Flatline%":"Flatline","Dropout%":"Dropout"}).itertuples()
         )
         dq_html = f"""
-        <h2>Data Quality</h2>
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:1100px">
           <thead><tr><th>Tag</th><th>Flatline %</th><th>Dropout %</th><th>Spikes</th></tr></thead>
           <tbody>{trs}</tbody>
@@ -414,7 +437,6 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
     pca_path = os.path.join(ART_DIR, "acm_pca.joblib")
     if os.path.exists(pca_path):
         try:
-            # light introspection: load explained variance ratio if present (optional)
             from joblib import load
             pca = load(pca_path)
             if hasattr(pca, "explained_variance_ratio_"):
