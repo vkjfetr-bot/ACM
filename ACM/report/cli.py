@@ -92,6 +92,16 @@ def build(train_csv: str, test_csv: str, equip: str, out_dir: str, cfg_path: str
     title = f"ACM Report"
     html_name = f"ACM_Report_{equip.replace(' ', '_')}_{ts}.html"
     out_html = os.path.join(out_dir, html_name)
+    # normalize episodes to JSON-safe
+    eps_json = []
+    for i, ep in enumerate(episodes, start=1):
+        eps_json.append({
+            "id": f"E{i}",
+            "start": str(ep.get("start", "")),
+            "end": str(ep.get("end", "")),
+            "peak": float(scored["FusedScore"].max() if len(scored) else 0.0),
+        })
+
     json_obj = {
         "equipment": equip,
         "period": {
@@ -99,7 +109,7 @@ def build(train_csv: str, test_csv: str, equip: str, out_dir: str, cfg_path: str
             "end": str(scored.index.max()) if len(scored) else "",
         },
         "kpis": kpis,
-        "episodes": episodes,
+        "episodes": eps_json,
         "dq": dq_df.to_dict(orient="records") if dq_df is not None else [],
     }
     ctx = {
@@ -145,4 +155,3 @@ def main(argv: List[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
