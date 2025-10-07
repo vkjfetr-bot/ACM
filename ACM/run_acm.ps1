@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$Root      = "C:\Users\bhadk\Documents\CPCL\ACM",
   [string]$Artifacts = "C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts",
   [string]$TrainCsv  = "",
@@ -112,7 +112,7 @@ function Run-OneEquipment {
         if(Test-Path $src){ Copy-Item $src (Join-Path $equipOut $f) -Force }
     }
 
-    Ok "Saved → $equipOut"
+    Ok "Saved â†’ $equipOut"
     $rep = Join-Path $equipOut "acm_report.html"
     if (Test-Path $rep) { Start-Process $rep }
 }
@@ -126,7 +126,7 @@ if ($All) {
     foreach($tr in $trainFiles){
         $equip = ($tr.BaseName -replace ' TRAINING DATA$','')
         $ts = Join-Path $csvDir "$equip TEST DATA.csv"
-        if (!(Test-Path $ts)) { Write-Warning "Missing TEST DATA for '$equip' → $ts"; continue }
+        if (!(Test-Path $ts)) { Write-Warning "Missing TEST DATA for '$equip' â†’ $ts"; continue }
         Run-OneEquipment -Train $tr.FullName -Test $ts -Name $equip
     }
     Ok "Batch run complete."
