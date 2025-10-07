@@ -20,6 +20,7 @@ Thumbs.db
 
 # Build artifacts and reports (generated)
 ACM/acm_artifacts/
+reports/
 
 # Logs
 *.log

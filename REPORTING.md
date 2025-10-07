@@ -1,16 +1,46 @@
-# ACM Next — Reporting Guide
+# ACM Reporting Guide
 
-The next-gen reporting pipeline is a standalone path that does not modify your existing solution. It generates a self-contained HTML file and images directly from artifacts (scores, events, optional contributions and attention).
+There are two reporting paths available. The new, integrated path is recommended for day‑to‑day use; the older experimental path remains available for advanced visuals.
 
-Quick start
+Sections:
+- New integrated report (ACM/report)
+- Experimental next report (ACM/next)
+- Outputs and tips
 
-1) Prepare artifacts:
-   - `scores.csv|parquet` with numeric columns (e.g., tag values, `FusedScore`, optional H1/H2/H3 components).
-   - Optional `events.jsonl` with fields like `{event_id, t0, t1}` (index-based).
-   - Optional `contrib.jsonl` lines: `{window_id, contrib:[{tag, score}, ...]}`.
-   - Optional `attn.npz` with arrays `temporal` and/or `spatial`.
+## New Integrated Report (recommended)
 
-2) Run the CLI:
+Command-line
+
+```bash
+python -m ACM.report.cli build \
+  --train "ACM/Dummy Data/FD FAN TRAINING DATA.csv" \
+  --test  "ACM/Dummy Data/FD FAN TEST DATA.csv" \
+  --equip "FD FAN" \
+  --out   reports \
+  --config report_config.yaml
+```
+
+PowerShell wrapper
+
+```powershell
+.\run_report.ps1 -TrainCsv "ACM\Dummy Data\FD FAN TRAINING DATA.csv" `
+                 -TestCsv  "ACM\Dummy Data\FD FAN TEST DATA.csv" `
+                 -Equip    "FD FAN" `
+                 -Out      ".\reports"
+```
+
+Outputs
+- HTML: `reports/ACM_Report_<equip>_<yyyymmdd_HHMM>.html`
+- PNGs: `reports/assets/*.png`
+- Embedded JSON: `<script type="application/json" id="report-json">…</script>` inside the HTML
+
+Notes
+- Uses only two CSV inputs (train/test); synthesizes a simple fused score if missing.
+- Focused on clean visuals and layman summary; does not alter your existing ACM pipeline.
+
+## Experimental Next Report (optional, advanced)
+
+The experimental path remains available for artifact-driven reports and additional visuals.
 
 ```bash
 python ACM/next/build_report.py build-report \
@@ -24,16 +54,8 @@ python ACM/next/build_report.py build-report \
 ```
 
 Outputs
-- `<art-dir>/<equip>/report.html`
-- `<art-dir>/<equip>/snapshot.csv`
-- `<art-dir>/<equip>/snippet_table.html`
-- `<art-dir>/<equip>/images/*.png`:
-  - `*_trend_*.png`, `anomaly_matrix.png`, `threshold_trace.png`
-  - `event_*.png`, `waterfall_*.png`, `tag_health.png`
-  - `contrib_*.png`, `temporal_attention.png`, `spatial_attention.png`, `latent_space.png`
+- `<art-dir>/<equip>/report.html`, `snapshot.csv`, `images/*.png`
 
 Tips
 - Use `--no-matrix`, `--no-attention`, or `--no-latent` to skip heavy plots.
-- The renderer tolerates NaNs/Infs and will produce placeholders if inputs are missing.
-- Keep file sizes in check by reducing tags via `--top-tags`.
-
+- Tolerates NaNs/Infs and produces placeholders when inputs are missing.
