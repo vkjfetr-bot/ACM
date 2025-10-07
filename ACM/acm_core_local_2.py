@@ -33,19 +33,80 @@ def detect_tags(df: pd.DataFrame,
     return cands
 
 def ensure_time_index(df: pd.DataFrame) -> pd.DataFrame:
-    for ts_col in ["Ts","ts","TS","Timestamp","timestamp","time","Time"]:
-        if ts_col in df.columns:
-            df = df.copy()
-            df[ts_col] = pd.to_datetime(df[ts_col])
-            df = df.set_index(ts_col).sort_index()
-            return df
-    if isinstance(df.index, pd.DatetimeIndex):
+    """
+    Make a DateTimeIndex from a timestamp column while tolerating mixed/invalid formats.
+    - Accepts: TS/Ts/timestamp/time/datetime (any case).
+    - Uses pandas 'mixed' parser + dayfirst fallback.
+    - Also supports Excel serials (numbers).
+    - Drops only the bad rows (warns), never raises.
+    """
+    import pandas as pd
+    import numpy as np
+
+    # 1) find a timestamp column (case-insensitive)
+    cand_keys = {"ts", "timestamp", "time", "datetime"}
+    ts_col = None
+    for c in df.columns:
+        if str(c).strip().lower() in cand_keys:
+            ts_col = c
+            break
+    if ts_col is None:
+        # last attempt: common exact names
+        for c in ["Ts", "ts", "TS", "Timestamp", "timestamp", "Time", "time", "Datetime", "datetime"]:
+            if c in df.columns:
+                ts_col = c
+                break
+    if ts_col is None and isinstance(df.index, pd.DatetimeIndex):
         return df.sort_index()
-    raise ValueError("Data must have 'Ts' column or a DatetimeIndex.")
+    if ts_col is None:
+        print("[ACM][WARN] No timestamp column found. Expected TS/Ts/Timestamp/Time.")
+        # do NOT crash—return as-is; later steps may handle or you can bail gracefully
+        return df
+
+    s = df[ts_col]
+
+    # 2) try robust parsing
+    # pass 1: mixed
+    dt1 = pd.to_datetime(s, errors="coerce", format="mixed", utc=False)
+    # pass 2: mixed + dayfirst=True (helps with DD-MM-YYYY)
+    dt2 = pd.to_datetime(s, errors="coerce", format="mixed", dayfirst=True, utc=False)
+
+    # 3) Excel serials (numbers)
+    num = pd.to_numeric(s, errors="coerce")
+    excel_dt = pd.to_datetime("1899-12-30") + pd.to_timedelta(num, unit="D")
+
+    # 4) combine best effort
+    ts_parsed = dt1.copy()
+    ts_parsed = ts_parsed.fillna(dt2)
+    ts_parsed = ts_parsed.fillna(excel_dt.where(num.notna(), pd.NaT))
+
+    # 5) drop bad rows, warn only
+    bad = ts_parsed.isna().sum()
+    if bad > 0:
+        print(f"[ACM][WARN] Skipping {bad} row(s) with invalid timestamp format.")
+
+    good_mask = ts_parsed.notna()
+    if good_mask.any():
+        out = df.loc[good_mask].copy()
+        out.index = ts_parsed.loc[good_mask]
+        return out.sort_index()
+    else:
+        print("[ACM][WARN] All timestamps invalid; continuing with original index (no resampling possible).")
+        return df  # keep going without a time index
+
 
 def resample_fill(df: pd.DataFrame, rule: str = "1min") -> pd.DataFrame:
-    g = df.resample(rule).mean()
+    # If we don't have a time index or nothing to do, just return
+    if not isinstance(df.index, pd.DatetimeIndex) or df.empty:
+        return df
+    # Coerce everything to numeric where possible; non-numeric -> NaN
+    num = df.apply(pd.to_numeric, errors="coerce")
+    # Resample only numeric content
+    g = num.resample(rule).mean()
+    # Fill small gaps
     return g.interpolate(limit_direction="both")
+
+
 
 def rolling_features(df: pd.DataFrame, cols: List[str],
                      w_short=5, w_mid=15, w_long=60) -> pd.DataFrame:
@@ -101,7 +162,9 @@ def train_core(csv_path: str,
     df = pd.read_csv(csv_path)
     df = ensure_time_index(df)
     df = resample_fill(df, config.resample_rule)
+    df = df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
 
+    
     if tags is None:
         tags = detect_tags(df, min_unique=config.min_unique)
 
@@ -172,6 +235,8 @@ def score_window(csv_path: str, save_prefix: str="acm") -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df = ensure_time_index(df)
     df = resample_fill(df, manifest["resample_rule"])
+    df = df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+
 
     fdf = rolling_features(df[tags], tags).dropna()
     # Backfill any missing engineered columns due to schema drift
