@@ -112,7 +112,7 @@ function Run-OneEquipment {
         if(Test-Path $src){ Copy-Item $src (Join-Path $equipOut $f) -Force }
     }
 
-    Ok "Saved â†’ $equipOut"
+    Ok "Saved -> $equipOut"
     $rep = Join-Path $equipOut "acm_report.html"
     if (Test-Path $rep) { Start-Process $rep }
 }
@@ -137,3 +137,4 @@ else {
     }
     Run-OneEquipment -Train $TrainCsv -Test $TestCsv -Name $Equip
 }
+
