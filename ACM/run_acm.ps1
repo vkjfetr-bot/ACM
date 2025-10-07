@@ -1,0 +1,6 @@
+$csv = "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TEST DATA.csv"
+python .\acm_core_local_2.py score --csv "$csv"
+python .\acm_core_local_2.py drift --csv "$csv"
+python .\acm_artifact_local.py --scored_csv ".\acm_artifacts\acm_scored_window.csv" --drift_csv ".\acm_artifacts\acm_drift.csv"
+python .\acm_score_local.py --scored_csv ".\acm_artifacts\acm_scored_window.csv" --drift_csv ".\acm_artifacts\acm_drift.csv"
+Start-Process ".\acm_artifacts\acm_report.html"
