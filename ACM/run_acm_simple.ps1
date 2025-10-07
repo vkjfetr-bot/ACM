@@ -1,5 +1,9 @@
 # run_acm_simple.ps1 — streamlined single-equipment run
 
+#
+# Streamlined single-equipment ACM pipeline runner.
+# Steps: train -> score -> drift -> aggregate scores -> build HTML -> (optional) LLM brief + prompt -> archive
+#
 param(
   [string]$Root      = "C:\Users\bhadk\Documents\CPCL\ACM",
   [string]$Artifacts = "C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts",
@@ -18,7 +22,7 @@ function Ok  ($m){ Write-Host $m -ForegroundColor Green }
 # ---- Paths ----
 $Core      = Join-Path $Root "acm_core_local_2.py"
 $ScoreAgg  = Join-Path $Root "acm_score_local_2.py"
-$ArtifactM = Join-Path $Root "report_main.py"          # main HTML builder
+$ArtifactM = Join-Path $Root "report_main.py"          # main HTML builder (writes acm_report.html)
 $Brief     = Join-Path $Root "acm_brief_local.py"
 
 # ---- Sanity ----
@@ -55,6 +59,7 @@ python $ScoreAgg --scored_csv "$sc" --drift_csv "$dr" --events_csv "$ev"
 if($LASTEXITCODE){ Die "Score aggregation failed" }
 
 # Build report (report_main.py should internally call acm_artifact_local/report_charts)
+# Build report (report_main.py writes acm_report.html in $Artifacts)
 Step "Build HTML report"
 $env:ACM_ART_DIR = $Artifacts
 python $ArtifactM
@@ -73,6 +78,7 @@ if(-not $NoBrief){
   }
 
   Step "LLM Brief (brief.json + brief.md)"
+  # acm_brief_local.py supports subcommands: build | prompt
   python $Brief build --art_dir "$Artifacts" --equip "$Equip"
   if($LASTEXITCODE){ Die "LLM brief build failed" }
 

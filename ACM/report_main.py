@@ -1,6 +1,9 @@
-# report_main.py
-# Basic ACM report builder (charts + tables; no cards, no JS).
-# Reads CSVs from ART_DIR (override via env ACM_ART_DIR) and writes acm_report_basic.html.
+"""
+report_main.py
+
+Basic ACM report builder (charts + tables; no cards, no JS).
+Reads CSVs from ART_DIR (override via env ACM_ART_DIR) and writes acm_report.html.
+"""
 
 import os
 from typing import Optional, List
@@ -11,7 +14,7 @@ from report_html import wrap_html, section, table, chart, kpi_grid
 from report_charts import timeline, sampled_tags_with_marks, drift_bars, FUSED_TAU
 
 # ---------- Settings ----------
-ART_DIR = os.environ.get("ACM_ART_DIR", r"C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts")
+ART_DIR = os.environ.get("ACM_ART_DIR", r"C:\\Users\\bhadk\\Documents\\CPCL\\ACM\\acm_artifacts")
 TITLE   = "Asset Condition Monitor — Basic Report"
 SPARKS_N = 18  # how many tags to show on sampled plots
 
@@ -24,7 +27,7 @@ def _pick_key_tags(scored: pd.DataFrame, drift: Optional[pd.DataFrame]) -> List[
     """Prefer top drifted tags; fallback to top-variance non-derived columns."""
     derived = {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}
     if drift is not None and {"Tag","DriftZ"}.issubset(drift.columns):
-        cand = (drift.dropna(subset=["DriftZ"])
+        cand = (drift.dropna(subset=["DriftZ"])\
                      .sort_values("DriftZ", ascending=False)["Tag"].tolist())
         cand = [c for c in cand if c not in derived]
         if cand:
@@ -83,6 +86,18 @@ def build_basic_report():
     drift  = _safe_read_csv(os.path.join(ART_DIR, "acm_drift.csv"))
     masks  = _safe_read_csv(os.path.join(ART_DIR, "acm_context_masks.csv"))
 
+    # Optionally read equipment score for KPI tile
+    equip_score = None
+    esc = _safe_read_csv(os.path.join(ART_DIR, "acm_equipment_score.csv"))
+    if esc is not None and "EquipmentScore" in esc.columns and not esc.empty:
+        try:
+            equip_score = float(esc["EquipmentScore"].iloc[0])
+        except Exception:
+            equip_score = None
+
+    # Prefer resampled numeric file for DQ if present
+    resampled = _safe_read_csv(os.path.join(ART_DIR, "acm_resampled.csv"), index_col=0, parse_dates=True)
+
     # KPIs
     t0, t1 = str(scored.index.min()), str(scored.index.max())
     events_n = int((scored["FusedScore"] >= FUSED_TAU).sum())
@@ -95,9 +110,11 @@ def build_basic_report():
         ("Window", f"{t0} → {t1}"),
         ("Rows", f"{len(scored):,}"),
         ("Regimes", regimes_seen),
-        ("Events ≥ τ", events_n),
+        (f"Events ≥ τ", events_n),
         ("Mask %", f"{mask_cov:.2f}%" if mask_cov is not None else "—"),
     ]
+    if equip_score is not None:
+        kpis.insert(0, ("Equipment Score", f"{equip_score:.1f}"))
 
     # Assemble body
     body = ""
@@ -134,7 +151,8 @@ def build_basic_report():
         body += section("Drift", "<div class='small'>No drift file found.</div>")
 
     # Data Quality
-    dq = compute_dq(scored, key_tags)
+    dq_source = resampled if resampled is not None and not resampled.empty else scored
+    dq = compute_dq(dq_source, key_tags)
     if not dq.empty:
         body += section("Data Quality",
                         table(["Tag","Flatline %","Dropout %","Spikes"],
@@ -147,7 +165,7 @@ def build_basic_report():
 
     # Wrap & write
     html = wrap_html(TITLE, body)
-    out = os.path.join(ART_DIR, "acm_report_basic.html")
+    out = os.path.join(ART_DIR, "acm_report.html")
     os.makedirs(ART_DIR, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
@@ -156,3 +174,4 @@ def build_basic_report():
 
 if __name__ == "__main__":
     build_basic_report()
+
