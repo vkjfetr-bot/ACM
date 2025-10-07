@@ -14,7 +14,7 @@ function Info($msg){ Write-Host $msg -ForegroundColor Cyan }
 function Step($msg){ Write-Host "== $msg ==" -ForegroundColor Yellow }
 
 $Core     = Join-Path $Root "acm_core_local_2.py"
-$Artifact = Join-Path $Root "acm_artifact_local_2.py"
+$Artifact = Join-Path $Root "acm_artifact_local.py"
 $Score    = Join-Path $Root "acm_score_local_2.py"
 
 if (!(Test-Path $Core))     { Die "Missing $Core" }
