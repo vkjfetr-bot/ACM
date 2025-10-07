@@ -10,7 +10,8 @@ param(
   [string]$TrainCsv  = "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TRAINING DATA.csv",
   [string]$TestCsv   = "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TEST DATA.csv",
   [string]$Equip     = "FD FAN",
-  [switch]$NoBrief
+  [switch]$NoBrief,
+  [switch]$ForceTrain
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,8 +43,25 @@ Get-ChildItem -Path $Artifacts -File -Force -ErrorAction SilentlyContinue | Remo
 # ---- Pipeline ----
 Info "Equipment: $Equip"
 
-Step "Train"
-python $Core train --csv "$TrainCsv"; if($LASTEXITCODE){ Die "Train failed" }
+# Skip train if artifacts already exist and not forcing
+function ArtifactsReady($dir){
+  $need = @(
+    "acm_scaler.joblib",
+    "acm_regimes.joblib",
+    "acm_pca.joblib",
+    "acm_tag_baselines.csv",
+    "acm_manifest.json"
+  )
+  foreach($n in $need){ if(-not (Test-Path (Join-Path $dir $n))){ return $false } }
+  return $true
+}
+
+if($ForceTrain -or -not (ArtifactsReady $Artifacts)){
+  Step "Train"
+  python $Core train --csv "$TrainCsv"; if($LASTEXITCODE){ Die "Train failed" }
+} else {
+  Info "Reusing existing model artifacts; skipping Train. Use -ForceTrain to retrain."
+}
 
 Step "Score (window)"
 python $Core score --csv "$TestCsv"; if($LASTEXITCODE){ Die "Score failed" }
