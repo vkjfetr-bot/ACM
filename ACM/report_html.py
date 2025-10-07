@@ -1,4 +1,4 @@
-# report_html.py
+﻿# report_html.py
 # Minimal HTML scaffolding and helpers (tables + charts only).
 # Pairs with: report_css.get_css() and charts from report_charts.py.
 
@@ -26,7 +26,7 @@ def wrap_html(title: str, body: str) -> str:
 </html>"""
 
 def kpi_grid(items):
-    """items: list[(title, value)] → 5-column KPI grid."""
+    """items: list[(title, value)] â†’ 5-column KPI grid."""
     cells = "".join(
         f"<div class='kpi'><div class='title'>{t}</div><div class='value'>{v}</div></div>"
         for t, v in items

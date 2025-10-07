@@ -1,5 +1,5 @@
-# report_charts.py
-# Builds static matplotlib charts (PNG→base64) for HTML embedding.
+﻿# report_charts.py
+# Builds static matplotlib charts (PNGâ†’base64) for HTML embedding.
 # Focus: clear, interpretable plots (no interactive JS).
 
 import io, base64
@@ -15,7 +15,7 @@ FUSED_TAU = 0.70  # threshold line for anomaly marking
 # ---------- Utility helpers ----------
 
 def _embed(fig) -> str:
-    """Convert matplotlib figure → base64 data URI."""
+    """Convert matplotlib figure â†’ base64 data URI."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=FIG_DPI, bbox_inches="tight")
     plt.close(fig)
@@ -48,7 +48,7 @@ def timeline(scored: pd.DataFrame,
         axes = [axes]
     i = 0
 
-    # Row 1 – Fused
+    # Row 1 â€“ Fused
     ax = axes[i]; i += 1
     ax.plot(ts2, use["FusedScore"].values, lw=1.4, label="FusedScore")
     ax.axhline(FUSED_TAU, color="gray", ls="--", lw=1.0)
@@ -70,7 +70,7 @@ def timeline(scored: pd.DataFrame,
         y = np.where(mk["Mask"].fillna(0).values>0, 0.02, np.nan)
         ax.plot(ts2, y, drawstyle="steps-mid", lw=2, color="#ef4444")
 
-    # Row 2 – Heads
+    # Row 2 â€“ Heads
     if len(cols)>1:
         ax = axes[i]; i += 1
         for c in cols[1:]:
@@ -78,7 +78,7 @@ def timeline(scored: pd.DataFrame,
         ax.legend(loc="upper right", fontsize=8)
         ax.set_ylabel("Heads"); ax.grid(alpha=0.25)
 
-    # Row 3 – Regime ribbon
+    # Row 3 â€“ Regime ribbon
     if "Regime" in scored.columns:
         ax = axes[i]; i += 1
         reg = scored["Regime"].astype(int)
@@ -106,7 +106,7 @@ def sampled_tags_with_marks(df: pd.DataFrame,
                             fused: Optional[pd.Series]) -> str:
     """
     Plot sampled raw tags (z-normalized) with:
-      - anomalies (FusedScore ≥ τ) marked as dots
+      - anomalies (FusedScore â‰¥ Ï„) marked as dots
       - event spans shaded
     """
     use_cols = [t for t in tags if t in df.columns]

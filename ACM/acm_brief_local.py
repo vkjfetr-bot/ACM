@@ -1,8 +1,17 @@
-# acm_brief_local.py
-# Builds a concise LLM brief (brief.json + brief.md) from ACM artifacts.
-# - Tolerant to different event column names (t0/t1, ts_start/ts_end, etc.)
-# - Safe when files/columns are missing
-# - Focuses on tables and text (no cards, no styling)
+"""
+acm_brief_local.py
+
+Builds a concise LLM brief (brief.json + brief.md) from ACM artifacts and can
+also generate a simple LLM-ready prompt (llm_prompt.json) for downstream use.
+
+Highlights
+- Tolerant to different event column names (t0/t1, ts_start/ts_end, etc.)
+- Safe when files/columns are missing
+- Focuses on tables and text (no cards, no styling)
+- Subcommands:
+  * build  -> reads artifacts and writes brief.json + brief.md
+  * prompt -> reads brief.json and writes llm_prompt.json
+"""
 
 import os
 import json
@@ -68,10 +77,10 @@ def normalize_events(df: Optional[pd.DataFrame]) -> pd.DataFrame:
 
     out = df.copy()
     # Choose columns (case-insensitive)
-    start_col = pick_column(out, ["start", "t_start", "ts_start", "begin", "t0", "episode_start", "s"])
-    end_col   = pick_column(out, ["end", "t_end", "ts_end", "finish", "t1", "episode_end", "e", "stop"])
+    start_col = pick_column(out, ["start", "t_start", "ts_start", "begin", "t0", "episode_start", "s", "Start"])  # include camel
+    end_col   = pick_column(out, ["end", "t_end", "ts_end", "finish", "t1", "episode_end", "e", "stop", "End"])      # include camel
     label_col = pick_column(out, ["label", "event", "type", "name", "tag", "category"])
-    score_col = pick_column(out, ["score", "severity", "strength", "prob", "probability"])
+    score_col = pick_column(out, ["score", "severity", "strength", "prob", "probability", "PeakScore"])
 
     # Rename to canonical
     ren = {}
@@ -107,30 +116,21 @@ def normalize_scored(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         return pd.DataFrame(columns=["ts", "score"])
     out = df.copy()
 
-    ts_col = pick_column(out, ["ts", "time", "timestamp", "datetime"])
-    if ts_col and ts_col != "ts":
-        out = out.rename(columns={ts_col: "ts"})
-    if "ts" in out.columns:
+    # index or column time support
+    if not isinstance(out.index, pd.DatetimeIndex):
+        ts_col = pick_column(out, ["ts", "time", "timestamp", "datetime", "Ts"])
+        if ts_col and ts_col != "ts":
+            out = out.rename(columns={ts_col: "ts"})
+        if "ts" in out.columns:
+            out["ts"] = pd.to_datetime(out["ts"], errors="coerce", utc=True)
+    else:
+        out = out.rename_axis("ts").reset_index()
         out["ts"] = pd.to_datetime(out["ts"], errors="coerce", utc=True)
 
-    score_col = pick_column(out, ["score", "anomaly_score", "fused_score", "final_score"])
+    score_col = pick_column(out, ["score", "anomaly_score", "fused_score", "final_score", "FusedScore"])
     if score_col and score_col != "score":
         out = out.rename(columns={score_col: "score"})
 
-    # we won't drop other columns; but downstream will guard on existence
-    return out
-
-
-def normalize_drift(df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Standardize drift dataframe to have ts and (optionally) metrics."""
-    if df is None or len(df) == 0:
-        return pd.DataFrame(columns=["ts"])
-    out = df.copy()
-    ts_col = pick_column(out, ["ts", "time", "timestamp", "datetime"])
-    if ts_col and ts_col != "ts":
-        out = out.rename(columns={ts_col: "ts"})
-    if "ts" in out.columns:
-        out["ts"] = pd.to_datetime(out["ts"], errors="coerce", utc=True)
     return out
 
 
@@ -139,9 +139,10 @@ def read_any_events(art_dir: str) -> pd.DataFrame:
     candidates = [
         "events.csv",
         "episodes.csv",
+        "acm_events.csv",
         "events_parsed.csv",
         "episodes_parsed.csv",
-        "events.json",   # supports json list/dict formats (minimal)
+        "events.json",
         "episodes.json",
     ]
     for name in candidates:
@@ -167,10 +168,13 @@ def read_scored(art_dir: str) -> pd.DataFrame:
         "scores.csv",
         "inference_scored.csv",
         "acm_scored.csv",
+        "acm_scored_window.csv",
     ]
     for name in candidates:
         path = os.path.join(art_dir, name)
-        df = load_csv_if_exists(path)
+        df = load_csv_if_exists(path, index_col=0, parse_dates=True)
+        if df is None:
+            df = load_csv_if_exists(path)
         if df is not None:
             return normalize_scored(df)
     return normalize_scored(None)
@@ -181,13 +185,18 @@ def read_drift(art_dir: str) -> pd.DataFrame:
         "drift.csv",
         "embedding_drift.csv",
         "pca_drift.csv",
+        "acm_drift.csv",
     ]
     for name in candidates:
         path = os.path.join(art_dir, name)
         df = load_csv_if_exists(path)
         if df is not None:
-            return normalize_drift(df)
-    return normalize_drift(None)
+            # If this is the acm_drift.csv (Tag/DriftZ table), synthesize a ts column for presence
+            if set(["Tag", "DriftZ"]).issubset(df.columns) and "ts" not in df.columns:
+                df = df.copy()
+                df["ts"] = pd.NaT
+            return df
+    return pd.DataFrame(columns=["ts"])  # empty
 
 
 # ----------------------------
@@ -203,30 +212,27 @@ def summarize_headline(scored: pd.DataFrame, events: pd.DataFrame, drift: pd.Dat
 
     # Current anomaly level (median of last N scores)
     curr_level = None
-    if "ts" in scored.columns and "score" in scored.columns and not scored.empty:
-        recent = scored.sort_values("ts").tail(300)  # recent window
+    if {"ts", "score"}.issubset(scored.columns) and not scored.empty:
+        recent = scored.sort_values("ts").tail(300)
         if not recent.empty:
-            curr_level = float(np.nanmedian(recent["score"]))
+            curr_level = float(np.nanmedian(recent["score"].astype(float)))
 
     # Drift ping
     last_drift = pd.NaT
     if "ts" in drift.columns and not drift.empty:
-        last_drift = safe_ts(drift["ts"].max())
+        try:
+            last_drift = safe_ts(drift["ts"].dropna().max())
+        except Exception:
+            last_drift = pd.NaT
 
     parts = []
-    if pd.isna(last_change):
-        parts.append("No recent anomaly episodes detected")
-    else:
-        parts.append(f"Last anomaly episode around {last_change.isoformat()}")
-
+    parts.append(
+        "No recent anomaly episodes detected" if pd.isna(last_change) else f"Last anomaly episode around {last_change.isoformat()}"
+    )
     if curr_level is not None and np.isfinite(curr_level):
         parts.append(f"current anomaly level ~ {curr_level:.2f}")
-
     if not pd.isna(last_drift):
         parts.append(f"last drift check {last_drift.isoformat()}")
-
-    if not parts:
-        return "No events or scores available."
     return "; ".join(parts) + "."
 
 
@@ -239,21 +245,20 @@ def summarize_events_table(events: pd.DataFrame, limit: int = 15) -> pd.DataFram
         tbl = tbl.sort_values("start", ascending=False)
     if limit > 0:
         tbl = tbl.head(limit)
-    # Format times as ISO without changing types in the DF returned (for JSON/md creation later)
     return tbl.reset_index(drop=True)
 
 
 def summarize_score_stats(scored: pd.DataFrame) -> Dict[str, Any]:
     if scored.empty or "score" not in scored.columns:
         return {"count": 0}
-    s = scored["score"].astype(float)
+    s = pd.to_numeric(scored["score"], errors="coerce").astype(float)
     s = s.replace([np.inf, -np.inf], np.nan)
     return {
         "count": int(s.notna().sum()),
         "min": float(np.nanmin(s)) if s.notna().any() else None,
-        "p25": float(np.nanpercentile(s, 25)) if s.notna().any() else None,
+        "p25": float(np.nanpercentile(s.dropna(), 25)) if s.notna().any() else None,
         "median": float(np.nanmedian(s)) if s.notna().any() else None,
-        "p75": float(np.nanpercentile(s, 75)) if s.notna().any() else None,
+        "p75": float(np.nanpercentile(s.dropna(), 75)) if s.notna().any() else None,
         "max": float(np.nanmax(s)) if s.notna().any() else None,
     }
 
@@ -280,6 +285,19 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
     events_tbl = summarize_events_table(events, limit=15)
 
     # Build JSON brief
+    # Normalize event records for JSON (ensure ISO strings for datetimes)
+    events_records: List[Dict[str, Any]] = []
+    for rec in events_tbl.to_dict(orient="records"):
+        out = {}
+        for k, v in rec.items():
+            if k in ("start", "end") and pd.notna(v):
+                try:
+                    out[k] = pd.to_datetime(v, utc=True).isoformat()
+                except Exception:
+                    out[k] = str(v)
+            else:
+                out[k] = v if (not isinstance(v, (pd.Timestamp, np.datetime64))) else str(v)
+        events_records.append(out)
     brief_json = {
         "generated_at_utc": utcnow_iso(),
         "equipment": equip,
@@ -290,12 +308,12 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
         },
         "meta": meta,
         "key_tags": key_tags,
-        "events": events_tbl.to_dict(orient="records"),
+        "events": events_records,
     }
 
     # Build Markdown brief
     md_lines = []
-    md_lines.append(f"# {equip} — ACM Brief")
+    md_lines.append(f"# {equip} - ACM Brief")
     md_lines.append("")
     md_lines.append(f"_Generated (UTC): {brief_json['generated_at_utc']}_  ")
     md_lines.append("")
@@ -307,7 +325,9 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
     else:
         s = brief_json["stats"]["scores"]
         md_lines.append(f"- Count: {s['count']}")
-        md_lines.append(f"- Min / P25 / Median / P75 / Max: {s.get('min')} / {s.get('p25')} / {s.get('median')} / {s.get('p75')} / {s.get('max')}")
+        md_lines.append(
+            f"- Min / P25 / Median / P75 / Max: {s.get('min')} / {s.get('p25')} / {s.get('median')} / {s.get('p75')} / {s.get('max')}"
+        )
     md_lines.append("")
 
     md_lines.append("## Recent Events (up to 15)")
@@ -336,7 +356,6 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
 
     if key_tags:
         md_lines.append("## Key Tags")
-        # show top-level keys only; values might be lists/weights etc.
         for k, v in key_tags.items():
             md_lines.append(f"- **{k}:** {v}")
         md_lines.append("")
@@ -357,7 +376,6 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(brief_md)
 
-    # Return for logging/testing
     return {
         "json_path": json_path,
         "md_path": md_path,
@@ -367,25 +385,80 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
     }
 
 
+def build_llm_prompt(brief_path: str, out_path: Optional[str] = None) -> str:
+    """Read brief.json and write a simple llm_prompt.json alongside."""
+    if not os.path.exists(brief_path):
+        raise FileNotFoundError(f"brief.json not found: {brief_path}")
+    with open(brief_path, "r", encoding="utf-8") as f:
+        brief = json.load(f)
+
+    equip = brief.get("equipment", "Equipment")
+    headline = brief.get("headline", "")
+    stats = brief.get("stats", {})
+    events = brief.get("events", [])
+
+    user_lines = []
+    user_lines.append(f"Asset: {equip}")
+    if headline:
+        user_lines.append(f"Headline: {headline}")
+    if stats:
+        user_lines.append(f"Stats: {json.dumps(stats, ensure_ascii=False)}")
+    if events:
+        user_lines.append("Recent Events (up to 15):")
+        for e in events[:15]:
+            user_lines.append("- " + ", ".join(f"{k}={e.get(k)}" for k in ["start","end","label","score"] if k in e))
+
+    prompt = {
+        "generated_at_utc": utcnow_iso(),
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an industrial analyst. Summarize anomalies, drift, and likely causes. Be concise and structured."
+            },
+            {
+                "role": "user",
+                "content": "\n".join(user_lines)
+            }
+        ]
+    }
+
+    if out_path is None:
+        out_dir = os.path.dirname(os.path.abspath(brief_path))
+        out_path = os.path.join(out_dir, "llm_prompt.json")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(prompt, f, ensure_ascii=False, indent=2)
+    return out_path
+
+
 # ----------------------------
 # CLI
 # ----------------------------
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Build ACM brief (brief.json + brief.md) from artifacts.")
-    p.add_argument("--art_dir", required=True, help="Artifacts directory (e.g., C:\\...\\acm_artifacts)")
-    p.add_argument("--equip", required=True, help="Equipment name for header.")
-    return p.parse_args()
-
-
 def main():
-    args = parse_args()
-    info = build_brief(args.art_dir, args.equip)
-    print("== LLM Brief (brief.json + brief.md) ==")
-    print(f"Headline: {info['headline']}")
-    print(f"Events: {info['events_count']} | Scores: {info['scores_count']}")
-    print(f"Wrote: {info['json_path']}")
-    print(f"Wrote: {info['md_path']}")
+    parser = argparse.ArgumentParser(description="ACM brief & prompt utilities")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_build = sub.add_parser("build", help="Build brief.json + brief.md from artifacts")
+    p_build.add_argument("--art_dir", required=True, help="Artifacts directory (e.g., C:\\...\\acm_artifacts)")
+    p_build.add_argument("--equip", required=True, help="Equipment name for header")
+
+    p_prompt = sub.add_parser("prompt", help="Build llm_prompt.json from an existing brief.json")
+    p_prompt.add_argument("--brief", required=True, help="Path to brief.json")
+    p_prompt.add_argument("--out", required=False, help="Output llm_prompt.json path (optional)")
+
+    args = parser.parse_args()
+
+    if args.cmd == "build":
+        info = build_brief(args.art_dir, args.equip)
+        print("== LLM Brief (brief.json + brief.md) ==")
+        print(f"Headline: {info['headline']}")
+        print(f"Events: {info['events_count']} | Scores: {info['scores_count']}")
+        print(f"Wrote: {info['json_path']}")
+        print(f"Wrote: {info['md_path']}")
+    elif args.cmd == "prompt":
+        outp = build_llm_prompt(args.brief, args.out)
+        print(f"== LLM Prompt ==\nWrote: {outp}")
 
 
 if __name__ == "__main__":
