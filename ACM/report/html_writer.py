@@ -37,11 +37,18 @@ def render(context: Dict, out_html: str, assets_dir: str) -> None:
     parts.append("  <main>")
     parts.append(f"    <div class='section'><h1>{escape(title)} &mdash; {escape(equip)}</h1></div>")
     parts.append(f"    <div class='section'><h2>Executive Summary</h2><ul>{summary_html}</ul></div>")
-    parts.append(f"    <div class='section'><h2>Overview</h2>{_img(imgs.get('overview'))}</div>")
+    parts.append(f"    <div class='section'><h2>Overview (Anomaly Timeline)</h2>{_img(imgs.get('overview'))}</div>")
+    if imgs.get('anom_matrix'):
+        parts.append(f"    <div class='section'><h2>Anomaly Matrix</h2>{_img(imgs.get('anom_matrix'))}</div>")
     parts.append(f"    <div class='section'><h2>Top Tags</h2>{_img(imgs.get('tags_strip'))}</div>")
     parts.append(f"    <div class='section'><h2>Drift</h2>{_img(imgs.get('drift'))}</div>")
     parts.append(f"    <div class='section'><h2>Data Quality</h2>{_img(imgs.get('dq_heatmap'))}{dq_table_html}</div>")
     parts.append(f"    <div class='section'><h2>Correlations</h2>{_img(imgs.get('corr_normal'))}{_img(imgs.get('corr_anom'))}</div>")
+    # Episodes
+    eps = context.get('episodes_imgs', []) or []
+    if eps:
+        gallery = ''.join(_img(p) for p in eps)
+        parts.append(f"    <div class='section'><h2>Episodes</h2>{gallery}</div>")
     parts.append(f"    <div class='section'><h2>Glossary</h2><table><thead><tr><th>Term</th><th>Meaning</th></tr></thead><tbody>{glossary_html}</tbody></table></div>")
     parts.append("  </main>")
     parts.append("</body>")
