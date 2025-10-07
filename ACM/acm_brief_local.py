@@ -172,7 +172,9 @@ def read_scored(art_dir: str) -> pd.DataFrame:
     ]
     for name in candidates:
         path = os.path.join(art_dir, name)
-        df = load_csv_if_exists(path, index_col=0, parse_dates=True) or load_csv_if_exists(path)
+        df = load_csv_if_exists(path, index_col=0, parse_dates=True)
+        if df is None:
+            df = load_csv_if_exists(path)
         if df is not None:
             return normalize_scored(df)
     return normalize_scored(None)
@@ -448,4 +450,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
