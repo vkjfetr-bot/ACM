@@ -285,6 +285,19 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
     events_tbl = summarize_events_table(events, limit=15)
 
     # Build JSON brief
+    # Normalize event records for JSON (ensure ISO strings for datetimes)
+    events_records: List[Dict[str, Any]] = []
+    for rec in events_tbl.to_dict(orient="records"):
+        out = {}
+        for k, v in rec.items():
+            if k in ("start", "end") and pd.notna(v):
+                try:
+                    out[k] = pd.to_datetime(v, utc=True).isoformat()
+                except Exception:
+                    out[k] = str(v)
+            else:
+                out[k] = v if (not isinstance(v, (pd.Timestamp, np.datetime64))) else str(v)
+        events_records.append(out)
     brief_json = {
         "generated_at_utc": utcnow_iso(),
         "equipment": equip,
@@ -295,7 +308,7 @@ def build_brief(art_dir: str, equip: str) -> Dict[str, Any]:
         },
         "meta": meta,
         "key_tags": key_tags,
-        "events": events_tbl.to_dict(orient="records"),
+        "events": events_records,
     }
 
     # Build Markdown brief
