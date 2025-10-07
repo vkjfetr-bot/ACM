@@ -1,4 +1,4 @@
-"""
+﻿"""
 report_main.py
 
 Basic ACM report builder (charts + tables; no cards, no JS).
@@ -11,11 +11,11 @@ import numpy as np
 import pandas as pd
 
 from report_html import wrap_html, section, table, chart, kpi_grid
-from report_charts import timeline, sampled_tags_with_marks, drift_bars, FUSED_TAU
+from report_charts import (timeline, sampled_tags_with_marks, drift_bars, regime_share, fused_histogram, hourly_burden_heatmap, contribution_breakdown, FUSED_TAU)
 
 # ---------- Settings ----------
 ART_DIR = os.environ.get("ACM_ART_DIR", r"C:\\Users\\bhadk\\Documents\\CPCL\\ACM\\acm_artifacts")
-TITLE   = "Asset Condition Monitor — Basic Report"
+TITLE   = "Asset Condition Monitor — Enhanced Report"
 SPARKS_N = 18  # how many tags to show on sampled plots
 
 # ---------- IO ----------
@@ -65,14 +65,14 @@ def explain_block() -> str:
     rows = [
         ("FusedScore",
          "Final anomaly score combining: H1 (forecast error), H2 (PCA reconstruction error), H3 (embedding drift). Higher = more anomalous."),
-        (f"τ (tau = {FUSED_TAU})",
-         f"Anomaly threshold. Points with FusedScore ≥ {FUSED_TAU} are highlighted as anomalies."),
+        (f"Ãâ€ž (tau = {FUSED_TAU})",
+         f"Anomaly threshold. Points with FusedScore Ã¢â€°Â¥ {FUSED_TAU} are highlighted as anomalies."),
         ("Regime",
          "Discrete operating mode (cluster) inferred from data; helps compare behavior within the same state."),
         ("Mask",
          "Transient periods (e.g., start-up/maintenance) down-weighted in fusion; shown as a thin red band on charts."),
         ("DriftZ",
-         "Z-scored magnitude of a tag’s distribution shift vs baseline; higher = stronger distribution change."),
+         "Z-scored magnitude of a tagÃ¢â‚¬â„¢s distribution shift vs baseline; higher = stronger distribution change."),
     ]
     return table(hdrs, rows)
 
@@ -107,11 +107,11 @@ def build_basic_report():
         mask_cov = 100.0 * (masks["Mask"].astype(int).sum() / max(1, len(masks)))
 
     kpis = [
-        ("Window", f"{t0} → {t1}"),
+        ("Window", f"{t0} Ã¢â€ â€™ {t1}"),
         ("Rows", f"{len(scored):,}"),
         ("Regimes", regimes_seen),
-        (f"Events ≥ τ", events_n),
-        ("Mask %", f"{mask_cov:.2f}%" if mask_cov is not None else "—"),
+        (f"Events Ã¢â€°Â¥ Ãâ€ž", events_n),
+        ("Mask %", f"{mask_cov:.2f}%" if mask_cov is not None else "Ã¢â‚¬â€"),
     ]
     if equip_score is not None:
         kpis.insert(0, ("Equipment Score", f"{equip_score:.1f}"))
@@ -137,7 +137,7 @@ def build_basic_report():
         for r in ev.itertuples():
             dur = pd.to_datetime(r.End) - pd.to_datetime(r.Start)
             peak = getattr(r, "PeakScore", np.nan)
-            rows.append([str(r.Start), str(r.End), (f"{float(peak):.2f}" if pd.notna(peak) else "—"), str(dur)])
+            rows.append([str(r.Start), str(r.End), (f"{float(peak):.2f}" if pd.notna(peak) else "Ã¢â‚¬â€"), str(dur)])
         body += section("Latest Events", table(hdrs, rows))
     else:
         body += section("Latest Events", "<div class='small'>No events file found.</div>")
@@ -146,7 +146,7 @@ def build_basic_report():
     if drift is not None and not drift.empty and {"Tag","DriftZ"}.issubset(drift.columns):
         body += section("Drift (Top 20)", chart(drift_bars(drift, 20)))
         top = drift.dropna(subset=["DriftZ"]).sort_values("DriftZ", ascending=False).head(30)[["Tag","DriftZ"]]
-        body += section("Drift — Table", table(["Tag","DriftZ"], [[t, f"{z:.2f}"] for t, z in top.itertuples(index=False)]))
+        body += section("Drift Ã¢â‚¬â€ Table", table(["Tag","DriftZ"], [[t, f"{z:.2f}"] for t, z in top.itertuples(index=False)]))
     else:
         body += section("Drift", "<div class='small'>No drift file found.</div>")
 
@@ -159,6 +159,12 @@ def build_basic_report():
                               [[r.Tag, f"{r._2:.2f}", f"{r._3:.2f}", r.Spikes] for r in dq.itertuples()]))
     else:
         body += section("Data Quality", "<div class='small'>No DQ issues computed.</div>")
+
+    # Spectacular extras (add-only)
+    body += section("Regime Time Share", chart(regime_share(scored)))
+    body += section("Fused Score Distribution", chart(fused_histogram(scored)))
+    body += section("When Are Anomalies Higher?", chart(hourly_burden_heatmap(scored)))
+    body += section("What Drives the Fused Score?", chart(contribution_breakdown(scored)))
 
     # Glossary / explanations
     body += section("Glossary (Model/Analysis Terms)", explain_block())
@@ -174,4 +180,10 @@ def build_basic_report():
 
 if __name__ == "__main__":
     build_basic_report()
+
+
+
+
+
+
 

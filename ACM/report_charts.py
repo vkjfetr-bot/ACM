@@ -151,3 +151,75 @@ def drift_bars(drift: pd.DataFrame, top: int = 20) -> str:
     ax.set_xlabel("Drift Z"); ax.set_title(f"Top {len(d)} Drifted Tags")
     fig.tight_layout()
     return _embed(fig)
+
+
+def regime_share(scored: pd.DataFrame) -> str:
+    """Pie chart of time share per regime."""
+    if "Regime" not in scored.columns or scored.empty:
+        return ""
+    counts = scored["Regime"].astype(int).value_counts().sort_index()
+    labels = [f"R{r} ({c/len(scored):.0%})" for r, c in counts.items()]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.pie(counts.values, labels=labels, autopct="%1.0f%%", startangle=90)
+    ax.set_title("Regime Time Share")
+    fig.tight_layout()
+    return _embed(fig)
+
+
+def fused_histogram(scored: pd.DataFrame) -> str:
+    """Histogram of fused scores with τ line and exceedance fraction."""
+    if "FusedScore" not in scored.columns or scored.empty:
+        return ""
+    s = pd.to_numeric(scored["FusedScore"], errors="coerce").dropna()
+    if s.empty:
+        return ""
+    frac = (s >= FUSED_TAU).mean()
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.hist(s.values, bins=40, color="#60a5fa", alpha=0.9)
+    ax.axvline(FUSED_TAU, color="gray", ls="--", lw=1.0)
+    ax.set_xlabel("FusedScore"); ax.set_ylabel("Count")
+    ax.set_title(f"Fused Score Distribution (≥ τ: {frac:.0%})")
+    fig.tight_layout()
+    return _embed(fig)
+
+
+def hourly_burden_heatmap(scored: pd.DataFrame) -> str:
+    """Hour-of-day vs date heatmap of mean FusedScore."""
+    if "FusedScore" not in scored.columns or scored.empty:
+        return ""
+    df = scored.copy()
+    idx = pd.to_datetime(df.index)
+    df["date"] = idx.date
+    df["hour"] = idx.hour
+    pivot = df.pivot_table(index="date", columns="hour", values="FusedScore", aggfunc="mean")
+    if pivot.empty:
+        return ""
+    fig, ax = plt.subplots(figsize=(10, max(3, 0.2*len(pivot))))
+    im = ax.imshow(pivot.values, aspect="auto", cmap="YlOrRd", vmin=0, vmax=1)
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels([str(d) for d in pivot.index])
+    ax.set_xticks(range(0, 24, 3)); ax.set_xticklabels([str(h) for h in range(0,24,3)])
+    ax.set_xlabel("Hour of Day"); ax.set_title("Anomaly Burden by Hour (mean FusedScore)")
+    fig.colorbar(im, ax=ax, fraction=0.025)
+    fig.tight_layout()
+    return _embed(fig)
+
+
+def contribution_breakdown(scored: pd.DataFrame, n: int = 600) -> str:
+    """Stacked preview of fusion components over the last n points."""
+    cols_need = ["H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","FusedScore"]
+    if not all(c in scored.columns for c in cols_need):
+        return ""
+    use = scored[cols_need].tail(n)
+    h1 = 0.45*use["H1_Forecast"].values
+    h2 = 0.35*use["H2_Recon"].values
+    h3 = 0.35*use["H3_Contrast"].values
+    boost = 0.15*use["CorrBoost"].values + 0.10*use["CPD"].values
+    x = range(len(use))
+    fig, ax = plt.subplots(figsize=(12, 3.8))
+    ax.stackplot(x, h1, h2, h3, boost, labels=["0.45*H1","0.35*H2","0.35*H3","Boost"], alpha=0.8)
+    ax.plot(x, use["FusedScore"].values, color="black", lw=1.2, label="Fused")
+    ax.set_title("Fusion Components (last window)"); ax.legend(loc="upper right", fontsize=8)
+    ax.set_xlabel("Samples")
+    fig.tight_layout()
+    return _embed(fig)
