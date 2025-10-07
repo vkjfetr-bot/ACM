@@ -55,10 +55,22 @@ def build(train_csv: str, test_csv: str, equip: str, out_dir: str, cfg_path: str
 
     # Plots
     ts = datetime.now().strftime("%Y%m%d_%H%M")
-    overview_png = os.path.join(assets, f"overview_{ts}.png")
-    V.plot_overview_timeline(scored, transforms.compute_regime_spans(scored), overview_png)
+    # Shaded timeline of fused score
+    overview_png = os.path.join(assets, f"timeline_{ts}.png")
+    V.plot_timeline_shaded(scored, threshold, anom_mask, overview_png)
 
-    # Simple tags strip: grid plot into one figure by compositing (quick approach)
+    # Anomaly matrix across tags using simple rolling z-score per-tag
+    matrix_png = os.path.join(assets, f"anom_matrix_{ts}.png")
+    mask_df = None
+    if tags:
+        roll = scored[tags].rolling(201, center=True, min_periods=25)
+        mu = roll.mean()
+        sd = roll.std().replace(0, np.nan)
+        z = (scored[tags] - mu) / (sd + 1e-9)
+        mask_df = (z.abs() > 3.0)
+        V.plot_anomaly_matrix(mask_df[tags], matrix_png)
+
+    # Simple tags strip: for now render first tag trend
     # For now, save only the first tag trend
     tag_strip_png = os.path.join(assets, f"tags_{ts}.png")
     if tags:
@@ -81,6 +93,16 @@ def build(train_csv: str, test_csv: str, equip: str, out_dir: str, cfg_path: str
     df_anom = scored[tags][anom_mask] if tags else pd.DataFrame()
     corr_prefix = os.path.join(assets, f"corr_{ts}")
     corr_n_png, corr_a_png = V.plot_corrs(df_norm, df_anom, tags or [], corr_prefix)
+
+    # Episode strips (multi-panel) for up to 5 episodes
+    episode_imgs = []
+    for i, ep in enumerate(episodes[:5], start=1):
+        ep_loc = {"id": f"E{i}", "t0": None, "t1": None}
+        # best-effort integer t0/t1 from index positions using threshold crossings
+        # If anom_mask is a Series aligned to scored, find spans again to map indices
+        ep_png = os.path.join(assets, f"episode_{ts}_{i}.png")
+        V.plot_episode_strip_multi(scored, ep_loc, tags[:3], ep_png)
+        episode_imgs.append(os.path.relpath(ep_png, out_dir))
 
     # Text
     summary = textgen.summarize_overview(kpis)
@@ -118,12 +140,14 @@ def build(train_csv: str, test_csv: str, equip: str, out_dir: str, cfg_path: str
         "kpis": kpis,
         "images": {
             "overview": os.path.relpath(overview_png, out_dir),
+            "anom_matrix": os.path.relpath(matrix_png, out_dir) if os.path.exists(matrix_png) else None,
             "tags_strip": os.path.relpath(tag_strip_png, out_dir),
             "drift": os.path.relpath(drift_png, out_dir),
             "dq_heatmap": os.path.relpath(dq_png, out_dir),
             "corr_normal": os.path.relpath(corr_n_png, out_dir),
             "corr_anom": os.path.relpath(corr_a_png, out_dir),
         },
+        "episodes_imgs": episode_imgs,
         "dq_table_html": dq_df.head(20).to_html(index=False) if dq_df is not None else "",
         "glossary": glossary,
         "summary": summary,

@@ -59,3 +59,4 @@ Outputs
 Tips
 - Use `--no-matrix`, `--no-attention`, or `--no-latent` to skip heavy plots.
 - Tolerates NaNs/Infs and produces placeholders when inputs are missing.
+
