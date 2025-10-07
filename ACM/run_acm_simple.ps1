@@ -1,4 +1,4 @@
-# run_acm_simple.ps1 — streamlined single-equipment run
+﻿# run_acm_simple.ps1 â€” streamlined single-equipment run
 
 #
 # Streamlined single-equipment ACM pipeline runner.
@@ -110,6 +110,6 @@ foreach($f in $copyList){
   if(Test-Path $src){ Copy-Item $src (Join-Path $equipOut $f) -Force }
 }
 
-Ok "Saved → $equipOut"
+Ok "Saved -> $equipOut"
 $rep = Join-Path $equipOut "acm_report.html"
 if(Test-Path $rep){ Start-Process $rep }
