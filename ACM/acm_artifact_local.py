@@ -1,645 +1,333 @@
 # acm_artifact_local.py
-# Report 2.0 — clear timeline story, event drill-downs, tag health, drift/stability,
-# data-quality, model cards, and timings. Static HTML, self-contained images (PNG -> base64).
-#
-# Inputs (defaults to acm_artifacts/*):
-#   - acm_scored_window.csv         (required)
-#   - acm_events.csv                (optional)
-#   - acm_drift.csv                 (optional)
-#   - acm_context_masks.csv         (optional)
-#   - run_*.jsonl                   (optional; timings)
-#   - acm_manifest.json             (optional; model/config metadata)
-#
-# Output:
-#   - acm_report.html (in ART_DIR)
-#
-# Notes:
-#   - Uses matplotlib only (no seaborn). No external JS/CSS; pure HTML+PNG data URIs.
+# Build a simple HTML report from artifacts (no cards; tables + charts only).
+# Assumes report_charts.py is in the same folder and that core/score steps
+# produced scored.csv, events.json (optional), masks.csv (optional), etc.
 
-import os, io, base64, glob, json, datetime as dt
-from typing import Optional, List, Dict, Tuple
+import os, io, json, argparse, math, warnings, datetime as dt
+from typing import Optional, List, Dict
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
-# ---------- Settings ----------
-# Prefer environment variable ACM_ART_DIR if set; else default to your Windows path.
-ART_DIR = os.environ.get("ACM_ART_DIR", r"C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts")
-TITLE   = "Asset Condition Monitor — Report"
-FUSED_TAU = 0.70           # threshold line on fused timeline
-EVENT_CARDS_N = 6          # how many latest events to show
-SPARKS_N = 20              # how many key tags to plot as sparklines
-DRIFT_TOP = 20             # how many drift bars
-FIG_DPI = 130
+from report_charts import timeline, sampled_tags_with_marks, drift_bars, FUSED_TAU
 
+warnings.filterwarnings("ignore")
+
+# ---- Static paths (match your existing setup) ----
+ROOT_DIR = r"C:\Users\bhadk\Documents\CPCL\ACM"
+ART_DIR  = os.path.join(ROOT_DIR, "acm_artifacts")
 os.makedirs(ART_DIR, exist_ok=True)
 
-# ---------- Helpers ----------
-def _embed_png(fig) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=FIG_DPI, bbox_inches="tight")
-    plt.close(fig)
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+# ---- Default artifact filenames ----
+SCORED_CSV   = os.path.join(ART_DIR, "scored.csv")
+EVENTS_JSON  = os.path.join(ART_DIR, "events.json")     # optional
+MASKS_CSV    = os.path.join(ART_DIR, "masks.csv")       # optional
+DRIFT_CSV    = os.path.join(ART_DIR, "drift.csv")       # optional
+REPORT_HTML  = os.path.join(ART_DIR, "acm_report_basic.html")
 
-def _html_anchorsafe(s: str) -> str:
-    return "".join(ch for ch in str(s) if ch.isalnum())
+# ---- Helpers ----
 
-def _duration_str(start, end) -> str:
+def _read_csv_any(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Missing file: {path}")
+    # Try parsing index as time if column Ts present
+    df = pd.read_csv(path)
+    if "Ts" in df.columns:
+        df["Ts"] = pd.to_datetime(df["Ts"], errors="coerce", utc=False)
+        df = df.set_index("Ts", drop=True)
+        df = df.sort_index()
+    else:
+        # try to coerce index if it looks like time
+        try:
+            df.index = pd.to_datetime(df.index, errors="coerce", utc=False)
+            df = df.sort_index()
+        except Exception:
+            pass
+    return df
+
+def _read_events(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["Start","End","PeakScore","Kind"])
     try:
-        d = pd.to_datetime(end) - pd.to_datetime(start)
-        total_s = int(d.total_seconds())
-        if total_s < 60: return f"{total_s}s"
-        if total_s < 3600: return f"{total_s//60}m {total_s%60}s"
-        return f"{total_s//3600}h {(total_s%3600)//60}m"
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Accept either list[dict] or dict with "events"
+        if isinstance(data, dict) and "events" in data:
+            data = data["events"]
+        ev = pd.DataFrame(data)
+        # Normalize time columns
+        for c in ["Start","End","Ts","PeakTs"]:
+            if c in ev.columns:
+                ev[c] = pd.to_datetime(ev[c], errors="coerce", utc=False)
+        # Ensure Start/End exist if only Ts given
+        if "Start" not in ev.columns and "Ts" in ev.columns:
+            ev["Start"] = ev["Ts"]
+        if "End" not in ev.columns and "Start" in ev.columns:
+            ev["End"] = ev["Start"]
+        if "PeakScore" not in ev.columns:
+            ev["PeakScore"] = np.nan
+        if "Kind" not in ev.columns:
+            ev["Kind"] = ""
+        # Keep only necessary cols
+        keep = ["Start","End","PeakScore","Kind"]
+        ev = ev[[c for c in keep if c in ev.columns]].dropna(subset=["Start"])
+        return ev
+    except Exception:
+        # If JSON malformed, return empty
+        return pd.DataFrame(columns=["Start","End","PeakScore","Kind"])
+
+def _read_optional_csv(path: str, expect_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=expect_cols or [])
+    try:
+        df = pd.read_csv(path)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=expect_cols or [])
+
+def _ensure_time_index(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df.sort_index()
+    if "Ts" in df.columns:
+        df["Ts"] = pd.to_datetime(df["Ts"], errors="coerce", utc=False)
+        df = df.set_index("Ts", drop=True)
+        return df.sort_index()
+    # Try best effort
+    try:
+        df.index = pd.to_datetime(df.index, errors="coerce", utc=False)
+        return df.sort_index()
+    except Exception:
+        return df
+
+def _infer_tag_columns(raw_df: pd.DataFrame, scored: pd.DataFrame) -> List[str]:
+    score_cols = {"FusedScore","H1_Forecast","H2_Recon","H3_Contrast","Regime"}
+    # anything numeric in raw_df not in score cols
+    tags = []
+    for c in raw_df.columns:
+        if c in score_cols:
+            continue
+        if pd.api.types.is_numeric_dtype(raw_df[c]):
+            tags.append(c)
+    # If nothing found, try from scored common cols
+    if not tags:
+        for c in scored.columns:
+            if c in score_cols: 
+                continue
+            if c in raw_df.columns and pd.api.types.is_numeric_dtype(raw_df[c]):
+                tags.append(c)
+    return tags
+
+def _fmt_int(n: Optional[int]) -> str:
+    try:
+        return f"{int(n):,d}"
     except Exception:
         return "-"
 
-def _minmax_index(idx):
+def _count_events(ev: pd.DataFrame) -> int:
+    if ev is None or ev.empty: 
+        return 0
+    return len(ev.dropna(subset=["Start"]))
+
+def _count_anom_points(scored: pd.DataFrame) -> int:
+    if "FusedScore" not in scored.columns:
+        return 0
     try:
-        return idx.min(), idx.max()
+        return int((scored["FusedScore"] >= FUSED_TAU).sum())
     except Exception:
-        return None, None
+        return 0
 
-def _safe_read_csv(path, **kw):
-    return pd.read_csv(path, **kw) if (path and os.path.exists(path)) else None
+# ---- Report builder ----
 
-def _read_latest_runlog() -> Optional[pd.DataFrame]:
-    logs = sorted(glob.glob(os.path.join(ART_DIR, "run_*.jsonl")))
-    if not logs: return None
-    df = pd.read_json(logs[-1], lines=True)
-    return df
+def build_report(equip: str,
+                 test_csv: Optional[str] = None,
+                 scored_csv: Optional[str] = None,
+                 events_json: Optional[str] = None,
+                 masks_csv: Optional[str] = None,
+                 drift_csv: Optional[str] = None,
+                 out_html: Optional[str] = None) -> str:
+    """
+    Build a minimal HTML report with timeline + sampled tag trends.
+    - equip: display name
+    - test_csv: optional path to the test data used for scoring (for raw tag trends)
+    - scored_csv: defaults to ART_DIR/scored.csv
+    - events_json/masks_csv/drift_csv: optional artifacts
+    - out_html: defaults to ART_DIR/acm_report_basic.html
+    """
+    scored_path = scored_csv or SCORED_CSV
+    events_path = events_json or EVENTS_JSON
+    masks_path  = masks_csv  or MASKS_CSV
+    drift_path  = drift_csv  or DRIFT_CSV
+    out_path    = out_html   or REPORT_HTML
 
-def _human_dur(sec: float) -> str:
-    if sec < 1: return f"{sec*1000:.0f} ms"
-    return f"{sec:.2f} s"
+    # Load artifacts
+    if not os.path.exists(scored_path):
+        raise FileNotFoundError(f"Missing scored.csv at: {scored_path}")
+    scored = _read_csv_any(scored_path)
+    scored = _ensure_time_index(scored)
 
-def _pick_key_tags(scored: pd.DataFrame, drift: Optional[pd.DataFrame]) -> List[str]:
-    derived = {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}
-    if drift is not None and {"Tag","DriftZ"}.issubset(drift.columns):
-        cand = drift.dropna(subset=["DriftZ"]).sort_values("DriftZ", ascending=False)["Tag"].tolist()
-        if cand:
-            return cand[:SPARKS_N]
-    numcols = []
-    for c in scored.columns:
-        if c in derived: 
-            continue
-        s = pd.to_numeric(scored[c], errors="coerce")
-        if s.notna().sum() > 0:
-            numcols.append(c)
-    if numcols:
-        v = scored[numcols].apply(pd.to_numeric, errors="coerce").var().sort_values(ascending=False)
-        return [c for c in v.index.tolist() if c not in derived][:SPARKS_N]
-    return []
+    # Prefer test CSV for raw trends; else try to reconstruct from scored if raw cols are present
+    if test_csv and os.path.exists(test_csv):
+        raw_df = _read_csv_any(test_csv)
+    else:
+        # fallback: if scored already contains raw numeric tag columns, use it
+        raw_df = scored.copy()
 
-# ---------- Plots ----------
-def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: Optional[pd.DataFrame]) -> str:
-    """Fused timeline with event shading + mask overlay + tau; heads mini; regime ribbon; corr/cpd mini."""
-    has_heads = all(c in scored.columns for c in ["H1_Forecast","H2_Recon","H3_Contrast"])
-    has_reg   = "Regime" in scored.columns
-    has_corr  = "CorrBoost" in scored.columns
-    has_cpd   = "CPD" in scored.columns
-    ts = pd.to_datetime(scored.index)
+    # Optional inputs
+    events_df = _read_events(events_path)
+    masks_df = _read_optional_csv(masks_path, expect_cols=["Ts","Mask"])
+    drift_df = _read_optional_csv(drift_path)
 
-    rows = 1 + (1 if has_heads else 0) + (1 if has_reg else 0) + (1 if (has_corr or has_cpd) else 0)
-    fig, axes = plt.subplots(rows, 1, figsize=(13, 2.5*rows), sharex=True)
-    if rows == 1: axes = [axes]
-    axi = 0
+    # Ensure indices/types
+    raw_df   = _ensure_time_index(raw_df)
+    scored   = _ensure_time_index(scored)
+    if not events_df.empty:
+        for c in ["Start","End"]:
+            if c in events_df.columns:
+                events_df[c] = pd.to_datetime(events_df[c], errors="coerce", utc=False)
+    if not masks_df.empty and "Ts" in masks_df.columns:
+        masks_df["Ts"] = pd.to_datetime(masks_df["Ts"], errors="coerce", utc=False)
 
-    # Row 1: fused timeline
-    ax = axes[axi]; axi += 1
-    ax.plot(ts, scored["FusedScore"].values, linewidth=1.5)
-    ax.axhline(FUSED_TAU, color="gray", linestyle="--", linewidth=1.0)
-    ax.set_ylabel("Fused")
-    ax.grid(alpha=0.25)
+    # Tag selection
+    tag_cols = _infer_tag_columns(raw_df, scored)
 
-    # Shaded events
-    if events is not None and not events.empty:
-        for r in events.itertuples():
-            ax.axvspan(r.Start, r.End, color="#f59e0b", alpha=0.25)
-            if hasattr(r, "PeakScore"):
-                ax.text(r.Start, min(0.98, float(getattr(r, "PeakScore", 0)) + 0.02), f"{float(getattr(r, 'PeakScore', 0)):.2f}", fontsize=8, color="#f59e0b")
-
-    # Mask overlay (red band at the bottom)
-    if masks is not None and "Ts" in masks.columns and "Mask" in masks.columns:
-        mk = masks.copy()
-        mk["Ts"] = pd.to_datetime(mk["Ts"])
-        mk = mk.set_index("Ts").reindex(ts, method="nearest")
-        mask_y = np.where(mk["Mask"].fillna(0).values > 0, 0.03, np.nan)
-        ax.plot(ts, mask_y, drawstyle="steps-mid", linewidth=2.5, alpha=0.9, color="#ef4444")
-
-    # Row 2: heads mini
-    if has_heads:
-        ax = axes[axi]; axi += 1
-        ax.plot(ts, scored["H1_Forecast"].values, linewidth=1.0, label="H1")
-        ax.plot(ts, scored["H2_Recon"].values, linewidth=1.0, label="H2")
-        ax.plot(ts, scored["H3_Contrast"].values, linewidth=1.0, label="H3")
-        ax.set_ylabel("Heads")
-        ax.grid(alpha=0.25); ax.legend(loc="upper right", fontsize=8)
-
-    # Row 3: regime ribbon (robust pcolormesh)
-    if has_reg:
-        ax = axes[axi]; axi += 1
-        reg = scored["Regime"].astype(int)
-        x = mdates.date2num(ts)
-        if len(x) >= 2:
-            dx = np.diff(x)
-            last_step = dx[-1] if len(dx) else (x[-1] - x[-2])
-            if not np.isfinite(last_step) or last_step == 0:
-                last_step = 1/1440  # 1 minute
-            edges = np.concatenate([x, [x[-1] + last_step]])
-        else:
-            edges = np.array([x[0], x[0] + 1/1440])
-        Z = reg.values[np.newaxis, :]
-        y_edges = np.array([0, 1])
-        if edges.shape[0] != Z.shape[1] + 1:
-            raise ValueError(f"Regime ribbon: edges length {edges.shape[0]} must be one more than Z columns {Z.shape[1]}")
-        ax.pcolormesh(edges, y_edges, Z, cmap="tab20", shading="auto")
-        ax.set_yticks([]); ax.set_ylabel("Regime"); ax.grid(False)
-
-    # Row 4: corr/cpd
-    if has_corr or has_cpd:
-        ax = axes[axi]; axi += 1
-        if has_corr: ax.plot(ts, scored["CorrBoost"].values, linewidth=1.0, label="CorrBoost")
-        if has_cpd:  ax.plot(ts, scored["CPD"].values, linewidth=1.0, label="CPD")
-        ax.set_ylabel("Extras"); ax.grid(alpha=0.25); ax.legend(loc="upper right", fontsize=8)
-
-    ax.set_xlabel("Time")
-    fig.tight_layout()
-    return _embed_png(fig)
-
-def _clip_time(df: pd.DataFrame, start, end, pad="10min") -> pd.DataFrame:
-    s = pd.to_datetime(start) - pd.to_timedelta(pad)
-    e = pd.to_datetime(end) + pd.to_timedelta(pad)
-    return df.loc[(df.index >= s) & (df.index <= e)]
-
-def plot_event_time(scored: pd.DataFrame, ev: pd.Series) -> str:
-    seg = _clip_time(scored, ev["Start"], ev["End"])
-    ts = pd.to_datetime(seg.index)
-    fig, ax = plt.subplots(figsize=(12, 3))
-    ax.plot(ts, seg["FusedScore"].values, linewidth=1.5, label="Fused")
-    for c in ["H1_Forecast","H2_Recon","H3_Contrast"]:
-        if c in seg.columns:
-            ax.plot(ts, seg[c].values, linewidth=1.0, label=c)
-    ax.axhline(FUSED_TAU, color="gray", linestyle="--", linewidth=1.0)
-    ax.set_title(f"Event {ev['Start']} → {ev['End']}")
-    ax.grid(alpha=0.25); ax.legend(loc="upper right", fontsize=8)
-    return _embed_png(fig)
-
-def plot_event_spectrum(scored: pd.DataFrame, raw_df: pd.DataFrame, ev: pd.Series, tags: List[str]) -> str:
-    # Compare spectrum in-event vs. pre-event baseline (same duration); aggregate by median
-    try:
-        import numpy.fft as nfft
-    except Exception:
-        return ""
-    start, end = pd.to_datetime(ev["Start"]), pd.to_datetime(ev["End"])
-    dur = end - start
-    pre_s, pre_e = start - dur, start
-    use_cols = [c for c in tags if c in raw_df.columns]
-    if not use_cols: return ""
-    seg_ev  = raw_df.loc[(raw_df.index >= start) & (raw_df.index <= end), use_cols].astype(float)
-    seg_pre = raw_df.loc[(raw_df.index >= pre_s) & (raw_df.index <= pre_e), use_cols].astype(float)
-    if len(seg_ev) < 8 or len(seg_pre) < 8: return ""
-    n = min(len(seg_ev), len(seg_pre))
-    Ev  = seg_ev.tail(n).values
-    Pre = seg_pre.tail(n).values
-    def _med_spec(X):
-        mags = []
-        for i in range(X.shape[1]):
-            spec = np.abs(nfft.rfft(X[:, i]))
-            mags.append(spec)
-        L = max(len(s) for s in mags)
-        mags = [np.pad(s, (0, L-len(s))) for s in mags]
-        return np.median(np.vstack(mags), axis=0)
-    sp_ev  = _med_spec(Ev)
-    sp_pre = _med_spec(Pre)
-    k = np.arange(len(sp_ev))
-
-    fig, ax = plt.subplots(figsize=(12, 3))
-    ax.plot(k, sp_ev, linewidth=1.0, label="Event")
-    ax.plot(k, sp_pre, linewidth=1.0, label="Baseline")
-    diff = sp_ev - sp_pre
-    sd = np.std(diff) + 1e-9
-    hi = np.where(diff > 2.5*sd)[0]
-    if len(hi):
-        ax.scatter(hi, sp_ev[hi], s=10)
-    ax.set_title("Event vs. Baseline Spectrum (median over key tags)")
-    ax.set_xlabel("FFT bin"); ax.set_ylabel("Magnitude")
-    ax.grid(alpha=0.25); ax.legend(loc="upper right", fontsize=8)
-    return _embed_png(fig)
-
-def plot_sparklines(scored: pd.DataFrame, tags: List[str], fused: Optional[pd.Series]) -> str:
-    rows = int(np.ceil(len(tags)/5)) or 1
-    fig, axes = plt.subplots(rows, 5, figsize=(13, 2.0*rows), sharex=True)
-    axes = np.atleast_2d(axes)
-    ts = pd.to_datetime(scored.index)
-    i = -1
-    for i, t in enumerate(tags):
-        r, c = divmod(i, 5)
-        ax = axes[r, c]
-        if t in scored.columns:
-            s = scored[t].astype(float)
-        else:
-            ax.axis("off"); continue
-        z = (s - s.mean()) / (s.std() + 1e-9)
-        ax.plot(ts, z.values, linewidth=0.8)
-        if fused is not None:
-            mark = np.where(fused.values >= FUSED_TAU, z.values, np.nan)
-            ax.scatter(ts, mark, s=6)
-        ax.set_title(t, fontsize=8)
-        ax.grid(alpha=0.15)
-    for j in range(i+1, rows*5):
-        r, c = divmod(j, 5); axes[r, c].axis("off")
-    fig.tight_layout()
-    return _embed_png(fig)
-
-def plot_raw_snapshot(raw_df: pd.DataFrame, tags: List[str], lookback: int = 300) -> str:
-    if raw_df is None or raw_df.empty or not tags:
-        return ""
-    use = [t for t in tags if t in raw_df.columns]
-    if not use:
-        return ""
-    tail = raw_df[use].tail(lookback).copy().astype(float)
-    tail = (tail - tail.min()) / (tail.max() - tail.min() + 1e-9)
-    fig, ax = plt.subplots(figsize=(12, 0.28*len(use)+1.5))
-    ax.imshow(tail.T.values, aspect="auto", interpolation="nearest")
-    ax.set_yticks(range(len(use))); ax.set_yticklabels(use, fontsize=8)
-    ax.set_xticks([]); ax.set_title("Raw Snapshot (recent)", fontsize=10)
-    return _embed_png(fig)
-
-def plot_drift_bars(drift: pd.DataFrame) -> str:
-    if "Tag" not in drift.columns or "DriftZ" not in drift.columns:
-        return ""
-    top = drift.dropna(subset=["DriftZ"]).sort_values("DriftZ", ascending=False).head(DRIFT_TOP)
-    if top.empty: return ""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.barh(top["Tag"][::-1], top["DriftZ"][::-1])
-    ax.set_xlabel("Drift Z"); ax.set_title(f"Top {len(top)} Drifted Tags")
-    fig.tight_layout()
-    return _embed_png(fig)
-
-# ---------- DQ & Timings ----------
-def compute_dq(raw_df: pd.DataFrame, tags: List[str]) -> pd.DataFrame:
-    rows = []
-    for t in tags or []:
-        if t not in raw_df.columns:
-            continue
-        s = pd.to_numeric(raw_df[t], errors="coerce").astype(float)
-        n = len(s)
-        if n == 0:
-            continue
-        flat = (s.diff().abs() < 1e-12).sum() / n * 100.0
-        drop = s.isna().sum() / n * 100.0
-        d = s.diff().dropna().abs()
-        iqr = (d.quantile(0.75) - d.quantile(0.25)) + 1e-9
-        spikes = int((d > 5 * iqr).sum())
-        rows.append({"Tag": t, "Flatline%": flat, "Dropout%": drop, "Spikes": spikes})
-
-    if not rows:
-        return pd.DataFrame(columns=["Tag", "Flatline%", "Dropout%", "Spikes"])
-
-    df = pd.DataFrame(rows)
-    for c in ["Flatline%", "Dropout%", "Spikes"]:
-        if c not in df.columns:
-            df[c] = np.nan
-    return df.sort_values(["Flatline%", "Dropout%", "Spikes"], ascending=[False, False, False])
-
-def timings_table(runlog: Optional[pd.DataFrame]) -> Tuple[str, List[Dict]]:
-    if runlog is None or runlog.empty:
-        return "", []
-    ends = runlog[runlog["event"]=="end"].copy()
-    ends = ends.sort_values(["ts"])
-    totals = ends.groupby("block")["duration_s"].sum().reset_index().sort_values("duration_s", ascending=False)
-    rows = []
-    for r in totals.itertuples():
-        rows.append({"Block": r.block, "Duration": _human_dur(r.duration_s)})
-    tr = "\n".join(f"<tr><td>{x['Block']}</td><td style='text-align:right'>{x['Duration']}</td></tr>" for x in rows)
-    html = f"""
-    <h2>Performance (Timings)</h2>
-    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:1100px">
-      <thead><tr><th>Block</th><th>Duration</th></tr></thead>
-      <tbody>{tr}</tbody>
-    </table>"""
-    return html, rows
-
-# ---------- Report Builder ----------
-def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=None, title=TITLE):
-    # Paths
-    if scored_csv is None:
-        scored_csv = os.path.join(ART_DIR, "acm_scored_window.csv")
-    if drift_csv is None and os.path.exists(os.path.join(ART_DIR, "acm_drift.csv")):
-        drift_csv = os.path.join(ART_DIR, "acm_drift.csv")
-    if events_csv is None and os.path.exists(os.path.join(ART_DIR, "acm_events.csv")):
-        events_csv = os.path.join(ART_DIR, "acm_events.csv")
-    if masks_csv is None and os.path.exists(os.path.join(ART_DIR, "acm_context_masks.csv")):
-        masks_csv = os.path.join(ART_DIR, "acm_context_masks.csv")
-
-    # Load
-    scored = _safe_read_csv(scored_csv, index_col=0, parse_dates=True)
-    if scored is None or scored.empty:
-        raise FileNotFoundError(f"Missing or empty scored csv: {scored_csv}")
-    events = _safe_read_csv(events_csv, parse_dates=["Start","End"])
-    drift  = _safe_read_csv(drift_csv)
-    masks  = _safe_read_csv(masks_csv)
-
-    # Try to load raw df for event spectra (approximate with scored columns)
-    raw_df = scored.copy()
-
-    # Metadata: manifest + runlog
-    manifest_path = os.path.join(ART_DIR, "acm_manifest.json")
-    manifest = json.load(open(manifest_path)) if os.path.exists(manifest_path) else {}
-    runlog = _read_latest_runlog()
-
-    # KPIs
-    t0, t1 = _minmax_index(scored.index)
-    eq_score_path = os.path.join(ART_DIR, "acm_equipment_score.csv")
-    eq_score = None
-    if os.path.exists(eq_score_path):
-        try:
-            eq_score = float(pd.read_csv(eq_score_path)["EquipmentScore"].iloc[0])
-        except Exception:
-            pass
-    events_n = int((scored["FusedScore"] >= FUSED_TAU).sum())
-    regimes_seen = int(scored["Regime"].nunique()) if "Regime" in scored.columns else 0
-    mask_cov = None
-    if masks is not None and not masks.empty:
-        if "Mask" in masks.columns:
-            mask_cov = 100.0 * (masks["Mask"].astype(int).sum() / max(1, len(masks)))
-
-    # Timeline story
-    img_timeline = plot_timeline(scored, events, masks)
-
-    # Tag health grid + raw snapshot
-    key_tags = _pick_key_tags(scored, drift)
-    img_sparks = plot_sparklines(scored, key_tags, scored["FusedScore"])
-    img_rawsnap = plot_raw_snapshot(raw_df, key_tags, lookback=400)
-
-    # Drift bars
-    drift_html = ""
-    if drift is not None and not drift.empty:
-        img_drift = plot_drift_bars(drift)
-        if img_drift:
-            drift_html = f'<div class="card"><h2>Drift</h2><img src="{img_drift}" style="width:100%;max-width:1100px;border:1px solid #333;border-radius:8px;margin:6px 0;" /></div>'
-
-    # Latest Events (table + cards)
-    event_cards = ""
-    if events is not None and not events.empty:
-        events = events.copy()
-        events["Start"] = pd.to_datetime(events["Start"])
-        events["End"]   = pd.to_datetime(events["End"])
-        ev_sorted = events.sort_values("End", ascending=False)
-        last = ev_sorted.head(EVENT_CARDS_N)
-
-        # Table
-        rows_html = []
-        for r in last.itertuples():
-            eid = f"ev{_html_anchorsafe(r.End.isoformat())}"
-            dur = _duration_str(r.Start, r.End)
-            peak = getattr(r, "PeakScore", np.nan)
-            peak_str = f"{float(peak):.2f}" if pd.notna(peak) else ""
-            rows_html.append(
-                f"<tr>"
-                f"<td><a href='#{eid}'>{r.Start}</a></td>"
-                f"<td>{r.End}</td>"
-                f"<td style='text-align:right'>{peak_str}</td>"
-                f"<td style='text-align:right'>{dur}</td>"
-                f"</tr>"
-            )
-        event_table = (
-            "<h2>Latest Events</h2>"
-            "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;max-width:1100px'>"
-            "<thead><tr><th>Start</th><th>End</th><th>Peak</th><th>Duration</th></tr></thead>"
-            f"<tbody>{''.join(rows_html)}</tbody></table>"
-        )
-
-        # Cards
-        cards = []
-        use_cols = [c for c in raw_df.columns if c not in {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}]
-        for r in last.itertuples():
-            ev = pd.Series({"Start": r.Start, "End": r.End, "PeakScore": getattr(r, "PeakScore", np.nan)})
-            eid = f"ev{_html_anchorsafe(r.End.isoformat())}"
-            img_ev_time = plot_event_time(scored, ev)
-
-            clip_ev  = raw_df.loc[(raw_df.index >= r.Start) & (raw_df.index <= r.End), use_cols]
-            clip_pre = raw_df.loc[(raw_df.index >= r.Start - (r.End - r.Start)) & (raw_df.index <= r.Start), use_cols]
-            top_tags = []
-            if not clip_ev.empty and not clip_pre.empty and len(use_cols):
-                zv = ((clip_ev - clip_ev.mean()) / (clip_ev.std() + 1e-9)).abs().mean().sort_values(ascending=False)
-                top_tags = zv.head(5).index.tolist()
-
-            img_ev_spec = plot_event_spectrum(scored, raw_df, ev, top_tags[:5])
-
-            meta = (
-                f"<div class='meta'><b>Start</b> {r.Start} &nbsp; "
-                f"<b>End</b> {r.End} &nbsp; "
-                f"<b>Duration</b> {_duration_str(r.Start, r.End)} &nbsp; "
-                f"<b>Peak</b> {getattr(r, 'PeakScore', float('nan')):.2f}"
-                f"</div>"
-            )
-            top = ""
-            if top_tags:
-                chips = " ".join([f"<span class='chip'>{t}</span>" for t in top_tags])
-                top = f"<div class='meta'><b>Top tags</b> {chips}</div>"
-            card = (
-                f"<div class='card' id='{eid}'>"
-                f"  <h3>Event</h3>"
-                f"  {meta}"
-                f"  {top}"
-                f"  <div><img src='{img_ev_time}' style='width:100%;border:1px solid #333;border-radius:8px;margin:6px 0;' /></div>"
-                f"  {('<div><img src=\"'+img_ev_spec+'\" style=\"width:100%;border:1px solid #333;border-radius:8px;margin:6px 0;\" /></div>' if img_ev_spec else '')}"
-                f"</div>"
-            )
-            cards.append(card)
-
-        event_cards = f"<div class='card'>{event_table}<div class='grid'>{''.join(cards)}</div></div>"
-
-    # Data Quality
-    dq_html = ""
-    dq = compute_dq(raw_df, key_tags)
-    if not dq.empty:
-        dq2 = dq.rename(columns={"Flatline%":"Flatline","Dropout%":"Dropout"})
-        trs = "\n".join(
-            f"<tr><td>{r.Tag}</td>"
-            f"<td style='text-align:right'>{r.Flatline:.2f}</td>"
-            f"<td style='text-align:right'>{r.Dropout:.2f}</td>"
-            f"<td style='text-align:right'>{r.Spikes}</td></tr>"
-            for r in dq2.itertuples()
-        )
-        dq_html = f"""
-        <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:1100px">
-          <thead><tr><th>Tag</th><th>Flatline %</th><th>Dropout %</th><th>Spikes</th></tr></thead>
-          <tbody>{trs}</tbody>
-        </table>
-        """
-
-    # Model cards
-    h1_mode = manifest.get("h1_mode", "lite_ar1")
-    pca_info = ""
-    pca_path = os.path.join(ART_DIR, "acm_pca.joblib")
-    if os.path.exists(pca_path):
-        try:
-            from joblib import load
-            pca = load(pca_path)
-            if hasattr(pca, "explained_variance_ratio_"):
-                evr = pca.explained_variance_ratio_.sum()*100.0
-                pca_info = f" (explained variance ≈ {evr:.1f}%)"
-        except Exception:
-            pass
-    h1_card = f"""
-      <div class="card">
-        <h3>H1 — Forecast (lite+AR1)</h3>
-        <div>Mode: <b>{h1_mode}</b>; Roll: <b>{manifest.get('h1_roll',9)}</b>;
-             RobustZ: <b>{manifest.get('h1_robust',True)}</b>;
-             TopK: <b>{manifest.get('h1_topk',0)}</b>;
-             MinSupport: <b>{manifest.get('h1_min_support',200)}</b></div>
-      </div>"""
-    h2_card = f"""
-      <div class="card">
-        <h3>H2 — Reconstruction (PCA)</h3>
-        <div>n_components: <b>0.9 (variance)</b>{pca_info}</div>
-      </div>"""
-    h3_card = f"""
-      <div class="card">
-        <h3>H3 — Embedding Drift</h3>
-        <div>Similarity: <b>cosine</b>; Baseline window: <b>50</b></div>
-      </div>"""
-    regimes_card = ""
-    if "k_min" in manifest and "k_max" in manifest:
-        regimes_card = f"""
-        <div class="card">
-          <h3>Regimes</h3>
-          <div>Auto-k range: <b>{manifest.get('k_min')}</b>–<b>{manifest.get('k_max')}</b>;
-               Observed: <b>{regimes_seen}</b></div>
-        </div>"""
-    fusion_card = f"""
-      <div class="card">
-        <h3>Fusion</h3>
-        <div>Weights (approx): H1 0.45, H2 0.35, H3 0.35; Boosts: Corr 0.15, CPD 0.10; Mask reduces ×0.7</div>
-        <div>Threshold τ: <b>{manifest.get('fused_tau', FUSED_TAU):.2f}</b></div>
-      </div>"""
-    config_card = f"""
-      <div class="card">
-        <h3>Config</h3>
-        <div>Resample: <b>{manifest.get('resample_rule','1min')}</b>;
-             Window/Stride: <b>{manifest.get('window',256)}/{manifest.get('stride',64)}</b>;
-             FFT bins: <b>{manifest.get('max_fft_bins',64)}</b></div>
-      </div>"""
-
-    # Timings
-    timings_html, _ = timings_table(runlog)
-
-    # Header KPIs
-    eq_html = f"{eq_score:.1f}" if eq_score is not None else "—"
-    header_html = f"""
-    <div class="kpis">
-      <div class="kpi"><div class="kpi-title">Equipment Score</div><div class="kpi-value">{eq_html}</div></div>
-      <div class="kpi"><div class="kpi-title">Window</div><div class="kpi-value">{t0} → {t1}</div></div>
-      <div class="kpi"><div class="kpi-title">Rows</div><div class="kpi-value">{len(scored):,}</div></div>
-      <div class="kpi"><div class="kpi-title">Regimes</div><div class="kpi-value">{regimes_seen}</div></div>
-      <div class="kpi"><div class="kpi-title">Events ≥ τ</div><div class="kpi-value">{events_n}</div></div>
-      <div class="kpi"><div class="kpi-title">Mask %</div><div class="kpi-value">{mask_cov:.2f}%</div></div>
-    </div>""" if mask_cov is not None else f"""
-    <div class="kpis">
-      <div class="kpi"><div class="kpi-title">Equipment Score</div><div class="kpi-value">{eq_html}</div></div>
-      <div class="kpi"><div class="kpi-title">Window</div><div class="kpi-value">{t0} → {t1}</div></div>
-      <div class="kpi"><div class="kpi-title">Rows</div><div class="kpi-value">{len(scored):,}</div></div>
-      <div class="kpi"><div class="kpi-title">Regimes</div><div class="kpi-value">{regimes_seen}</div></div>
-      <div class="kpi"><div class="kpi-title">Events ≥ τ</div><div class="kpi-value">{events_n}</div></div>
-    </div>"""
-
-    # HTML
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>{title}</title>
-<style>
-body {{ background:#0b0f14; color:#e8edf2; font-family:Segoe UI,Roboto,Arial,sans-serif; margin:0; }}
-main {{ max-width:1200px; margin:20px auto; padding:0 16px; }}
-h1,h2,h3 {{ color:#eef2f7; }}
-.card {{ background:#0f1621; padding:14px 16px; border-radius:10px; border:1px solid #1f2a37; margin:12px 0; }}
-.kpis {{ display:grid; grid-template-columns: repeat(6, 1fr); gap:12px; }}
-.kpi {{ background:#0f1621; border:1px solid #1f2a37; border-radius:10px; padding:12px; }}
-.kpi-title {{ font-size:12px; color:#a8b3c0; }}
-.kpi-value {{ font-size:20px; font-weight:600; margin-top:4px; }}
-.chip {{ background:#1b2636; border:1px solid #334155; border-radius:999px; padding:2px 8px; margin:2px; display:inline-block; font-size:12px; }}
-.small {{ color:#a8b3c0; font-size:12px; }}
-hr.sep {{ border:0; height:1px; background:#1f2937; margin:18px 0; }}
-a, a:visited {{ color:#93c5fd; text-decoration:none; }}
-.grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:12px; }}
-.meta {{ color:#aab3bf; margin:6px 0; }}
-table {{ border-collapse:collapse; width:100%; max-width:1100px; }}
-th, td {{ border:1px solid #444; padding:6px; }}
-</style>
-</head>
-<body>
-  <main>
-    <div class="card">
-      <h1>{title}</h1>
-      <div class="small">Generated: {dt.datetime.now().isoformat()} &nbsp; | &nbsp; Artifacts: {ART_DIR}</div>
-      {header_html}
-    </div>
-
-    <div class="card">
-      <h2>Timeline Story</h2>
-      <div><img src="{img_timeline}" style="width:100%;border:1px solid #334155;border-radius:8px;" /></div>
-      <div class="small">Shaded = events; red band = transient mask; dashed = τ</div>
-    </div>
-
-    <div class="card">
-      <h2>Tag Health (Sparklines)</h2>
-      <div><img src="{img_sparks}" style="width:100%;border:1px solid #334155;border-radius:8px;" /></div>
-      {f'<h3 style="margin-top:12px;">Original Data — Recent Snapshot</h3><img src="{img_rawsnap}" style="width:100%;max-width:1100px;border:1px solid #333;border-radius:8px;margin:6px 0;" />' if img_rawsnap else ''}
-    </div>
-
-    {drift_html if drift_html else ''}
-
-    {event_cards if event_cards else ''}
-
-    <div class="card">
-      <h2>Data Quality</h2>
-      {dq_html if dq_html else "<div class='small'>No DQ issues computed.</div>"}
-    </div>
-
-    <div class="card">
-      <h2>Model & Config</h2>
-      {h1_card}
-      {h2_card}
-      {h3_card}
-      {regimes_card}
-      {fusion_card}
-      {config_card}
-    </div>
-
-    <div class="card">
-      {timings_html if timings_html else "<h2>Performance (Timings)</h2><div class='small'>No run log found.</div>"}
-    </div>
-
-    <div class="small">Run complete.</div>
-  </main>
-</body>
-</html>
-"""
-    out = os.path.join(ART_DIR, "acm_report.html")
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"Report: " + out)
-    return out
-
-# ---------- CLI ----------
-if __name__ == "__main__":
-    import argparse
-    p = argparse.ArgumentParser("ACM Artifact Report 2.0")
-    p.add_argument("--scored_csv", default=os.path.join(ART_DIR,"acm_scored_window.csv"))
-    p.add_argument("--drift_csv",  default=os.path.join(ART_DIR,"acm_drift.csv"))
-    p.add_argument("--events_csv", default=os.path.join(ART_DIR,"acm_events.csv"))
-    p.add_argument("--masks_csv",  default=os.path.join(ART_DIR,"acm_context_masks.csv"))
-    a = p.parse_args()
-    build_report(
-        a.scored_csv if os.path.exists(a.scored_csv) else None,
-        a.drift_csv if os.path.exists(a.drift_csv) else None,
-        a.events_csv if os.path.exists(a.events_csv) else None,
-        a.masks_csv if os.path.exists(a.masks_csv) else None,
-        title=TITLE
+    # Charts
+    img_timeline = timeline(scored, events_df, masks_df)
+    img_sampled  = sampled_tags_with_marks(
+        df=raw_df,
+        tags=tag_cols,
+        events=events_df if not events_df.empty else None,
+        fused=scored["FusedScore"] if "FusedScore" in scored.columns else None
     )
+
+    # Optional drift bars if present
+    img_drift = ""
+    if not drift_df.empty and {"Tag","DriftZ"}.issubset(drift_df.columns):
+        img_drift = drift_bars(drift_df, top=20)
+
+    # Summaries
+    t0 = scored.index.min()
+    t1 = scored.index.max()
+    n_rows = len(scored)
+    n_events = _count_events(events_df)
+    n_anom_pts = _count_anom_points(scored)
+    n_tags = len(tag_cols)
+
+    # Minimal CSS
+    css = """
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;margin:16px;color:#111}
+    h1,h2{margin:6px 0 8px 0}
+    h1{font-size:22px}
+    h2{font-size:18px;border-bottom:1px solid #ddd;padding-bottom:4px}
+    table{border-collapse:collapse;width:100%;margin:8px 0}
+    th,td{border:1px solid #ccc;padding:6px 8px;font-size:13px;text-align:left}
+    small{color:#555}
+    .meta{margin:6px 0 12px 0}
+    img{display:block}
+    """
+
+    # Header
+    title = f"ACM Report — {equip}"
+    gen_ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Summary table
+    sum_rows = [
+        ("Equipment", equip),
+        ("Time Range", f"{t0} → {t1}"),
+        ("Rows (scored)", _fmt_int(n_rows)),
+        ("Tags (plotted)", _fmt_int(n_tags)),
+        (f"Anomaly threshold τ", f"{FUSED_TAU:.2f}"),
+        ("Events (episodes)", _fmt_int(n_events)),
+        ("Anomalous points", _fmt_int(n_anom_pts)),
+    ]
+    sum_tbl = ["<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>"]
+    for k, v in sum_rows:
+        # avoid f-string backslash issues by formatting outside the braces where needed
+        row = "<tr><td>{}</td><td>{}</td></tr>".format(k, v)
+        sum_tbl.append(row)
+    sum_tbl.append("</tbody></table>")
+    sum_html = "\n".join(sum_tbl)
+
+    # Sections
+    sec_timeline = (
+        "<section id='timeline'>"
+        "<h2>Timeline</h2>"
+        "<p><small>FusedScore with τ = {:.2f} (dashed). Shaded = events; thin red band = masked context. Heads and regime ribbon shown below.</small></p>"
+        "<img src='{}' style='width:100%;border:1px solid #333;margin:8px 0;' />"
+        "</section>".format(FUSED_TAU, img_timeline)
+    )
+
+    sec_sampled = ""
+    if img_sampled:
+        sec_sampled = (
+            "<section id='sampled'>"
+            "<h2>Sampled Tag Trends</h2>"
+            "<p><small>z-normalized; orange dots mark points where FusedScore ≥ τ = {:.2f}. Event spans lightly shaded.</small></p>"
+            "<img src='{}' style='width:100%;border:1px solid #333;margin:8px 0;' />"
+            "</section>".format(FUSED_TAU, img_sampled)
+        )
+
+    sec_drift = ""
+    if img_drift:
+        sec_drift = (
+            "<section id='drift'>"
+            "<h2>Top Drifted Tags</h2>"
+            "<img src='{}' style='width:100%;border:1px solid #333;margin:8px 0;' />"
+            "</section>".format(img_drift)
+        )
+
+    # Final HTML
+    html_parts = [
+        "<!doctype html>",
+        "<html><head><meta charset='utf-8'><title>{}</title><style>{}</style></head><body>".format(title, css),
+        "<h1>{}</h1>".format(title),
+        "<div class='meta'><small>Generated: {}</small></div>".format(gen_ts),
+        sum_html,
+        sec_timeline,
+        sec_sampled,
+        sec_drift,
+        "</body></html>"
+    ]
+    html = "\n".join(html_parts)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    print(f"[BUILD_REPORT] Wrote {out_path}")
+    return out_path
+
+# ---- CLI ----
+
+def main():
+    parser = argparse.ArgumentParser(description="Build basic ACM HTML report (tables + charts).")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_build = sub.add_parser("build", help="Build the report")
+    p_build.add_argument("--equip", required=True, help="Equipment name to display (e.g., 'FD FAN')")
+    p_build.add_argument("--test", default="", help="Path to test CSV (used for raw tag trends)")
+    p_build.add_argument("--scored", default="", help="Path to scored.csv (defaults to artifacts)")
+    p_build.add_argument("--events", default="", help="Path to events.json (optional)")
+    p_build.add_argument("--masks", default="", help="Path to masks.csv (optional)")
+    p_build.add_argument("--drift", default="", help="Path to drift.csv (optional)")
+    p_build.add_argument("--out", default="", help="Path to output HTML (defaults to artifacts)")
+
+    args = parser.parse_args()
+
+    if args.cmd == "build":
+        test_csv = args.test if args.test else None
+        scored_csv = args.scored if args.scored else None
+        events_json = args.events if args.events else None
+        masks_csv = args.masks if args.masks else None
+        drift_csv = args.drift if args.drift else None
+        out_html = args.out if args.out else None
+
+        build_report(
+            equip=args.equip,
+            test_csv=test_csv,
+            scored_csv=scored_csv,
+            events_json=events_json,
+            masks_csv=masks_csv,
+            drift_csv=drift_csv,
+            out_html=out_html
+        )
+
+if __name__ == "__main__":
+    main()

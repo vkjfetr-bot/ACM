@@ -65,10 +65,9 @@ function Run-OneEquipment {
     python $ScoreAgg --scored_csv "$sc" --drift_csv "$dr" --events_csv "$ev"
     if ($LASTEXITCODE) { Die "Score aggregation failed" }
 
-    Step "Build HTML report"
-    $mk = Join-Path $Artifacts "acm_context_masks.csv"
-    python $Artifact --scored_csv "$sc" --drift_csv "$dr" --events_csv "$ev" --masks_csv "$mk"
-    if ($LASTEXITCODE) { Die "Report build failed" }
+    Step "Build Basic HTML Report"
+    $env:ACM_ART_DIR = $Artifacts
+    python (Join-Path $Root "report_main.py")
 
     if (-not $NoBrief) {
         # Map current filenames to what acm_brief_local.py expects
