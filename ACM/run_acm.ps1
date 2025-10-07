@@ -1,11 +1,12 @@
-﻿param(
-  [string]$Root      = "C:\Users\bhadk\Documents\CPCL\ACM",
-  [string]$Artifacts = "C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts",
+param(
+  [string]$Root      = "C:\\Users\\bhadk\\Documents\\CPCL\\ACM",
+  [string]$Artifacts = "C:\\Users\\bhadk\\Documents\\CPCL\\ACM\\acm_artifacts",
   [string]$TrainCsv  = "",
   [string]$TestCsv   = "",
   [string]$Equip     = "",
   [switch]$All,
-  [switch]$NoBrief
+  [switch]$NoBrief,
+  [switch]$ForceTrain
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,20 +35,60 @@ function Run-OneEquipment {
     if (!(Test-Path $Test))  { Die "Test CSV not found:  $Test"  }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
-        $Name = (Split-Path $Train -Leaf) -replace ' TRAINING DATA\.csv$',''
+        $Name = (Split-Path $Train -Leaf) -replace ' TRAINING DATA\.csv
+
+if ($All) {
+    $csvDir = Join-Path $Root "Dummy Data"
+    if (!(Test-Path $csvDir)) { Die "Dummy Data folder not found: $csvDir" }
+    $trainFiles = Get-ChildItem "$csvDir\* TRAINING DATA.csv" -File
+    if ($trainFiles.Count -eq 0) { Die "No * TRAINING DATA.csv found in $csvDir" }
+
+    foreach($tr in $trainFiles){
+        $equip = ($tr.BaseName -replace ' TRAINING DATA$','')
+        $ts = Join-Path $csvDir "$equip TEST DATA.csv"
+        if (!(Test-Path $ts)) { Write-Warning "Missing TEST DATA for '$equip' Ã¢â€ â€™ $ts"; continue }
+        Run-OneEquipment -Train $tr.FullName -Test $ts -Name $equip
+    }
+    Ok "Batch run complete."
+}
+else {
+    if ([string]::IsNullOrWhiteSpace($TrainCsv) -or [string]::IsNullOrWhiteSpace($TestCsv)) {
+        Die "Provide -TrainCsv and -TestCsv, or use -All"
+    }
+    Run-OneEquipment -Train $TrainCsv -Test $TestCsv -Name $Equip
+}
+
+
+
+
+,''
     }
     Info "Equipment: $Name"
 
     $equipOut = Join-Path $Artifacts $Name
     New-Item -ItemType Directory -Force -Path $equipOut | Out-Null
 
-    Step "Clean artifacts (root)"
-    # Only clear files in the artifacts root; keep subfolders like per-equipment archives
-    Get-ChildItem -Path $Artifacts -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Step "Clean artifacts (transient outputs only)"
+    # Keep model artifacts (joblib/json baselines); clear only transient outputs used by test/report
+    $toClear = @(
+      'acm_scored_window.csv','acm_events.csv','acm_context_masks.csv','acm_drift.csv','acm_resampled.csv',
+      'acm_tag_scores.csv','acm_equipment_score.csv','acm_report.html','brief.json','brief.md','llm_prompt.json'
+    )
+    foreach($f in $toClear){ $p = Join-Path $Artifacts $f; if(Test-Path $p){ Remove-Item $p -Force -ErrorAction SilentlyContinue } }
 
-    Step "Train"
-    python $Core train --csv "$Train"
-    if ($LASTEXITCODE) { Die "Train failed" }
+    function ArtifactsReady([string]$dir){
+        $need = @('acm_scaler.joblib','acm_regimes.joblib','acm_pca.joblib','acm_tag_baselines.csv','acm_manifest.json')
+        foreach($n in $need){ if(-not (Test-Path (Join-Path $dir $n))){ return $false } }
+        return $true
+    }
+
+    if ($ForceTrain -or -not (ArtifactsReady $Artifacts)) {
+        Step "Train"
+        python $Core train --csv "$Train"
+        if ($LASTEXITCODE) { Die "Train failed" }
+    } else {
+        Info "Reusing existing model artifacts; skipping Train. Use -ForceTrain to retrain."
+    }
 
     Step "Score (window)"
     python $Core score --csv "$Test"
@@ -126,7 +167,7 @@ if ($All) {
     foreach($tr in $trainFiles){
         $equip = ($tr.BaseName -replace ' TRAINING DATA$','')
         $ts = Join-Path $csvDir "$equip TEST DATA.csv"
-        if (!(Test-Path $ts)) { Write-Warning "Missing TEST DATA for '$equip' â†’ $ts"; continue }
+        if (!(Test-Path $ts)) { Write-Warning "Missing TEST DATA for '$equip' Ã¢â€ â€™ $ts"; continue }
         Run-OneEquipment -Train $tr.FullName -Test $ts -Name $equip
     }
     Ok "Batch run complete."
@@ -137,4 +178,7 @@ else {
     }
     Run-OneEquipment -Train $TrainCsv -Test $TestCsv -Name $Equip
 }
+
+
+
 

@@ -10,7 +10,8 @@ param(
   [string]$TrainCsv  = "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TRAINING DATA.csv",
   [string]$TestCsv   = "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TEST DATA.csv",
   [string]$Equip     = "FD FAN",
-  [switch]$NoBrief
+  [switch]$NoBrief,
+  [switch]$ForceTrain
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,14 +37,36 @@ $equipOut = Join-Path $Artifacts $Equip
 New-Item -ItemType Directory -Force -Path $equipOut | Out-Null
 
 # Clean only files in $Artifacts root (keep per-equipment folders)
-Step "Clean artifacts (root files only)"
-Get-ChildItem -Path $Artifacts -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Step "Clean artifacts (transient outputs only)"
+# Keep model artifacts (joblib/json baselines); clear only transient outputs used by test/report
+$toClear = @(
+  'acm_scored_window.csv','acm_events.csv','acm_context_masks.csv','acm_drift.csv','acm_resampled.csv',
+  'acm_tag_scores.csv','acm_equipment_score.csv','acm_report.html','brief.json','brief.md','llm_prompt.json'
+)
+foreach($f in $toClear){ $p = Join-Path $Artifacts $f; if(Test-Path $p){ Remove-Item $p -Force -ErrorAction SilentlyContinue } }
 
 # ---- Pipeline ----
 Info "Equipment: $Equip"
 
-Step "Train"
-python $Core train --csv "$TrainCsv"; if($LASTEXITCODE){ Die "Train failed" }
+# Skip train if artifacts already exist and not forcing
+function ArtifactsReady($dir){
+  $need = @(
+    "acm_scaler.joblib",
+    "acm_regimes.joblib",
+    "acm_pca.joblib",
+    "acm_tag_baselines.csv",
+    "acm_manifest.json"
+  )
+  foreach($n in $need){ if(-not (Test-Path (Join-Path $dir $n))){ return $false } }
+  return $true
+}
+
+if($ForceTrain -or -not (ArtifactsReady $Artifacts)){
+  Step "Train"
+  python $Core train --csv "$TrainCsv"; if($LASTEXITCODE){ Die "Train failed" }
+} else {
+  Info "Reusing existing model artifacts; skipping Train. Use -ForceTrain to retrain."
+}
 
 Step "Score (window)"
 python $Core score --csv "$TestCsv"; if($LASTEXITCODE){ Die "Score failed" }
