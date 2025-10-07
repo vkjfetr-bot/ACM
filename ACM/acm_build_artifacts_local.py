@@ -4,7 +4,7 @@
 # 2025-10-07: Local-files artifact builder: reads history CSV, builds contextual baselines + regimes, saves to acm_artifact.csv.
 
 import argparse, json, numpy as np, pandas as pd
-from acm_core_local import (
+from acm_core_local_2 import (
     ensure_time_index, slice_time, resample_guard, enforce_tags,
     build_baseline, train_regimes, artifact_insert
 )

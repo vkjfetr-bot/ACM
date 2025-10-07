@@ -24,7 +24,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # ---------- Settings ----------
-ART_DIR = r"C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts"
+# Prefer environment variable ACM_ART_DIR if set; else default to your Windows path.
+ART_DIR = os.environ.get("ACM_ART_DIR", r"C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts")
 TITLE   = "Asset Condition Monitor — Report"
 FUSED_TAU = 0.70           # threshold line on fused timeline
 EVENT_CARDS_N = 6          # how many latest events to show
@@ -41,6 +42,19 @@ def _embed_png(fig) -> str:
     plt.close(fig)
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/png;base64,{b64}"
+
+def _html_anchorsafe(s: str) -> str:
+    return "".join(ch for ch in str(s) if ch.isalnum())
+
+def _duration_str(start, end) -> str:
+    try:
+        d = pd.to_datetime(end) - pd.to_datetime(start)
+        total_s = int(d.total_seconds())
+        if total_s < 60: return f"{total_s}s"
+        if total_s < 3600: return f"{total_s//60}m {total_s%60}s"
+        return f"{total_s//3600}h {(total_s%3600)//60}m"
+    except Exception:
+        return "-"
 
 def _minmax_index(idx):
     try:
@@ -63,11 +77,10 @@ def _human_dur(sec: float) -> str:
 
 def _pick_key_tags(scored: pd.DataFrame, drift: Optional[pd.DataFrame]) -> List[str]:
     derived = {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}
-    if drift is not None and "Tag" in drift.columns and "DriftZ" in drift.columns:
+    if drift is not None and {"Tag","DriftZ"}.issubset(drift.columns):
         cand = drift.dropna(subset=["DriftZ"]).sort_values("DriftZ", ascending=False)["Tag"].tolist()
         if cand:
             return cand[:SPARKS_N]
-    # variance fallback over numeric, non-derived columns
     numcols = []
     for c in scored.columns:
         if c in derived: 
@@ -80,11 +93,9 @@ def _pick_key_tags(scored: pd.DataFrame, drift: Optional[pd.DataFrame]) -> List[
         return [c for c in v.index.tolist() if c not in derived][:SPARKS_N]
     return []
 
-
 # ---------- Plots ----------
 def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: Optional[pd.DataFrame]) -> str:
     """Fused timeline with event shading + mask overlay + tau; heads mini; regime ribbon; corr/cpd mini."""
-    # 4-row vertical layout: Fused, Heads, Ribbon, Corr/CPD
     has_heads = all(c in scored.columns for c in ["H1_Forecast","H2_Recon","H3_Contrast"])
     has_reg   = "Regime" in scored.columns
     has_corr  = "CorrBoost" in scored.columns
@@ -108,7 +119,7 @@ def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: O
         for r in events.itertuples():
             ax.axvspan(r.Start, r.End, color="#f59e0b", alpha=0.25)
             if hasattr(r, "PeakScore"):
-                ax.text(r.Start, min(0.98, getattr(r, "PeakScore", 0)+0.02), f"{getattr(r, 'PeakScore', 0):.2f}", fontsize=8, color="#f59e0b")
+                ax.text(r.Start, min(0.98, float(getattr(r, "PeakScore", 0)) + 0.02), f"{float(getattr(r, 'PeakScore', 0)):.2f}", fontsize=8, color="#f59e0b")
 
     # Mask overlay (red band at the bottom)
     if masks is not None and "Ts" in masks.columns and "Mask" in masks.columns:
@@ -127,31 +138,23 @@ def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: O
         ax.set_ylabel("Heads")
         ax.grid(alpha=0.25); ax.legend(loc="upper right", fontsize=8)
 
-    # Row 3: regime ribbon (FIXED pcolormesh shapes)
+    # Row 3: regime ribbon (robust pcolormesh)
     if has_reg:
         ax = axes[axi]; axi += 1
         reg = scored["Regime"].astype(int)
-
-        # Use date numbers + pcolormesh (avoid int overflow from ns timestamps)
         x = mdates.date2num(ts)
         if len(x) >= 2:
             dx = np.diff(x)
             last_step = dx[-1] if len(dx) else (x[-1] - x[-2])
             if not np.isfinite(last_step) or last_step == 0:
-                last_step = 1/1440  # +1 minute
+                last_step = 1/1440  # 1 minute
             edges = np.concatenate([x, [x[-1] + last_step]])
         else:
-            # single-point fallback: create a tiny 1-minute span
             edges = np.array([x[0], x[0] + 1/1440])
-
-        # Make Z single-row so Y needs exactly 2 edges → avoids mismatch
-        Z = reg.values[np.newaxis, :]           # shape (1, N)
-        y_edges = np.array([0, 1])              # length 2 = M+1 when M=1
-
-        # Safety check: X edges must be N+1
+        Z = reg.values[np.newaxis, :]
+        y_edges = np.array([0, 1])
         if edges.shape[0] != Z.shape[1] + 1:
             raise ValueError(f"Regime ribbon: edges length {edges.shape[0]} must be one more than Z columns {Z.shape[1]}")
-
         ax.pcolormesh(edges, y_edges, Z, cmap="tab20", shading="auto")
         ax.set_yticks([]); ax.set_ylabel("Regime"); ax.grid(False)
 
@@ -189,7 +192,7 @@ def plot_event_spectrum(scored: pd.DataFrame, raw_df: pd.DataFrame, ev: pd.Serie
     try:
         import numpy.fft as nfft
     except Exception:
-        return ""  # no FFT
+        return ""
     start, end = pd.to_datetime(ev["Start"]), pd.to_datetime(ev["End"])
     dur = end - start
     pre_s, pre_e = start - dur, start
@@ -198,17 +201,14 @@ def plot_event_spectrum(scored: pd.DataFrame, raw_df: pd.DataFrame, ev: pd.Serie
     seg_ev  = raw_df.loc[(raw_df.index >= start) & (raw_df.index <= end), use_cols].astype(float)
     seg_pre = raw_df.loc[(raw_df.index >= pre_s) & (raw_df.index <= pre_e), use_cols].astype(float)
     if len(seg_ev) < 8 or len(seg_pre) < 8: return ""
-    # windowing to equal length
     n = min(len(seg_ev), len(seg_pre))
     Ev  = seg_ev.tail(n).values
     Pre = seg_pre.tail(n).values
-    # rfft per column then median across tags
     def _med_spec(X):
         mags = []
         for i in range(X.shape[1]):
             spec = np.abs(nfft.rfft(X[:, i]))
             mags.append(spec)
-        # pad to same length
         L = max(len(s) for s in mags)
         mags = [np.pad(s, (0, L-len(s))) for s in mags]
         return np.median(np.vstack(mags), axis=0)
@@ -220,7 +220,6 @@ def plot_event_spectrum(scored: pd.DataFrame, raw_df: pd.DataFrame, ev: pd.Serie
     ax.plot(k, sp_ev, linewidth=1.0, label="Event")
     ax.plot(k, sp_pre, linewidth=1.0, label="Baseline")
     diff = sp_ev - sp_pre
-    # highlight bins above +kσ of diff
     sd = np.std(diff) + 1e-9
     hi = np.where(diff > 2.5*sd)[0]
     if len(hi):
@@ -231,11 +230,11 @@ def plot_event_spectrum(scored: pd.DataFrame, raw_df: pd.DataFrame, ev: pd.Serie
     return _embed_png(fig)
 
 def plot_sparklines(scored: pd.DataFrame, tags: List[str], fused: Optional[pd.Series]) -> str:
-    # Small multiples grid: each tag normalized z with anomaly dots
     rows = int(np.ceil(len(tags)/5)) or 1
     fig, axes = plt.subplots(rows, 5, figsize=(13, 2.0*rows), sharex=True)
     axes = np.atleast_2d(axes)
     ts = pd.to_datetime(scored.index)
+    i = -1
     for i, t in enumerate(tags):
         r, c = divmod(i, 5)
         ax = axes[r, c]
@@ -243,23 +242,37 @@ def plot_sparklines(scored: pd.DataFrame, tags: List[str], fused: Optional[pd.Se
             s = scored[t].astype(float)
         else:
             ax.axis("off"); continue
-        # normalize (z)
         z = (s - s.mean()) / (s.std() + 1e-9)
         ax.plot(ts, z.values, linewidth=0.8)
         if fused is not None:
-            # mark points where fused >= tau
             mark = np.where(fused.values >= FUSED_TAU, z.values, np.nan)
             ax.scatter(ts, mark, s=6)
         ax.set_title(t, fontsize=8)
         ax.grid(alpha=0.15)
-    # hide empties
     for j in range(i+1, rows*5):
         r, c = divmod(j, 5); axes[r, c].axis("off")
     fig.tight_layout()
     return _embed_png(fig)
 
+def plot_raw_snapshot(raw_df: pd.DataFrame, tags: List[str], lookback: int = 300) -> str:
+    if raw_df is None or raw_df.empty or not tags:
+        return ""
+    use = [t for t in tags if t in raw_df.columns]
+    if not use:
+        return ""
+    tail = raw_df[use].tail(lookback).copy().astype(float)
+    tail = (tail - tail.min()) / (tail.max() - tail.min() + 1e-9)
+    fig, ax = plt.subplots(figsize=(12, 0.28*len(use)+1.5))
+    ax.imshow(tail.T.values, aspect="auto", interpolation="nearest")
+    ax.set_yticks(range(len(use))); ax.set_yticklabels(use, fontsize=8)
+    ax.set_xticks([]); ax.set_title("Raw Snapshot (recent)", fontsize=10)
+    return _embed_png(fig)
+
 def plot_drift_bars(drift: pd.DataFrame) -> str:
-    top = drift.sort_values("DriftZ", ascending=False).head(DRIFT_TOP)
+    if "Tag" not in drift.columns or "DriftZ" not in drift.columns:
+        return ""
+    top = drift.dropna(subset=["DriftZ"]).sort_values("DriftZ", ascending=False).head(DRIFT_TOP)
+    if top.empty: return ""
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.barh(top["Tag"][::-1], top["DriftZ"][::-1])
     ax.set_xlabel("Drift Z"); ax.set_title(f"Top {len(top)} Drifted Tags")
@@ -283,29 +296,24 @@ def compute_dq(raw_df: pd.DataFrame, tags: List[str]) -> pd.DataFrame:
         spikes = int((d > 5 * iqr).sum())
         rows.append({"Tag": t, "Flatline%": flat, "Dropout%": drop, "Spikes": spikes})
 
-    # Guard: if nothing to report, return empty frame with expected columns
     if not rows:
         return pd.DataFrame(columns=["Tag", "Flatline%", "Dropout%", "Spikes"])
 
     df = pd.DataFrame(rows)
-    # Ensure all expected cols exist before sort (paranoia)
     for c in ["Flatline%", "Dropout%", "Spikes"]:
         if c not in df.columns:
             df[c] = np.nan
     return df.sort_values(["Flatline%", "Dropout%", "Spikes"], ascending=[False, False, False])
 
-
 def timings_table(runlog: Optional[pd.DataFrame]) -> Tuple[str, List[Dict]]:
     if runlog is None or runlog.empty:
         return "", []
-    # compute duration by block (end entries already have duration_s)
     ends = runlog[runlog["event"]=="end"].copy()
     ends = ends.sort_values(["ts"])
     totals = ends.groupby("block")["duration_s"].sum().reset_index().sort_values("duration_s", ascending=False)
     rows = []
     for r in totals.itertuples():
         rows.append({"Block": r.block, "Duration": _human_dur(r.duration_s)})
-    # HTML table
     tr = "\n".join(f"<tr><td>{x['Block']}</td><td style='text-align:right'>{x['Duration']}</td></tr>" for x in rows)
     html = f"""
     <h2>Performance (Timings)</h2>
@@ -362,67 +370,101 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
     # Timeline story
     img_timeline = plot_timeline(scored, events, masks)
 
-    # Tag health grid
+    # Tag health grid + raw snapshot
     key_tags = _pick_key_tags(scored, drift)
     img_sparks = plot_sparklines(scored, key_tags, scored["FusedScore"])
+    img_rawsnap = plot_raw_snapshot(raw_df, key_tags, lookback=400)
 
     # Drift bars
     drift_html = ""
     if drift is not None and not drift.empty:
         img_drift = plot_drift_bars(drift)
-        drift_html = f'<h2>Drift</h2><img src="{img_drift}" style="width:100%;max-width:1100px;border:1px solid #333;border-radius:8px;margin:6px 0;" />'
+        if img_drift:
+            drift_html = f'<div class="card"><h2>Drift</h2><img src="{img_drift}" style="width:100%;max-width:1100px;border:1px solid #333;border-radius:8px;margin:6px 0;" /></div>'
 
-    # Event cards (latest N)
+    # Latest Events (table + cards)
     event_cards = ""
     if events is not None and not events.empty:
-        last = events.tail(EVENT_CARDS_N)
+        events = events.copy()
+        events["Start"] = pd.to_datetime(events["Start"])
+        events["End"]   = pd.to_datetime(events["End"])
+        ev_sorted = events.sort_values("End", ascending=False)
+        last = ev_sorted.head(EVENT_CARDS_N)
+
+        # Table
+        rows_html = []
+        for r in last.itertuples():
+            eid = f"ev{_html_anchorsafe(r.End.isoformat())}"
+            dur = _duration_str(r.Start, r.End)
+            peak = getattr(r, "PeakScore", np.nan)
+            peak_str = f"{float(peak):.2f}" if pd.notna(peak) else ""
+            rows_html.append(
+                f"<tr>"
+                f"<td><a href='#{eid}'>{r.Start}</a></td>"
+                f"<td>{r.End}</td>"
+                f"<td style='text-align:right'>{peak_str}</td>"
+                f"<td style='text-align:right'>{dur}</td>"
+                f"</tr>"
+            )
+        event_table = (
+            "<h2>Latest Events</h2>"
+            "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;width:100%;max-width:1100px'>"
+            "<thead><tr><th>Start</th><th>End</th><th>Peak</th><th>Duration</th></tr></thead>"
+            f"<tbody>{''.join(rows_html)}</tbody></table>"
+        )
+
+        # Cards
         cards = []
+        use_cols = [c for c in raw_df.columns if c not in {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}]
         for r in last.itertuples():
             ev = pd.Series({"Start": r.Start, "End": r.End, "PeakScore": getattr(r, "PeakScore", np.nan)})
+            eid = f"ev{_html_anchorsafe(r.End.isoformat())}"
             img_ev_time = plot_event_time(scored, ev)
-            # Top tags proxy: biggest |z| change inside event
-            use_cols = [c for c in raw_df.columns if c not in
-                        {"Regime","FusedScore","H1_Forecast","H2_Recon","H3_Contrast","CorrBoost","CPD","ContextMask"}]
-            clip_ev = raw_df.loc[(raw_df.index >= r.Start) & (raw_df.index <= r.End), use_cols]
+
+            clip_ev  = raw_df.loc[(raw_df.index >= r.Start) & (raw_df.index <= r.End), use_cols]
             clip_pre = raw_df.loc[(raw_df.index >= r.Start - (r.End - r.Start)) & (raw_df.index <= r.Start), use_cols]
             top_tags = []
             if not clip_ev.empty and not clip_pre.empty and len(use_cols):
                 zv = ((clip_ev - clip_ev.mean()) / (clip_ev.std() + 1e-9)).abs().mean().sort_values(ascending=False)
                 top_tags = zv.head(5).index.tolist()
+
             img_ev_spec = plot_event_spectrum(scored, raw_df, ev, top_tags[:5])
 
-            meta = f"""
-            <div class="meta">
-              <b>Start</b> {r.Start} &nbsp; <b>End</b> {r.End} &nbsp;
-              <b>Duration</b> {(pd.to_datetime(r.End)-pd.to_datetime(r.Start))} &nbsp;
-              <b>Peak</b> {getattr(r, "PeakScore", float('nan')):.2f}
-            </div>"""
+            meta = (
+                f"<div class='meta'><b>Start</b> {r.Start} &nbsp; "
+                f"<b>End</b> {r.End} &nbsp; "
+                f"<b>Duration</b> {_duration_str(r.Start, r.End)} &nbsp; "
+                f"<b>Peak</b> {getattr(r, 'PeakScore', float('nan')):.2f}"
+                f"</div>"
+            )
             top = ""
             if top_tags:
                 chips = " ".join([f"<span class='chip'>{t}</span>" for t in top_tags])
                 top = f"<div class='meta'><b>Top tags</b> {chips}</div>"
-            card = f"""
-            <div class="card">
-              <h3>Event</h3>
-              {meta}
-              {top}
-              <div><img src="{img_ev_time}" style="width:100%;border:1px solid #333;border-radius:8px;margin:6px 0;" /></div>
-              {'<div><img src="'+img_ev_spec+'" style="width:100%;border:1px solid #333;border-radius:8px;margin:6px 0;" /></div>' if img_ev_spec else ''}
-            </div>"""
+            card = (
+                f"<div class='card' id='{eid}'>"
+                f"  <h3>Event</h3>"
+                f"  {meta}"
+                f"  {top}"
+                f"  <div><img src='{img_ev_time}' style='width:100%;border:1px solid #333;border-radius:8px;margin:6px 0;' /></div>"
+                f"  {('<div><img src=\"'+img_ev_spec+'\" style=\"width:100%;border:1px solid #333;border-radius:8px;margin:6px 0;\" /></div>' if img_ev_spec else '')}"
+                f"</div>"
+            )
             cards.append(card)
-        event_cards = "<h2>Latest Events</h2>" + "\n".join(cards)
+
+        event_cards = f"<div class='card'>{event_table}<div class='grid'>{''.join(cards)}</div></div>"
 
     # Data Quality
     dq_html = ""
     dq = compute_dq(raw_df, key_tags)
-
     if not dq.empty:
+        dq2 = dq.rename(columns={"Flatline%":"Flatline","Dropout%":"Dropout"})
         trs = "\n".join(
             f"<tr><td>{r.Tag}</td>"
             f"<td style='text-align:right'>{r.Flatline:.2f}</td>"
             f"<td style='text-align:right'>{r.Dropout:.2f}</td>"
             f"<td style='text-align:right'>{r.Spikes}</td></tr>"
-            for r in dq.rename(columns={"Flatline%":"Flatline","Dropout%":"Dropout"}).itertuples()
+            for r in dq2.itertuples()
         )
         dq_html = f"""
         <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:1100px">
@@ -467,7 +509,7 @@ def build_report(scored_csv=None, drift_csv=None, events_csv=None, masks_csv=Non
         regimes_card = f"""
         <div class="card">
           <h3>Regimes</h3>
-          <div>Auto-k range: <b>{manifest['k_min']}–{manifest['k_max']}</b>;
+          <div>Auto-k range: <b>{manifest.get('k_min')}</b>–<b>{manifest.get('k_max')}</b>;
                Observed: <b>{regimes_seen}</b></div>
         </div>"""
     fusion_card = f"""
@@ -525,6 +567,10 @@ h1,h2,h3 {{ color:#eef2f7; }}
 .small {{ color:#a8b3c0; font-size:12px; }}
 hr.sep {{ border:0; height:1px; background:#1f2937; margin:18px 0; }}
 a, a:visited {{ color:#93c5fd; text-decoration:none; }}
+.grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:12px; }}
+.meta {{ color:#aab3bf; margin:6px 0; }}
+table {{ border-collapse:collapse; width:100%; max-width:1100px; }}
+th, td {{ border:1px solid #444; padding:6px; }}
 </style>
 </head>
 <body>
@@ -544,9 +590,10 @@ a, a:visited {{ color:#93c5fd; text-decoration:none; }}
     <div class="card">
       <h2>Tag Health (Sparklines)</h2>
       <div><img src="{img_sparks}" style="width:100%;border:1px solid #334155;border-radius:8px;" /></div>
+      {f'<h3 style="margin-top:12px;">Original Data — Recent Snapshot</h3><img src="{img_rawsnap}" style="width:100%;max-width:1100px;border:1px solid #333;border-radius:8px;margin:6px 0;" />' if img_rawsnap else ''}
     </div>
 
-    {drift_html}
+    {drift_html if drift_html else ''}
 
     {event_cards if event_cards else ''}
 
@@ -577,7 +624,7 @@ a, a:visited {{ color:#93c5fd; text-decoration:none; }}
     out = os.path.join(ART_DIR, "acm_report.html")
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"Report: {out}")
+    print(f"Report: " + out)
     return out
 
 # ---------- CLI ----------
