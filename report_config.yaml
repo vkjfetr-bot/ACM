@@ -1,0 +1,15 @@
+sampling_rate: "1min"
+time_format: "%Y-%m-%d %H:%M:%S"
+top_n_tags: 6
+plots:
+  dpi: 150
+  width: 900
+  height: 300
+colors:
+  score: "#60a5fa"
+  threshold: "#34d399"
+  anom: "#ef4444"
+anomaly_thresholds:
+  fused_p: 0.95
+dq_rules: {}
+
