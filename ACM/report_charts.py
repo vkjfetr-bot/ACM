@@ -223,3 +223,34 @@ def contribution_breakdown(scored: pd.DataFrame, n: int = 600) -> str:
     ax.set_xlabel("Samples")
     fig.tight_layout()
     return _embed(fig)
+
+
+def raw_tag_panels(raw: pd.DataFrame, tags: List[str], events: Optional[pd.DataFrame]=None, max_points: int = 1800) -> str:
+    """Simple multi-panel plot of raw tags used during test.
+
+    - Plots each tag on its own axis with its native scale.
+    - Optionally overlays event shading if events are provided (Start/End columns).
+    - Downsamples long series for readability.
+    """
+    use_cols = [t for t in tags if t in raw.columns]
+    if not use_cols:
+        return ""
+
+    data = _sample(raw[use_cols].apply(pd.to_numeric, errors="coerce"), max_points)
+    ts = pd.to_datetime(data.index)
+    rows = len(use_cols)
+    fig, axes = plt.subplots(rows, 1, figsize=(13, max(2.0*rows, 4)), sharex=True)
+    if rows == 1:
+        axes = [axes]
+    for i, col in enumerate(use_cols):
+        ax = axes[i]
+        y = data[col].astype(float)
+        ax.plot(ts, y.values, lw=0.9, color="#2563eb", label="Actual")
+        if events is not None and not events.empty and {"Start","End"}.issubset(events.columns):
+            for ev in events.itertuples():
+                ax.axvspan(ev.Start, ev.End, color="#fde68a", alpha=0.25)
+        ax.set_ylabel(col)
+        ax.grid(alpha=0.2)
+    axes[-1].set_xlabel("Time")
+    fig.tight_layout()
+    return _embed(fig)

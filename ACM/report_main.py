@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from report_html import wrap_html, section, table, chart, kpi_grid
-from report_charts import (timeline, sampled_tags_with_marks, drift_bars, regime_share, fused_histogram, hourly_burden_heatmap, contribution_breakdown, FUSED_TAU)
+from report_charts import (timeline, sampled_tags_with_marks, drift_bars, regime_share, fused_histogram, hourly_burden_heatmap, contribution_breakdown, raw_tag_panels, FUSED_TAU)
 
 # ---------- Settings ----------
 ART_DIR = os.environ.get("ACM_ART_DIR", r"C:\\Users\\bhadk\\Documents\\CPCL\\ACM\\acm_artifacts")
@@ -120,6 +120,21 @@ def build_basic_report():
     body = ""
     body += kpi_grid(kpis)
 
+    # Simple raw-data panels first (top tags by variance from resampled test data)
+    simple_tags: List[str] = []
+    if resampled is not None and not resampled.empty:
+        numeric = resampled.select_dtypes(include=[np.number])
+        if not numeric.empty:
+            simple_tags = (
+                numeric.var().sort_values(ascending=False)
+                .head(min(6, len(numeric.columns)))
+                .index.tolist()
+            )
+            body += section(
+                "Simple Trends (Raw Data: Top-Variance Tags)",
+                chart(raw_tag_panels(resampled, simple_tags, events)),
+            )
+
     # Timeline chart with event & mask overlays
     body += section("Timeline (Fused + Heads + Regime)",
                     chart(timeline(scored, events, masks)))
@@ -180,6 +195,8 @@ def build_basic_report():
 
 if __name__ == "__main__":
     build_basic_report()
+
+
 
 
 
