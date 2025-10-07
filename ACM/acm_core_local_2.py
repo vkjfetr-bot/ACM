@@ -394,7 +394,7 @@ def score_window(csv_path: str, save_prefix="acm") -> Dict:
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         resampled_out = os.path.join(ART_DIR, "acm_resampled.csv")
         df[numeric_cols].to_csv(resampled_out, index=True)
-        print(f"[SAVE] Resampled numeric data → {resampled_out}")
+        print(f"[SAVE] Resampled numeric data -> {resampled_out}")
 
     tags = man["tags"]; W, S, max_fft = man["window"], man["stride"], man["max_fft_bins"]
 
