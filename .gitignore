@@ -1,0 +1,26 @@
+﻿# Python bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
+
+# Build artifacts and reports (generated)
+ACM/acm_artifacts/
+
+# Logs
+*.log
+*.jsonl
