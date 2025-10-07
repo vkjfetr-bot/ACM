@@ -35,6 +35,9 @@ function Run-OneEquipment {
     Info "Equipment: $Name"
     $equipOut = Join-Path $Artifacts $Name
     New-Item -ItemType Directory -Force -Path $equipOut | Out-Null
+    
+    Step "Clean artifacts"
+    Get-ChildItem -Path $Artifacts -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
     Step "Train"
     python $Core train --csv "$Train"; if ($LASTEXITCODE) { Die "Train failed" }

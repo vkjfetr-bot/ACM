@@ -21,6 +21,7 @@ from typing import Optional, List, Dict, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 # ---------- Settings ----------
 ART_DIR = r"C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts"
@@ -122,10 +123,22 @@ def plot_timeline(scored: pd.DataFrame, events: Optional[pd.DataFrame], masks: O
     if has_reg:
         ax = axes[axi]; axi += 1
         reg = scored["Regime"].astype(int)
-        # draw as colored blocks
-        ax.imshow(reg.values[np.newaxis, :], aspect="auto", cmap="tab20", extent=[ts[0].value, ts[-1].value, 0, 1])
-        ax.set_yticks([]); ax.set_ylabel("Regime")
-        ax.grid(False)
+
+        # Use date numbers + pcolormesh (avoids int overflow from ns timestamps)
+        x = mdates.date2num(ts)
+        if len(x) >= 2:
+            dx = np.diff(x)
+            last_step = dx[-1] if len(dx) else (x[-1] - x[-2])
+            if not np.isfinite(last_step) or last_step == 0:
+                last_step = 1/1440  # +1 minute
+            edges = np.concatenate([x, [x[-1] + last_step]])
+        else:
+            # single-point fallback: create a tiny 1-minute span
+            edges = np.array([x[0], x[0] + 1/1440])
+
+        Z = np.vstack([reg.values, reg.values])  # 2 rows required by pcolormesh
+        ax.pcolormesh(edges, [0, 1], Z, cmap="tab20", shading="auto")
+        ax.set_yticks([]); ax.set_ylabel("Regime"); ax.grid(False)
 
     # Row 4: corr/cpd
     if has_corr or has_cpd:
