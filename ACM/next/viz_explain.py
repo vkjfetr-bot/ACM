@@ -18,7 +18,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from .viz_core import ensure_dir, save_fig, sanitize_array, set_seed
+try:
+    from .viz_core import ensure_dir, save_fig, sanitize_array, set_seed  # type: ignore
+except Exception:  # fallback when run as a script module
+    from viz_core import ensure_dir, save_fig, sanitize_array, set_seed  # type: ignore
 
 
 def read_contrib_jsonl(path: str) -> Dict[str, List[Tuple[str, float]]]:
@@ -121,4 +124,3 @@ def plot_latent_space(emb: np.ndarray, out_path: str, seed: int = 42) -> str:
     ax.set_title("Latent space (PCA)")
     ax.grid(True, alpha=0.2)
     return save_fig(fig, out_path)
-
