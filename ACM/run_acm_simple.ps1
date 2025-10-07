@@ -37,8 +37,13 @@ $equipOut = Join-Path $Artifacts $Equip
 New-Item -ItemType Directory -Force -Path $equipOut | Out-Null
 
 # Clean only files in $Artifacts root (keep per-equipment folders)
-Step "Clean artifacts (root files only)"
-Get-ChildItem -Path $Artifacts -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Step "Clean artifacts (transient outputs only)"
+# Keep model artifacts (joblib/json baselines); clear only transient outputs used by test/report
+$toClear = @(
+  'acm_scored_window.csv','acm_events.csv','acm_context_masks.csv','acm_drift.csv','acm_resampled.csv',
+  'acm_tag_scores.csv','acm_equipment_score.csv','acm_report.html','brief.json','brief.md','llm_prompt.json'
+)
+foreach($f in $toClear){ $p = Join-Path $Artifacts $f; if(Test-Path $p){ Remove-Item $p -Force -ErrorAction SilentlyContinue } }
 
 # ---- Pipeline ----
 Info "Equipment: $Equip"
