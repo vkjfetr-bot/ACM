@@ -1,4 +1,4 @@
-# ACM Core Local 2 — Developer Handbook
+﻿# ACM Core Local 2 â€” Developer Handbook
 
 **Purpose:**  
 This script implements the *core machine-learning pipeline* of the Asset Condition Monitoring (ACM) system.  
@@ -15,9 +15,9 @@ It provides a modular, explainable framework for anomaly detection, regime ident
 | 3 | Tag detection | Select numeric signals with variability |
 | 4 | Windowing & feature extraction | Convert signals to statistical and spectral features |
 | 5 | Regime clustering | Discover natural operating modes |
-| 6 | H1 — Forecast/AR(1) | Short-term residual anomaly score |
-| 7 | H2 — PCA reconstruction | Multivariate deviation score |
-| 8 | H3 — Embedding drift | Slow context change score |
+| 6 | H1 â€” Forecast/AR(1) | Short-term residual anomaly score |
+| 7 | H2 â€” PCA reconstruction | Multivariate deviation score |
+| 8 | H3 â€” Embedding drift | Slow context change score |
 | 9 | Context mask & fusion | Transient filter, fusion of scores |
 | 10 | Episode detection | Group fused spikes into events |
 | 11 | Drift check | Compare current means to baselines |
@@ -30,7 +30,7 @@ It provides a modular, explainable framework for anomaly detection, regime ident
 
 | Category | Key | Description |
 | ---------- | ---- | ------------- |
-| Sampling | `resample_rule` | e.g. “1min” | 
+| Sampling | `resample_rule` | e.g. â€œ1minâ€ | 
 | Windowing | `window`, `stride`, `max_fft_bins` | Frame size and FFT resolution |
 | Regime Detection | `k_min`, `k_max` | Range of cluster counts for auto-KMeans |
 | H1 | `h1_mode`, `h1_roll`, `h1_topk`, `h1_robust`, `h1_min_support` | Rolling and AR(1) parameters |
@@ -61,7 +61,7 @@ Uniform sampling simplifies rolling features and FFT. Irregular timestamps break
 ## 4. Tag Detection
 
 **Function:** `detect_tags()`  
-- Selects numeric columns with ≥ 20 unique values.  
+- Selects numeric columns with â‰¥ 20 unique values.  
 - Filters timestamp columns by name.
 
 **Why:**  
@@ -77,13 +77,13 @@ Each window (size `W`, stride `S`) is a snapshot for feature computation.
 Overlaps preserve temporal continuity.
 
 ### Time-domain features
-- Mean (μ), RMS, Variance (σ²)  
+- Mean (Î¼), RMS, Variance (ÏƒÂ²)  
 - Skewness (asymmetry) and Kurtosis (peakedness)  
 - Crest Factor = Peak / RMS  
 - Slope = trend via linear regression on half window
 
 **Why:**  
-Captures signal energy, shape, and trend — sensitive to faults like imbalance, vibration spikes.
+Captures signal energy, shape, and trend â€” sensitive to faults like imbalance, vibration spikes.
 
 ### Frequency-domain features
 - FFT magnitude spectrum (up to `max_fft_bins`)  
@@ -92,7 +92,7 @@ Captures signal energy, shape, and trend — sensitive to faults like imbalance,
 
 **Why:**  
 Many mechanical faults manifest as frequency signatures (e.g., bearing tones).  
-FFT adds “what frequency energy shifted” context missing in time domain.
+FFT adds â€œwhat frequency energy shiftedâ€ context missing in time domain.
 
 **Alternatives:**
 | Approach | Pros | Cons |
@@ -107,14 +107,14 @@ FFT adds “what frequency energy shifted” context missing in time domain.
 `RobustScaler` (uses median & IQR).  
 
 **Why:** Outlier-resistant; ensures each feature contributes equally to KMeans and PCA.  
-**Alternative:** `StandardScaler` (Z-score) — faster but outlier-sensitive.
+**Alternative:** `StandardScaler` (Z-score) â€” faster but outlier-sensitive.
 
 ---
 
 ## 7. Regime Detection (K-Means Clustering)
 
-- Try k = `k_min..k_max`, select best via Silhouette Score \(s=\frac{b−a}{\max(a,b)}\).  
-- Stores cluster centroids → defines operating modes.
+- Try k = `k_min..k_max`, select best via Silhouette Score \(s=\frac{bâˆ’a}{\max(a,b)}\).  
+- Stores cluster centroids â†’ defines operating modes.
 
 **Why KMeans:**  
 Industrial signals often form compact clusters (steady-states). Fast, explainable.  
@@ -122,19 +122,19 @@ Industrial signals often form compact clusters (steady-states). Fast, explainabl
 
 ---
 
-## 8. H1 — Forecast Lite + AR(1)
+## 8. H1 â€” Forecast Lite + AR(1)
 
 ### Concept
 Models each tag as first-order auto-regressive:
 \[
-x_t = φx_{t−1} + ε_t
+x_t = Ï†x_{tâˆ’1} + Îµ_t
 \]
-Residual \(r_t = x_t − φx_{t−1}\) should be white noise if normal. Deviations → anomalies.
+Residual \(r_t = x_t âˆ’ Ï†x_{tâˆ’1}\) should be white noise if normal. Deviations â†’ anomalies.
 
 ### Steps
-1. Estimate φ per tag (correlation of lag 1).  
+1. Estimate Ï† per tag (correlation of lag 1).  
 2. Compute rolling median baseline (`h1_roll`).  
-3. Z-score residuals using MAD → aggregate across tags.
+3. Z-score residuals using MAD â†’ aggregate across tags.
 
 **Why:** Captures short-term predictability; detects sudden departures without complex forecast models.
 
@@ -142,44 +142,44 @@ Residual \(r_t = x_t − φx_{t−1}\) should be white noise if normal. Deviatio
 
 ---
 
-## 9. H2 — PCA Reconstruction Error
+## 9. H2 â€” PCA Reconstruction Error
 
 ### Theory
 Principal Component Analysis projects features onto orthogonal axes maximizing variance.  
 Reconstruction error:
 \[
-e_i = \|x_i − \hat{x}_i\|^2
+e_i = \|x_i âˆ’ \hat{x}_i\|^2
 \]
 where \(\hat{x}_i = PCA^{-1}(PCA(x_i))\).
 
-**Why:** Captures multivariate structure — changes in relationships between tags trigger higher errors.  
+**Why:** Captures multivariate structure â€” changes in relationships between tags trigger higher errors.  
 Ideal for detecting correlated faults (spanning multiple tags).
 
 **Alternatives:** Autoencoder NN (similar concept, nonlinear), Robust PCA (outlier-tolerant).
 
 ---
 
-## 10. H3 — Embedding Drift (Contrast Score)
+## 10. H3 â€” Embedding Drift (Contrast Score)
 
 ### Concept
 In PCA space, take cosine similarity to rolling mean:
 \[
-s_i = 1 − \frac{x_i·μ_{i−50:i}}{\|x_i\|\|μ_{i−50:i}\|}
+s_i = 1 âˆ’ \frac{x_iÂ·Î¼_{iâˆ’50:i}}{\|x_i\|\|Î¼_{iâˆ’50:i}\|}
 \]
-Higher \(s_i\) → state diverged from recent context.
+Higher \(s_i\) â†’ state diverged from recent context.
 
-**Why:** Detects slow, systematic drifts (e.g., aging, control offsets) that don’t spike residuals.
+**Why:** Detects slow, systematic drifts (e.g., aging, control offsets) that donâ€™t spike residuals.
 
 ---
 
 ## 11. Context Mask & Corroboration
 
 ### Transient Mask
-Detect high median |Δ| and |Δ²| across tags → mark transients.  
+Detect high median |Î”| and |Î”Â²| across tags â†’ mark transients.  
 Reduces false alarms during start-ups and load changes.
 
 ### Corroboration Boost
-Top N highly correlated tag pairs; when both deviate → boost confidence.
+Top N highly correlated tag pairs; when both deviate â†’ boost confidence.
 
 **Why:** Correlated tags (e.g., flow & pressure) should fail together; isolated deviation may be sensor noise.
 
@@ -187,7 +187,7 @@ Top N highly correlated tag pairs; when both deviate → boost confidence.
 
 ## 12. Change-Point Signal (CPD)
 
-Rolling mean & std (60 pts), sum of their absolute derivatives → detect step changes.  
+Rolling mean & std (60 pts), sum of their absolute derivatives â†’ detect step changes.  
 **Why:** Provides simple, low-latency change-point proxy without offline algorithms (PELT, BOCPD).
 
 ---
@@ -198,9 +198,9 @@ Fused score:
 \[
 F = \min\!\big(1,\;0.45 H1 + 0.35 H2 + 0.35 H3 + 0.15 Corr + 0.10 CPD\big)
 \]
-then \(F × 0.7\) where masked.
+then \(F Ã— 0.7\) where masked.
 
-Episodes = continuous segments where \(F ≥ τ\) (`fused_tau`), merged if gap < `merge_gap`.
+Episodes = continuous segments where \(F â‰¥ Ï„\) (`fused_tau`), merged if gap < `merge_gap`.
 
 **Why:** Combines fast, multivariate, and drift detectors into one interpretable timeline.
 
@@ -210,9 +210,9 @@ Episodes = continuous segments where \(F ≥ τ\) (`fused_tau`), merged if gap <
 
 Compare current means vs. stored baselines:  
 \[
-Z = \frac{|μ_{current} − μ_{train}|}{σ_{train}}
+Z = \frac{|Î¼_{current} âˆ’ Î¼_{train}|}{Ïƒ_{train}}
 \]
-Sort descending → tags with largest drift.
+Sort descending â†’ tags with largest drift.
 
 **Why:** Quantifies slow shifts beyond normal variance.  
 Critical for sensor bias or process creep.
@@ -237,9 +237,9 @@ Artifacts and logs are written to `acm_artifacts\`.
 | -------------- | ------------------- | ---------------------------- |
 | `window`       | Feature granularity | Smaller = faster but noisier |
 | `stride`       | Overlap density     | Higher = more samples        |
-| `max_fft_bins` | Spectral resolution | 32–64 adequate               |
-| `h1_mode`      | Computation load    | “lite_ar1” balanced          |
-| `fused_tau`    | Sensitivity         | Lower → more events          |
+| `max_fft_bins` | Spectral resolution | 32â€“64 adequate               |
+| `h1_mode`      | Computation load    | â€œlite_ar1â€ balanced          |
+| `fused_tau`    | Sensitivity         | Lower â†’ more events          |
 | `k_min/k_max`  | Clustering scope    | Narrow for speed             |
 
 ---
@@ -252,7 +252,7 @@ Artifacts and logs are written to `acm_artifacts\`.
 | Multivariate compression  | PCA            | Linear, deterministic     | Autoencoder        |
 | Short-term forecast       | AR(1)          | Minimal data, instant fit | ARIMA, LSTM        |
 | Anomaly fusion            | Weighted sum   | Transparent logic         | Ensemble learners  |
-| Drift                     | Mean/σ Z-shift | Explainable               | KL-divergence, MMD |
+| Drift                     | Mean/Ïƒ Z-shift | Explainable               | KL-divergence, MMD |
 
 ---
 
@@ -267,10 +267,16 @@ Artifacts and logs are written to `acm_artifacts\`.
 
 ## 19. Developer Checklist
 
-* ✅ Code organized into pure functions.
-* ✅ Each stage timed & logged (JSONL).
-* ✅ Artifacts portable between runs.
-* ✅ Safe for parallel equipment execution.
-* ✅ No external dependencies beyond pandas/numpy/sklearn.
+* âœ… Code organized into pure functions.
+* âœ… Each stage timed & logged (JSONL).
+* âœ… Artifacts portable between runs.
+* âœ… Safe for parallel equipment execution.
+* âœ… No external dependencies beyond pandas/numpy/sklearn.
 
 ---
+
+## Quick Run
+
+- Single equipment: run ACM\run_acm_simple.ps1 with -TrainCsv, -TestCsv, -Equip. Outputs to cm_artifacts and archives to cm_artifacts\<Equip> including cm_report.html and the brief.
+- Batch mode: run ACM\run_acm.ps1 -All to process all pairs in Dummy Data folder.
+- LLM brief: python ACM\acm_brief_local.py build --art_dir <acm_artifacts> --equip <name> then python ACM\acm_brief_local.py prompt --brief <acm_artifacts\brief.json>.
