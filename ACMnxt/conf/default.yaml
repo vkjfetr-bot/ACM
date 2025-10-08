@@ -1,0 +1,12 @@
+equip: FD_FAN
+resample: 1min
+use_h1: true
+use_h2: true
+use_h3: true
+threshold:
+  method: mad
+  z: 3.0
+regimes:
+  k_min: 2
+  k_max: 8
+

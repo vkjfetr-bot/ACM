@@ -22,6 +22,9 @@ ART_DIR = r"C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts"
 os.makedirs(ART_DIR, exist_ok=True)
 print(f"[ACM] Using static ART_DIR: {ART_DIR}")
 
+# Lightweight mode (testing): set env ACM_SKIP_DIAG=1 to skip heavy CSVs
+SKIP_DIAG = os.environ.get("ACM_SKIP_DIAG", "0") == "1"
+
 RUN_ID = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:6]
 RUN_LOG = os.path.join(ART_DIR, f"run_{RUN_ID}.jsonl")
 
@@ -372,7 +375,8 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm")
         with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json"), "w") as f:
             json.dump(manifest, f, indent=2)
         diag = F.copy(); diag["Regime"] = regimes
-        diag.to_csv(os.path.join(ART_DIR, f"{save_prefix}_train_diagnostics.csv"))
+        if not SKIP_DIAG:
+            diag.to_csv(os.path.join(ART_DIR, f"{save_prefix}_train_diagnostics.csv"))
 
     with Timer("SUMMARY"):
         print(f"Tags: {len(tags)} | Feature rows: {len(F)} | Regimes: {km.n_clusters} | Switches: {regime_switches}")
@@ -392,9 +396,10 @@ def score_window(csv_path: str, save_prefix="acm") -> Dict:
         df = df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
         # Save resampled numeric frame for report (sparklines & event spectra)
         numeric_cols = df.select_dtypes(include=[np.number]).columns
-        resampled_out = os.path.join(ART_DIR, "acm_resampled.csv")
-        df[numeric_cols].to_csv(resampled_out, index=True)
-        print(f"[SAVE] Resampled numeric data -> {resampled_out}")
+        if not SKIP_DIAG:
+            resampled_out = os.path.join(ART_DIR, "acm_resampled.csv")
+            df[numeric_cols].to_csv(resampled_out, index=True)
+            print(f"[SAVE] Resampled numeric data -> {resampled_out}")
 
     tags = man["tags"]; W, S, max_fft = man["window"], man["stride"], man["max_fft_bins"]
 

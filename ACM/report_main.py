@@ -15,6 +15,7 @@ from report_charts import (timeline, sampled_tags_with_marks, drift_bars, regime
 
 # ---------- Settings ----------
 ART_DIR = os.environ.get("ACM_ART_DIR", r"C:\\Users\\bhadk\\Documents\\CPCL\\ACM\\acm_artifacts")
+FAST = os.environ.get("ACM_FAST_REPORT", "0") == "1"
 TITLE   = "Asset Condition Monitor — Enhanced Report"
 SPARKS_N = 18  # how many tags to show on sampled plots
 
@@ -82,7 +83,15 @@ def build_basic_report():
     scored = _safe_read_csv(os.path.join(ART_DIR, "acm_scored_window.csv"), index_col=0, parse_dates=True)
     if scored is None or scored.empty:
         raise FileNotFoundError(f"Missing or empty: {os.path.join(ART_DIR, 'acm_scored_window.csv')}")
+    # Optional downsample for speed
+    if FAST and hasattr(scored.index, "inferred_type") and "datetime" in str(scored.index.inferred_type):
+        scored = scored.resample("5T").median()
+    elif FAST:
+        scored = scored.iloc[::5]
+
     events = _safe_read_csv(os.path.join(ART_DIR, "acm_events.csv"), parse_dates=["Start","End"])
+    if FAST and events is not None and not events.empty:
+        events = events.head(5)
     drift  = _safe_read_csv(os.path.join(ART_DIR, "acm_drift.csv"))
     masks  = _safe_read_csv(os.path.join(ART_DIR, "acm_context_masks.csv"))
 

@@ -20,6 +20,20 @@ Thumbs.db
 
 # Build artifacts and reports (generated)
 ACM/acm_artifacts/
+acmnxt/artifacts/
+acmnxt/**/*.joblib
+**/.pytest_cache/
+dist/
+build/
+*.egg-info/
+*.ipynb_checkpoints/
+*.coverage
+coverage.xml
+*.png
+*.svg
+*.html
+!acmnxt/report/*.py
+!.vscode/
 reports/
 
 # Logs

@@ -5,6 +5,15 @@ All notable changes to this project are documented here. This file is maintained
 ## [Unreleased]
 - TBA
 
+## [2025-10-08] ACMnxt v0.1.0 — Fast, modular baseline
+- feat(acmnxt): New package under `acmnxt/` with CLI (train/score/report)
+- feat(acmnxt): Native report with real charts (timeline, sampled tags, regimes, drift, event minis)
+- feat(acmnxt): Score-only path; reuses PCA/scaler; 15-min loop friendly
+- perf(acmnxt): Fast mode (PCA subsample, limited silhouette sample, downsampled DQ)
+- chore(ps1): Wrapper supports separate Train CSV vs Score CSV (`-ScoreCsv`) + `-Fast`
+- fix(report): tz-naive plotting and event context windows; clear legends
+- chore(git): Add ignores for artifacts, joblibs, images, build outputs
+
 ## [2025-10-07] Brief/Report alignment and robustness
 - feat(brief): Add `prompt` subcommand to `acm_brief_local.py` which reads `brief.json` and writes `llm_prompt.json` (simple chat payload).
 - feat(brief): Make brief resilient to varying filenames and columns: reads `scored.csv`/`acm_scored_window.csv`, `events.csv`/`acm_events.csv`, `drift.csv`/`acm_drift.csv` and normalizes columns.
