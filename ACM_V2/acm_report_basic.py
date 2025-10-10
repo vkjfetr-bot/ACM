@@ -1,4 +1,4 @@
-"""Generate a chart-rich HTML report for ACM_V2 artifacts."""
+﻿"""Generate a chart-rich HTML report for ACM_V2 artifacts."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
-
 
 ACCENT_BLUE = "#005a9c"
 ACCENT_ORANGE = "#ff9248"
@@ -56,7 +55,9 @@ def _summarise_guardrails(rows: List[Dict]) -> str:
         level = row.get("level", "").upper()
         gtype = row.get("type", "")
         msg = row.get("message", "")
-        items.append(f"<li><strong>{level}</strong> &mdash; {gtype}: {msg} <span class='stamp'>({stamp})</span></li>")
+        items.append(
+            f"<li><strong>{level}</strong> &mdash; {gtype}: {msg} <span class='stamp'>({stamp})</span></li>"
+        )
     return "<ul>" + "".join(items) + "</ul>"
 
 
@@ -116,7 +117,7 @@ def _plot_blame(top_event: pd.Series) -> str:
     fig, ax = plt.subplots(figsize=(6, 3.5))
     ax.barh(tags, values, color=ACCENT_BLUE)
     ax.set_xlabel("Average |z-score|")
-    ax.set_title("Blame chart &mdash; top drivers")
+    ax.set_title("Blame chart — top drivers")
     for i, v in enumerate(values):
         ax.text(v + 0.02, i, f"{v:0.2f}", va="center", fontsize=9, color=TEXT_COLOR)
     ax.grid(**GRID_STYLE, axis="x")
@@ -160,6 +161,58 @@ def _plot_dq(dq: pd.DataFrame) -> str:
     return _encode_fig(fig)
 
 
+def _plot_tag_overlay(resampled_path: Path, events: Optional[pd.DataFrame], top_event: Optional[pd.Series]) -> str:
+    if top_event is None or not resampled_path.exists():
+        return ""
+    df = pd.read_csv(resampled_path)
+    if df.empty:
+        return ""
+    ts_col = None
+    for name in ["Ts", "ts", "timestamp", df.columns[0]]:
+        if name in df.columns:
+            ts_col = name
+            break
+    if ts_col is None:
+        return ""
+    ts = pd.to_datetime(df[ts_col], errors="coerce")
+    if ts.isna().all():
+        return ""
+    df = df.assign(Ts=ts).dropna(subset=["Ts"]).set_index("Ts").sort_index()
+    raw_tags = top_event.get("TopTags", "")
+    tag_list = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    contrib = top_event.get("TagContrib", {})
+    if isinstance(contrib, str):
+        try:
+            contrib = json.loads(contrib)
+        except json.JSONDecodeError:
+            contrib = {}
+    if not tag_list and contrib:
+        tag_list = list(sorted(contrib, key=contrib.get, reverse=True)[:3])
+    if not tag_list:
+        tag_list = list(df.columns[:3])
+    fig, ax = plt.subplots(figsize=(11, 4))
+    colors = [ACCENT_BLUE, ACCENT_ORANGE, ACCENT_GREEN, "#7c5295"]
+    for idx, tag in enumerate(tag_list):
+        if tag not in df.columns:
+            continue
+        series = pd.to_numeric(df[tag], errors="coerce")
+        if series.isna().all():
+            continue
+        z = (series - series.mean()) / (series.std(ddof=0) + 1e-9)
+        ax.plot(df.index, z, label=tag, color=colors[idx % len(colors)], linewidth=1.4)
+    if events is not None and not events.empty:
+        for _, event in events.iterrows():
+            alpha = 0.1 if event.get("Persistence", "").lower() == "persistent" else 0.05
+            ax.axvspan(event["Start"], event["End"], color="#ed6a5a", alpha=alpha)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    fig.autofmt_xdate()
+    ax.set_ylabel("Normalised value (z)")
+    ax.set_title("Tag behaviour overlay")
+    ax.grid(**GRID_STYLE)
+    ax.legend(frameon=False)
+    return _encode_fig(fig)
+
+
 def build_report(artifacts_dir: str, equip: str) -> None:
     art_dir = Path(artifacts_dir)
     if not art_dir.exists():
@@ -168,6 +221,7 @@ def build_report(artifacts_dir: str, equip: str) -> None:
     scores_path = art_dir / "scores.csv"
     events_path = art_dir / "events.csv"
     dq_path = art_dir / "dq.csv"
+    resampled_path = art_dir / "acm_resampled.csv"
     run_summary_path = art_dir / "run_summary.csv"
     guardrail_path = art_dir / "guardrail_log.jsonl"
 
@@ -187,14 +241,18 @@ def build_report(artifacts_dir: str, equip: str) -> None:
     blame_img = _plot_blame(top_event) if top_event is not None else ""
     head_img = _plot_head_mix(scores)
     dq_img = _plot_dq(dq)
+    overlay_img = _plot_tag_overlay(resampled_path, events if not events.empty else None, top_event)
 
     if top_event is not None:
-        contrib = json.loads(top_event.get("TagContrib", "{}")) if isinstance(top_event.get("TagContrib"), str) else top_event.get("TagContrib", {})
-        top_tags = ", ".join(top_event.get("TopTags", "").split(",")) or "N/A"
-        blame_text = f"<ul><li><strong>Window:</strong> {top_event['Start']} ? {top_event['End']}</li>" \
-            f"<li><strong>Peak score:</strong> {float(top_event['PeakScore']):0.2f}</li>" \
-            f"<li><strong>Persistence:</strong> {top_event['Persistence']}</li>" \
-            f"<li><strong>Primary drivers:</strong> {top_tags}</li></ul>"
+        top_tags = ", ".join([t.strip() for t in top_event.get("TopTags", "").split(",") if t.strip()]) or "N/A"
+        blame_text = (
+            f"<ul>"
+            f"<li><strong>Window:</strong> {top_event['Start']} → {top_event['End']}</li>"
+            f"<li><strong>Peak score:</strong> {float(top_event['PeakScore']):0.2f}</li>"
+            f"<li><strong>Persistence:</strong> {top_event['Persistence']}</li>"
+            f"<li><strong>Primary drivers:</strong> {top_tags}</li>"
+            f"</ul>"
+        )
     else:
         blame_text = "<em>No significant events detected.</em>"
 
@@ -226,6 +284,7 @@ def build_report(artifacts_dir: str, equip: str) -> None:
     <h2>Who is to blame?</h2>
     {blame_text}
     {f"<img src='{blame_img}' alt='Top tag contributions'>" if blame_img else ""}
+    {f"<img src='{overlay_img}' alt='Tag behaviour overlay'>" if overlay_img else ""}
     {f"<img src='{head_img}' alt='Dominant hypothesis mix'>" if head_img else ""}
   </div>
   <div class='section'>

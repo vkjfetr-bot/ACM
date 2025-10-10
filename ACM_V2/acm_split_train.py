@@ -15,6 +15,7 @@ TIME_COLUMNS = [
     "time",
     "datetime",
     "Ts",
+    "TS",
     "Timestamp",
     "Time",
     "Datetime",
@@ -75,11 +76,7 @@ def main() -> None:
 
     for i, chunk in enumerate(frames, start=1):
         fname = out_dir / f"{src.stem}_split_{i}.csv"
-        chunk_out = chunk.reset_index()
-        first_col = chunk_out.columns[0]
-        if str(first_col).lower() in {"index", "level_0"}:
-            chunk_out = chunk_out.rename(columns={first_col: "Ts"})
-        chunk_out.to_csv(fname, index=False)
+        chunk.to_csv(fname, index_label="Ts")
         print(f"[SPLIT] Wrote {len(chunk)} rows -> {fname}")
 
 
