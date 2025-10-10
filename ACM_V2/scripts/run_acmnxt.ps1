@@ -10,6 +10,7 @@ param(
   [string]$Artifacts = (Resolve-Path (Join-Path $PSScriptRoot "..\artifacts" )).Path,
   [string]$TrainCsv,
   [string]$ScoreCsv,
+  [string]$Equip     = "equipment",
   [switch]$SkipTrain,
   [switch]$SkipScore,
   [switch]$SkipReport
@@ -31,24 +32,26 @@ foreach($p in @($Core,$Report)){
   }
 }
 
-New-Item -ItemType Directory -Path $Artifacts -Force | Out-Null
-$env:ACM_ART_DIR = $Artifacts
+$equipArtifacts = Join-Path $Artifacts $Equip
+New-Item -ItemType Directory -Path $equipArtifacts -Force | Out-Null
+$env:ACM_ART_DIR = $equipArtifacts
+$env:ACM_EQUIP = $Equip
 
 if(-not $SkipTrain){
   Step "Train"
-  python $Core train --csv "$TrainCsv"
+  python $Core train --csv "$TrainCsv" --equip "$Equip"
   if($LASTEXITCODE){ Die "Train failed" }
 }
 
 if(-not $SkipScore){
   Step "Score"
-  python $Core score --csv "$ScoreCsv"
+  python $Core score --csv "$ScoreCsv" --equip "$Equip"
   if($LASTEXITCODE){ Die "Score failed" }
 }
 
 if(-not $SkipReport){
   Step "Report"
-  python $Report --artifacts "$Artifacts"
+  python $Report --artifacts "$equipArtifacts" --equip "$Equip"
   if($LASTEXITCODE){ Die "Report failed" }
 }
 
