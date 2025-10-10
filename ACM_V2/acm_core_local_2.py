@@ -796,12 +796,14 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             out["Theta"] = theta_aligned.values
             out.to_csv(scored_path)
 
-            pd.DataFrame([{"Start": e["start"], "End": e["end"], "PeakScore": e["peak"]} for e in episodes]).to_csv(
-                os.path.join(ART_DIR, f"{save_prefix}_events.csv"), index=False)
+            events_df = pd.DataFrame([{"Start": e["start"], "End": e["end"], "PeakScore": e["peak"]} for e in episodes])
+            events_df.to_csv(os.path.join(ART_DIR, f"{save_prefix}_events.csv"), index=False)
+            events_df.to_csv(os.path.join(ART_DIR, "events.csv"), index=False)
             pd.DataFrame({"Ts": F.index, "Mask": mask.values}).to_csv(
                 os.path.join(ART_DIR, f"{save_prefix}_context_masks.csv"), index=False)
-            fused_series.reset_index().rename(columns={"index": "Ts"}).to_csv(
-                os.path.join(ART_DIR, f"{save_prefix}_scores.csv"), index=False)
+            fused_export = fused_series.reset_index().rename(columns={"index": "Ts"})
+            fused_export.to_csv(os.path.join(ART_DIR, f"{save_prefix}_scores.csv"), index=False)
+            fused_export.to_csv(os.path.join(ART_DIR, "scores.csv"), index=False)
 
         with Timer("SUMMARY"):
             print(f"Rows: {len(F):,} | Regimes seen: {len(np.unique(regimes))} | Events: {events_count}")
