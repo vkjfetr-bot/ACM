@@ -1,0 +1,226 @@
+# **ACMnxt – The Hands-Off, Unsupervised Asset Condition Monitoring System**
+
+---
+
+## 1. Vision and Philosophy
+
+### 1.1. Purpose
+
+ACMnxt is a **fully autonomous asset condition monitoring (ACM)** framework designed to work for **any kind of industrial equipment** — from pumps and fans to compressors, heat exchangers, or process skids.
+It requires **no manual model tuning**, **no label data**, and **no expert supervision**.
+
+It continuously learns the “normal” behaviour of equipment through streaming operational data, detects shifts or anomalies, and generates insights for:
+
+* **Alerting** → Operator notifications or control-room alarms
+* **Dashboarding** → Real-time visualization in MES / Grafana
+* **Summarization** → LLM-based natural language briefs and daily summaries
+
+### 1.2. Core Philosophy
+
+1. **Autonomous:** The system configures, trains, and updates itself.
+2. **Unsupervised:** Models learn patterns without labeled failures.
+3. **Explainable:** Every score, regime, and event can be visualized and described in human terms.
+4. **Continuous:** The model refines itself as data grows, adapting to new operating conditions.
+5. **Comprehensive:** From raw sensor values → features → regimes → events → summaries, ACMnxt handles the entire pipeline.
+
+---
+
+## 2. High-Level Architecture
+
+| Layer                                                 | Function                                                                         | Key Output                                 |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------ |
+| **Data Layer**                                        | Pulls historian data through MES stored procedures (SPs)                         | Clean, resampled tag data                  |
+| **Core Engine (`core.py`)**                           | Performs feature extraction, regime detection, scoring, fusion, and eventization | Scores, regimes, events, thresholds        |
+| **Evaluator (`evaluator.py`)**                        | Tests candidate models on historical data                                        | KPI metrics, champion/ challenger decision |
+| **Refinement (`refine.py`)**                          | Retrains, registers new models, triggers evaluation                              | Updated champion models                    |
+| **Visualization (`report_charts.py`, HTML Graphics)** | Generates PNGs + HTML/CSS/JS dashboards                                          | Timeline, trend charts, JSON payloads      |
+| **Reporting (`report_html.py`)**                      | Compiles a simple HTML report and LLM brief                                      | `report_<equip>.html`, `brief.json`        |
+| **Scheduler Integration**                             | MES job scheduler or PS1 orchestrator                                            | Autonomous retraining and scoring          |
+
+---
+
+## 3. Lifecycle Overview
+
+### When an Equipment Is Added in MES
+
+1. MES calls **`cli.py train`** → ACMnxt checks available history via SP
+2. It classifies the **data phase** (cold-start / light / full)
+3. Builds or reuses models accordingly
+4. Sets up **scheduled jobs** for:
+
+   * **Training / Refinement** → weekly or on drift
+   * **Scoring** → every N minutes (tumbling window)
+
+### Continuous Operation Loop
+
+```
+Fetch latest window → Score → Generate fused score & events → Update dynamic threshold → 
+Write artifacts (scores/events/json) → Trigger alerts/dashboard updates → Summarize → 
+(Drift detected?) → Train challenger → Evaluate → Promote
+```
+
+---
+
+## 4. Core Algorithms and Intelligence
+
+### 4.1. Data Quality (DQ)
+
+* Flatline %, spikes, dropout %, NaN %, presence ratio
+* Heatmap and ranked table of tag issues
+* Serves as early anomaly signal before model maturity
+
+### 4.2. Feature Engineering
+
+* **Time-domain:** rolling mean/std/delta/z-scores, AR(1) residuals
+* **Frequency-domain:** Welch PSD bandpowers, spectral flatness
+* **Context:** tag interactions, regime IDs, recent drifts
+
+### 4.3. Hypotheses Stack
+
+| Head                              | Logic                                              | Detects                           |
+| --------------------------------- | -------------------------------------------------- | --------------------------------- |
+| **H1 – Forecast Residual (AR1)**  | Predict next sample, compute residual z-score      | Fast spikes and short transients  |
+| **H2 – PCA Reconstruction Error** | Low-dim embedding → reconstruction error           | Multivariate structure changes    |
+| **H3 – Drift Detection**          | Distance of current embedding to baseline centroid | Slow degradation or offset drifts |
+
+Each head produces a score in [0,1].
+
+### 4.4. Regime 2.0 – Smart Clustering
+
+* Ensemble of **KMeans + GMM**, aligned via **Hungarian mapping**
+* K auto-selected using composite metric:
+  `J(K) = z(silhouette) + z(center_separation) – z(BIC)`
+* Soft voting + temporal smoothing (min-dwell)
+* Captures distinct operating modes automatically
+
+### 4.5. Fusion and Dynamic Threshold
+
+* Weighted geometric mean across active heads (H1–H3)
+* `θ(t)` dynamic threshold = **EWMA(quantile₀.₉₅(fused))**
+* Updated per scoring window (N-minute rolling)
+* Drift detection (ADWIN) may auto-reset θ
+
+### 4.6. Eventization
+
+* Identify consecutive segments where `fused > θ`
+* Merge close peaks (gap < X min) into episodes
+* Compute event metadata: start, end, duration, peak, top tags, severity
+* Output → `events.csv`
+
+---
+
+## 5. Handling Data Uncertainty and Cold Start
+
+| Phase | Condition      | Behaviour                                  |
+| ----- | -------------- | ------------------------------------------ |
+| 0     | <1 000 samples | DQ + tag MAD/EWMA, K=1                     |
+| 1     | 1 000–5 000    | Rolling z, θ(t), light H1; no PCA          |
+| 2     | 5 000–20 000   | Enable PCA (H2), drift (H3); K∈{1,2,3}     |
+| 3     | >20 000        | Full Regime 2.0 ensemble, all heads active |
+
+**Always retrain opportunistically:**
+After every SP call, ACMnxt measures data span → if sufficient growth or drift → trains or retrains automatically.
+
+---
+
+## 6. Model Governance
+
+### 6.1. Evaluation (offline)
+
+* `evaluator.py` runs backtests on historical data
+* Computes unsupervised KPIs:
+
+  * False alarm rate, alert density, score volatility
+  * Regime flip rate, silhouette, regime purity, coverage
+  * Drift monotonicity, variance captured
+* Produces `eval_<ts>.json` + HTML scorecard
+
+### 6.2. Refinement (online)
+
+* `refine.py` runs daily / weekly
+* If data has grown or drift flagged → trains challenger
+* Evaluator decides promotion → updates `models/champion/manifest.json`
+
+---
+
+## 7. Deliverables by Phase
+
+| Phase                                      | Duration | Focus                                                                                      | Key Deliverables / Visibility                                                       |
+| ------------------------------------------ | -------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| **Phase 1 – Bootstrap Core**               | Week 1–2 | Re-implement `core.py`, embedded configs, CLI scaffolding, DQ + H1 pipeline                | Train/score working on small dataset; basic HTML report with DQ table & fused trend |
+| **Phase 2 – Full ML Stack**                | Week 3–4 | Add H2 (PCA), H3 (drift), Fusion, Dynamic θ, Regime 2.0 ensemble                           | Stable scoring & events; timeline chart with θ line & regime strip                  |
+| **Phase 3 – Reporting & Dashboard**        | Week 5   | Add `report_charts.py`, `report_html.py`, CSS; generate HTML + Grafana-ready JSON payloads | Interactive timeline & per-event charts visible in HTML report                      |
+| **Phase 4 – Cold-Start & Streaming Logic** | Week 6   | Implement data-volume detection, phase switching, ADWIN drift hook, auto-retrain decision  | Fully automatic behaviour with sparse data; visible θ adaptation                    |
+| **Phase 5 – Evaluation & Refinement**      | Week 7–8 | Build `evaluator.py`, `refine.py`; define KPI thresholds & promotion policy                | First champion/challenger evaluation reports; automatic model promotion             |
+| **Phase 6 – Integration & MES Scheduling** | Week 9   | Connect with MES stored-procedure fetch; PowerShell orchestrator                           | Hands-off MES deployment; new equipment auto-spins ACMnxt instance                  |
+| **Phase 7 – LLM Summaries & Alerts**       | Week 10  | Generate `brief.json`, `brief.md`, structured LLM prompt; integrate with alert bus         | Textual summaries and anomaly reasons accessible to operators                       |
+
+Each phase leaves something demonstrable — an HTML file, charts, payloads, or auto-generated summaries.
+
+---
+
+## 8. Data Flow Diagram (Conceptual)
+
+```
+ ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+ │ MES / SP API │──▶──▶│ ACMnxt Core  │──▶──▶│ Artifacts     │
+ │ usp_GetEquip │      │ train/score  │      │ csv/json/html │
+ └──────────────┘      └──────────────┘      └──────────────┘
+        │                       │                     │
+        ▼                       ▼                     ▼
+    Scheduler            Evaluator/Refine        Dashboards & LLM
+```
+
+---
+
+## 9. Output Artifacts (per equipment)
+
+| File                        | Content                      |
+| --------------------------- | ---------------------------- |
+| `dq.csv`                    | Data quality metrics per tag |
+| `features.parquet`          | Extracted feature matrix     |
+| `scores.csv`                | H1/H2/H3 + fused scores      |
+| `thresholds.csv`            | θ(t) per scoring window      |
+| `events.csv`                | Episodes summary             |
+| `regimes.csv` / `meta.json` | Regime labels & cluster info |
+| `payload_*.json`            | Grafana JSON payloads        |
+| `report_<equip>.html`       | Static HTML report           |
+| `brief.json` / `.md`        | LLM summary prompt           |
+| `run.json`                  | Runtime log & timings        |
+
+---
+
+## 10. Success Metrics
+
+| Area                  | KPI                            | Target            |
+| --------------------- | ------------------------------ | ----------------- |
+| **Automation**        | Manual interventions per month | 0                 |
+| **Scalability**       | Equipments supported per host  | > 50 concurrently |
+| **Performance**       | Training time (100k×20 tags)   | ≤ 15 s            |
+| **Detection Quality** | False alarms/day               | ≤ 1               |
+| **Adaptivity**        | Drift response time            | < 30 min          |
+| **Explainability**    | % events with clear top-tags   | ≥ 90 %            |
+
+---
+
+## 11. Future Enhancements
+
+* **Explainability-Lite:** per-event tag contribution plots
+* **Seasonality Guard:** daily/shift baseline subtraction
+* **Incremental Append:** checkpointed partial retraining
+* **RiverML Upgrade:** fully streaming clustering (online KMeans + ADWIN)
+* **Unified Visualization:** convert HTML Graphics to native Grafana panel templates
+* **Cross-Asset Meta-Learning:** share scalers & feature importance across similar machines
+
+---
+
+## 12. Philosophy Summary
+
+> **ACMnxt thinks, adapts, and explains — without being told what’s right or wrong.**
+
+* It does not rely on labeled failures.
+* It learns the *shape* and *structure* of normality for each asset.
+* It continuously compares new behaviour to that learned shape.
+* It self-updates when it has learned enough or when reality changes.
+* It tells operators *why* it believes something is abnormal and what changed.
+* And it does all of this **automatically**, per equipment, within your MES ecosystem.
