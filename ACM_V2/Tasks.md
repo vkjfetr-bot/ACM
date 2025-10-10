@@ -93,7 +93,7 @@ data/                          # inputs (SP export or CSV)
 **Deliverables**
 
 * [x] `artifacts/<equip>/dq.csv`, `thresholds.csv`, events built off theta(t).
-* [ ] Timeline in HTML shows fused vs theta line; guardrail log captures any large theta jumps.
+* [x] Timeline in HTML shows fused vs theta line; guardrail log captures any large theta jumps.
 
 ---
 
@@ -103,7 +103,7 @@ data/                          # inputs (SP export or CSV)
 
 **Tasks**
 
-* [ ] **Phase detector** inside core:
+* [x] **Phase detector** inside core:
 
   * `rows, tags, span_min, rank(X)` -> decide **phase**:
 
@@ -112,7 +112,7 @@ data/                          # inputs (SP export or CSV)
     * P2 `5k-20k` -> enable PCA (rank-aware) + H3; Kin{1..3}
     * P3 `>20k` -> full stack; Kin{2..6}
 * [ ] **Regime gate**: only allow `K>1` if silhouette >= 0.15 and min-cluster-size >= 10% window.
-* [ ] **PCA rank guard**: if rank < features, reduce components; if <2, skip H2/H3 safely.
+* [x] **PCA rank guard**: if rank < features, reduce components; if <2, skip H2/H3 safely.
 * [ ] **Retrain decision** (very simple): retrain if `(now - last_train) >= 7d` OR `new_rows >= 0.5 * train_rows` OR `drift_flag`.
 * [ ] When a phase downgrade or retrain deferral occurs, raise a guardrail entry with reason (`thin_data`, `low_rank`, etc.) and set `guardrail_state` accordingly.
 

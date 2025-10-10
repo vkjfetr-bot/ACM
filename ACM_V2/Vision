@@ -134,6 +134,7 @@ Each head produces a score in [0,1].
 | 2     | 5 000-20 000   | Enable PCA (H2), drift (H3); Kin{1,2,3}     |
 | 3     | >20 000        | Full Regime 2.0 ensemble, all heads active |
 
+* Phase determination emits guardrail entries when data is too thin (P0/P1) so operators know gating occurred.
 **Always retrain opportunistically (with guardrails):**
 After every SP call, ACMnxt measures data span and quality -> if thresholds pass and drift merits it -> trains or retrains automatically, otherwise defers and raises a note in the scheduler log.
 

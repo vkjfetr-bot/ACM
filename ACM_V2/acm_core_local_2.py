@@ -115,6 +115,9 @@ def compute_dq_metrics(df: pd.DataFrame, tags: List[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+PHASE_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
 def _dq_path(save_prefix: str) -> Path:
     return Path(ART_DIR) / f"{save_prefix}_dq.csv"
 
@@ -158,6 +161,55 @@ def save_thresholds(theta: pd.Series, save_prefix: str) -> None:
     out = pd.DataFrame({"Ts": theta.index, "Theta": theta.values})
     out.to_csv(_threshold_path(save_prefix), index=False)
     out.to_csv(Path(ART_DIR) / "thresholds.csv", index=False)
+
+
+def determine_phase(rows: int, tags: int, span_min: float, feature_rank: int) -> Dict[str, Any]:
+    reasons = []
+    if rows < 1000 or feature_rank < 5:
+        reasons.append("Insufficient samples (<1k) or low feature rank")
+        phase = "P0"
+        cfg = {"k_min": 1, "k_max": 1, "enable_pca": False, "enable_h3": False}
+    elif rows < 5000:
+        reasons.append("Limited history (<5k samples)")
+        phase = "P1"
+        cfg = {"k_min": 1, "k_max": 1, "enable_pca": False, "enable_h3": False}
+    elif rows < 20000:
+        reasons.append("Moderate history (<20k samples)")
+        phase = "P2"
+        cfg = {"k_min": 1, "k_max": 3, "enable_pca": True, "enable_h3": True}
+    else:
+        phase = "P3"
+        cfg = {"k_min": 2, "k_max": 6, "enable_pca": True, "enable_h3": True}
+    reason = "; ".join(reasons) if reasons else "Full history"
+    cfg.update(
+        {
+            "phase": phase,
+            "reason": reason,
+            "rows": rows,
+            "tags": tags,
+            "span_min": span_min,
+            "feature_rank": feature_rank,
+            "min_cluster_frac": 0.10,
+            "silhouette_floor": 0.15,
+        }
+    )
+    return cfg
+
+
+def phase_to_guardrail(save_prefix: str, phase_info: Dict[str, Any]) -> None:
+    phase = phase_info.get("phase", "P3")
+    if phase in ("P0", "P1"):
+        _append_guardrail(
+            save_prefix,
+            "phase_limited",
+            "warn",
+            f"Phase {phase}: {phase_info.get('reason','limited history')}",
+            {
+                "phase": phase,
+                "rows": phase_info.get("rows", 0),
+                "feature_rank": phase_info.get("feature_rank", 0),
+            },
+        )
 
 
 def theta_step_pct(prev_theta: Optional[float], curr_theta: Optional[float]) -> float:
@@ -358,46 +410,52 @@ def _align_labels_hungarian(ref_labels: np.ndarray, tgt_labels: np.ndarray, n_re
         mapping[j] = i
     return mapping
 
-def auto_ensemble_regimes(Xn: np.ndarray, kmin=2, kmax=6, random_state=17) -> EnsembleRegimes:
-    """Train an ensemble (KMeans + GMM) at a single selected K and store label alignment.
-
-    - Select K by maximizing KMeans silhouette over feasible Ks.
-    - Fit KMeans and GaussianMixture at that K on train features.
-    - Align GMM labels to KMeans labels via Hungarian mapping on train predictions.
-    - Return a model with predict(X) that votes (tie-break to KMeans).
-    """
+def auto_ensemble_regimes(
+    Xn: np.ndarray,
+    kmin=2,
+    kmax=6,
+    random_state=17,
+    min_cluster_frac: float = 0.0,
+    silhouette_floor: float = 0.0,
+) -> EnsembleRegimes:
+    """Train an ensemble (KMeans + GMM) at a single selected K and store label alignment."""
     n_samples = Xn.shape[0]
-    # Feasible K set
     ks = [k for k in range(max(1, kmin), max(1, kmax) + 1) if k <= n_samples]
     if not ks:
         ks = [1]
     sil_best, k_best, km_best = -1.0, ks[0], None
     for k in ks:
-        # Silhouette requires at least 2 clusters and >1 samples per cluster
         km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
         labels = km.fit_predict(Xn)
-        if k >= 2 and len(np.unique(labels)) >= 2:
-            try:
-                sil = silhouette_score(Xn, labels, metric="euclidean")
-            except Exception:
-                sil = -1.0
-        else:
-            sil = -1.0
+        if k < 2 or len(np.unique(labels)) < 2:
+            continue
+        try:
+            sil = silhouette_score(Xn, labels, metric="euclidean")
+        except Exception:
+            continue
+        if silhouette_floor > 0.0 and sil < silhouette_floor:
+            continue
+        if min_cluster_frac > 0.0:
+            counts = np.bincount(labels)
+            if counts.size == 0 or counts.min() / float(len(labels)) < min_cluster_frac:
+                continue
         if sil > sil_best:
             sil_best, k_best, km_best = sil, k, km
     if km_best is None:
+        k_best = max(1, min(kmax, kmin))
         km_best = KMeans(n_clusters=k_best, n_init="auto", random_state=random_state).fit(Xn)
+    else:
+        km_best.fit(Xn)
 
-    # Fit GMM at same K
     gmm = GaussianMixture(n_components=k_best, covariance_type='full', random_state=random_state, n_init=10)
     gmm.fit(Xn)
 
-    # Align GMM labels to KMeans label space using train predictions
     y_km = km_best.predict(Xn)
     y_gm = gmm.predict(Xn)
     mapping = _align_labels_hungarian(y_km, y_gm, n_ref=int(k_best))
 
     return EnsembleRegimes(km_best, gmm, mapping)
+
 
 # ------------------------- H1: Forecast-lite + AR(1) -------------------------
 def _mad(x: pd.Series) -> float:
@@ -538,6 +596,8 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
     feat_rows = 0
     regime_count = 0
     data_span_min = 0.0
+    feature_rank = 0
+    phase_info: Dict[str, Any] = {"phase": "P3"}
     run_info: Dict[str, Any] = {"ok": False}
 
     try:
@@ -566,12 +626,24 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
             feat_rows = len(F)
             scaler = RobustScaler().fit(F.values)
             Xn = scaler.transform(F.values)
+            feature_rank = int(np.linalg.matrix_rank(np.nan_to_num(F.values))) if feat_rows else 0
 
-        with Timer("REGIMES_AUTO_K", {"kmin": cfg.k_min, "kmax": cfg.k_max}):
-            km = auto_ensemble_regimes(Xn, cfg.k_min, cfg.k_max)
+        phase_info = determine_phase(rows_in, len(tags), data_span_min, feature_rank)
+        phase_to_guardrail(save_prefix, phase_info)
+        k_min = phase_info["k_min"]
+        k_max = phase_info["k_max"]
+
+        with Timer("REGIMES_AUTO_K", {"kmin": k_min, "kmax": k_max}):
+            km = auto_ensemble_regimes(
+                Xn,
+                k_min,
+                k_max,
+                min_cluster_frac=phase_info.get("min_cluster_frac", 0.0),
+                silhouette_floor=phase_info.get("silhouette_floor", 0.0),
+            )
             regimes = km.predict(Xn)
             regime_switches = int(np.sum(regimes[1:] != regimes[:-1]))
-            regime_count = int(km.n_clusters)
+            regime_count = int(getattr(km, "n_clusters", len(np.unique(regimes))))
 
         h1_enabled = cfg.h1_mode.lower() != "off"
         ar1_coeffs = {}
@@ -592,8 +664,6 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
             from joblib import dump
             dump(scaler, os.path.join(ART_DIR, f"{save_prefix}_scaler.joblib"))
             dump(km, os.path.join(ART_DIR, f"{save_prefix}_regimes.joblib"))
-            pca = PCA(n_components=0.9, svd_solver="full").fit(Xn)
-            dump(pca, os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
             manifest = {
                 "equip": equip_name,
                 "tags": tags,
@@ -601,8 +671,8 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
                 "window": cfg.window,
                 "stride": cfg.stride,
                 "max_fft_bins": cfg.max_fft_bins,
-                "k_min": cfg.k_min,
-                "k_max": cfg.k_max,
+                "k_min": k_min,
+                "k_max": k_max,
                 "h1_mode": cfg.h1_mode,
                 "h1_roll": cfg.h1_roll,
                 "h1_centered": cfg.h1_centered,
@@ -611,7 +681,14 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
                 "h1_min_support": cfg.h1_min_support,
                 "fused_tau": cfg.fused_tau,
                 "merge_gap": cfg.merge_gap,
+                "phase_info": phase_info,
             }
+            if phase_info.get("enable_pca", True):
+                pca = PCA(n_components=0.9, svd_solver="full").fit(Xn)
+                dump(pca, os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
+                manifest["phase_info"]["enable_pca"] = True
+            else:
+                manifest["phase_info"]["enable_pca"] = False
             with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json"), "w") as f:
                 json.dump(manifest, f, indent=2)
             diag = F.copy(); diag["Regime"] = regimes
@@ -621,7 +698,7 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
         with Timer("SUMMARY"):
             print(f"Tags: {len(tags)} | Feature rows: {len(F)} | Regimes: {regime_count} | Switches: {regime_switches}")
 
-        run_info = {"ok": True, "tags": tags, "rows": len(F), "regimes": regime_count}
+        run_info = {"ok": True, "tags": tags, "rows": len(F), "regimes": regime_count, "phase": phase_info.get("phase", "P3")}
         return run_info
     except Exception as exc:
         status = "error"
@@ -642,7 +719,7 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
             "regimes": regime_count,
             "events": 0,
             "data_span_min": round(data_span_min, 3),
-            "phase": "",
+            "phase": phase_info.get("phase", ""),
             "k_selected": regime_count,
             "theta_p95": 0.0,
             "drift_flag": 0,
@@ -669,9 +746,13 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
     theta_step = 0.0
     theta_p95 = 0.0
     data_span_min = 0.0
+    feature_rank = 0
     run_info: Dict[str, Any] = {"ok": False}
     scored_path = Path(ART_DIR) / f"{save_prefix}_scored_window.csv"
     artifact_age = artifact_age_minutes(scored_path)
+
+    phase_manifest: Dict[str, Any] = {"phase": "P3"}
+    phase_effective: Dict[str, Any] = phase_manifest
 
     try:
         with Timer("LOAD_DATA", {"csv": csv_path}):
@@ -681,6 +762,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
 
         with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json")) as f:
             man = json.load(f)
+            phase_manifest = man.get("phase_info", {"phase": "P3", "enable_pca": True, "enable_h3": True})
 
         with Timer("RESAMPLE", {"rule": man["resample_rule"]}):
             df = resample_numeric(df, man["resample_rule"])
@@ -703,6 +785,27 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             from joblib import load
             scaler = load(os.path.join(ART_DIR, f"{save_prefix}_scaler.joblib"))
             Xn = scaler.transform(F.values)
+            feature_rank = int(np.linalg.matrix_rank(np.nan_to_num(F.values))) if feat_rows else 0
+
+        phase_runtime = determine_phase(rows_in, len(tags), data_span_min, feature_rank)
+        if PHASE_ORDER.get(phase_runtime["phase"], 0) < PHASE_ORDER.get(phase_manifest.get("phase", "P3"), 0):
+            _append_guardrail(
+                save_prefix,
+                "phase_downgrade",
+                "warn",
+                f"Runtime phase {phase_runtime['phase']} below manifest {phase_manifest.get('phase','P3')}",
+                {
+                    "runtime_rows": phase_runtime.get("rows", rows_in),
+                    "runtime_reason": phase_runtime.get("reason", ""),
+                },
+            )
+            phase_to_guardrail(save_prefix, phase_runtime)
+            phase_effective = phase_runtime
+        else:
+            phase_effective = phase_manifest
+
+        enable_pca = phase_effective.get("enable_pca", True)
+        enable_h3 = phase_effective.get("enable_h3", True) and enable_pca
 
         with Timer("REGIMES"):
             from joblib import load
@@ -720,29 +823,36 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             s_h1 = h1_score_fast(df, tags, mode, man.get("h1_roll", 9), man.get("h1_robust", True), ar1_coeffs)
             s_h1 = s_h1.reindex(F.index).fillna(method="ffill").fillna(0)
 
-        with Timer("H2_SCORE"):
-            from joblib import load
-            pca = load(os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
-            Xr = pca.inverse_transform(pca.transform(Xn))
-            err = ((Xn - Xr)**2).sum(axis=1)
-            s_h2 = pd.Series(err, index=F.index)
-            p95 = s_h2.quantile(0.95) or 1.0
-            s_h2 = (s_h2 / (p95 + 1e-9)).clip(0, 1)
+        if enable_pca and Path(ART_DIR, f"{save_prefix}_pca.joblib").exists():
+            with Timer("H2_SCORE"):
+                from joblib import load
+                pca = load(os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
+                Xr = pca.inverse_transform(pca.transform(Xn))
+                err = ((Xn - Xr)**2).sum(axis=1)
+                s_h2 = pd.Series(err, index=F.index)
+                p95 = s_h2.quantile(0.95) or 1.0
+                s_h2 = (s_h2 / (p95 + 1e-9)).clip(0, 1)
+        else:
+            pca = None
+            s_h2 = pd.Series(0.0, index=F.index)
 
-        with Timer("H3_SCORE"):
-            Emb = pca.transform(Xn)
-            from numpy.linalg import norm
-            scores = np.zeros(len(Emb))
-            for i in range(len(Emb)):
-                j0 = max(0, i - 50)
-                ref = Emb[j0:i]
-                if len(ref) < 10:
-                    scores[i] = 0.0
-                    continue
-                mu = ref.mean(axis=0)
-                cos = float((Emb[i] * mu).sum() / (norm(Emb[i]) * norm(mu) + 1e-9))
-                scores[i] = max(0.0, 1.0 - cos)
-            s_h3 = pd.Series(scores, index=F.index)
+        if enable_h3 and pca is not None:
+            with Timer("H3_SCORE"):
+                Emb = pca.transform(Xn)
+                from numpy.linalg import norm
+                scores = np.zeros(len(Emb))
+                for i in range(len(Emb)):
+                    j0 = max(0, i - 50)
+                    ref = Emb[j0:i]
+                    if len(ref) < 10:
+                        scores[i] = 0.0
+                        continue
+                    mu = ref.mean(axis=0)
+                    cos = float((Emb[i] * mu).sum() / (norm(Emb[i]) * norm(mu) + 1e-9))
+                    scores[i] = max(0.0, 1.0 - cos)
+                s_h3 = pd.Series(scores, index=F.index)
+        else:
+            s_h3 = pd.Series(0.0, index=F.index)
 
         with Timer("CONTEXT_MASKS", {"slope_thr": man.get("slope_thr", 0.75), "accel_thr": man.get("accel_thr", 1.25)}):
             mask = detect_transients(df, tags, slope_thr=man.get("slope_thr", 0.75), accel_thr=man.get("accel_thr", 1.25))
@@ -755,7 +865,10 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             cpd = change_point_signal(df.reindex(F.index, method="nearest"), tags, W=60)
 
         with Timer("FUSION"):
-            base = np.maximum.reduce([0.45 * s_h1.values, 0.35 * s_h2.values, 0.35 * s_h3.values])
+            components = [0.45 * s_h1.values]
+            components.append(0.35 * s_h2.values if enable_pca else 0.0)
+            components.append(0.35 * s_h3.values if enable_h3 else 0.0)
+            base = np.maximum.reduce(components)
             boost = 0.15 * corrb.values + 0.10 * cpd.values
             fused = np.clip(base + boost, 0, 1)
             fused = np.where(mask.values > 0, fused * 0.7, fused)
@@ -808,7 +921,13 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
         with Timer("SUMMARY"):
             print(f"Rows: {len(F):,} | Regimes seen: {len(np.unique(regimes))} | Events: {events_count}")
 
-        run_info = {"ok": True, "rows": int(len(F)), "events": events_count, "theta_p95": theta_p95}
+        run_info = {
+            "ok": True,
+            "rows": int(len(F)),
+            "events": events_count,
+            "theta_p95": theta_p95,
+            "phase": phase_effective.get("phase", "P3"),
+        }
         return run_info
     except Exception as exc:
         status = "error"
@@ -830,7 +949,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             "regimes": regime_count,
             "events": events_count,
             "data_span_min": round(data_span_min, 3),
-            "phase": "",
+            "phase": phase_effective.get("phase", ""),
             "k_selected": regime_count,
             "theta_p95": round(theta_p95, 6) if theta_p95 else 0.0,
             "drift_flag": 0,
