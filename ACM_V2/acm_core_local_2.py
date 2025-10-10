@@ -19,7 +19,6 @@ from sklearn.ensemble import VotingClassifier
 from sklearn.mixture import GaussianMixture
 from scipy.stats import mode
 import acm_observe
-import acm_payloads
 
 warnings.filterwarnings("ignore")
 
@@ -31,6 +30,9 @@ if not ART_DIR:
     ART_DIR = os.path.join(root, "acm_artifacts")
 os.makedirs(ART_DIR, exist_ok=True)
 print(f"[ACM] Using ART_DIR: {ART_DIR}")
+
+ART_MODE = os.environ.get("ACM_ART_MODE", "full").lower()
+print(f"[ACM] Artifact mode: {ART_MODE}")
 
 # Lightweight mode (testing): set env ACM_SKIP_DIAG=1 to skip heavy CSVs
 SKIP_DIAG = os.environ.get("ACM_SKIP_DIAG", "0") == "1"
@@ -703,6 +705,9 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
         with Timer("SUMMARY"):
             print(f"Tags: {len(tags)} | Feature rows: {len(F)} | Regimes: {regime_count} | Switches: {regime_switches}")
 
+        if ART_MODE != "full" and save_prefix == "acm":
+            acm_observe.enforce_artifact_policy(ART_DIR, ART_MODE, prefix=save_prefix)
+
         run_info = {"ok": True, "tags": tags, "rows": len(F), "regimes": regime_count, "phase": phase_info.get("phase", "P3")}
         return run_info
     except Exception as exc:
@@ -986,10 +991,13 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None, ma
                 for e in events_enriched
             ]
             (Path(ART_DIR) / "events_timeline.json").write_text(json.dumps(timeline_payload, indent=2), encoding="utf-8")
-            acm_payloads.write_payloads(ART_DIR)
+            acm_observe.write_payloads(ART_DIR)
 
         with Timer("SUMMARY"):
             print(f"Rows: {len(F):,} | Regimes seen: {len(np.unique(regimes))} | Events: {events_count}")
+
+        if ART_MODE != "full" and save_prefix == "acm":
+            acm_observe.enforce_artifact_policy(ART_DIR, ART_MODE, prefix=save_prefix)
 
         run_info = {
             "ok": True,

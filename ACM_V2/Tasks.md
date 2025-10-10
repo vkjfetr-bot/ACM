@@ -8,7 +8,7 @@
 * **LLM last**.
 * **Wrapper script** to run everything first (one command).
 * **Cold-Start & Data Availability logic** before LLM.
-* **Dashboard payloads:** split into 2 - deliver **basic HTML** now; keep a **separate payload generator file (stub/empty)** for later.
+* **Dashboard payloads:** deliver **basic HTML** now and keep payload builders isolated inside observability utilities for later wiring.
 * Keep/reuse **existing ACM core**; enhance only where needed.
 
 ---
@@ -22,7 +22,7 @@
 5. **Autonomy guardrails**: no drift/volume gatekeeping, theta step alerts, runtime health monitoring, or rollback cache aligned with the new accountability pillar.
 6. **River streaming**: no online KMeans/ADWIN adapter for scoring and drift triggers.
 7. **Basic HTML analysis report**: not present.
-8. **Dashboard payload generator**: not split; no stub that we can wire later.
+8. **Dashboard payload generator**: now lives inside observability utilities but still needs wiring into downstream dashboards.
 9. **Evaluation/Refinement**: champion/challenger lanes not split yet; no seeded-scenario evaluation or guardrail-based promotion policy.
 10. **Operational CSV + wrapper**: no single `run_summary.csv` with minimal fields and no `run_all` wrapper to orchestrate end-to-end.
 
@@ -35,9 +35,8 @@ We'll close these deliberately in phases below.
 ```
 ACM_V2/
   acm_core_local_2.py          # your current core (we'll extend, not break)
-  acm_payloads.py              # NEW: payload generator (stub/empty now)
   acm_report_basic.py          # NEW: basic HTML analysis report (tables+charts)
-  acm_observe.py               # NEW: operational + guardrail utilities (run CSV, guardrail log, runtime checks)
+  acm_observe.py               # NEW: operational + guardrail utilities, payload export, artifact policy
   acm_river.py                 # NEW: River adapters (online KMeans, ADWIN), drop-in
   acm_evaluate.py              # LATER: evaluator (kept lean)
   acm_refine.py                # LATER: refinement/promote (lean)
@@ -46,6 +45,12 @@ ACM_V2/
 artifacts/<equip>/             # outputs live here
 data/                          # inputs (SP export or CSV)
 ```
+
+### Artifact retention modes
+
+* `ACM_ART_MODE=full` (default) keeps every CSV/JSON artifact for diagnostics.
+* `ACM_ART_MODE=minimal` trims duplicate prefixed CSVs and heavy diagnostics, leaving canonical outputs (`scores.csv`, `events.csv`, `dq.csv`, `thresholds.csv`), guardrail logs, models, and reports.
+* `ACM_ART_MODE=temp` currently mirrors `minimal` and is reserved for future, more aggressive cleanup once SQL persistence lands.
 
 > We **will not** create virtual environments or unit tests. Everything runs directly with system Python + pip'd libs.
 
@@ -167,7 +172,7 @@ data/                          # inputs (SP export or CSV)
   * Save `report_<equip>.html`.
 * [x] **Split payloads**:
 
-  * `acm_payloads.py` now emits real JSON payloads (`timeline.json`, `events.json`, `dq.json`) sourced from the latest artifacts.
+  * Payload builders now live inside `acm_observe.py`, emitting JSON payloads (`timeline.json`, `events.json`, `dq.json`) sourced from the latest artifacts.
 
 **Deliverables**
 
@@ -304,7 +309,7 @@ data/                          # inputs (SP export or CSV)
 ## Nice-to-have (kept out per constraints, but easy later)
 
 * Composite-K upgrade (silhouette + separation - BIC) - you already have silhouette; add BIC and separation when needed.
-* Robust HTML/CSS/JS payloads for Grafana - we left **`acm_payloads.py` stub** so wiring is straightforward when you're ready.
+* Robust HTML/CSS/JS payloads for Grafana - payload functions now reside in **`acm_observe.py`**, ready for future wiring.
 * Guardrail notification bridge into alert bus (PowerShell/REST) once ack workflow is defined.
 * Persistence forecasting / hazard modelling to estimate time-to-alert based on fused trends.
 
@@ -321,6 +326,6 @@ data/                          # inputs (SP export or CSV)
 * [ ] Operator insight loop (persistence, top tags, events_timeline)
 * [ ] River adapters early (ADWIN + online KMeans)
 * [x] Chart-rich HTML report (tables removed)
-* [x] Separate **payload generator** file (empty for now)
+* [x] Payload exports consolidated inside `acm_observe.py`
 * [x] Wrapper to run everything
 * [x] No venv, no unit tests
