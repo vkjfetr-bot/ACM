@@ -523,77 +523,133 @@ def change_point_signal(df: pd.DataFrame, tags: List[str], W: int=60) -> pd.Seri
     return (s / (s.quantile(0.95) + 1e-9)).clip(0,1)
 
 # ------------------------- Pipeline -------------------------
-def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm") -> Dict:
+def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm", equip: Optional[str]=None) -> Dict:
     cfg = cfg or CoreConfig()
+    equip_name = _equip_name(csv_path, equip)
+    started = time.perf_counter()
+    status = "ok"
+    err_msg = ""
+    rows_in = 0
+    tags: List[str] = []
+    feat_rows = 0
+    regime_count = 0
+    data_span_min = 0.0
+    run_info: Dict[str, Any] = {"ok": False}
 
-    with Timer("LOAD_DATA", {"csv": csv_path}):
-        df = pd.read_csv(csv_path)
+    try:
+        with Timer("LOAD_DATA", {"csv": csv_path}):
+            df = pd.read_csv(csv_path)
 
-    with Timer("CLEAN_TIME"):
-        df = ensure_time_index(df)
+        with Timer("CLEAN_TIME"):
+            df = ensure_time_index(df)
 
-    with Timer("RESAMPLE", {"rule": cfg.resample_rule}):
-        df = resample_numeric(df, cfg.resample_rule)
-        df = df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+        with Timer("RESAMPLE", {"rule": cfg.resample_rule}):
+            df = resample_numeric(df, cfg.resample_rule)
+            df = df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+        rows_in = len(df)
+        data_span_min = _data_span_minutes(df.index)
 
-    with Timer("TAG_SELECT"):
-        tags = detect_tags(df)
-        if not tags: raise ValueError("No numeric tags with enough variability.")
-        _log_jsonl({"block":"TAG_SELECT","event":"tags","tags":tags[:10]+(["..."] if len(tags)>10 else [])})
+        with Timer("TAG_SELECT"):
+            tags = detect_tags(df)
+            if not tags:
+                raise ValueError("No numeric tags with enough variability.")
+            _log_jsonl({"block": "TAG_SELECT", "event": "tags", "tags": tags[:10] + (["..."] if len(tags) > 10 else [])})
 
-    with Timer("FEATURES_BUILD", {"W": cfg.window, "S": cfg.stride, "fft_bins": cfg.max_fft_bins}):
-        F = build_feature_matrix(df, tags, cfg.window, cfg.stride, cfg.max_fft_bins)
-        scaler = RobustScaler().fit(F.values)
-        Xn = scaler.transform(F.values)
+        write_dq_metrics(df, tags, save_prefix)
 
-    with Timer("REGIMES_AUTO_K", {"kmin": cfg.k_min, "kmax": cfg.k_max}):
-        # Use ensemble (KMeans + GMM) with silhouette-selected K and predictive voting
-        km = auto_ensemble_regimes(Xn, cfg.k_min, cfg.k_max)
-        regimes = km.predict(Xn)
-        regime_switches = int(np.sum(regimes[1:] != regimes[:-1]))
+        with Timer("FEATURES_BUILD", {"W": cfg.window, "S": cfg.stride, "fft_bins": cfg.max_fft_bins}):
+            F = build_feature_matrix(df, tags, cfg.window, cfg.stride, cfg.max_fft_bins)
+            feat_rows = len(F)
+            scaler = RobustScaler().fit(F.values)
+            Xn = scaler.transform(F.values)
 
-    # H1: prepare AR(1) coefficients (fast). Lite baseline needs no training.
-    h1_enabled = cfg.h1_mode.lower() != "off"
-    ar1_coeffs = {}
-    with Timer("H1_FIT", {"mode": cfg.h1_mode, "roll": cfg.h1_roll, "topk": cfg.h1_topk}):
-        if h1_enabled and cfg.h1_mode.lower() in ("lite_ar1",):
-            ar1_coeffs = h1_fit_ar1(df, tags, cfg.h1_min_support, cfg.h1_topk)
-            with open(os.path.join(ART_DIR, f"{save_prefix}_h1_ar1.json"), "w") as f:
-                json.dump(ar1_coeffs, f)
-            print(f"[H1] AR1 tags: {len(ar1_coeffs)}/{len(tags)}")
-        else:
-            print("[H1] SKIPPED (mode off or lite-only)")
+        with Timer("REGIMES_AUTO_K", {"kmin": cfg.k_min, "kmax": cfg.k_max}):
+            km = auto_ensemble_regimes(Xn, cfg.k_min, cfg.k_max)
+            regimes = km.predict(Xn)
+            regime_switches = int(np.sum(regimes[1:] != regimes[:-1]))
+            regime_count = int(km.n_clusters)
 
-    # Baselines for drift
-    with Timer("DRIFT_BASELINES"):
-        baselines = {t: {"mu": float(df[t].mean()), "sigma": float(df[t].std(ddof=1) or 0.0)} for t in tags}
-        pd.DataFrame(baselines).T.to_csv(os.path.join(ART_DIR, f"{save_prefix}_tag_baselines.csv"))
+        h1_enabled = cfg.h1_mode.lower() != "off"
+        ar1_coeffs = {}
+        with Timer("H1_FIT", {"mode": cfg.h1_mode, "roll": cfg.h1_roll, "topk": cfg.h1_topk}):
+            if h1_enabled and cfg.h1_mode.lower() in ("lite_ar1",):
+                ar1_coeffs = h1_fit_ar1(df, tags, cfg.h1_min_support, cfg.h1_topk)
+                with open(os.path.join(ART_DIR, f"{save_prefix}_h1_ar1.json"), "w") as f:
+                    json.dump(ar1_coeffs, f)
+                print(f"[H1] AR1 tags: {len(ar1_coeffs)}/{len(tags)}")
+            else:
+                print("[H1] SKIPPED (mode off or lite-only)")
 
-    # Persist
-    with Timer("EXPORT_ARTIFACTS"):
-        from joblib import dump
-        dump(scaler,  os.path.join(ART_DIR, f"{save_prefix}_scaler.joblib"))
-        dump(km,      os.path.join(ART_DIR, f"{save_prefix}_regimes.joblib"))
-        pca = PCA(n_components=0.9, svd_solver="full").fit(Xn)
-        dump(pca,     os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
-        manifest = {
-            "tags": tags,
-            "resample_rule": cfg.resample_rule,
-            "window": cfg.window, "stride": cfg.stride, "max_fft_bins": cfg.max_fft_bins,
-            "k_min": cfg.k_min, "k_max": cfg.k_max,
-            "h1_mode": cfg.h1_mode, "h1_roll": cfg.h1_roll, "h1_centered": cfg.h1_centered,
-            "h1_robust": cfg.h1_robust, "h1_topk": cfg.h1_topk, "h1_min_support": cfg.h1_min_support,
-            "fused_tau": cfg.fused_tau, "merge_gap": cfg.merge_gap
+        with Timer("DRIFT_BASELINES"):
+            baselines = {t: {"mu": float(df[t].mean()), "sigma": float(df[t].std(ddof=1) or 0.0)} for t in tags}
+            pd.DataFrame(baselines).T.to_csv(os.path.join(ART_DIR, f"{save_prefix}_tag_baselines.csv"))
+
+        with Timer("EXPORT_ARTIFACTS"):
+            from joblib import dump
+            dump(scaler, os.path.join(ART_DIR, f"{save_prefix}_scaler.joblib"))
+            dump(km, os.path.join(ART_DIR, f"{save_prefix}_regimes.joblib"))
+            pca = PCA(n_components=0.9, svd_solver="full").fit(Xn)
+            dump(pca, os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
+            manifest = {
+                "equip": equip_name,
+                "tags": tags,
+                "resample_rule": cfg.resample_rule,
+                "window": cfg.window,
+                "stride": cfg.stride,
+                "max_fft_bins": cfg.max_fft_bins,
+                "k_min": cfg.k_min,
+                "k_max": cfg.k_max,
+                "h1_mode": cfg.h1_mode,
+                "h1_roll": cfg.h1_roll,
+                "h1_centered": cfg.h1_centered,
+                "h1_robust": cfg.h1_robust,
+                "h1_topk": cfg.h1_topk,
+                "h1_min_support": cfg.h1_min_support,
+                "fused_tau": cfg.fused_tau,
+                "merge_gap": cfg.merge_gap,
+            }
+            with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json"), "w") as f:
+                json.dump(manifest, f, indent=2)
+            diag = F.copy(); diag["Regime"] = regimes
+            if not SKIP_DIAG:
+                diag.to_csv(os.path.join(ART_DIR, f"{save_prefix}_train_diagnostics.csv"))
+
+        with Timer("SUMMARY"):
+            print(f"Tags: {len(tags)} | Feature rows: {len(F)} | Regimes: {regime_count} | Switches: {regime_switches}")
+
+        run_info = {"ok": True, "tags": tags, "rows": len(F), "regimes": regime_count}
+        return run_info
+    except Exception as exc:
+        status = "error"
+        err_msg = str(exc)
+        raise
+    finally:
+        latency_s = time.perf_counter() - started
+        guard_events = acm_observe.load_guardrail_events(ART_DIR)
+        guard_state = acm_observe.guardrail_state(guard_events)
+        run_summary = {
+            "run_id": RUN_ID,
+            "ts_utc": _now_iso(),
+            "equip": equip_name,
+            "cmd": "train",
+            "rows_in": rows_in,
+            "tags": len(tags),
+            "feat_rows": feat_rows,
+            "regimes": regime_count,
+            "events": 0,
+            "data_span_min": round(data_span_min, 3),
+            "phase": "",
+            "k_selected": regime_count,
+            "theta_p95": 0.0,
+            "drift_flag": 0,
+            "guardrail_state": guard_state,
+            "theta_step_pct": 0.0,
+            "latency_s": round(latency_s, 3),
+            "artifacts_age_min": 0.0,
+            "status": status,
+            "err_msg": err_msg,
         }
-        with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json"), "w") as f:
-            json.dump(manifest, f, indent=2)
-        diag = F.copy(); diag["Regime"] = regimes
-        if not SKIP_DIAG:
-            diag.to_csv(os.path.join(ART_DIR, f"{save_prefix}_train_diagnostics.csv"))
-
-    with Timer("SUMMARY"):
-        print(f"Tags: {len(tags)} | Feature rows: {len(F)} | Regimes: {km.n_clusters} | Switches: {regime_switches}")
-    return {"ok": True, "tags": tags, "rows": len(F), "regimes": int(km.n_clusters)}
+        _write_run_summary(run_summary)
 
 def score_window(csv_path: str, save_prefix="acm") -> Dict:
     with Timer("LOAD_DATA", {"csv": csv_path}):
