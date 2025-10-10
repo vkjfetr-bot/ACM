@@ -123,7 +123,10 @@ def write_dq_metrics(df: pd.DataFrame, tags: List[str], save_prefix: str) -> Non
     if not tags:
         return
     dq = compute_dq_metrics(df, tags)
-    dq.to_csv(_dq_path(save_prefix), index=False)
+    path_pref = _dq_path(save_prefix)
+    path_plain = Path(ART_DIR) / "dq.csv"
+    dq.to_csv(path_pref, index=False)
+    dq.to_csv(path_plain, index=False)
 
 
 def dynamic_threshold(series: pd.Series, q: float = 0.95, alpha: float = 0.2) -> pd.Series:
