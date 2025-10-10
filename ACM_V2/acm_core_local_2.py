@@ -474,10 +474,11 @@ def detect_transients(df: pd.DataFrame, tags: List[str], slope_thr: float, accel
     accel = z.diff(2).abs().median(axis=1).fillna(0)
     return ((slope > slope_thr) | (accel > accel_thr)).astype(int)
 
-def build_episodes(score: pd.Series, tau: float, merge_gap: int) -> List[Dict]:
+def build_episodes(score: pd.Series, tau, merge_gap: int) -> List[Dict]:
     events, active = [], None
     for t, v in score.items():
-        if v >= tau:
+        thr = tau.loc[t] if isinstance(tau, pd.Series) else tau
+        if v >= thr:
             if active is None: active = {"start": t, "end": t, "peak": v}
             else:
                 active["end"] = t
