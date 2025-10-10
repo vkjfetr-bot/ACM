@@ -33,7 +33,7 @@ We'll close these deliberately in phases below.
 ## Minimal File Map (simple, local-only)
 
 ```
-acmnxt/
+ACM_V2/
   acm_core_local_2.py          # your current core (we'll extend, not break)
   acm_payloads.py              # NEW: payload generator (stub/empty now)
   acm_report_basic.py          # NEW: basic HTML analysis report (tables+charts)
