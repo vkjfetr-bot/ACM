@@ -173,7 +173,7 @@ After every SP call, ACMnxt measures data span and quality -> if thresholds pass
 | **Phase 6 - Integration & MES Scheduling** | Week 9   | Connect with MES stored-procedure fetch; PowerShell orchestrator                           | Hands-off MES deployment; new equipment auto-spins ACMnxt instance                  |
 | **Phase 7 - LLM Summaries & Alerts**       | Week 10  | Generate `brief.json`, `brief.md`, structured LLM prompt; integrate with alert bus         | Textual summaries and anomaly reasons accessible to operators                       |
 
-Each phase leaves something demonstrable - an HTML file, charts, payloads, or auto-generated summaries.
+Each phase leaves something demonstrable - an HTML file, charts, payloads, or auto-generated summaries. Until Phase 3 lands, the PowerShell wrapper runs train → score, with the report step gated behind an explicit `-EnableReport` flag so we only render HTML once the builder exists.
 
 ---
 
@@ -202,7 +202,7 @@ Each phase leaves something demonstrable - an HTML file, charts, payloads, or au
 | `events.csv`                | Episode summary with start/end, persistence flag, top tags    |
 | `regimes.csv` / `meta.json` | Regime labels & cluster info |
 | `payload_*.json`            | Grafana/alert payloads (sparklines, tag drivers, commentary) |
-| `report_<equip>.html`       | Static HTML report with timelines, drivers, guardrail notes   |
+| `report_<equip>.html`       | Static HTML report with timelines, drivers, guardrail notes (generated only when `-EnableReport` is set) |
 | `brief.json` / `.md`        | LLM summary prompt (current health, outlook, root cause)      |
 | `run.json`                  | Runtime log, scheduler timing, guardrail status               |
 

@@ -1,19 +1,19 @@
 <#!
 run_acmnxt.ps1 - Lightweight orchestrator for ACM_V2 pipeline.
 
-This wrapper runs train -> score -> report for a single equipment dataset.
-Update as phases deliver richer automation/guardrails.
+This wrapper runs train -> score (and optionally report) for a single equipment dataset.
+Enable the report step with -EnableReport once the HTML builder is implemented.
 #>
 
 param(
-  [string]$Root      = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path,
-  [string]$Artifacts = (Resolve-Path (Join-Path $PSScriptRoot "..\artifacts" )).Path,
+  [string]$Root        = (Resolve-Path (Join-Path $PSScriptRoot ".." )).Path,
+  [string]$Artifacts   = (Resolve-Path (Join-Path $PSScriptRoot "..\artifacts" )).Path,
   [string]$TrainCsv,
   [string]$ScoreCsv,
-  [string]$Equip     = "equipment",
+  [string]$Equip       = "equipment",
   [switch]$SkipTrain,
   [switch]$SkipScore,
-  [switch]$SkipReport
+  [switch]$EnableReport
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,10 +26,11 @@ if(-not $ScoreCsv -and -not $SkipScore){ Die "Provide -ScoreCsv or pass -SkipSco
 $Core   = Join-Path $Root "acm_core_local_2.py"
 $Report = Join-Path $Root "acm_report_basic.py"
 
-foreach($p in @($Core,$Report)){
-  if(!(Test-Path $p)){
-    Die "Missing $p"
-  }
+foreach($p in @($Core)){
+  if(!(Test-Path $p)){ Die "Missing $p" }
+}
+if($EnableReport -and -not (Test-Path $Report)){
+  Die "Report script not found (acm_report_basic.py)"
 }
 
 $equipArtifacts = Join-Path $Artifacts $Equip
@@ -49,7 +50,7 @@ if(-not $SkipScore){
   if($LASTEXITCODE){ Die "Score failed" }
 }
 
-if(-not $SkipReport){
+if($EnableReport){
   Step "Report"
   python $Report --artifacts "$equipArtifacts" --equip "$Equip"
   if($LASTEXITCODE){ Die "Report failed" }

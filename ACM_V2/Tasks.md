@@ -61,8 +61,8 @@ data/                          # inputs (SP export or CSV)
 
 * [x] **Wrapper** `scripts/run_acmnxt.ps1`
 
-  * `-Equip`, `-TrainCsv`, `-ScoreCsv`, `-ArtDir`, `-Minutes` (optional).
-  * Calls: `python acm_core_local_2.py train`, then `score`, then `python acm_report_basic.py`.
+  * `-Equip`, `-TrainCsv`, `-ScoreCsv`, `-ArtDir`, `-Minutes` (optional), `-EnableReport` (opt-in).
+  * Calls: `python acm_core_local_2.py train`, then `score`, with the report step only triggered when `-EnableReport` is provided (until HTML builder ships).
 * [x] **Operational CSV** `run_summary.csv` (append-only, 1 row per run) via `acm_observe.py`:
 
   * Fields: `run_id, ts_utc, equip, cmd(train/score), rows_in, tags, feat_rows, regimes, events, data_span_min, phase, k_selected, theta_p95, drift_flag, guardrail_state, theta_step_pct, latency_s, artifacts_age_min, status, err_msg`

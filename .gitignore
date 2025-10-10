@@ -24,6 +24,9 @@ ACM_Legacy/
 archive_legacy/
 acmnxt/artifacts/
 acmnxt/**/*.joblib
+ACM_V2/artifacts/
+!ACM_V2/artifacts/.gitkeep
+ACM_V2/data/*.csv
 **/.pytest_cache/
 dist/
 build/
