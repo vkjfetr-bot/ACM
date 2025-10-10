@@ -5,7 +5,8 @@
 # block-by-block timings and JSONL run log.
 
 import os, json, math, warnings, time, uuid, datetime as dt
-from typing import List, Dict, Tuple, Optional
+from pathlib import Path
+from typing import List, Dict, Tuple, Optional, Any
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from numpy.fft import rfft
 from sklearn.ensemble import VotingClassifier
 from sklearn.mixture import GaussianMixture
 from scipy.stats import mode
+import acm_observe
 
 warnings.filterwarnings("ignore")
 
@@ -52,6 +54,140 @@ class Timer:
         dur = time.perf_counter() - self.t0
         print(f"[{self.name}] END   {dur:.3f}s")
         _log_jsonl({"block": self.name, "event": "end", "duration_s": round(dur, 6), "notes": self.notes})
+
+# ------------------------- Guardrail helpers -------------------------
+GUARDRAIL_WARN_STEP_PCT = 20.0
+GUARDRAIL_ALERT_STEP_PCT = 40.0
+
+
+def _now_iso() -> str:
+    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _equip_name(csv_path: str, provided: Optional[str] = None) -> str:
+    if provided:
+        return provided
+    env = os.environ.get("ACM_EQUIP")
+    if env:
+        return env
+    try:
+        return Path(csv_path).stem
+    except Exception:
+        return "equipment"
+
+
+def _data_span_minutes(idx: pd.Index) -> float:
+    if not isinstance(idx, pd.DatetimeIndex) or idx.size == 0:
+        return 0.0
+    span = idx.max() - idx.min()
+    return span.total_seconds() / 60.0
+
+
+def compute_dq_metrics(df: pd.DataFrame, tags: List[str]) -> pd.DataFrame:
+    rows = []
+    for tag in tags:
+        s = pd.to_numeric(df.get(tag), errors="coerce")
+        total = len(s)
+        if total == 0:
+            rows.append({"Tag": tag, "flatline_pct": 0.0, "dropout_pct": 0.0,
+                         "nan_pct": 0.0, "presence_ratio": 0.0, "spikes_pct": 0.0})
+            continue
+        nan_mask = s.isna()
+        presence_ratio = float((~nan_mask).sum()) / float(total)
+        nan_pct = float(nan_mask.sum()) / float(total) * 100.0
+        clean = s.fillna(method="ffill").fillna(method="bfill")
+        diffs = clean.diff().abs()
+        flatline_pct = float((diffs <= 1e-9).sum()) / max(total - 1, 1) * 100.0
+        dropout_pct = float((clean == 0).sum()) / float(total) * 100.0
+        if clean.std(ddof=0) > 1e-9:
+            z = (clean - clean.mean()) / clean.std(ddof=0)
+            spikes_pct = float((z.abs() > 4).sum()) / float(total) * 100.0
+        else:
+            spikes_pct = 0.0
+        rows.append({
+            "Tag": tag,
+            "flatline_pct": round(flatline_pct, 3),
+            "dropout_pct": round(dropout_pct, 3),
+            "nan_pct": round(nan_pct, 3),
+            "presence_ratio": round(presence_ratio, 3),
+            "spikes_pct": round(spikes_pct, 3),
+        })
+    return pd.DataFrame(rows)
+
+
+def _dq_path(save_prefix: str) -> Path:
+    return Path(ART_DIR) / f"{save_prefix}_dq.csv"
+
+
+def write_dq_metrics(df: pd.DataFrame, tags: List[str], save_prefix: str) -> None:
+    if not tags:
+        return
+    dq = compute_dq_metrics(df, tags)
+    dq.to_csv(_dq_path(save_prefix), index=False)
+
+
+def dynamic_threshold(series: pd.Series, q: float = 0.95, alpha: float = 0.2) -> pd.Series:
+    if series.empty:
+        return series.copy()
+    quant = series.expanding(min_periods=1).quantile(q)
+    theta = quant.ewm(alpha=alpha, adjust=False).mean()
+    return theta.clip(lower=0.0)
+
+
+def _threshold_path(save_prefix: str) -> Path:
+    return Path(ART_DIR) / f"{save_prefix}_thresholds.csv"
+
+
+def load_previous_theta(save_prefix: str) -> Optional[float]:
+    path = _threshold_path(save_prefix)
+    if not path.exists():
+        return None
+    try:
+        df_prev = pd.read_csv(path)
+        if "Theta" in df_prev.columns and not df_prev.empty:
+            return float(df_prev["Theta"].iloc[-1])
+    except Exception:
+        return None
+    return None
+
+
+def save_thresholds(theta: pd.Series, save_prefix: str) -> None:
+    out = pd.DataFrame({"Ts": theta.index, "Theta": theta.values})
+    out.to_csv(_threshold_path(save_prefix), index=False)
+
+
+def theta_step_pct(prev_theta: Optional[float], curr_theta: Optional[float]) -> float:
+    if prev_theta is None or curr_theta is None:
+        return 0.0
+    if abs(prev_theta) < 1e-9:
+        return 0.0 if abs(curr_theta) < 1e-9 else 100.0
+    return ((curr_theta - prev_theta) / abs(prev_theta)) * 100.0
+
+
+def artifact_age_minutes(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    try:
+        mtime = dt.datetime.utcfromtimestamp(path.stat().st_mtime)
+        delta = dt.datetime.utcnow() - mtime
+        return max(delta.total_seconds() / 60.0, 0.0)
+    except Exception:
+        return 0.0
+
+
+def _append_guardrail(save_prefix: str, g_type: str, level: str, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    try:
+        acm_observe.append_guardrail_event(ART_DIR, g_type, level=level, message=message, extra={"save_prefix": save_prefix, **(extra or {})})
+    except Exception as exc:
+        print(f"[GUARDRAIL][WARN] Failed to append guardrail event: {exc}")
+
+
+def _write_run_summary(row: Dict[str, Any]) -> None:
+    try:
+        acm_observe.write_run_summary(ART_DIR, row)
+        acm_observe.write_run_health(ART_DIR, row)
+    except Exception as exc:
+        print(f"[RUN_SUMMARY][WARN] Failed to persist run summary: {exc}")
 
 # ------------------------- Config -------------------------
 @dataclass
