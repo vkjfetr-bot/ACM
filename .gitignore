@@ -1,0 +1,43 @@
+﻿# Python bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE settings
+.vscode/
+.idea/
+
+# Build artifacts and reports (generated)
+ACM/acm_artifacts/
+ACM_Legacy/
+archive_legacy/
+acmnxt/artifacts/
+acmnxt/**/*.joblib
+**/.pytest_cache/
+dist/
+build/
+*.egg-info/
+*.ipynb_checkpoints/
+*.coverage
+coverage.xml
+*.png
+*.svg
+*.html
+!acmnxt/report/*.py
+!.vscode/
+reports/
+
+# Logs
+*.log
+*.jsonl

@@ -1,0 +1,44 @@
+[1mdiff --git a/ACM/aco_core_local.patch b/ACM/aco_core_local.patch[m
+[1mdeleted file mode 100644[m
+[1mindex 1e68807..0000000[m
+[1m--- a/ACM/aco_core_local.patch[m
+[1m+++ /dev/null[m
+[36m@@ -1,38 +0,0 @@[m
+[31m---- a/acm_core_local.py[m
+[31m-+++ b/acm_core_local.py[m
+[31m-@@[m
+[31m--# Changelog[m
+[31m--# 2025-10-07: Local-files core: contextual baselines, regimes, IF ensemble, drift, spans; CSV "table" helpers (no SQL).[m
+[31m-+# Changelog[m
+[31m-+# 2025-10-07: Added auto tag detection helper (detect_tags) for CSV-only flows; no CLI tags required.[m
+[31m-+# 2025-10-07: Local-files core: contextual baselines, regimes, IF ensemble, drift, spans; CSV "table" helpers (no SQL).[m
+[31m-@@[m
+[31m- from typing import List, Dict, Tuple, Optional[m
+[31m- from sklearn.cluster import KMeans[m
+[31m- from sklearn.ensemble import IsolationForest[m
+[31m-@@[m
+[31m- def ensure_time_index(df: pd.DataFrame) -> pd.DataFrame:[m
+[31m-@@[m
+[31m-     raise ValueError("Data must have 'Ts' column or a DatetimeIndex.")[m
+[31m- [m
+[31m- def slice_time(df: pd.DataFrame, start: Optional[str], end: Optional[str]) -> pd.DataFrame:[m
+[31m-@@[m
+[31m-     return df[m
+[31m-+[m
+[31m-+def detect_tags(df: pd.DataFrame) -> List[str]:[m
+[31m-+    """[m
+[31m-+    Auto-detect numeric sensor tags in a CSV.[m
+[31m-+    - Excludes the timestamp column 'Ts'[m
+[31m-+    - Keeps only columns that are numeric dtype (or coercible by pandas on read)[m
+[31m-+    """[m
+[31m-+    cols = [c for c in df.columns if c != "Ts"][m
+[31m-+    # If the CSV loader typed numerics as objects, users should re-export; here we trust pandas dtypes.[m
+[31m-+    num_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])][m
+[31m-+    if not num_cols:[m
+[31m-+        raise ValueError("No numeric sensor columns detected (besides 'Ts').")[m
+[31m-+    return num_cols[m
+[31m-@@[m
+[31m- def enforce_tags(df: pd.DataFrame, tags: List[str]) -> List[str]:[m
+[31m-     missing = [t for t in tags if t not in df.columns][m
+[31m-     if missing: raise ValueError(f"Missing tags in data: {missing}")[m
+[31m-     return tags[m

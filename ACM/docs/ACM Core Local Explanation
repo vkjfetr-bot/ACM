@@ -1,0 +1,263 @@
+# ACM Core (Local v2) — How it works & how to run it
+
+**File:** `acm_core_local_2.py`
+**Goal:** Train a lightweight, general-purpose Asset Condition Monitor from CSV; score new data for anomalies/events; check tag drift.
+**Artifacts dir:** `C:\Users\bhadk\Documents\CPCL\ACM\acm_artifacts`
+
+---
+
+## Quick start
+
+```powershell
+# TRAIN on historical CSV (builds models & baselines)
+python C:\Users\bhadk\Documents\CPCL\ACM\acm_core_local_2.py train --csv "C:\path\to\TRAIN.csv"
+
+# SCORE a new CSV window (produces fused scores & events)
+python C:\Users\bhadk\Documents\CPCL\ACM\acm_core_local_2.py score --csv "C:\path\to\TEST.csv"
+
+# DRIFT check against trained baselines (which tags shifted?)
+python C:\Users\bhadk\Documents\CPCL\ACM\acm_core_local_2.py drift --csv "C:\path\to\RECENT.csv"
+```
+
+Outputs land in `acm_artifacts\`:
+
+* Models: `acm_scaler.joblib`, `acm_regimes.joblib`, `acm_pca.joblib`, `acm_h1_ar1.json`
+* Metadata: `acm_manifest.json`, `acm_tag_baselines.csv`, `acm_train_diagnostics.csv`
+* Scoring: `acm_scored_window.csv`, `acm_events.csv`, `acm_context_masks.csv`, `acm_resampled.csv`
+* Drift: `acm_drift.csv`
+* Logs/timings: `run_*.jsonl` printed by each pipeline block
+
+---
+
+## End-to-end flow (what happens in sequence)
+
+1. **Load CSV** → infer/parse timestamp column (robust to common names & Excel serials).
+2. **Time index & resample** → set `DatetimeIndex`; resample numeric tags to `1min` mean; interpolate gaps.
+3. **Tag selection** → auto-pick numeric columns with ≥ 20 unique values.
+4. **Windowing** → rolling windows (`window=256`, `stride=64`) across selected tags.
+5. **Feature build** → time-domain & frequency-domain stats per window; robust-scale to train space.
+6. **Regime detection** → K-Means with automatic **k** (2..6) via silhouette score.
+7. **H1** → fast anomaly baseline from rolling residuals + optional AR(1) residuals.
+8. **H2** → PCA reconstruction error (deviation in multivariate feature space).
+9. **H3** → embedding drift (1 – cosine similarity to rolling PCA mean).
+10. **Context** → transient mask; corroboration boost (pairwise hot tags); change-point signal.
+11. **Fusion & episodes** → weighted fusion → suppress transients → merge spikes into events.
+12. **Export** → scores, events, masks, diagnostics, baselines; timings JSONL.
+
+---
+
+## Analysis blocks — what/why/how (with knobs)
+
+### A. Timestamp handling & resample
+
+* **What:** `ensure_time_index`, `resample_numeric(rule="1min")`
+* **Why:** normalize uneven sampling; make rolling features stable.
+* **How:** detect timestamp column; coerce to datetime; resample numeric tags to 1-minute mean; interpolate edges.
+* **Knobs:** `CoreConfig.resample_rule`
+* **Watch-outs:** all timestamps invalid → continues without resample (warns); prefer clean time.
+
+### B. Tag detection
+
+* **What:** `detect_tags(min_unique=20)`
+* **Why:** remove constants/IDs; keep informative signals.
+* **How:** numeric columns with enough unique values.
+* **Knobs:** raise/lower `min_unique` if data is too static/too noisy.
+
+### C. Sliding windows
+
+* **What:** `sliding_windows(window=256, stride=64)`
+* **Why:** local stationarity → stable feature extraction & detection.
+* **How:** end-aligned windows; yields `(t_end, window_matrix)`.
+* **Knobs:** `window`, `stride` (bigger = smoother, slower).
+
+### D. Time-domain features
+
+* **What:** `feats_time` = mean, RMS, variance, skew, kurtosis, crest factor, slope (last-half regression).
+* **Why:** capture level, variability, impulsiveness, trend.
+* **Knobs:** none (robust by design).
+* **Notes:** crest = peak/RMS highlights spikes.
+
+### E. Frequency-domain features
+
+* **What:** `feats_freq` = |FFT| magnitudes (capped to `max_fft_bins`), spectral centroid, spectral flatness.
+* **Why:** detect oscillations/harmonics/change in spectra.
+* **Knobs:** `max_fft_bins` (default 64).
+
+### F. Scaling & feature matrix
+
+* **What:** `RobustScaler()` on concatenated time+freq features.
+* **Why:** insensitivity to outliers; consistent train/score space.
+* **Artifacts:** `acm_scaler.joblib`.
+
+### G. Regime detection (operating modes)
+
+* **What:** `auto_kmeans(k=2..6)` with silhouette selection.
+* **Why:** discover natural operating states (e.g., idle/load).
+* **Artifacts:** `acm_regimes.joblib`, and train diagnostics CSV with regime labels.
+* **Knobs:** `k_min`, `k_max`.
+
+### H. H1 — fast forecast residuals (lite + AR(1))
+
+* **What:** two quick signals:
+
+  * **Rolling baseline residual** per tag, z-scored (MAD or std), averaged across tags.
+  * **AR(1) residual** using φ estimated from training; again z-scored & averaged.
+* **Why:** catch quick deviations without heavy models.
+* **Modes:**
+
+  * `"off"` → disable
+  * `"lite"` → only rolling residual
+  * `"lite_ar1"` (default) → rolling + AR(1)
+* **Artifacts:** `acm_h1_ar1.json` (φ per tag, only if `"lite_ar1"`).
+* **Knobs:** `h1_mode`, `h1_roll`, `h1_robust`, `h1_min_support`, `h1_topk` (variance-ranked subset).
+* **Notes:** final H1 normalized by p95; robust to scaling.
+
+### I. H2 — PCA reconstruction error
+
+* **What:** fit PCA to scaled features (retain 90% variance); error = ‖X − PCA(X)‖².
+* **Why:** multivariate deviation across all features/tags.
+* **Artifacts:** `acm_pca.joblib`.
+* **Knobs:** explained variance cutoff (fixed at 0.9 in code); normalization by p95 for [0,1].
+
+### J. H3 — embedding drift (contrast)
+
+* **What:** transform to PCA space; compute **1 − cosine** to rolling mean of last ~50 windows.
+* **Why:** slow context/behavior drift independent of amplitude.
+* **Knobs:** window for reference (fixed 50; min 10 for stability).
+
+### K. Context masking (transients)
+
+* **What:** `detect_transients` → median |z-slope| & |z-accel| across tags.
+* **Why:** suppress transient phases (start/stop) that inflate scores.
+* **Effect:** fused score × 0.7 where transient mask is 1.
+* **Knobs:** `slope_thr` (default 0.75), `accel_thr` (1.25).
+
+### L. Corroboration boost
+
+* **What:** pick top-corr tag pairs; add when both are hot.
+* **Why:** multi-tag agreement is more credible.
+* **Knobs:** `corroboration_pairs` (default 20); normalized by p95.
+
+### M. Change-point signal (CPD proxy)
+
+* **What:** rolling mean/std (W=60); median absolute Δmean + Δstd.
+* **Why:** detect step-like shifts or variance regime change.
+* **Knobs:** window `W` (fixed 60 in code); normalized by p95.
+
+### N. Fusion & event episodes
+
+* **What:**
+
+  * Base = `max(0.45*H1, 0.35*H2, 0.35*H3)`
+  * Boost = `0.15*corroboration + 0.10*CPD`
+  * Transient suppression: × 0.7 where masked
+* **Thresholding:** episodes built where fused ≥ `fused_tau` (0.7); merge gaps ≤ `merge_gap` minutes.
+* **Outputs:** `acm_scored_window.csv`, `acm_events.csv`, `acm_context_masks.csv`.
+* **Knobs:** `fused_tau`, `merge_gap`.
+
+### O. Drift check (tag-wise baseline shift)
+
+* **What:** compare current tag means to trained baselines (μ, σ) → `DriftZ = |mean−μ|/σ`.
+* **Why:** slow degradation/offset drift per tag.
+* **Outputs:** `acm_drift.csv` sorted by worst drift.
+* **Requires:** trained `acm_tag_baselines.csv` from the **train** step.
+
+---
+
+## How to run — exact commands & patterns
+
+### 1) Python CLI (direct)
+
+```powershell
+# Recommended: activate your env first
+# python -m venv venv; venv\Scripts\Activate.ps1; pip install -r requirements.txt
+
+# TRAIN
+python C:\Users\bhadk\Documents\CPCL\ACM\acm_core_local_2.py train --csv "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TRAINING DATA.csv"
+
+# SCORE
+python C:\Users\bhadk\Documents\CPCL\ACM\acm_core_local_2.py score --csv "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TEST DATA.csv"
+
+# DRIFT
+python C:\Users\bhadk\Documents\CPCL\ACM\acm_core_local_2.py drift --csv "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TEST DATA.csv"
+```
+
+### 2) PowerShell wrapper (example)
+
+```powershell
+# Save as: run_acm.ps1
+param(
+  [string]$Root    = "C:\Users\bhadk\Documents\CPCL\ACM",
+  [string]$TrainCsv = "",
+  [string]$TestCsv  = "",
+  [string]$Equip    = ""
+)
+$Core = Join-Path $Root "acm_core_local_2.py"
+if (!(Test-Path $Core)) { Write-Host "Missing $Core" -ForegroundColor Red; exit 1 }
+Write-Host "Equipment: $Equip" -ForegroundColor Cyan
+
+# Train
+python $Core train --csv $TrainCsv
+if ($LASTEXITCODE -ne 0){ Write-Host "Train failed" -ForegroundColor Red; exit 1 }
+
+# Score
+python $Core score --csv $TestCsv
+if ($LASTEXITCODE -ne 0){ Write-Host "Score failed" -ForegroundColor Red; exit 1 }
+
+# Drift (optional)
+python $Core drift --csv $TestCsv
+```
+
+Run it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\Users\bhadk\Documents\CPCL\ACM\run_acm.ps1" `
+  -TrainCsv "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TRAINING DATA.csv" `
+  -TestCsv  "C:\Users\bhadk\Documents\CPCL\ACM\Dummy Data\FD FAN TEST DATA.csv" `
+  -Equip "FD FAN"
+```
+
+### 3) Import as a module (Python)
+
+```python
+# Example usage in a notebook or another script
+from acm_core_local_2 import train_core, score_window, drift_check, CoreConfig
+
+cfg = CoreConfig(resample_rule="1min", window=256, stride=64, h1_mode="lite_ar1")
+train_core(r"C:\data\train.csv", cfg, save_prefix="acm")
+score_window(r"C:\data\test.csv",  save_prefix="acm")
+drift_check(r"C:\data\recent.csv", save_prefix="acm")
+```
+
+---
+
+## Performance dials (fast vs robust)
+
+* **Window/Stride:** Smaller `window` or larger `stride` → faster, but coarser detection.
+* **H1 mode:** `"lite"` (no AR1) is fastest; `"off"` skips H1 entirely (not recommended).
+* **KMeans range:** Narrow `k_min..k_max` if silhouette picking is slow.
+* **FFT bins:** Reduce `max_fft_bins` (e.g., 32) if many tags/windows.
+* **Top-K in H1:** Set `h1_topk` (e.g., 10–20) to limit AR(1) to most variant tags.
+
+---
+
+## Troubleshooting
+
+* **“No numeric tags with enough variability.”**
+  Increase signal variety (longer data) or lower detection threshold (`min_unique` logic in `detect_tags`).
+* **All timestamps invalid / mixed formats.**
+  Ensure a clean `Ts`/`Timestamp` column; avoid non-time text rows; Excel serials are supported.
+* **Events look noisy around start/stop.**
+  Increase `slope_thr` / `accel_thr` (transient mask stricter) or raise `fused_tau`.
+* **Too few/too many events.**
+  Tune `fused_tau` and `merge_gap`; `H1/H2/H3` weights can be adjusted in code if needed.
+
+---
+
+## Outputs you’ll look at first
+
+* `acm_scored_window.csv` → timeline of H1/H2/H3/Corr/CPD/Fused per window (use to plot trends + event markers).
+* `acm_events.csv` → clean list of episodes with Start/End/PeakScore (use for report/event drill-downs).
+* `acm_drift.csv` → which tags are drifting the most vs training baselines.
+
+---
