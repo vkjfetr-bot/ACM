@@ -863,17 +863,17 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser("ACM Core (H1: lite+AR1)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    tr = sub.add_parser("train"); tr.add_argument("--csv", required=True)
-    sc = sub.add_parser("score"); sc.add_argument("--csv", required=True)
+    tr = sub.add_parser("train"); tr.add_argument("--csv", required=True); tr.add_argument("--equip")
+    sc = sub.add_parser("score"); sc.add_argument("--csv", required=True); sc.add_argument("--equip")
     dr = sub.add_parser("drift"); dr.add_argument("--csv", required=True)
     args = p.parse_args()
     with Timer("START"): pass
     try:
         if args.cmd == "train":
-            info = train_core(args.csv)
+            info = train_core(args.csv, equip=getattr(args, "equip", None))
             print(json.dumps(info, indent=2))
         elif args.cmd == "score":
-            info = score_window(args.csv)
+            info = score_window(args.csv, equip=getattr(args, "equip", None))
             print(json.dumps(info, indent=2))
         elif args.cmd == "drift":
             drift_check(args.csv)
