@@ -157,6 +157,7 @@ def load_previous_theta(save_prefix: str) -> Optional[float]:
 def save_thresholds(theta: pd.Series, save_prefix: str) -> None:
     out = pd.DataFrame({"Ts": theta.index, "Theta": theta.values})
     out.to_csv(_threshold_path(save_prefix), index=False)
+    out.to_csv(Path(ART_DIR) / "thresholds.csv", index=False)
 
 
 def theta_step_pct(prev_theta: Optional[float], curr_theta: Optional[float]) -> float:
