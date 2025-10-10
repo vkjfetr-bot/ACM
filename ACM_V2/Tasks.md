@@ -59,14 +59,14 @@ data/                          # inputs (SP export or CSV)
 
 **Tasks**
 
-* [ ] **Wrapper** `scripts/run_acmnxt.ps1`
+* [x] **Wrapper** `scripts/run_acmnxt.ps1`
 
   * `-Equip`, `-TrainCsv`, `-ScoreCsv`, `-ArtDir`, `-Minutes` (optional).
   * Calls: `python acm_core_local_2.py train`, then `score`, then `python acm_report_basic.py`.
-* [ ] **Operational CSV** `run_summary.csv` (append-only, 1 row per run) via `acm_observe.py`:
+* [x] **Operational CSV** `run_summary.csv` (append-only, 1 row per run) via `acm_observe.py`:
 
   * Fields: `run_id, ts_utc, equip, cmd(train/score), rows_in, tags, feat_rows, regimes, events, data_span_min, phase, k_selected, theta_p95, drift_flag, guardrail_state, theta_step_pct, latency_s, artifacts_age_min, status, err_msg`
-* [ ] Keep existing JSONL block timings - already in core; **don't remove**.
+* [x] Keep existing JSONL block timings - already in core; **don't remove**.
 
 **Deliverables**
 
@@ -81,19 +81,19 @@ data/                          # inputs (SP export or CSV)
 
 **Tasks**
 
-* [ ] In `acm_core_local_2.py` **train** and **score** paths:
+* [x] In `acm_core_local_2.py` **train** and **score** paths:
 
   * Compute per-tag DQ: `flatline_pct, dropout_pct, NaN_pct, spikes_pct` -> **`dq.csv`**.
   * Add `dynamic_threshold(fused_window, q=0.95, alpha=0.2)` -> compute **theta(t)** per scored index.
   * Export **`thresholds.csv`** with `ts, theta`.
   * Compare latest `theta` band to previous run -> compute `theta_step_pct`, stash to `run_summary.csv`, and append guardrail entry to `guardrail_log.jsonl` when a step exceeds tolerance.
   * In episodes, use **theta(t) for eventization** (still keep `fused_tau` as fallback).
-* [ ] Append `theta_p95` to `run_summary.csv` (median/95th of theta over window).
+* [x] Append `theta_p95` to `run_summary.csv` (median/95th of theta over window).
 
 **Deliverables**
 
 * [x] `artifacts/<equip>/dq.csv`, `thresholds.csv`, events built off theta(t).
-* [x] Timeline in HTML shows fused vs theta line; guardrail log captures any large theta jumps.
+* [ ] Timeline in HTML shows fused vs theta line; guardrail log captures any large theta jumps.
 
 ---
 
@@ -152,7 +152,7 @@ data/                          # inputs (SP export or CSV)
 
 **Deliverables**
 
-* [x] `artifacts/<equip>/river_state.json`, `guardrail_log.jsonl`, and `run_health.json` written; `run_summary.csv` shows guardrail state when drift/latency occurs.
+* [ ] `artifacts/<equip>/river_state.json`, `guardrail_log.jsonl`, and `run_health.json` written; `run_summary.csv` shows guardrail state when drift/latency occurs.
 
 > We're **implementing River early** as requested, while also wiring the accountability hooks demanded by the updated vision.
 
@@ -181,7 +181,7 @@ data/                          # inputs (SP export or CSV)
 
 **Deliverables**
 
-* [x] `report_<equip>.html` present with top tags/persistence callouts.
+* [ ] `report_<equip>.html` present with top tags/persistence callouts.
 * [x] `events_timeline.json` plus placeholder `payload_*.json` files exist (structure only).
 
 ---
@@ -302,10 +302,10 @@ data/                          # inputs (SP export or CSV)
 
 * A **single PS1** command produces:
 
-  * `dq.csv`, `scores.csv`, `thresholds.csv`, `events.csv`, `events_timeline.json`, `regimes.csv` (if eligible)
-  * `guardrail_log.jsonl` + `run_health.json` showing theta steps, drift, runtime health
+  * `dq.csv`, `scores.csv`, `thresholds.csv`, `events.csv` (and `events_timeline.json` once built)
+  * `guardrail_log.jsonl` + `run_health.json` showing theta steps, drift, runtime health (pending River phase)
   * **run_summary.csv** with guardrail fields populated for each step
-  * `report_<equip>.html` (timeline with theta + drift markers, event cards with top tags/persistence)
+  * `report_<equip>.html` (timeline with theta + drift markers, event cards with top tags/persistence) [pending HTML implementation]
 
 ---
 
@@ -323,12 +323,12 @@ data/                          # inputs (SP export or CSV)
 * [x] Basic ops CSV (run_summary with guardrail fields)
 * [x] DQ metrics export
 * [x] Dynamic theta(t) export + guardrail logging
-* [x] Cold-start & data-availability gating **before** LLM
+* [ ] Cold-start & data-availability gating **before** LLM
 * [x] Guardrail instrumentation (log, run_health, rollback)
-* [x] Evaluator guardrails + seeded scenario injection
-* [x] Operator insight loop (persistence, top tags, events_timeline)
-* [x] River adapters early (ADWIN + online KMeans)
-* [x] Basic HTML report now
+* [ ] Evaluator guardrails + seeded scenario injection
+* [ ] Operator insight loop (persistence, top tags, events_timeline)
+* [ ] River adapters early (ADWIN + online KMeans)
+* [ ] Basic HTML report now
 * [x] Separate **payload generator** file (empty for now)
 * [x] Wrapper to run everything
 * [x] No venv, no unit tests
