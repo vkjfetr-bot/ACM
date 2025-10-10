@@ -717,7 +717,7 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
             "run_id": RUN_ID,
             "ts_utc": _now_iso(),
             "equip": equip_name,
-            "cmd": "train",
+            "cmd": "train" if save_prefix == "acm" else f"train[{save_prefix}]",
             "rows_in": rows_in,
             "tags": len(tags),
             "feat_rows": feat_rows,
@@ -737,7 +737,7 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
         }
         _write_run_summary(run_summary)
 
-def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) -> Dict:
+def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None, manifest_prefix: Optional[str]=None) -> Dict:
     equip_name = _equip_name(csv_path, equip)
     started = time.perf_counter()
     status = "ok"
@@ -765,7 +765,9 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
         with Timer("CLEAN_TIME"):
             df = ensure_time_index(df)
 
-        with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json")) as f:
+        manifest_name = manifest_prefix or save_prefix
+        model_prefix = manifest_name
+        with open(os.path.join(ART_DIR, f"{manifest_name}_manifest.json")) as f:
             man = json.load(f)
             phase_manifest = man.get("phase_info", {"phase": "P3", "enable_pca": True, "enable_h3": True})
 
@@ -788,7 +790,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             F = build_feature_matrix(df, tags, W, S, max_fft)
             feat_rows = len(F)
             from joblib import load
-            scaler = load(os.path.join(ART_DIR, f"{save_prefix}_scaler.joblib"))
+            scaler = load(os.path.join(ART_DIR, f"{model_prefix}_scaler.joblib"))
             Xn = scaler.transform(F.values)
             feature_rank = int(np.linalg.matrix_rank(np.nan_to_num(F.values))) if feat_rows else 0
 
@@ -814,14 +816,14 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
 
         with Timer("REGIMES"):
             from joblib import load
-            km = load(os.path.join(ART_DIR, f"{save_prefix}_regimes.joblib"))
+            km = load(os.path.join(ART_DIR, f"{model_prefix}_regimes.joblib"))
             regimes = km.predict(Xn)
             regime_count = int(getattr(km, "n_clusters", len(np.unique(regimes))))
 
         with Timer("H1_SCORE", {"mode": man.get("h1_mode", "lite_ar1"), "roll": man.get("h1_roll", 9)}):
             mode = man.get("h1_mode", "lite_ar1").lower()
             try:
-                with open(os.path.join(ART_DIR, f"{save_prefix}_h1_ar1.json")) as f:
+                with open(os.path.join(ART_DIR, f"{model_prefix}_h1_ar1.json")) as f:
                     ar1_coeffs = json.load(f)
             except FileNotFoundError:
                 ar1_coeffs = {}
@@ -831,7 +833,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
         if enable_pca and Path(ART_DIR, f"{save_prefix}_pca.joblib").exists():
             with Timer("H2_SCORE"):
                 from joblib import load
-                pca = load(os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
+                pca = load(os.path.join(ART_DIR, f"{model_prefix}_pca.joblib"))
                 Xr = pca.inverse_transform(pca.transform(Xn))
                 err = ((Xn - Xr)**2).sum(axis=1)
                 s_h2 = pd.Series(err, index=F.index)
@@ -920,6 +922,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
                 if not contributing_heads:
                     contributing_heads = [max(head_peaks, key=head_peaks.get)]
 
+                tag_contrib = z_slice.head(5).round(3).to_dict()
                 events_enriched.append(
                     {
                         "Start": e["start"],
@@ -929,6 +932,8 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
                         "Persistence": "persistent" if persistent else "transient",
                         "TopTags": ",".join(top_tags),
                         "ContributingHeads": ",".join(contributing_heads),
+                        "TagContrib": json.dumps(tag_contrib),
+                        "HeadPeaks": json.dumps(head_peaks),
                     }
                 )
 
@@ -976,6 +981,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
                     "persistence": e["Persistence"],
                     "top_tags": e["TopTags"].split(",") if e["TopTags"] else [],
                     "heads": e["ContributingHeads"].split(",") if e["ContributingHeads"] else [],
+                    "tag_contrib": json.loads(e["TagContrib"]) if e.get("TagContrib") else {},
                 }
                 for e in events_enriched
             ]
@@ -1006,7 +1012,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             "run_id": RUN_ID,
             "ts_utc": _now_iso(),
             "equip": equip_name,
-            "cmd": "score",
+            "cmd": "score" if save_prefix == "acm" else f"score[{save_prefix}]",
             "rows_in": rows_in,
             "tags": tag_count,
             "feat_rows": feat_rows,
@@ -1052,17 +1058,17 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser("ACM Core (H1: lite+AR1)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    tr = sub.add_parser("train"); tr.add_argument("--csv", required=True); tr.add_argument("--equip")
-    sc = sub.add_parser("score"); sc.add_argument("--csv", required=True); sc.add_argument("--equip")
+    tr = sub.add_parser("train"); tr.add_argument("--csv", required=True); tr.add_argument("--equip"); tr.add_argument("--prefix", default="acm")
+    sc = sub.add_parser("score"); sc.add_argument("--csv", required=True); sc.add_argument("--equip"); sc.add_argument("--prefix", default="acm"); sc.add_argument("--manifest-prefix")
     dr = sub.add_parser("drift"); dr.add_argument("--csv", required=True)
     args = p.parse_args()
     with Timer("START"): pass
     try:
         if args.cmd == "train":
-            info = train_core(args.csv, equip=getattr(args, "equip", None))
+            info = train_core(args.csv, save_prefix=getattr(args, "prefix", "acm"), equip=getattr(args, "equip", None))
             print(json.dumps(info, indent=2))
         elif args.cmd == "score":
-            info = score_window(args.csv, equip=getattr(args, "equip", None))
+            info = score_window(args.csv, save_prefix=getattr(args, "prefix", "acm"), manifest_prefix=getattr(args, "manifest_prefix", None), equip=getattr(args, "equip", None))
             print(json.dumps(info, indent=2))
         elif args.cmd == "drift":
             drift_check(args.csv)

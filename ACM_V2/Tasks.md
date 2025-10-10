@@ -173,6 +173,8 @@ data/                          # inputs (SP export or CSV)
 
 * [x] `report_<equip>.html` present with top tags/persistence callouts.
 * [x] `events_timeline.json` and populated `payload_*.json` exports exist.
+* [x] Wrapper supports `-SplitTrainIntoTests` to run multiple score windows and capture prefixes in run summaries.
+
 
 ---
 
@@ -318,7 +320,7 @@ data/                          # inputs (SP export or CSV)
 * [ ] Evaluator guardrails + seeded scenario injection
 * [ ] Operator insight loop (persistence, top tags, events_timeline)
 * [ ] River adapters early (ADWIN + online KMeans)
-* [ ] Basic HTML report now
+* [x] Chart-rich HTML report (tables removed)
 * [x] Separate **payload generator** file (empty for now)
 * [x] Wrapper to run everything
 * [x] No venv, no unit tests

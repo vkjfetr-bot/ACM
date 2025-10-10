@@ -1,4 +1,4 @@
-"""Generate a lightweight HTML report for ACM_V2 artifacts."""
+"""Generate a chart-rich HTML report for ACM_V2 artifacts."""
 
 from __future__ import annotations
 
@@ -7,36 +7,157 @@ import base64
 import json
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
 
-def _load_guardrails(path: Path, limit: int = 20) -> List[Dict]:
+ACCENT_BLUE = "#005a9c"
+ACCENT_ORANGE = "#ff9248"
+ACCENT_GREEN = "#2ca58d"
+BACKGROUND = "#f7f9fb"
+TEXT_COLOR = "#1d1d1f"
+GRID_STYLE = {"linestyle": "--", "alpha": 0.3}
+
+
+def _encode_fig(fig: plt.Figure) -> str:
+    buf = BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _load_guardrails(path: Path, limit: int = 10) -> List[Dict]:
     if not path.exists():
         return []
-    events: List[Dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
+    rows: List[Dict] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
             continue
         try:
-            events.append(json.loads(line))
+            rows.append(json.loads(raw))
         except json.JSONDecodeError:
             continue
-    return events[-limit:]
+    return rows[-limit:]
 
 
-def _encode_plot_to_data_uri(fig: plt.Figure) -> str:
-    buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(fig)
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+def _summarise_guardrails(rows: List[Dict]) -> str:
+    if not rows:
+        return "<em>No guardrails raised.</em>"
+    items = []
+    for row in rows[::-1]:
+        stamp = row.get("ts", "")
+        level = row.get("level", "").upper()
+        gtype = row.get("type", "")
+        msg = row.get("message", "")
+        items.append(f"<li><strong>{level}</strong> &mdash; {gtype}: {msg} <span class='stamp'>({stamp})</span></li>")
+    return "<ul>" + "".join(items) + "</ul>"
+
+
+def _latest_run_summary(path: Path) -> str:
+    if not path.exists():
+        return "<em>No runs recorded yet.</em>"
+    df = pd.read_csv(path)
+    if df.empty:
+        return "<em>No runs recorded yet.</em>"
+    latest = df.tail(1).iloc[0]
+    bits = [
+        f"<li><strong>Command:</strong> {latest['cmd']}</li>",
+        f"<li><strong>Rows scanned:</strong> {int(latest['rows_in'])} | <strong>Events:</strong> {int(latest['events'])}</li>",
+        f"<li><strong>Phase:</strong> {latest['phase']} | <strong>Theta p95:</strong> {float(latest['theta_p95']):0.3f}</li>",
+        f"<li><strong>Guardrail state:</strong> {latest['guardrail_state']} | <strong>Latency:</strong> {float(latest['latency_s']):0.2f} s</li>",
+    ]
+    return "<ul>" + "".join(bits) + "</ul>"
+
+
+def _plot_health(scores: pd.DataFrame, events: Optional[pd.DataFrame]) -> str:
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.plot(scores["Ts"], scores["FusedScore"], label="Fused score", color=ACCENT_BLUE, linewidth=1.6)
+    if "Theta" in scores.columns:
+        ax.plot(scores["Ts"], scores["Theta"], label="Theta(t)", color=ACCENT_ORANGE, linewidth=1.2)
+    if events is not None and not events.empty:
+        for _, event in events.iterrows():
+            if event.get("Persistence", "").lower() == "persistent":
+                ax.axvspan(event["Start"], event["End"], color=ACCENT_ORANGE, alpha=0.12)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    fig.autofmt_xdate()
+    ax.set_ylabel("Score")
+    ax.set_title("Health timeline")
+    ax.grid(**GRID_STYLE)
+    ax.legend(frameon=False)
+    return _encode_fig(fig)
+
+
+def _select_top_event(events: pd.DataFrame) -> Optional[pd.Series]:
+    if events is None or events.empty:
+        return None
+    events = events.copy()
+    events["PersistenceScore"] = events["Persistence"].str.lower().eq("persistent").astype(int)
+    events = events.sort_values(["PersistenceScore", "PeakScore"], ascending=[False, False])
+    return events.iloc[0]
+
+
+def _plot_blame(top_event: pd.Series) -> str:
+    contrib = top_event.get("TagContrib", {})
+    if isinstance(contrib, str):
+        try:
+            contrib = json.loads(contrib)
+        except json.JSONDecodeError:
+            contrib = {}
+    if not contrib:
+        return ""
+    tags, values = zip(*sorted(contrib.items(), key=lambda kv: kv[1]))
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.barh(tags, values, color=ACCENT_BLUE)
+    ax.set_xlabel("Average |z-score|")
+    ax.set_title("Blame chart &mdash; top drivers")
+    for i, v in enumerate(values):
+        ax.text(v + 0.02, i, f"{v:0.2f}", va="center", fontsize=9, color=TEXT_COLOR)
+    ax.grid(**GRID_STYLE, axis="x")
+    return _encode_fig(fig)
+
+
+def _plot_head_mix(scores: pd.DataFrame) -> str:
+    if "DominantHead" not in scores.columns:
+        return ""
+    counts = scores["DominantHead"].value_counts().sort_values(ascending=False)
+    fig, ax = plt.subplots(figsize=(5, 3.5))
+    ax.bar(counts.index, counts.values, color=ACCENT_GREEN)
+    ax.set_ylabel("Samples")
+    ax.set_title("Which hypothesis fired most")
+    ax.grid(**GRID_STYLE, axis="y")
+    return _encode_fig(fig)
+
+
+def _plot_dq(dq: pd.DataFrame) -> str:
+    if dq.empty:
+        return ""
+    metrics = [
+        ("flatline_pct", "Flatline %"),
+        ("dropout_pct", "Dropout %"),
+        ("spikes_pct", "Spike %"),
+    ]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(12, 3.5), sharey=True)
+    if len(metrics) == 1:
+        axes = [axes]
+    for ax, (col, label) in zip(axes, metrics):
+        if col not in dq.columns:
+            ax.axis("off")
+            continue
+        top = dq.nlargest(5, col)
+        ax.barh(top["Tag"], top[col], color=ACCENT_BLUE)
+        ax.set_xlabel(label)
+        ax.invert_yaxis()
+        ax.grid(**GRID_STYLE, axis="x")
+    fig.suptitle("Data-quality hot spots (top 5)")
+    plt.tight_layout()
+    return _encode_fig(fig)
 
 
 def build_report(artifacts_dir: str, equip: str) -> None:
@@ -54,107 +175,76 @@ def build_report(artifacts_dir: str, equip: str) -> None:
         raise FileNotFoundError(f"Missing scores.csv in {artifacts_dir}")
 
     scores = pd.read_csv(scores_path, parse_dates=["Ts"])
-    fig, ax = plt.subplots(figsize=(10, 4))
-    if "FusedScore" in scores.columns:
-        ax.plot(scores["Ts"], scores["FusedScore"], label="Fused Score", color="#1f77b4")
-    if "Theta" in scores.columns:
-        ax.plot(scores["Ts"], scores["Theta"], label="Theta(t)", color="#ff7f0e")
-    ax.set_xlabel("Timestamp")
-    ax.set_ylabel("Score")
-    ax.set_title(f"{equip} - Fused Score vs Theta")
-    ax.grid(True, linestyle="--", alpha=0.3)
-    ax.legend()
-    plot_uri = _encode_plot_to_data_uri(fig)
-
-    events = pd.read_csv(events_path) if events_path.exists() else pd.DataFrame()
+    events = pd.read_csv(events_path, parse_dates=["Start", "End"]) if events_path.exists() else pd.DataFrame()
     dq = pd.read_csv(dq_path) if dq_path.exists() else pd.DataFrame()
+
     guardrails = _load_guardrails(guardrail_path)
-    run_summary = pd.read_csv(run_summary_path) if run_summary_path.exists() else pd.DataFrame()
-    latest_summary = run_summary.tail(2) if not run_summary.empty else pd.DataFrame()
+    guardrail_html = _summarise_guardrails(guardrails)
+    run_summary_html = _latest_run_summary(run_summary_path)
 
-    if not events.empty:
-        display_events = events[["Start", "End", "PeakScore"]].copy()
-        if "DurationMin" in events.columns:
-            display_events["DurationMin"] = events["DurationMin"]
-        if "Persistence" in events.columns:
-            display_events["Persistence"] = events["Persistence"]
-        if "TopTags" in events.columns:
-            display_events["TopTags"] = events["TopTags"]
-        if "ContributingHeads" in events.columns:
-            display_events["Heads"] = events["ContributingHeads"]
-        html_events = display_events.head(20).to_html(index=False, classes="table table-sm")
-    else:
-        html_events = "<em>No events recorded.</em>"
-    html_dq = (
-        dq.sort_values("flatline_pct", ascending=False)
-        .head(20)
-        .to_html(index=False, classes="table table-sm")
-        if not dq.empty
-        else "<em>No data-quality metrics.</em>"
-    )
-    html_runs = (
-        latest_summary.to_html(index=False, classes="table table-sm")
-        if not latest_summary.empty
-        else "<em>No run summary yet.</em>"
-    )
-    if guardrails:
-        guardrail_rows = "".join(
-            f"<tr><td>{g.get('ts','')}</td><td>{g.get('type','')}</td><td>{g.get('level','')}</td>"
-            f"<td>{g.get('message','')}</td></tr>"
-            for g in guardrails
-        )
-        html_guardrails = (
-            "<table class='table table-sm'>"
-            "<thead><tr><th>Timestamp</th><th>Type</th><th>Level</th><th>Message</th></tr></thead>"
-            f"<tbody>{guardrail_rows}</tbody></table>"
-        )
-    else:
-        html_guardrails = "<em>No guardrail entries.</em>"
+    health_img = _plot_health(scores, events if not events.empty else None)
+    top_event = _select_top_event(events) if not events.empty else None
+    blame_img = _plot_blame(top_event) if top_event is not None else ""
+    head_img = _plot_head_mix(scores)
+    dq_img = _plot_dq(dq)
 
-    html_doc = f"""<!DOCTYPE html>
-<html lang="en">
+    if top_event is not None:
+        contrib = json.loads(top_event.get("TagContrib", "{}")) if isinstance(top_event.get("TagContrib"), str) else top_event.get("TagContrib", {})
+        top_tags = ", ".join(top_event.get("TopTags", "").split(",")) or "N/A"
+        blame_text = f"<ul><li><strong>Window:</strong> {top_event['Start']} ? {top_event['End']}</li>" \
+            f"<li><strong>Peak score:</strong> {float(top_event['PeakScore']):0.2f}</li>" \
+            f"<li><strong>Persistence:</strong> {top_event['Persistence']}</li>" \
+            f"<li><strong>Primary drivers:</strong> {top_tags}</li></ul>"
+    else:
+        blame_text = "<em>No significant events detected.</em>"
+
+    dq_text = "" if dq_img else "<em>Data-quality metrics were clean for this run.</em>"
+
+    html = f"""<!DOCTYPE html>
+<html lang='en'>
 <head>
-  <meta charset="utf-8" />
+  <meta charset='utf-8'>
   <title>ACMnxt Report - {equip}</title>
   <style>
-    body {{ font-family: Arial, sans-serif; margin: 2rem; background-color: #f7f9fb; color: #1d1d1f; }}
-    h1, h2 {{ color: #003b73; }}
-    .section {{ margin-bottom: 2rem; }}
-    img {{ max-width: 100%; height: auto; border: 1px solid #ccc; padding: 0.5rem; background: #fff; }}
-    .table {{ border-collapse: collapse; width: 100%; background: #fff; }}
-    .table th, .table td {{ border: 1px solid #ddd; padding: 0.5rem; text-align: left; }}
-    .table th {{ background-color: #003b73; color: #fff; }}
-    em {{ color: #555; }}
+    body {{ font-family: "Segoe UI", Arial, sans-serif; background: {BACKGROUND}; color: {TEXT_COLOR}; margin: 2rem; }}
+    h1 {{ color: {ACCENT_BLUE}; }}
+    h2 {{ color: {ACCENT_BLUE}; margin-top: 2rem; }}
+    .section {{ margin-bottom: 2.5rem; background: #fff; padding: 1.5rem; border-radius: 12px; box-shadow: 0 6px 14px rgba(0,0,0,0.06); }}
+    img {{ max-width: 100%; height: auto; display: block; margin: 0 auto; }}
+    ul {{ margin: 0.5rem 0 0 1.2rem; }}
+    li {{ margin-bottom: 0.35rem; }}
+    .stamp {{ color: #646c76; font-size: 0.85rem; }}
   </style>
 </head>
 <body>
-  <h1>ACMnxt Report &mdash; {equip}</h1>
-  <div class="section">
-    <h2>Timeline: Fused Score vs Theta</h2>
-    <img src="{plot_uri}" alt="Fused Score vs Theta" />
+  <h1>ACMnxt Situation Report — {equip}</h1>
+  <div class='section'>
+    <h2>How healthy are we?</h2>
+    <img src='{health_img}' alt='Fused score vs theta chart'>
   </div>
-  <div class="section">
-    <h2>Recent Guardrail Events</h2>
-    {html_guardrails}
+  <div class='section'>
+    <h2>Who is to blame?</h2>
+    {blame_text}
+    {f"<img src='{blame_img}' alt='Top tag contributions'>" if blame_img else ""}
+    {f"<img src='{head_img}' alt='Dominant hypothesis mix'>" if head_img else ""}
   </div>
-  <div class="section">
-    <h2>Latest Run Summary</h2>
-    {html_runs}
+  <div class='section'>
+    <h2>Guardrails & Run Snapshot</h2>
+    <h3>Latest run</h3>
+    {run_summary_html}
+    <h3>Guardrail events</h3>
+    {guardrail_html}
   </div>
-  <div class="section">
-    <h2>Recent Events (Top 20)</h2>
-    {html_events}
-  </div>
-  <div class="section">
-    <h2>Data Quality Snapshot (Top 20 by flatline %)</h2>
-    {html_dq}
+  <div class='section'>
+    <h2>Sensor data quality</h2>
+    {f"<img src='{dq_img}' alt='Data quality issues'>" if dq_img else dq_text}
   </div>
 </body>
 </html>
 """
 
     out_path = art_dir / f"report_{equip}.html"
-    out_path.write_text(html_doc, encoding="utf-8")
+    out_path.write_text(html, encoding="utf-8")
     print(f"[REPORT] Saved -> {out_path}")
 
 

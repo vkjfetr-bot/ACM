@@ -63,7 +63,7 @@ def write_payloads(artifacts_dir: str, limit: int = 500) -> None:
                 "ts": row.Ts.isoformat(),
                 "fused": float(row.FusedScore),
                 "theta": float(row.Theta) if "Theta" in subset.columns else None,
-                "head": row.DominantHead if "DominantHead" in subset.columns else None,
+                "dominant_head": row.DominantHead if "DominantHead" in subset.columns else None,
                 "persistent": bool(row.PersistentEvent) if "PersistentEvent" in subset.columns else False,
             }
             for row in subset.itertuples()
@@ -87,6 +87,7 @@ def write_payloads(artifacts_dir: str, limit: int = 500) -> None:
                 "persistence": row.Persistence if "Persistence" in events_df.columns else None,
                 "top_tags": row.TopTags.split(",") if "TopTags" in events_df.columns and isinstance(row.TopTags, str) else [],
                 "heads": row.ContributingHeads.split(",") if "ContributingHeads" in events_df.columns and isinstance(row.ContributingHeads, str) else [],
+                "tag_contrib": json.loads(row.TagContrib) if "TagContrib" in events_df.columns and isinstance(row.TagContrib, str) else {},
             }
             for row in events_df.itertuples()
         ]
