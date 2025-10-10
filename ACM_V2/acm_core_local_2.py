@@ -651,115 +651,191 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
         }
         _write_run_summary(run_summary)
 
-def score_window(csv_path: str, save_prefix="acm") -> Dict:
-    with Timer("LOAD_DATA", {"csv": csv_path}):
-        df = pd.read_csv(csv_path)
-    with Timer("CLEAN_TIME"):
-        df = ensure_time_index(df)
+def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) -> Dict:
+    equip_name = _equip_name(csv_path, equip)
+    started = time.perf_counter()
+    status = "ok"
+    err_msg = ""
+    rows_in = 0
+    feat_rows = 0
+    events_count = 0
+    regime_count = 0
+    theta_latest = None
+    theta_prev = None
+    theta_step = 0.0
+    theta_p95 = 0.0
+    data_span_min = 0.0
+    run_info: Dict[str, Any] = {"ok": False}
+    scored_path = Path(ART_DIR) / f"{save_prefix}_scored_window.csv"
+    artifact_age = artifact_age_minutes(scored_path)
 
-    with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json")) as f:
-        man = json.load(f)
+    try:
+        with Timer("LOAD_DATA", {"csv": csv_path}):
+            df = pd.read_csv(csv_path)
+        with Timer("CLEAN_TIME"):
+            df = ensure_time_index(df)
 
-    with Timer("RESAMPLE", {"rule": man["resample_rule"]}):
-        df = resample_numeric(df, man["resample_rule"])
-        df = df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
-        # Save resampled numeric frame for report (sparklines & event spectra)
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        if not SKIP_DIAG:
-            resampled_out = os.path.join(ART_DIR, "acm_resampled.csv")
-            df[numeric_cols].to_csv(resampled_out, index=True)
-            print(f"[SAVE] Resampled numeric data -> {resampled_out}")
+        with open(os.path.join(ART_DIR, f"{save_prefix}_manifest.json")) as f:
+            man = json.load(f)
 
-    tags = man["tags"]; W, S, max_fft = man["window"], man["stride"], man["max_fft_bins"]
+        with Timer("RESAMPLE", {"rule": man["resample_rule"]}):
+            df = resample_numeric(df, man["resample_rule"])
+            df = df.apply(pd.to_numeric, errors="coerce").dropna(axis=1, how="all")
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            if not SKIP_DIAG:
+                resampled_out = os.path.join(ART_DIR, f"{save_prefix}_resampled.csv")
+                df[numeric_cols].to_csv(resampled_out, index=True)
+                print(f"[SAVE] Resampled numeric data -> {resampled_out}")
+        rows_in = len(df)
+        data_span_min = _data_span_minutes(df.index)
 
-    with Timer("FEATURES_BUILD", {"W": W, "S": S, "fft_bins": max_fft}):
-        F = build_feature_matrix(df, tags, W, S, max_fft)
-        from joblib import load
-        scaler = load(os.path.join(ART_DIR, f"{save_prefix}_scaler.joblib"))
-        Xn = scaler.transform(F.values)
+        tags = man["tags"]
+        write_dq_metrics(df, tags, save_prefix)
+        W, S, max_fft = man["window"], man["stride"], man["max_fft_bins"]
 
-    with Timer("REGIMES"):
-        from joblib import load
-        km = load(os.path.join(ART_DIR, f"{save_prefix}_regimes.joblib"))
-        regimes = km.predict(Xn)
+        with Timer("FEATURES_BUILD", {"W": W, "S": S, "fft_bins": max_fft}):
+            F = build_feature_matrix(df, tags, W, S, max_fft)
+            feat_rows = len(F)
+            from joblib import load
+            scaler = load(os.path.join(ART_DIR, f"{save_prefix}_scaler.joblib"))
+            Xn = scaler.transform(F.values)
 
-    # H1 fast: Forecast-lite + AR1
-    with Timer("H1_SCORE", {"mode": man.get("h1_mode","lite_ar1"), "roll": man.get("h1_roll",9)}):
-        mode = man.get("h1_mode","lite_ar1").lower()
-        try:
-            with open(os.path.join(ART_DIR, f"{save_prefix}_h1_ar1.json")) as f:
-                ar1_coeffs = json.load(f)
-        except FileNotFoundError:
-            ar1_coeffs = {}
-        s_h1 = h1_score_fast(df, tags, mode, man.get("h1_roll",9), man.get("h1_robust",True), ar1_coeffs)
-        s_h1 = s_h1.reindex(F.index).fillna(method="ffill").fillna(0)
+        with Timer("REGIMES"):
+            from joblib import load
+            km = load(os.path.join(ART_DIR, f"{save_prefix}_regimes.joblib"))
+            regimes = km.predict(Xn)
+            regime_count = int(getattr(km, "n_clusters", len(np.unique(regimes))))
 
-    # H2 reconstruction (PCA)
-    with Timer("H2_SCORE"):
-        from joblib import load
-        pca = load(os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
-        Xr = pca.inverse_transform(pca.transform(Xn))
-        err = ((Xn - Xr)**2).sum(axis=1)
-        s_h2 = pd.Series(err, index=F.index)
-        p95 = s_h2.quantile(0.95) or 1.0
-        s_h2 = (s_h2 / (p95 + 1e-9)).clip(0,1)
+        with Timer("H1_SCORE", {"mode": man.get("h1_mode", "lite_ar1"), "roll": man.get("h1_roll", 9)}):
+            mode = man.get("h1_mode", "lite_ar1").lower()
+            try:
+                with open(os.path.join(ART_DIR, f"{save_prefix}_h1_ar1.json")) as f:
+                    ar1_coeffs = json.load(f)
+            except FileNotFoundError:
+                ar1_coeffs = {}
+            s_h1 = h1_score_fast(df, tags, mode, man.get("h1_roll", 9), man.get("h1_robust", True), ar1_coeffs)
+            s_h1 = s_h1.reindex(F.index).fillna(method="ffill").fillna(0)
 
-    # H3: embedding drift via PCA space (cosine to rolling mean)
-    with Timer("H3_SCORE"):
-        Emb = pca.transform(Xn)
-        from numpy.linalg import norm
-        scores = np.zeros(len(Emb))
-        for i in range(len(Emb)):
-            j0 = max(0, i-50); ref = Emb[j0:i]
-            if len(ref) < 10: scores[i]=0.0; continue
-            mu = ref.mean(axis=0)
-            cos = float((Emb[i]*mu).sum() / (norm(Emb[i])*norm(mu) + 1e-9))
-            scores[i] = max(0.0, 1.0 - cos)
-        s_h3 = pd.Series(scores, index=F.index)
+        with Timer("H2_SCORE"):
+            from joblib import load
+            pca = load(os.path.join(ART_DIR, f"{save_prefix}_pca.joblib"))
+            Xr = pca.inverse_transform(pca.transform(Xn))
+            err = ((Xn - Xr)**2).sum(axis=1)
+            s_h2 = pd.Series(err, index=F.index)
+            p95 = s_h2.quantile(0.95) or 1.0
+            s_h2 = (s_h2 / (p95 + 1e-9)).clip(0, 1)
 
-    # Context & extras
-    with Timer("CONTEXT_MASKS", {"slope_thr": man.get("slope_thr",0.75), "accel_thr": man.get("accel_thr",1.25)}):
-        mask = detect_transients(df, tags, slope_thr=man.get("slope_thr",0.75), accel_thr=man.get("accel_thr",1.25))
-        mask = mask.reindex(F.index).fillna(0)
+        with Timer("H3_SCORE"):
+            Emb = pca.transform(Xn)
+            from numpy.linalg import norm
+            scores = np.zeros(len(Emb))
+            for i in range(len(Emb)):
+                j0 = max(0, i - 50)
+                ref = Emb[j0:i]
+                if len(ref) < 10:
+                    scores[i] = 0.0
+                    continue
+                mu = ref.mean(axis=0)
+                cos = float((Emb[i] * mu).sum() / (norm(Emb[i]) * norm(mu) + 1e-9))
+                scores[i] = max(0.0, 1.0 - cos)
+            s_h3 = pd.Series(scores, index=F.index)
 
-    with Timer("CORROBORATION"):
-        corrb = corroboration_boost(df.reindex(F.index, method="nearest"), tags, pairs=man.get("corroboration_pairs",20))
+        with Timer("CONTEXT_MASKS", {"slope_thr": man.get("slope_thr", 0.75), "accel_thr": man.get("accel_thr", 1.25)}):
+            mask = detect_transients(df, tags, slope_thr=man.get("slope_thr", 0.75), accel_thr=man.get("accel_thr", 1.25))
+            mask = mask.reindex(F.index).fillna(0)
 
-    with Timer("CHANGEPOINT"):
-        cpd = change_point_signal(df.reindex(F.index, method="nearest"), tags, W=60)
+        with Timer("CORROBORATION"):
+            corrb = corroboration_boost(df.reindex(F.index, method="nearest"), tags, pairs=man.get("corroboration_pairs", 20))
 
-    with Timer("FUSION"):
-        base = np.maximum.reduce([0.45*s_h1.values, 0.35*s_h2.values, 0.35*s_h3.values])
-        boost = 0.15*corrb.values + 0.10*cpd.values
-        fused = np.clip(base + boost, 0, 1)
-        fused = np.where(mask.values>0, fused*0.7, fused)
+        with Timer("CHANGEPOINT"):
+            cpd = change_point_signal(df.reindex(F.index, method="nearest"), tags, W=60)
 
-    with Timer("EPISODES", {"tau": man.get("fused_tau",0.7), "merge_gap": man.get("merge_gap",3)}):
-        episodes = build_episodes(pd.Series(fused, index=F.index), man.get("fused_tau",0.7), man.get("merge_gap",3))
+        with Timer("FUSION"):
+            base = np.maximum.reduce([0.45 * s_h1.values, 0.35 * s_h2.values, 0.35 * s_h3.values])
+            boost = 0.15 * corrb.values + 0.10 * cpd.values
+            fused = np.clip(base + boost, 0, 1)
+            fused = np.where(mask.values > 0, fused * 0.7, fused)
+        fused_series = pd.Series(fused, index=F.index, name="FusedScore")
 
-    with Timer("EXPORT"):
-        out = F.copy()
-        out["Regime"] = regimes
-        out["H1_Forecast"] = s_h1.values
-        out["H2_Recon"] = s_h2.values
-        out["H3_Contrast"] = s_h3.values
-        out["CorrBoost"] = corrb.values
-        out["CPD"] = cpd.values
-        out["ContextMask"] = mask.values
-        out["FusedScore"] = fused
-        out.to_csv(os.path.join(ART_DIR, f"{save_prefix}_scored_window.csv"))
+        theta_prev = load_previous_theta(save_prefix)
+        theta_series = dynamic_threshold(fused_series)
+        if not theta_series.empty:
+            theta_latest = float(theta_series.iloc[-1])
+            theta_p95 = float(theta_series.quantile(0.95))
+            theta_step = theta_step_pct(theta_prev, theta_latest)
+            if abs(theta_step) >= GUARDRAIL_WARN_STEP_PCT:
+                level = "alert" if abs(theta_step) >= GUARDRAIL_ALERT_STEP_PCT else "warn"
+                message = f"theta shift {theta_step:.1f}% (prev={theta_prev}, curr={theta_latest})"
+                _append_guardrail(save_prefix, "theta_step", level, message, {"theta_prev": theta_prev, "theta_curr": theta_latest})
+        save_thresholds(theta_series, save_prefix)
 
-        # events
-        pd.DataFrame([{"Start": e["start"], "End": e["end"], "PeakScore": e["peak"]} for e in episodes]).to_csv(
-            os.path.join(ART_DIR, f"{save_prefix}_events.csv"), index=False)
+        with Timer("EPISODES", {"merge_gap": man.get("merge_gap", 3)}):
+            episodes = build_episodes(fused_series, theta_series, man.get("merge_gap", 3))
+            events_count = len(episodes)
 
-        # masks
-        pd.DataFrame({"Ts": F.index, "Mask": mask.values}).to_csv(
-            os.path.join(ART_DIR, f"{save_prefix}_context_masks.csv"), index=False)
+        with Timer("EXPORT"):
+            out = F.copy()
+            out["Regime"] = regimes
+            out["H1_Forecast"] = s_h1.values
+            out["H2_Recon"] = s_h2.values
+            out["H3_Contrast"] = s_h3.values
+            out["CorrBoost"] = corrb.values
+            out["CPD"] = cpd.values
+            out["ContextMask"] = mask.values
+            out["FusedScore"] = fused
+            theta_aligned = theta_series.reindex(F.index)
+            if theta_aligned.isna().any():
+                if not theta_series.empty:
+                    theta_aligned = theta_aligned.fillna(method="ffill").fillna(method="bfill")
+                else:
+                    theta_aligned = pd.Series(np.zeros(len(F)), index=F.index)
+            out["Theta"] = theta_aligned.values
+            out.to_csv(scored_path)
 
-    with Timer("SUMMARY"):
-        print(f"Rows: {len(F):,} | Regimes seen: {len(np.unique(regimes))} | Events: {len(episodes)}")
-    return {"ok": True, "rows": int(len(F)), "events": int(len(episodes))}
+            pd.DataFrame([{"Start": e["start"], "End": e["end"], "PeakScore": e["peak"]} for e in episodes]).to_csv(
+                os.path.join(ART_DIR, f"{save_prefix}_events.csv"), index=False)
+            pd.DataFrame({"Ts": F.index, "Mask": mask.values}).to_csv(
+                os.path.join(ART_DIR, f"{save_prefix}_context_masks.csv"), index=False)
+            fused_series.reset_index().rename(columns={"index": "Ts"}).to_csv(
+                os.path.join(ART_DIR, f"{save_prefix}_scores.csv"), index=False)
+
+        with Timer("SUMMARY"):
+            print(f"Rows: {len(F):,} | Regimes seen: {len(np.unique(regimes))} | Events: {events_count}")
+
+        run_info = {"ok": True, "rows": int(len(F)), "events": events_count, "theta_p95": theta_p95}
+        return run_info
+    except Exception as exc:
+        status = "error"
+        err_msg = str(exc)
+        raise
+    finally:
+        latency_s = time.perf_counter() - started
+        guard_events = acm_observe.load_guardrail_events(ART_DIR)
+        guard_state = acm_observe.guardrail_state(guard_events)
+        tag_count = len(man.get("tags", [])) if "man" in locals() else 0
+        run_summary = {
+            "run_id": RUN_ID,
+            "ts_utc": _now_iso(),
+            "equip": equip_name,
+            "cmd": "score",
+            "rows_in": rows_in,
+            "tags": tag_count,
+            "feat_rows": feat_rows,
+            "regimes": regime_count,
+            "events": events_count,
+            "data_span_min": round(data_span_min, 3),
+            "phase": "",
+            "k_selected": regime_count,
+            "theta_p95": round(theta_p95, 6) if theta_p95 else 0.0,
+            "drift_flag": 0,
+            "guardrail_state": guard_state,
+            "theta_step_pct": round(theta_step, 3),
+            "latency_s": round(latency_s, 3),
+            "artifacts_age_min": round(artifact_age, 3),
+            "status": status,
+            "err_msg": err_msg,
+        }
+        _write_run_summary(run_summary)
 
 def drift_check(csv_path: str, save_prefix="acm") -> pd.DataFrame:
     base = pd.read_csv(os.path.join(ART_DIR, f"{save_prefix}_tag_baselines.csv"), index_col=0)
