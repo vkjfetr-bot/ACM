@@ -72,11 +72,19 @@ def build_report(artifacts_dir: str, equip: str) -> None:
     run_summary = pd.read_csv(run_summary_path) if run_summary_path.exists() else pd.DataFrame()
     latest_summary = run_summary.tail(2) if not run_summary.empty else pd.DataFrame()
 
-    html_events = (
-        events.head(20).to_html(index=False, classes="table table-sm")
-        if not events.empty
-        else "<em>No events recorded.</em>"
-    )
+    if not events.empty:
+        display_events = events[["Start", "End", "PeakScore"]].copy()
+        if "DurationMin" in events.columns:
+            display_events["DurationMin"] = events["DurationMin"]
+        if "Persistence" in events.columns:
+            display_events["Persistence"] = events["Persistence"]
+        if "TopTags" in events.columns:
+            display_events["TopTags"] = events["TopTags"]
+        if "ContributingHeads" in events.columns:
+            display_events["Heads"] = events["ContributingHeads"]
+        html_events = display_events.head(20).to_html(index=False, classes="table table-sm")
+    else:
+        html_events = "<em>No events recorded.</em>"
     html_dq = (
         dq.sort_values("flatline_pct", ascending=False)
         .head(20)

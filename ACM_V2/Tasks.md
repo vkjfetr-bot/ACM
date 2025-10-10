@@ -122,9 +122,9 @@ data/                          # inputs (SP export or CSV)
 
 ---
 
-### PHASE 3 - Autonomy Guardrails + River Streaming (Early)
+### PHASE 3 - Guardrail Operations (River deferred)
 
-**Goal:** Instrument automation so it can be trusted (guardrails, health signals, rollback) while wiring in River streaming hooks.
+**Goal:** Strengthen guardrail logging, run-health reporting, and rollback tooling (River adapters deferred to a later phase).
 
 **Tasks**
 
@@ -140,19 +140,9 @@ data/                          # inputs (SP export or CSV)
 
   * After each successful train, snapshot current champion (models, scalers, thresholds) to `models/rollback/last/`.
   * Provide `acm_observe.create_rollback_point()` and `restore_rollback_point()` wrappers (no auto-restore yet).
-* [ ] **River adapters** (`acm_river.py`):
-
-  * `RiverKMeansAdapter`: wraps `river.cluster.KMeans` (online partial updates).
-  * `ADWINDrift`: wraps `river.drift.ADWIN` per fused score with `drift_update()` returning severity.
-  * Persist minimal River state (JSON) to artifacts (centroids, counts, adwin deltas).
-* [ ] **Score-path hooks**:
-
-  * If River mode enabled, update ADWIN per fused window; on drift, set `drift_flag=1`, emit guardrail entry, and optionally trigger challenger retrain flag.
-  * River KMeans predictions optional (parallel to batch ensemble); keep current ensemble default for now.
-
 **Deliverables**
 
-* [ ] `artifacts/<equip>/river_state.json`, `guardrail_log.jsonl`, and `run_health.json` written; `run_summary.csv` shows guardrail state when drift/latency occurs.
+* [x] `guardrail_log.jsonl` and `run_health.json` written; `run_summary.csv` shows guardrail state when drift/latency occurs.
 
 > We're **implementing River early** as requested, while also wiring the accountability hooks demanded by the updated vision.
 
@@ -164,25 +154,25 @@ data/                          # inputs (SP export or CSV)
 
 **Tasks**
 
-* [ ] **Core enrichments** (builds on Phase 1/2 work):
+* [x] **Core enrichments** (builds on Phase 1/2 work):
 
   * During eventization, compute persistence classification (`transient | persistent`) using fused slope + duration patience.
   * Capture per-head tag contributions (`H1`, `H2`, `H3`) -> attach to `events.csv` and emit `events_timeline.json`.
   * Include contributing-head list and persistence flag in `scores.csv` (via `per_tag_contrib` column or sidecar file).
-* [ ] `acm_report_basic.py`:
+* [x] `acm_report_basic.py`:
 
   * Read `scores.csv`, `thresholds.csv`, `events.csv`, `dq.csv`, `guardrail_log.jsonl`, (optional) `regimes.csv`.
   * Build HTML: meta/guardrail callouts -> DQ heatmap -> timeline (fused vs theta, drift markers) -> event cards listing top tags, persistence, start/end, contributing heads.
   * Highlight current guardrail state and outstanding acknowledgements.
   * Save `report_<equip>.html`.
-* [ ] **Split payloads**:
+* [x] **Split payloads**:
 
-  * `acm_payloads.py` stays separate but now writes placeholder JSON structures (`timeline.json`, `events.json`, `dq.json`) with empty arrays ready for real data later.
+  * `acm_payloads.py` now emits real JSON payloads (`timeline.json`, `events.json`, `dq.json`) sourced from the latest artifacts.
 
 **Deliverables**
 
-* [ ] `report_<equip>.html` present with top tags/persistence callouts.
-* [x] `events_timeline.json` plus placeholder `payload_*.json` files exist (structure only).
+* [x] `report_<equip>.html` present with top tags/persistence callouts.
+* [x] `events_timeline.json` and populated `payload_*.json` exports exist.
 
 ---
 

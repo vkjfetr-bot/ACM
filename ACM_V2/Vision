@@ -121,6 +121,7 @@ Each head produces a score in [0,1].
 * **What is the health right now?** `I(t)` vs `theta(t)` drives gauges, dashboards, and alarms.
 * **Is it going to stay bad?** Trend persistence checks and drift magnitude show whether degradation is transient or sustained.
 * **What is responsible?** Per-head tag attribution (residual z-scores, PCA reconstruction loadings, drift deltas) is ranked and exposed in `events.csv`, briefs, and HTML charts.
+  * **How do we see it?** events_timeline.json, 	imeline.json, and events.json capture persistence labels, top tags, and dominant heads for dashboards and reports.
 * **When did it start?** Event timelines record onset, peak, and recovery so teams can correlate with process actions or maintenance logs.
 
 ---

@@ -19,6 +19,7 @@ from sklearn.ensemble import VotingClassifier
 from sklearn.mixture import GaussianMixture
 from scipy.stats import mode
 import acm_observe
+import acm_payloads
 
 warnings.filterwarnings("ignore")
 
@@ -240,6 +241,10 @@ def _append_guardrail(save_prefix: str, g_type: str, level: str, message: str, e
 
 def _write_run_summary(row: Dict[str, Any]) -> None:
     try:
+        log_path = Path(ART_DIR) / acm_observe.GUARDRAIL_LOG_FILENAME
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if not log_path.exists():
+            log_path.touch()
         acm_observe.write_run_summary(ART_DIR, row)
         acm_observe.write_run_health(ART_DIR, row)
     except Exception as exc:
@@ -855,8 +860,8 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             s_h3 = pd.Series(0.0, index=F.index)
 
         with Timer("CONTEXT_MASKS", {"slope_thr": man.get("slope_thr", 0.75), "accel_thr": man.get("accel_thr", 1.25)}):
-            mask = detect_transients(df, tags, slope_thr=man.get("slope_thr", 0.75), accel_thr=man.get("accel_thr", 1.25))
-            mask = mask.reindex(F.index).fillna(0)
+            context_mask = detect_transients(df, tags, slope_thr=man.get("slope_thr", 0.75), accel_thr=man.get("accel_thr", 1.25))
+            context_mask = context_mask.reindex(F.index).fillna(0)
 
         with Timer("CORROBORATION"):
             corrb = corroboration_boost(df.reindex(F.index, method="nearest"), tags, pairs=man.get("corroboration_pairs", 20))
@@ -871,7 +876,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             base = np.maximum.reduce(components)
             boost = 0.15 * corrb.values + 0.10 * cpd.values
             fused = np.clip(base + boost, 0, 1)
-            fused = np.where(mask.values > 0, fused * 0.7, fused)
+            fused = np.where(context_mask.values > 0, fused * 0.7, fused)
         fused_series = pd.Series(fused, index=F.index, name="FusedScore")
 
         theta_prev = load_previous_theta(save_prefix)
@@ -887,8 +892,47 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
         save_thresholds(theta_series, save_prefix)
 
         with Timer("EPISODES", {"merge_gap": man.get("merge_gap", 3)}):
-            episodes = build_episodes(fused_series, theta_series, man.get("merge_gap", 3))
-            events_count = len(episodes)
+            episodes_raw = build_episodes(fused_series, theta_series, man.get("merge_gap", 3))
+            events_enriched: List[Dict[str, Any]] = []
+            persistent_flag = pd.Series(0, index=F.index, dtype=int)
+            z_df = df[tags].reindex(F.index, method="nearest")
+            z_df = (z_df - z_df.mean()) / (z_df.std(ddof=0) + 1e-9)
+            for e in episodes_raw:
+                event_mask = (F.index >= e["start"]) & (F.index <= e["end"])
+                if not event_mask.any():
+                    continue
+                fused_slice = fused_series.loc[event_mask]
+                duration_min = max((e["end"] - e["start"]).total_seconds() / 60.0, 0.0)
+                slope = fused_slice.diff().mean() if len(fused_slice) > 1 else 0.0
+                persistent = duration_min >= 30 or (slope is not None and slope > 0.002)
+                if persistent:
+                    persistent_flag.loc[event_mask] = 1
+
+                z_slice = z_df.loc[event_mask].abs().mean(axis=0).sort_values(ascending=False)
+                top_tags = z_slice.head(3).index.tolist()
+
+                head_peaks = {
+                    "H1": float(s_h1.loc[fused_slice.index].max()),
+                    "H2": float(s_h2.loc[fused_slice.index].max()),
+                    "H3": float(s_h3.loc[fused_slice.index].max()),
+                }
+                contributing_heads = [head for head, val in head_peaks.items() if val >= 0.6]
+                if not contributing_heads:
+                    contributing_heads = [max(head_peaks, key=head_peaks.get)]
+
+                events_enriched.append(
+                    {
+                        "Start": e["start"],
+                        "End": e["end"],
+                        "PeakScore": e["peak"],
+                        "DurationMin": round(duration_min, 3),
+                        "Persistence": "persistent" if persistent else "transient",
+                        "TopTags": ",".join(top_tags),
+                        "ContributingHeads": ",".join(contributing_heads),
+                    }
+                )
+
+            events_count = len(events_enriched)
 
         with Timer("EXPORT"):
             out = F.copy()
@@ -898,7 +942,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
             out["H3_Contrast"] = s_h3.values
             out["CorrBoost"] = corrb.values
             out["CPD"] = cpd.values
-            out["ContextMask"] = mask.values
+            out["ContextMask"] = context_mask.values
             out["FusedScore"] = fused
             theta_aligned = theta_series.reindex(F.index)
             if theta_aligned.isna().any():
@@ -907,16 +951,36 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None) ->
                 else:
                     theta_aligned = pd.Series(np.zeros(len(F)), index=F.index)
             out["Theta"] = theta_aligned.values
+            dominant_head_idx = np.vstack(
+                [s_h1.values, s_h2.values, s_h3.values]
+            ).argmax(axis=0)
+            head_map = np.array(["H1", "H2", "H3"])
+            out["DominantHead"] = head_map[dominant_head_idx]
+            out["PersistentEvent"] = persistent_flag.values
             out.to_csv(scored_path)
 
-            events_df = pd.DataFrame([{"Start": e["start"], "End": e["end"], "PeakScore": e["peak"]} for e in episodes])
+            events_df = pd.DataFrame(events_enriched)
             events_df.to_csv(os.path.join(ART_DIR, f"{save_prefix}_events.csv"), index=False)
             events_df.to_csv(os.path.join(ART_DIR, "events.csv"), index=False)
-            pd.DataFrame({"Ts": F.index, "Mask": mask.values}).to_csv(
+            pd.DataFrame({"Ts": F.index, "Mask": context_mask.values}).to_csv(
                 os.path.join(ART_DIR, f"{save_prefix}_context_masks.csv"), index=False)
-            fused_export = fused_series.reset_index().rename(columns={"index": "Ts"})
+            fused_export = out[["FusedScore", "Theta", "DominantHead", "PersistentEvent"]].reset_index().rename(columns={"index": "Ts"})
             fused_export.to_csv(os.path.join(ART_DIR, f"{save_prefix}_scores.csv"), index=False)
             fused_export.to_csv(os.path.join(ART_DIR, "scores.csv"), index=False)
+            timeline_payload = [
+                {
+                    "start": str(e["Start"]),
+                    "end": str(e["End"]),
+                    "peak": e["PeakScore"],
+                    "duration_min": e["DurationMin"],
+                    "persistence": e["Persistence"],
+                    "top_tags": e["TopTags"].split(",") if e["TopTags"] else [],
+                    "heads": e["ContributingHeads"].split(",") if e["ContributingHeads"] else [],
+                }
+                for e in events_enriched
+            ]
+            (Path(ART_DIR) / "events_timeline.json").write_text(json.dumps(timeline_payload, indent=2), encoding="utf-8")
+            acm_payloads.write_payloads(ART_DIR)
 
         with Timer("SUMMARY"):
             print(f"Rows: {len(F):,} | Regimes seen: {len(np.unique(regimes))} | Events: {events_count}")
