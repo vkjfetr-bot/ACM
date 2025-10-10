@@ -16,12 +16,20 @@ import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
-ACCENT_BLUE = "#005a9c"
-ACCENT_ORANGE = "#ff9248"
-ACCENT_GREEN = "#2ca58d"
-BACKGROUND = "#f7f9fb"
-TEXT_COLOR = "#1d1d1f"
-GRID_STYLE = {"linestyle": "--", "alpha": 0.3}
+ACCENT_BLUE = "#087f8c"
+ACCENT_ORANGE = "#f76f8e"
+ACCENT_GREEN = "#43aa8b"
+BACKGROUND = "#f5f8ff"
+TEXT_COLOR = "#212738"
+GRID_STYLE = {"linestyle": "--", "alpha": 0.25}
+VIVID_PALETTE = ["#087f8c", "#f76f8e", "#ffb400", "#5a189a", "#43aa8b", "#f94144", "#4cc9f0"]
+
+
+def _safe_palette(n: int) -> List[str]:
+    if n <= len(VIVID_PALETTE):
+        return VIVID_PALETTE[:n]
+    reps = (n // len(VIVID_PALETTE)) + 1
+    return (VIVID_PALETTE * reps)[:n]
 
 
 def _encode_fig(fig: plt.Figure) -> str:
@@ -59,6 +67,15 @@ def _summarise_guardrails(rows: List[Dict]) -> str:
             f"<li><strong>{level}</strong> &mdash; {gtype}: {msg} <span class='stamp'>({stamp})</span></li>"
         )
     return "<ul>" + "".join(items) + "</ul>"
+
+
+def _latest_runs(path: Path, take: int = 6) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    if df.empty:
+        return df
+    return df.tail(take)
 
 
 def _latest_run_summary(path: Path) -> str:
@@ -115,9 +132,9 @@ def _plot_blame(top_event: pd.Series) -> str:
         return ""
     tags, values = zip(*sorted(contrib.items(), key=lambda kv: kv[1]))
     fig, ax = plt.subplots(figsize=(6, 3.5))
-    ax.barh(tags, values, color=ACCENT_BLUE)
+    ax.barh(tags, values, color=_safe_palette(len(tags)))
     ax.set_xlabel("Average |z-score|")
-    ax.set_title("Blame chart — top drivers")
+    ax.set_title("Blame chart - top drivers")
     for i, v in enumerate(values):
         ax.text(v + 0.02, i, f"{v:0.2f}", va="center", fontsize=9, color=TEXT_COLOR)
     ax.grid(**GRID_STYLE, axis="x")
@@ -129,7 +146,7 @@ def _plot_head_mix(scores: pd.DataFrame) -> str:
         return ""
     counts = scores["DominantHead"].value_counts().sort_values(ascending=False)
     fig, ax = plt.subplots(figsize=(5, 3.5))
-    ax.bar(counts.index, counts.values, color=ACCENT_GREEN)
+    ax.bar(counts.index, counts.values, color=_safe_palette(len(counts)))
     ax.set_ylabel("Samples")
     ax.set_title("Which hypothesis fired most")
     ax.grid(**GRID_STYLE, axis="y")
@@ -152,7 +169,7 @@ def _plot_dq(dq: pd.DataFrame) -> str:
             ax.axis("off")
             continue
         top = dq.nlargest(5, col)
-        ax.barh(top["Tag"], top[col], color=ACCENT_BLUE)
+        ax.barh(top["Tag"], top[col], color=_safe_palette(1)[0])
         ax.set_xlabel(label)
         ax.invert_yaxis()
         ax.grid(**GRID_STYLE, axis="x")
@@ -210,6 +227,108 @@ def _plot_tag_overlay(resampled_path: Path, events: Optional[pd.DataFrame], top_
     ax.set_title("Tag behaviour overlay")
     ax.grid(**GRID_STYLE)
     ax.legend(frameon=False)
+    return _encode_fig(fig)
+
+
+def _plot_head_timeseries(scores: pd.DataFrame) -> str:
+    columns = [c for c in scores.columns if c.startswith("H")]
+    if not columns:
+        return ""
+    palette = _safe_palette(len(columns))
+    fig, ax = plt.subplots(figsize=(11, 4))
+    for idx, col in enumerate(columns):
+        ax.plot(scores["Ts"], scores[col], label=col, color=palette[idx], linewidth=1.1)
+    ax.set_title("Hypothesis score footprints")
+    ax.set_ylabel("Score")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    fig.autofmt_xdate()
+    ax.grid(**GRID_STYLE)
+    ax.legend(frameon=False, ncol=3)
+    return _encode_fig(fig)
+
+
+def _plot_event_timeline(events: pd.DataFrame) -> str:
+    if events.empty:
+        return ""
+    events = events.copy()
+    events["Date"] = events["Start"].dt.date
+    agg = events.groupby(["Date", "Persistence"]).size().unstack(fill_value=0)
+    fig, ax = plt.subplots(figsize=(9, 3.2))
+    agg.plot(kind="bar", stacked=True, ax=ax, color=["#ff8fab", "#7b2cbf"])
+    ax.set_ylabel("Events")
+    ax.set_title("Daily anomaly cadence")
+    ax.grid(**GRID_STYLE, axis="y")
+    ax.legend(["Transient", "Persistent"], frameon=False)
+    return _encode_fig(fig)
+
+
+def _plot_event_scatter(events: pd.DataFrame) -> str:
+    if events.empty:
+        return ""
+    fig, ax = plt.subplots(figsize=(6, 4))
+    colours = events["Persistence"].str.lower().map({"persistent": "#ff595e", "transient": "#1982c4"}).fillna("#adb5bd")
+    bubble = events["DurationMin"].fillna(5) + 5
+    ax.scatter(events["Start"], events["PeakScore"], s=bubble, c=colours, alpha=0.6)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+    fig.autofmt_xdate()
+    ax.set_ylabel("Peak score")
+    ax.set_title("Every anomaly bubble: duration vs severity")
+    ax.grid(**GRID_STYLE)
+    return _encode_fig(fig)
+
+
+def _plot_correlation_heatmap(resampled_path: Path, top_event: Optional[pd.Series]) -> str:
+    if top_event is None or not resampled_path.exists():
+        return ""
+    df = pd.read_csv(resampled_path)
+    if df.empty:
+        return ""
+    ts_col = None
+    for name in ["Ts", "ts", "timestamp", df.columns[0]]:
+        if name in df.columns:
+            ts_col = name
+            break
+    if ts_col:
+        df["Ts"] = pd.to_datetime(df[ts_col], errors="coerce")
+        df = df.drop(columns=[ts_col])
+    if "Ts" in df.columns:
+        df = df.drop(columns=["Ts"])
+    tags = [t.strip() for t in (top_event.get("TopTags", "") or "").split(",") if t.strip()]
+    contrib = top_event.get("TagContrib", {})
+    if isinstance(contrib, str):
+        try:
+            contrib = json.loads(contrib)
+        except json.JSONDecodeError:
+            contrib = {}
+    if contrib:
+        tags = list({*tags, *sorted(contrib, key=contrib.get, reverse=True)[:4]})
+    tags = [t for t in tags if t in df.columns]
+    if len(tags) < 2:
+        return ""
+    corr = df[tags].corr()
+    fig, ax = plt.subplots(figsize=(5, 4))
+    im = ax.imshow(corr.values, cmap="coolwarm", vmin=-1, vmax=1)
+    ax.set_xticks(range(len(tags)))
+    ax.set_xticklabels(tags, rotation=45, ha="right")
+    ax.set_yticks(range(len(tags)))
+    ax.set_yticklabels(tags)
+    plt.colorbar(im, ax=ax, shrink=0.75, label="Correlation")
+    ax.set_title("Tag correlation inside alert window")
+    return _encode_fig(fig)
+
+
+def _plot_split_summary(run_tail: pd.DataFrame) -> str:
+    if run_tail.empty:
+        return ""
+    score_rows = run_tail[run_tail["cmd"].str.contains("score", na=False)]
+    if score_rows.empty:
+        return ""
+    fig, ax = plt.subplots(figsize=(7, 3.2))
+    ax.bar(score_rows["cmd"], score_rows["theta_p95"], color=_safe_palette(len(score_rows)))
+    ax.set_ylabel("Theta p95")
+    ax.set_title("Multiple score runs (prefix comparison)")
+    ax.set_xticklabels(score_rows["cmd"], rotation=45, ha="right")
+    ax.grid(**GRID_STYLE, axis="y")
     return _encode_fig(fig)
 
 
@@ -277,22 +396,40 @@ def build_report(artifacts_dir: str, equip: str) -> None:
 <body>
   <h1>ACMnxt Situation Report — {equip}</h1>
   <div class='section'>
-    <h2>How healthy are we?</h2>
-    <img src='{health_img}' alt='Fused score vs theta chart'>
+    <h2>How is the asset behaving?</h2>
+    <img src='{health_img}' alt='Fused score vs theta timeline'>
+    <p class='caption'>Shaded bands highlight anomaly windows; persistent alerts use a bolder tint so the timeline reads like a story.</p>
   </div>
   <div class='section'>
-    <h2>Who is to blame?</h2>
+    <h2>Who caused the biggest alert?</h2>
     {blame_text}
-    {f"<img src='{blame_img}' alt='Top tag contributions'>" if blame_img else ""}
+    {f"<img src='{blame_img}' alt='Top contributing tags'>" if blame_img else ""}
+    {f"<p class='caption'>Average z-scores per tag inside the highest alert window. Higher bars imply stronger blame.</p>" if blame_img else ""}
     {f"<img src='{overlay_img}' alt='Tag behaviour overlay'>" if overlay_img else ""}
-    {f"<img src='{head_img}' alt='Dominant hypothesis mix'>" if head_img else ""}
+    {f"<p class='caption'>Normalised tag traces for the culprits across time; the red bands show exactly when they pushed the score over threshold.</p>" if overlay_img else ""}
+    {f"<img src='{corr_img}' alt='Tag correlation heatmap'>" if corr_img else ""}
+    {f"<p class='caption'>Correlation of the same tags during the alert window, showing how joint movements escalate the anomaly.</p>" if corr_img else ""}
   </div>
   <div class='section'>
-    <h2>Guardrails & Run Snapshot</h2>
-    <h3>Latest run</h3>
-    {run_summary_html}
-    <h3>Guardrail events</h3>
+    <h2>Anomaly cadence</h2>
+    {f"<img src='{event_timeline_img}' alt='Daily anomaly cadence'>" if event_timeline_img else "<em>No anomalies recorded in the selected window.</em>"}
+    {f"<p class='caption'>Persistent events stack on top of transient ones; busy days stand out immediately.</p>" if event_timeline_img else ""}
+    {f"<img src='{event_scatter_img}' alt='Anomaly scatter'>" if event_scatter_img else ""}
+    {f"<p class='caption'>Each bubble represents one anomaly — the radius mirrors duration and the height reflects peak severity.</p>" if event_scatter_img else ""}
+  </div>
+  <div class='section'>
+    <h2>Which hypothesis is firing?</h2>
+    {f"<img src='{head_mix_img}' alt='Head dominance'>" if head_mix_img else ""}
+    {f"<p class='caption'>Counts of windows dominated by each hypothesis (H1 spikes, H2 multivariate structure, H3 drift).</p>" if head_mix_img else ""}
+    {f"<img src='{head_ts_img}' alt='Hypothesis score footprints'>" if head_ts_img else ""}
+    {f"<p class='caption'>Score footprints per hypothesis reveal when the model switches from spike detection to structural drift.</p>" if head_ts_img else ""}
+  </div>
+  <div class='section'>
+    <h2>Run history & guardrails</h2>
     {guardrail_html}
+    {run_table_html}
+    {f"<img src='{split_img}' alt='Score prefix summary'>" if split_img else ""}
+    {f"<p class='caption'>Multiple score runs in the same execution help compare operating regimes or synthetic splits.</p>" if split_img else ""}
   </div>
   <div class='section'>
     <h2>Sensor data quality</h2>
