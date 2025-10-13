@@ -23,13 +23,15 @@ import acm_observe
 warnings.filterwarnings("ignore")
 
 # ---- Artifacts directory (env or local default) ----
-ART_DIR = os.environ.get("ACM_ART_DIR")
-if not ART_DIR:
-    here = os.path.dirname(os.path.abspath(__file__))
-    root = os.path.dirname(here)
-    ART_DIR = os.path.join(root, "acm_artifacts")
-os.makedirs(ART_DIR, exist_ok=True)
-print(f"[ACM] Using ART_DIR: {ART_DIR}")
+ART_DIR = "" # This will be set by the CLI arguments
+
+def _set_art_dir(path: Optional[str] = None):
+    global ART_DIR
+    if path:
+        ART_DIR = path
+    else:
+        ART_DIR = os.environ.get("ACM_ART_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "acm_artifacts"))
+    os.makedirs(ART_DIR, exist_ok=True)
 
 ART_MODE = os.environ.get("ACM_ART_MODE", "full").lower()
 print(f"[ACM] Artifact mode: {ART_MODE}")
@@ -713,6 +715,7 @@ def train_core(csv_path: str, cfg: Optional[CoreConfig]=None, save_prefix="acm",
     except Exception as exc:
         status = "error"
         err_msg = str(exc)
+        _write_run_summary({"run_id": RUN_ID, "ts_utc": _now_iso(), "equip": equip_name, "cmd": "train", "status": "error", "err_msg": err_msg})
         raise
     finally:
         latency_s = time.perf_counter() - started
@@ -1010,6 +1013,7 @@ def score_window(csv_path: str, save_prefix="acm", equip: Optional[str]=None, ma
     except Exception as exc:
         status = "error"
         err_msg = str(exc)
+        _write_run_summary({"run_id": RUN_ID, "ts_utc": _now_iso(), "equip": equip_name, "cmd": "score", "status": "error", "err_msg": err_msg})
         raise
     finally:
         latency_s = time.perf_counter() - started
@@ -1065,11 +1069,14 @@ def drift_check(csv_path: str, save_prefix="acm") -> pd.DataFrame:
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser("ACM Core (H1: lite+AR1)")
+    p.add_argument("--art-dir", help="Override artifact directory")
     sub = p.add_subparsers(dest="cmd", required=True)
     tr = sub.add_parser("train"); tr.add_argument("--csv", required=True); tr.add_argument("--equip"); tr.add_argument("--prefix", default="acm")
     sc = sub.add_parser("score"); sc.add_argument("--csv", required=True); sc.add_argument("--equip"); sc.add_argument("--prefix", default="acm"); sc.add_argument("--manifest-prefix")
     dr = sub.add_parser("drift"); dr.add_argument("--csv", required=True)
     args = p.parse_args()
+    _set_art_dir(args.art_dir)
+    print(f"[ACM] Using ART_DIR: {ART_DIR}")
     with Timer("START"): pass
     try:
         if args.cmd == "train":
