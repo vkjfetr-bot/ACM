@@ -424,24 +424,28 @@ def auto_ensemble_regimes(
     kmin=2,
     kmax=6,
     random_state=17,
-    min_cluster_frac: float = 0.0,
-    silhouette_floor: float = 0.0,
+    min_cluster_frac: float = 0.0, # Minimum fraction of samples in the smallest cluster
+    silhouette_floor: float = 0.0, # Minimum acceptable silhouette score
 ) -> EnsembleRegimes:
     """Train an ensemble (KMeans + GMM) at a single selected K and store label alignment."""
     n_samples = Xn.shape[0]
     ks = [k for k in range(max(1, kmin), max(1, kmax) + 1) if k <= n_samples]
     if not ks:
         ks = [1]
+
     sil_best, k_best, km_best = -1.0, ks[0], None
     for k in ks:
         km = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
         labels = km.fit_predict(Xn)
+
         if k < 2 or len(np.unique(labels)) < 2:
             continue
+
         try:
             sil = silhouette_score(Xn, labels, metric="euclidean")
         except Exception:
             continue
+
         if silhouette_floor > 0.0 and sil < silhouette_floor:
             continue
         if min_cluster_frac > 0.0:
@@ -450,6 +454,7 @@ def auto_ensemble_regimes(
                 continue
         if sil > sil_best:
             sil_best, k_best, km_best = sil, k, km
+
     if km_best is None:
         k_best = max(1, min(kmax, kmin))
         km_best = KMeans(n_clusters=k_best, n_init="auto", random_state=random_state).fit(Xn)
