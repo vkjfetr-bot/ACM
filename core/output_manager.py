@@ -777,13 +777,17 @@ class OutputManager:
         Console.info(f"[DATA] Loading from SQL historian: {equipment_name}")
         Console.info(f"[DATA] Time range: {start_utc} to {end_utc}")
         
+        # Get EquipID for the stored procedure call
+        equip_id = self.equip_id if hasattr(self, 'equip_id') and self.equip_id else None
+        
         # Call stored procedure to get all data for time range
         hb = Heartbeat("Calling usp_ACM_GetHistorianData_TEMP", next_hint="parse results", eta_hint=5).start()
         try:
             cur = self.sql_client.cursor()
+            # Pass both EquipID (preferred) and EquipmentName (fallback) to stored procedure
             cur.execute(
-                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipmentName=?",
-                (start_utc, end_utc, equipment_name)
+                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipID=?, @EquipmentName=?",
+                (start_utc, end_utc, equip_id, equipment_name)
             )
             
             # Fetch all rows

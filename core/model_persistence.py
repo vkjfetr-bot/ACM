@@ -57,7 +57,7 @@ from utils.logger import Console
 class ModelVersionManager:
     """Manages model versioning, persistence, and loading (filesystem + SQL)."""
     
-    def __init__(self, equip: str, artifact_root: Path, sql_client=None, equip_id: Optional[int] = None):
+    def __init__(self, equip: str, artifact_root: Path, sql_client=None, equip_id: Optional[int] = None, sql_only_mode: bool = False):
         """
         Initialize model version manager.
         
@@ -66,11 +66,13 @@ class ModelVersionManager:
             artifact_root: Root artifacts directory (may or may not include equipment name)
             sql_client: Optional SQLClient for SQL persistence (None = filesystem only)
             equip_id: Equipment ID for SQL storage (required if sql_client provided)
+            sql_only_mode: If True, skip filesystem operations and only use SQL
         """
         self.equip = equip
         self.artifact_root = Path(artifact_root)
         self.sql_client = sql_client
         self.equip_id = equip_id
+        self.sql_only_mode = sql_only_mode
         
         # Check if artifact_root already includes equipment name to avoid duplication
         # (e.g., artifacts/COND_PUMP vs artifacts)

@@ -361,6 +361,7 @@ def _get_equipment_id(equipment_name: str) -> int:
     # SQL mode: use actual database IDs for known equipment
     sql_equipment_mapping = {
         'FD_FAN': 1,
+        'GAS_TURBINE': 2621,
         # Add other equipment mappings as needed
     }
     
@@ -516,14 +517,15 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
     window_end = None
 
     tsql = """
-    DECLARE @RunID UNIQUEIDENTIFIER, @WS DATETIME2(3), @WE DATETIME2(3);
+    DECLARE @RunID UNIQUEIDENTIFIER, @WS DATETIME2(3), @WE DATETIME2(3), @EID INT;
     EXEC dbo.usp_ACM_StartRun
         @EquipCode = ?, @EquipID = NULL, @Stage = ?, @TickMinutes = ?,
         @DefaultStartUtc = ?, @Version = ?, @ConfigHash = ?, @TriggerReason = ?,
         @RunID = @RunID OUTPUT,
         @WindowStartEntryDateTime = @WS OUTPUT,
-        @WindowEndEntryDateTime = @WE OUTPUT;
-    SELECT CONVERT(varchar(36), @RunID) AS RunID, @WS AS WindowStartEntryDateTime, @WE AS WindowEndEntryDateTime;
+        @WindowEndEntryDateTime = @WE OUTPUT,
+        @EquipIDOut = @EID OUTPUT;
+    SELECT CONVERT(varchar(36), @RunID) AS RunID, @WS AS WindowStartEntryDateTime, @WE AS WindowEndEntryDateTime, @EID AS EquipID;
     """
     """
     Calls the database stored procedure to start a new run.
@@ -543,8 +545,10 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
         run_id = str(row[0])
         ws = pd.to_datetime(row[1]) if row[1] else pd.Timestamp.now()
         we = pd.to_datetime(row[2]) if row[2] else pd.Timestamp.now()
+        # Get EquipID from stored procedure output (4th column)
+        equip_id = int(row[3]) if len(row) > 3 and row[3] is not None else equip_id
         cli.conn.commit()
-        Console.info(f"[RUN] Started RunID={run_id} window=[{ws},{we}) equip='{equip_code}'")
+        Console.info(f"[RUN] Started RunID={run_id} window=[{ws},{we}) equip='{equip_code}' EquipID={equip_id}")
         return run_id, ws, we, equip_id
     except Exception:
         cli.conn.rollback()
@@ -743,17 +747,45 @@ def main() -> None:
             Console.info(f"[DATA] Using batch (score_csv): {cfg.get('data', {}).get('score_csv', 'N/A')}")
 
             if SQL_MODE:
-                # SQL mode: Load from historian using stored procedure
-                train, score, meta = output_manager.load_data(
-                    cfg, 
-                    start_utc=win_start, 
-                    end_utc=win_end,
-                    equipment_name=equip,
-                    sql_mode=True
+                # SQL mode: Use smart coldstart with retry logic
+                from core.smart_coldstart import SmartColdstart
+                
+                coldstart_manager = SmartColdstart(
+                    sql_client=sql_client,
+                    equip_id=equip_id,
+                    equip_name=equip,
+                    stage='score'  # Always use 'score' stage for now
                 )
+                
+                # Attempt data loading with intelligent retry
+                train, score, meta, coldstart_complete = coldstart_manager.load_with_retry(
+                    output_manager=output_manager,
+                    cfg=cfg,
+                    initial_start=win_start,
+                    initial_end=win_end,
+                    max_attempts=3
+                )
+                
+                # If coldstart not complete, exit gracefully (will retry next job run)
+                if not coldstart_complete:
+                    Console.info("[COLDSTART] Deferred to next job run - insufficient data for training")
+                    Console.info("[COLDSTART] Job will retry automatically when more data arrives")
+                    
+                    # Mark run as NOOP (no operation) - not a failure
+                    outcome = "NOOP"
+                    rows_read = 0
+                    rows_written = 0
+                    
+                    # Finalize and exit
+                    if sql_client and run_id:
+                        _sql_finalize_run(sql_client, run_id=run_id, outcome=outcome, 
+                                        rows_read=rows_read, rows_written=rows_written, err_json=None)
+                    return  # Exit gracefully
+                    
             else:
                 # File mode: Load from CSV files
                 train, score, meta = output_manager.load_data(cfg)
+                
             train = _ensure_local_index(train)
             score = _ensure_local_index(score)
             
@@ -1191,24 +1223,30 @@ def main() -> None:
                     Console.warn(f"[MODEL] Failed to load cached detectors: {e}")
 
         # Attempt to infer EquipID from config or meta if available (0 if unknown)
-        with T.section("data.equip_id_infer"):
-            try:
-                equip_id = int(getattr(meta, "equip_id", 0) or 0)
-            except Exception:
-                equip_id = 0
-        
-        if SQL_MODE:
-            with T.section("data.equip_id_sql_mode"):
-                equip_id_cfg = cfg.get("runtime", {}).get("equip_id", equip_id)
+        # CRITICAL: In SQL_MODE, equip_id is already set by _sql_start_run() from stored procedure
+        # Do NOT override it! Only infer for file/dual modes.
+        if not SQL_MODE:
+            with T.section("data.equip_id_infer"):
                 try:
-                    equip_id = int(equip_id_cfg)
+                    equip_id = int(getattr(meta, "equip_id", 0) or 0)
                 except Exception:
                     equip_id = 0
-                if equip_id <= 0:
-                    raise RuntimeError(
-                        "EquipID is required and must be a positive integer in SQL mode. "
-                        "Set runtime.equip_id in config OR ensure output_manager.load_data(meta.equip_id) provides it."
-                    )
+                
+                # For dual mode, try config fallback if meta didn't provide it
+                if dual_mode and equip_id == 0:
+                    equip_id_cfg = cfg.get("runtime", {}).get("equip_id", equip_id)
+                    try:
+                        equip_id = int(equip_id_cfg)
+                    except Exception:
+                        equip_id = 0
+        
+        # Validate equip_id for SQL/dual modes
+        if (SQL_MODE or dual_mode) and equip_id <= 0:
+            raise RuntimeError(
+                f"EquipID is required and must be a positive integer in SQL/dual mode. "
+                f"Current value: {equip_id}. In SQL mode, this should come from _sql_start_run(). "
+                f"In dual mode, set runtime.equip_id in config OR ensure load_data provides it."
+            )
 
         # ===== 2) Fit heads on TRAIN =====
         
@@ -3261,8 +3299,8 @@ def main() -> None:
         outcome = "OK"
 
     except Exception as e:
-        # capture error for finalize
-        outcome = "ERROR"
+        # capture error for finalize (must be 'FAIL' not 'ERROR' to match Runs table constraint)
+        outcome = "FAIL"
         try:
             err_json = json.dumps({"type": e.__class__.__name__, "message": str(e)}, ensure_ascii=False)
         except Exception:

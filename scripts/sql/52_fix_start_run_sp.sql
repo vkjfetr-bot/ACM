@@ -17,7 +17,8 @@ CREATE PROC dbo.usp_ACM_StartRun
   @TriggerReason             VARCHAR(64) = 'timer',
   @RunID                     UNIQUEIDENTIFIER OUTPUT,
   @WindowStartEntryDateTime  DATETIME2(3) OUTPUT,
-  @WindowEndEntryDateTime    DATETIME2(3) OUTPUT
+  @WindowEndEntryDateTime    DATETIME2(3) OUTPUT,
+  @EquipIDOut                INT OUTPUT
 AS
 BEGIN
   SET NOCOUNT ON;
@@ -82,6 +83,9 @@ BEGIN
       'OK', @Version, @ConfigHash, @TriggerReason, NULL, NULL, NULL
     );
 
+    -- Return resolved EquipID
+    SET @EquipIDOut = @EquipID;
+
   END TRY
   BEGIN CATCH
     THROW;
@@ -89,5 +93,5 @@ BEGIN
 END
 GO
 
-PRINT 'usp_ACM_StartRun fixed to use equipment-specific data tables';
+PRINT 'usp_ACM_StartRun fixed to use equipment-specific data tables and return EquipID';
 GO

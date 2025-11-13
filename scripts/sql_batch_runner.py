@@ -1,0 +1,526 @@
+"""SQL Batch Runner - Continuous ACM processing from SQL historian with smart coldstart.
+
+This script runs ACM continuously from SQL mode, handling:
+1. Cold start - repeatedly calls ACM until coldstart completes successfully
+2. Batch processing - processes all available data in tick-sized windows
+3. Progress tracking - resumes from last successful batch
+
+Usage examples:
+    # Process single equipment until all data analyzed
+    python scripts/sql_batch_runner.py --equip FD_FAN
+    
+    # Process multiple equipment in parallel
+    python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2
+    
+    # Resume from last successful run
+    python scripts/sql_batch_runner.py --equip FD_FAN --resume
+    
+    # Dry run to see what would be processed
+    python scripts/sql_batch_runner.py --equip FD_FAN --dry-run
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import textwrap
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+import pyodbc
+
+
+class SQLBatchRunner:
+    """Manages continuous batch processing from SQL historian."""
+    
+    def __init__(self, 
+                 sql_conn_string: str,
+                 artifact_root: Path,
+                 tick_minutes: int = 30,
+                 max_coldstart_attempts: int = 10):
+        """Initialize batch runner.
+        
+        Args:
+            sql_conn_string: SQL Server connection string
+            artifact_root: Root directory for artifacts
+            tick_minutes: Window size in minutes (default: 30)
+            max_coldstart_attempts: Max attempts to complete coldstart (default: 10)
+        """
+        self.sql_conn_string = sql_conn_string
+        self.artifact_root = artifact_root
+        self.tick_minutes = tick_minutes
+        self.max_coldstart_attempts = max_coldstart_attempts
+        self.progress_file = artifact_root / ".sql_batch_progress.json"
+    
+    def _get_sql_connection(self) -> pyodbc.Connection:
+        """Create SQL connection."""
+        return pyodbc.connect(self.sql_conn_string)
+    
+    def _load_progress(self) -> Dict[str, Dict]:
+        """Load progress tracking state.
+        
+        Returns:
+            Dictionary with equipment progress: {
+                'FD_FAN': {
+                    'coldstart_complete': True,
+                    'last_batch_end': '2012-01-10 00:00:00',
+                    'batches_completed': 15
+                }
+            }
+        """
+        if not self.progress_file.exists():
+            return {}
+        
+        try:
+            with open(self.progress_file, "r") as f:
+                data = json.load(f)
+                return data
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[WARN] Could not load progress file: {exc}")
+            return {}
+    
+    def _save_progress(self, progress: Dict[str, Dict]) -> None:
+        """Save progress tracking state."""
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self.progress_file, "w") as f:
+                json.dump(progress, f, indent=2, default=str)
+        except OSError as exc:
+            print(f"[WARN] Could not save progress file: {exc}")
+    
+    def _get_data_range(self, equip_name: str) -> tuple[Optional[datetime], Optional[datetime]]:
+        """Get the available data range from SQL historian.
+        
+        Args:
+            equip_name: Equipment name (e.g., 'FD_FAN')
+            
+        Returns:
+            Tuple of (min_timestamp, max_timestamp) or (None, None) if no data
+        """
+        try:
+            conn = self._get_sql_connection()
+            cur = conn.cursor()
+            
+            table_name = f"{equip_name}_Data"
+            query = f"SELECT MIN(EntryDateTime), MAX(EntryDateTime) FROM {table_name}"
+            cur.execute(query)
+            row = cur.fetchone()
+            
+            cur.close()
+            conn.close()
+            
+            if row and row[0] and row[1]:
+                return row[0], row[1]
+            return None, None
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to get data range for {equip_name}: {e}")
+            return None, None
+    
+    def _check_coldstart_status(self, equip_name: str) -> tuple[bool, int, int]:
+        """Check if coldstart is complete for equipment.
+        
+        Args:
+            equip_name: Equipment name
+            
+        Returns:
+            Tuple of (is_complete, accumulated_rows, required_rows)
+        """
+        try:
+            conn = self._get_sql_connection()
+            cur = conn.cursor()
+            
+            # Get EquipID from Equipment table
+            cur.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equip_name,))
+            row = cur.fetchone()
+            if not row:
+                cur.close()
+                conn.close()
+                return False, 0, 500
+            
+            equip_id = row[0]
+            
+            # Check ModelRegistry for existing models
+            cur.execute("""
+                SELECT COUNT(*) FROM ModelRegistry 
+                WHERE EquipID = ? AND ModelType IN ('pca', 'gmm', 'iforest')
+            """, (equip_id,))
+            model_count = cur.fetchone()[0]
+            
+            # Check coldstart state
+            cur.execute("""
+                SELECT Status, AccumulatedRows, RequiredRows 
+                FROM ACM_ColdstartState 
+                WHERE EquipID = ? AND Stage = 'score'
+            """, (equip_id,))
+            row = cur.fetchone()
+            
+            cur.close()
+            conn.close()
+            
+            # Coldstart complete if models exist
+            if model_count >= 3:
+                return True, 0, 0
+            
+            if row:
+                status, accum_rows, req_rows = row
+                return status == 'COMPLETE', accum_rows or 0, req_rows or 500
+            
+            return False, 0, 500
+            
+        except Exception as e:
+            print(f"[WARN] Could not check coldstart status: {e}")
+            return False, 0, 500
+    
+    def _run_acm_batch(self, equip_name: str, *, dry_run: bool = False) -> tuple[bool, str]:
+        """Run single ACM batch for equipment.
+        
+        Args:
+            equip_name: Equipment name
+            dry_run: If True, print command without running
+            
+        Returns:
+            Tuple of (success, outcome) where outcome is 'OK', 'NOOP', or 'FAIL'
+        """
+        equip_artifact_root = self.artifact_root / equip_name
+        cmd = [
+            sys.executable, "-m", "core.acm_main",
+            "--equip", equip_name,
+            "--artifact-root", str(equip_artifact_root)
+        ]
+        
+        printable = " ".join(cmd)
+        if dry_run:
+            print(f"[DRY] {printable}")
+            return True, "OK"
+        
+        print(f"[RUN] {printable}")
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        
+        # Parse outcome from logs
+        outcome = "FAIL"
+        if result.returncode == 0:
+            # Look for outcome in output
+            for line in result.stdout.split('\n'):
+                if 'outcome=OK' in line:
+                    outcome = "OK"
+                    break
+                elif 'outcome=NOOP' in line:
+                    outcome = "NOOP"
+                    break
+            else:
+                outcome = "OK"  # Assume OK if no explicit outcome
+        
+        success = result.returncode == 0
+        return success, outcome
+    
+    def _process_coldstart(self, equip_name: str, *, dry_run: bool = False) -> bool:
+        """Process coldstart phase for equipment.
+        
+        Continuously runs ACM until coldstart completes or max attempts reached.
+        
+        Args:
+            equip_name: Equipment name
+            dry_run: If True, simulate without running
+            
+        Returns:
+            True if coldstart completed successfully
+        """
+        print(f"\n{'='*60}")
+        print(f"[COLDSTART] Starting coldstart for {equip_name}")
+        print(f"{'='*60}")
+        
+        for attempt in range(1, self.max_coldstart_attempts + 1):
+            print(f"\n[COLDSTART] {equip_name}: Attempt {attempt}/{self.max_coldstart_attempts}")
+            
+            # Check current status
+            is_complete, accum_rows, req_rows = self._check_coldstart_status(equip_name)
+            if is_complete:
+                print(f"[COLDSTART] ✓ {equip_name}: Coldstart COMPLETE!")
+                return True
+            
+            print(f"[COLDSTART] {equip_name}: Status - {accum_rows}/{req_rows} rows accumulated")
+            
+            # Run ACM batch
+            success, outcome = self._run_acm_batch(equip_name, dry_run=dry_run)
+            
+            if not success and outcome == "FAIL":
+                print(f"[COLDSTART] ✗ {equip_name}: Attempt {attempt} FAILED (error)")
+                continue
+            
+            if outcome == "NOOP":
+                print(f"[COLDSTART] → {equip_name}: Deferred (insufficient data), will retry...")
+                continue
+            
+            if outcome == "OK":
+                # Check if coldstart completed
+                is_complete, _, _ = self._check_coldstart_status(equip_name)
+                if is_complete:
+                    print(f"[COLDSTART] ✓ {equip_name}: Coldstart COMPLETE!")
+                    return True
+                else:
+                    print(f"[COLDSTART] → {equip_name}: Making progress, continuing...")
+        
+        print(f"[COLDSTART] ✗ {equip_name}: Max attempts ({self.max_coldstart_attempts}) reached without completion")
+        return False
+    
+    def _process_batches(self, equip_name: str, start_from: Optional[datetime] = None, 
+                        *, dry_run: bool = False, resume: bool = False) -> int:
+        """Process all available data in batches.
+        
+        Args:
+            equip_name: Equipment name
+            start_from: Starting timestamp (if None, starts from beginning)
+            dry_run: If True, simulate without running
+            resume: If True, resume from last successful batch
+            
+        Returns:
+            Number of batches successfully processed
+        """
+        print(f"\n{'='*60}")
+        print(f"[BATCH] Starting batch processing for {equip_name}")
+        print(f"{'='*60}")
+        
+        # Get data range
+        min_ts, max_ts = self._get_data_range(equip_name)
+        if not min_ts or not max_ts:
+            print(f"[BATCH] ✗ {equip_name}: No data available in historian")
+            return 0
+        
+        print(f"[BATCH] {equip_name}: Data available from {min_ts} to {max_ts}")
+        
+        # Load progress
+        progress = self._load_progress()
+        equip_progress = progress.get(equip_name, {})
+        
+        # Determine starting point
+        if resume and 'last_batch_end' in equip_progress:
+            current_ts = datetime.fromisoformat(equip_progress['last_batch_end'])
+            batches_completed = equip_progress.get('batches_completed', 0)
+            print(f"[BATCH] {equip_name}: Resuming from {current_ts} ({batches_completed} batches already completed)")
+        elif start_from:
+            current_ts = start_from
+            batches_completed = 0
+        else:
+            current_ts = min_ts
+            batches_completed = 0
+        
+        # Calculate total batches
+        total_minutes = (max_ts - current_ts).total_seconds() / 60
+        total_batches = int(total_minutes / self.tick_minutes)
+        
+        print(f"[BATCH] {equip_name}: Processing {total_batches} batch(es) ({self.tick_minutes}-minute windows)")
+        
+        # Process batches
+        batch_num = 0
+        while current_ts < max_ts:
+            batch_num += 1
+            next_ts = current_ts + timedelta(minutes=self.tick_minutes)
+            
+            # Don't go beyond available data
+            if next_ts > max_ts:
+                next_ts = max_ts
+            
+            print(f"\n[BATCH] {equip_name}: Batch {batch_num}/{total_batches} - [{current_ts} to {next_ts})")
+            
+            # Run ACM (it will automatically use the current batch window from SQL)
+            success, outcome = self._run_acm_batch(equip_name, dry_run=dry_run)
+            
+            if not success:
+                print(f"[BATCH] ✗ {equip_name}: Batch {batch_num} FAILED")
+                break
+            
+            batches_completed += 1
+            
+            # Update progress
+            equip_progress['last_batch_end'] = next_ts.isoformat()
+            equip_progress['batches_completed'] = batches_completed
+            equip_progress['coldstart_complete'] = True
+            progress[equip_name] = equip_progress
+            
+            if not dry_run:
+                self._save_progress(progress)
+            
+            print(f"[BATCH] ✓ {equip_name}: Batch {batch_num} completed (outcome={outcome})")
+            
+            # Move to next window
+            current_ts = next_ts
+        
+        print(f"\n[BATCH] ✓ {equip_name}: Processed {batches_completed} batch(es)")
+        return batches_completed
+    
+    def process_equipment(self, equip_name: str, *, dry_run: bool = False, 
+                         resume: bool = False) -> bool:
+        """Process single equipment through coldstart and batch phases.
+        
+        Args:
+            equip_name: Equipment name
+            dry_run: If True, simulate without running
+            resume: If True, resume from last successful run
+            
+        Returns:
+            True if processing completed successfully
+        """
+        print(f"\n{'#'*60}")
+        print(f"# Processing Equipment: {equip_name}")
+        print(f"{'#'*60}")
+        
+        # Load progress
+        progress = self._load_progress()
+        equip_progress = progress.get(equip_name, {})
+        
+        # Check if coldstart already complete
+        coldstart_complete = equip_progress.get('coldstart_complete', False)
+        
+        if resume and coldstart_complete:
+            print(f"[INFO] {equip_name}: Coldstart already complete, skipping to batch processing")
+        else:
+            # Phase 1: Coldstart
+            if not self._process_coldstart(equip_name, dry_run=dry_run):
+                print(f"[ERROR] {equip_name}: Coldstart failed")
+                return False
+            
+            # Update progress
+            equip_progress['coldstart_complete'] = True
+            progress[equip_name] = equip_progress
+            if not dry_run:
+                self._save_progress(progress)
+        
+        # Phase 2: Batch processing
+        batches = self._process_batches(equip_name, dry_run=dry_run, resume=resume)
+        
+        if batches > 0:
+            print(f"\n[SUCCESS] {equip_name}: Completed - {batches} batch(es) processed")
+            return True
+        else:
+            print(f"\n[WARN] {equip_name}: No batches processed")
+            return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="SQL Batch Runner - Continuous ACM processing from SQL historian",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Processing Flow:
+              1. COLDSTART PHASE: Repeatedly calls ACM until coldstart completes
+                 - Auto-detects data cadence
+                 - Loads from earliest available data
+                 - Retries with exponential window expansion
+                 - Tracks progress in ACM_ColdstartState table
+              
+              2. BATCH PHASE: Processes all available data in tick-sized windows
+                 - Continues from coldstart end point
+                 - Processes batches sequentially
+                 - Tracks progress in .sql_batch_progress.json
+              
+            Notes:
+              • Requires SQL mode: runtime.storage_backend='sql' in ACM_Config
+              • Progress tracking allows resume after interruption
+              • Use --dry-run to preview without execution
+              • Use --resume to skip completed batches
+        """),
+    )
+    parser.add_argument("--equip", nargs="+", required=True,
+                        help="Equipment codes to process (e.g., FD_FAN GAS_TURBINE)")
+    parser.add_argument("--sql-server", default="localhost\\B19CL3PCQLSERVER",
+                        help="SQL Server instance (default: localhost\\B19CL3PCQLSERVER)")
+    parser.add_argument("--sql-database", default="ACM",
+                        help="SQL database name (default: ACM)")
+    parser.add_argument("--artifact-root", default="artifacts",
+                        help="ACM artifact root directory (default: artifacts)")
+    parser.add_argument("--tick-minutes", type=int, default=30,
+                        help="Batch window size in minutes (default: 30)")
+    parser.add_argument("--max-coldstart-attempts", type=int, default=10,
+                        help="Max coldstart retry attempts (default: 10)")
+    parser.add_argument("--max-workers", type=int, default=1,
+                        help="Number of equipment to process in parallel (default: 1)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from last successful batch")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print commands without running")
+
+    args = parser.parse_args()
+
+    # Build SQL connection string
+    sql_conn_string = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={args.sql_server};"
+        f"DATABASE={args.sql_database};"
+        f"Trusted_Connection=yes;"
+    )
+
+    artifact_root = Path(args.artifact_root).resolve()
+    
+    # Create runner
+    runner = SQLBatchRunner(
+        sql_conn_string=sql_conn_string,
+        artifact_root=artifact_root,
+        tick_minutes=args.tick_minutes,
+        max_coldstart_attempts=args.max_coldstart_attempts
+    )
+
+    max_workers = max(1, args.max_workers)
+    errors: List[str] = []
+
+    print("\n" + "="*60)
+    print("SQL BATCH RUNNER - Continuous ACM Processing")
+    print("="*60)
+    print(f"Equipment: {', '.join(args.equip)}")
+    print(f"SQL Server: {args.sql_server}/{args.sql_database}")
+    print(f"Tick Window: {args.tick_minutes} minutes")
+    print(f"Max Workers: {max_workers}")
+    print(f"Resume: {args.resume}")
+    print(f"Dry Run: {args.dry_run}")
+    print("="*60)
+
+    # Process equipment (sequentially or in parallel)
+    if max_workers == 1:
+        # Sequential processing
+        for equip in args.equip:
+            try:
+                success = runner.process_equipment(equip, dry_run=args.dry_run, resume=args.resume)
+                if not success:
+                    errors.append(f"{equip}: Processing incomplete")
+            except Exception as exc:
+                errors.append(f"{equip}: {exc}")
+                print(f"[ERROR] {equip}: {exc}", file=sys.stderr)
+    else:
+        # Parallel processing
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    runner.process_equipment,
+                    equip,
+                    dry_run=args.dry_run,
+                    resume=args.resume
+                ): equip for equip in args.equip
+            }
+            for future in as_completed(future_map):
+                equip = future_map[future]
+                try:
+                    success = future.result()
+                    if not success:
+                        errors.append(f"{equip}: Processing incomplete")
+                except Exception as exc:
+                    errors.append(f"{equip}: {exc}")
+                    print(f"[ERROR] {equip}: {exc}", file=sys.stderr)
+
+    print("\n" + "="*60)
+    if errors:
+        print("BATCH RUNNER COMPLETED WITH ERRORS:")
+        for line in errors:
+            print(f"  ✗ {line}")
+        print("="*60)
+        return 1
+    else:
+        print("✓ BATCH RUNNER COMPLETED SUCCESSFULLY")
+        print("="*60)
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
