@@ -20,13 +20,46 @@
 - **Verification**: `SELECT * FROM Equipment WHERE EquipID IN (1, 2621)` ✓ 2 rows
 
 ### ⚠️ SQL-12: Dual-Write Validation Cycles
-- **Status**: IN PROGRESS (1/10 runs completed)
-- **Run 1**: `run_20251113_133359` - SUCCESS (20.8s runtime)
-  - ✓ File writes: 34 analytics tables → `artifacts/FD_FAN/run_20251113_133359/tables/`
-  - ✗ SQL writes: 26 tables skipped (tables not found in database)
-  - ✓ No crashes, pipeline stable
-  - ✓ Models saved to v3
-  - ✓ Forecast and charts generated
+- **Status**: IN PROGRESS (4/10 runs completed) - **24 of 27 tables working (89%)**
+- **Run 1-4**: Data accumulating successfully across multiple runs
+  - ✓ 50,000+ rows inserted across 24 analytics tables
+  - ✓ Upsert logic working (DELETE before INSERT per RunID+EquipID)
+  - ✓ No duplicate data despite removed PRIMARY KEY constraints
+  - ✓ ACM_Episodes fixed to use summary QC data (1 row per run)
+  - ⚠️ 3 tables still failing (ACM_DetectorCorrelation, ACM_CalibrationSummary, ACM_CulpritHistory)
+
+### ✅ Schema Creation & Deployment
+- **Status**: COMPLETE
+- **Script**: `scripts/sql/create_acm_analytics_tables.sql` 
+- **Tables Created**: 29 ACM analytics tables
+- **Synonyms**: `scripts/sql/create_acm_synonyms.sql` (8 mappings for existing tables)
+- **PRIMARY KEY**: Removed from all analytics tables per user request
+- **ACM_Scores_Wide**: Created for wide-format score data
+
+### ✅ Data Quality Fixes
+- **NaN/Inf Handling**: Replace with NULL before SQL insert (pyodbc compatibility)
+- **Timestamp Conversion**: Auto-convert timestamp columns to DATETIME2
+- **ACM_Episodes**: Fixed to write episodes_qc.csv summary data (not individual episodes)
+- **ACM_DataQuality**: Excluded from SQL writes (schema incompatible with pyodbc)
+
+### Working Tables (24)
+Data accumulation verified:
+- ACM_Scores_Wide: 30,952 rows (8 runs)
+- ACM_SensorHotspotTimeline: 19,104 rows
+- ACM_ContributionTimeline: 13,272 rows
+- ACM_HealthTimeline: 11,607 rows (3 runs)
+- ACM_DriftSeries: 11,607 rows
+- ACM_RegimeTimeline: 11,607 rows
+- ACM_DefectTimeline: 1,986 rows
+- ACM_SensorAnomalyByPeriod: 1,968 rows
+- ACM_HealthZoneByPeriod: 738 rows
+- ACM_Episodes: 2 rows (2 runs) ✅ Fixed!
+- Plus 14 more tables with data
+
+### Failing Tables (3)
+1. **ACM_DetectorCorrelation**: INSERT logs show 28 rows but data doesn't persist (investigating transaction commit issue)
+2. **ACM_CalibrationSummary**: Float precision error with MahalCondNum NULL values
+3. **ACM_CulpritHistory**: Timestamp character cast error
 
 ## Issues Discovered
 

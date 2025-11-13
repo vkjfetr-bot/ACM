@@ -542,9 +542,13 @@ class OutputManager:
             try:
                 if hasattr(self.sql_client, "commit"):
                     self.sql_client.commit()
+                    Console.info(f"[OUTPUT] Called sql_client.commit()")
                 elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
                     if not getattr(self.sql_client.conn, "autocommit", True):
                         self.sql_client.conn.commit()
+                        Console.info(f"[OUTPUT] Called sql_client.conn.commit()")
+                    else:
+                        Console.warn(f"[OUTPUT] Autocommit is ON - no explicit commit needed")
                 elapsed = time.time() - start_time
                 Console.info(f"[OUTPUT] Batched transaction committed ({elapsed:.2f}s)")
             except Exception as e:
@@ -1103,9 +1107,13 @@ class OutputManager:
             if "RunID" in df.columns and self.run_id and "RunID" in table_cols:
                 # Prefer scoping by (RunID, EquipID) when possible
                 if "EquipID" in df.columns and "EquipID" in table_cols and self.equip_id is not None:
-                    cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0)))
+                    rows_deleted = cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0))).rowcount
+                    if rows_deleted > 0:
+                        Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
                 else:
-                    cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,))
+                    rows_deleted = cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,)).rowcount
+                    if rows_deleted > 0:
+                        Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}")
 
             # only insert columns that actually exist in the table
             columns = [c for c in df.columns if c in table_cols]
@@ -1515,6 +1523,8 @@ class OutputManager:
         Write episodes with optimized dual-write coordination.
         
         Replaces storage.write_episodes_csv() with better performance.
+        
+        NOTE: Individual episodes go to CSV only. Summary QC goes to ACM_Episodes SQL table.
         """
         if episodes_df.empty:
             # Write empty file
@@ -1524,8 +1534,9 @@ class OutputManager:
         # Prepare episodes for output
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
         
-        # SQL column mapping
-        sql_table = "ACM_Episodes" if enable_sql else None
+        # Individual episodes go to CSV only (not SQL)
+        # Summary data goes to ACM_Episodes via episodes_qc.csv
+        sql_table = None  # Changed from "ACM_Episodes"
         episode_columns = {
             'start_ts': 'StartTs', 
             'end_ts': 'EndTs',
@@ -2042,10 +2053,11 @@ class OutputManager:
                     # 25c. Episodes QC (run-level quality summary)
                     try:
                         episodes_qc_df = self._generate_episodes_qc(scores_df, episodes_df)
-                        self.write_dataframe(episodes_qc_df, tables_dir / "episodes_qc.csv",
-                                             sql_table=None,
+                        result = self.write_dataframe(episodes_qc_df, tables_dir / "episodes_qc.csv",
+                                             sql_table="ACM_Episodes",  # This is the summary table
                                              add_created_at=False)
                         table_count += 1
+                        if result.get('sql_written'): sql_count += 1
                     except Exception as e:
                         Console.warn(f"[ANALYTICS] Failed to write episodes_qc.csv: {e}")
                 

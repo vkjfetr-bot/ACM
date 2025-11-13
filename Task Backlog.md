@@ -1,7 +1,38 @@
 # ACM V8 – Task Backlog (Master Consolidated Edition)
 
-**Last Updated:** 2025-11-12
-**Focus:** Hands-Off Analytics | Continuous Adaptation | Self-Tuning
+**Last Updated:** 2025-11-13
+**Focus:** Hands-Off Analytics | Continuous Adaptation | Self-Tuning | **SQL Integration (89% Complete)**
+
+---
+
+## SQL Integration Status (Current Priority)
+
+**Phase 1: Dual-Write Validation - 89% Complete**
+
+✅ Completed:
+- SQL-10: Dual-write mode enabled in config
+- SQL-11: Equipment records registered (2 equipments)
+- SQL-12a: Created 29 ACM analytics tables with schemas
+- SQL-12b: Removed PRIMARY KEY constraints per user request
+- SQL-12c: Fixed ACM_Episodes to use summary QC data
+- SQL-12d: Implemented NaN/Inf/timestamp cleaning for pyodbc compatibility
+- SQL-12e: Implemented DELETE before INSERT upsert logic
+
+⚠️ In Progress:
+- SQL-12: Dual-write validation (4/10 runs complete)
+  - **24 of 27 tables working** (50,000+ rows accumulated)
+  - ❌ ACM_DetectorCorrelation: INSERT succeeds but data doesn't persist (investigating)
+  - ❌ ACM_CalibrationSummary: Float precision error with NaN values
+  - ❌ ACM_CulpritHistory: Timestamp conversion error
+
+📋 Pending:
+- SQL-12: Complete remaining 6 validation runs
+- SQL-13: Create validate_dual_write.py comparison script
+- SQL-14: Validate row counts and values match CSV vs SQL
+- SQL-15: Performance baseline and optimization
+- SQL-20-23: Model persistence (save/load from ModelRegistry)
+- SQL-31: SQL-only mode flag
+- SQL-30,32,33: Production features (historian, scheduler, deployment)
 
 ---
 
