@@ -484,10 +484,18 @@ def _sql_mode(cfg: Dict[str, Any]) -> bool:
 def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
     if not SQLClient:
         raise RuntimeError("SQLClient not available. Ensure core/sql_client.py exists and pyodbc is installed.")
-    sql_cfg = cfg.get("sql", {}) or {}
-    cli = SQLClient(sql_cfg)
-    cli.connect()
-    return cli
+    # Prefer INI-based connection with Windows Authentication
+    try:
+        cli = SQLClient.from_ini('acm')
+        cli.connect()
+        return cli
+    except Exception as ini_err:
+        # Fallback to config dict (legacy behavior)
+        Console.warn(f"[SQL] Failed to connect via INI, trying config dict: {ini_err}")
+        sql_cfg = cfg.get("sql", {}) or {}
+        cli = SQLClient(sql_cfg)
+        cli.connect()
+        return cli
 
 def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str, pd.Timestamp, pd.Timestamp, int]:
     """
