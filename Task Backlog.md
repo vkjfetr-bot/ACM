@@ -160,28 +160,62 @@ All tabular output hardening items are complete (see Completed Task Stats). No o
 
 ---
 
-## 10 SQL Integration (Deferred)
+## 10 SQL Integration (ACTIVE - Phase 1)
 
+**Status:** Database ready, dual-write mode implemented, ready for testing
+**Updated:** November 13, 2025
+
+### Infrastructure Complete
 | ID      | Priority | Module                   | Task                           | Completion Criteria                       | Status   |
 | ------- | -------- | ------------------------ | ------------------------------ | ----------------------------------------- | -------- |
-| SQL-01  | Deferred | `scripts/sql/*.sql`      | Define core schemas            | Tables ACM_Scores, ACM_Episodes finalized | Deferred |
-| SQL-02  | Deferred | `scripts/sql/*.sql`      | Stored procedures              | Procs tested                              | Deferred |
-| SQL-03  | Deferred | `core/sql_client.py`     | Transactional write wrapper    | Single transaction mode                   | Deferred |
-| SQL-04  | Deferred | `core/sql_client.py`     | Health check metrics           | Latency + retry tracking                  | Deferred |
-| FUSE-05 | Deferred | `core/output_manager.py` | Dual-write orchestration       | File + SQL path unified                   | Deferred |
-| DRFT-01 | Deferred | `core/drift.py`          | Alert mode semantics migration | Moved to metadata                         | Deferred |
+| SQL-01  | DONE     | `scripts/sql/*.sql`      | Define core schemas            | 21 tables, 19 stored procs, 5 views       | COMPLETE |
+| SQL-02  | DONE     | `scripts/sql/*.sql`      | Stored procedures              | 19 usp_Write_ procedures deployed         | COMPLETE |
+| SQL-03  | DONE     | `core/sql_client.py`     | Windows Authentication support | Trusted_Connection working                | COMPLETE |
+| SQL-04  | DONE     | `core/sql_performance.py`| Performance monitoring         | SQLBatchWriter + monitor ready            | COMPLETE |
+
+### Phase 1: Dual-Write Validation (IMMEDIATE)
+| ID      | Priority | Module                   | Task                                  | Completion Criteria                       | Status   |
+| ------- | -------- | ------------------------ | ------------------------------------- | ----------------------------------------- | -------- |
+| SQL-10  | CRITICAL | Config                   | Enable dual_mode flag                 | config.yaml updated                       | TODO     |
+| SQL-11  | CRITICAL | Database                 | Register equipment records            | Equipment table populated                 | TODO     |
+| SQL-12  | CRITICAL | Pipeline                 | Run 10+ dual-write cycles             | Files + SQL both populated                | TODO     |
+| SQL-13  | HIGH     | Validation               | Create validation script              | validate_dual_write.py working            | TODO     |
+| SQL-14  | HIGH     | Testing                  | Compare file vs SQL outputs           | Row counts and values match               | TODO     |
+| SQL-15  | HIGH     | Performance              | Measure SQL write times               | Baseline established, target <15s         | TODO     |
+
+### Phase 2: Model Persistence (NEXT)
+| ID      | Priority | Module                      | Task                                  | Completion Criteria                       | Status   |
+| ------- | -------- | --------------------------- | ------------------------------------- | ----------------------------------------- | -------- |
+| SQL-20  | HIGH     | `core/model_persistence.py` | Implement save_to_sql()               | Models written to ModelRegistry           | TODO     |
+| SQL-21  | HIGH     | `core/model_persistence.py` | Implement load_from_sql()             | Models loaded from SQL                    | TODO     |
+| SQL-22  | HIGH     | Testing                     | Model round-trip validation           | Save/load produces identical predictions  | TODO     |
+| SQL-23  | MEDIUM   | Integration                 | Wire model persistence into pipeline  | Models auto-save to SQL on training      | TODO     |
+
+### Phase 3: SQL-Only Production (FUTURE)
+| ID      | Priority | Module                   | Task                                  | Completion Criteria                       | Status   |
+| ------- | -------- | ------------------------ | ------------------------------------- | ----------------------------------------- | -------- |
+| SQL-30  | MEDIUM   | `core/acm_main.py`       | Historian integration                 | Live data ingestion working               | PLANNED  |
+| SQL-31  | MEDIUM   | `core/output_manager.py` | Disable file writes in SQL-only mode  | SQL-only flag working                     | PLANNED  |
+| SQL-32  | MEDIUM   | Scripts                  | Equipment scheduler                   | Automated multi-equipment runs            | PLANNED  |
+| SQL-33  | LOW      | Deployment               | Production deployment setup           | Scheduled tasks + monitoring              | PLANNED  |
+
+### Legacy Items (Superseded)
+| ID      | Priority | Module                   | Task                           | Completion Criteria                       | Status      |
+| ------- | -------- | ------------------------ | ------------------------------ | ----------------------------------------- | ----------- |
+| FUSE-05 | N/A      | `core/output_manager.py` | Dual-write orchestration       | File + SQL path unified                   | IMPLEMENTED |
+| DRFT-01 | Deferred | `core/drift.py`          | Alert mode semantics migration | Moved to metadata                         | Deferred    |
 
 ---
 
 ## 11 Summary Statistics
 
-| Priority | Count | Status   |
-| -------- | ----- | -------- |
-| Critical | 3     | Open     |
-| High     | 4     | Open     |
-| Medium   | 19    | Open     |
-| Low      | 12     | Open     |
-| Deferred | 22    | Deferred |
+| Priority | Count | Status   | Notes                          |
+| -------- | ----- | -------- | ------------------------------ |
+| Critical | 5     | Open     | 3 Forecast + 2 SQL Phase 1     |
+| High     | 8     | Open     | 4 Charts + 4 SQL Phase 1/2     |
+| Medium   | 22    | Open     | Analytics + Performance + SQL  |
+| Low      | 12    | Open     | Docs + Ops + SQL Phase 3       |
+| Deferred | 17    | Deferred | AVEVA features                 |
 
 ---
 
