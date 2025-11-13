@@ -177,27 +177,77 @@ All tabular output hardening items are complete (see Completed Task Stats). No o
 | ID      | Priority | Module                   | Task                                  | Completion Criteria                       | Status   |
 | ------- | -------- | ------------------------ | ------------------------------------- | ----------------------------------------- | -------- |
 | SQL-10  | CRITICAL | Config                   | Enable dual_mode flag                 | config.yaml updated                       | TODO     |
+|         |          |                          | → Set `output.dual_mode: true` in config | → File and SQL outputs both enabled       |          |
+|         |          |                          | → Verify config loads correctly       | → OutputManager sees dual_mode=True       |          |
 | SQL-11  | CRITICAL | Database                 | Register equipment records            | Equipment table populated                 | TODO     |
+|         |          |                          | → Insert FD_FAN into Equipment table  | → SELECT * FROM Equipment shows record    |          |
+|         |          |                          | → Insert GAS_TURBINE into Equipment   | → equip_id values ready for FK references |          |
 | SQL-12  | CRITICAL | Pipeline                 | Run 10+ dual-write cycles             | Files + SQL both populated                | TODO     |
+|         |          |                          | → Execute: python -m core.acm_main --equip FD_FAN --enable-report | → artifacts/ folder has CSVs      |          |
+|         |          |                          | → Run for both FD_FAN and GAS_TURBINE | → SQL tables show matching row counts     |          |
+|         |          |                          | → Repeat 10 times to test stability   | → No crashes, consistent data             |          |
 | SQL-13  | HIGH     | Validation               | Create validation script              | validate_dual_write.py working            | TODO     |
+|         |          |                          | → Build scripts/sql/validate_dual_write.py | → Script compares CSV vs SQL row counts |          |
+|         |          |                          | → Check all 26 analytics tables       | → Reports match/mismatch status           |          |
+|         |          |                          | → Validate numeric values within 1e-6 | → Passes for all tables                   |          |
 | SQL-14  | HIGH     | Testing                  | Compare file vs SQL outputs           | Row counts and values match               | TODO     |
+|         |          |                          | → Run validation script from SQL-13   | → Zero mismatches reported                |          |
+|         |          |                          | → Check ScoresTS timestamps match     | → Datetime columns aligned                |          |
+|         |          |                          | → Verify drift_summary values         | → JSON fields populated correctly         |          |
 | SQL-15  | HIGH     | Performance              | Measure SQL write times               | Baseline established, target <15s         | TODO     |
+|         |          |                          | → Instrument OutputManager.write_tables() | → Log timing for each table write     |          |
+|         |          |                          | → Document current avg time (~58s)    | → Identify slowest tables                 |          |
+|         |          |                          | → Test batch size optimization        | → Achieve <15s per run                    |          |
 
 ### Phase 2: Model Persistence (NEXT)
 | ID      | Priority | Module                      | Task                                  | Completion Criteria                       | Status   |
 | ------- | -------- | --------------------------- | ------------------------------------- | ----------------------------------------- | -------- |
 | SQL-20  | HIGH     | `core/model_persistence.py` | Implement save_to_sql()               | Models written to ModelRegistry           | TODO     |
+|         |          |                             | → Add save_to_sql() method to ModelVersionManager | → Accepts sql_client, equip_id, model_type |          |
+|         |          |                             | → Serialize models to JSON (joblib bytes → base64) | → Store in ModelRegistry.model_artifact |          |
+|         |          |                             | → Compute signature hash for versioning | → Unique model_signature per config       |          |
+|         |          |                             | → Increment version_number automatically | → v1, v2, v3... monotonic                |          |
 | SQL-21  | HIGH     | `core/model_persistence.py` | Implement load_from_sql()             | Models loaded from SQL                    | TODO     |
+|         |          |                             | → Add load_from_sql() method           | → Queries ModelRegistry by equip_id       |          |
+|         |          |                             | → Support latest vs specific version   | → version=None gets max(version_number)   |          |
+|         |          |                             | → Deserialize JSON → Python objects    | → Returns model ready for .predict()      |          |
+|         |          |                             | → Handle missing model gracefully      | → Returns None if not found               |          |
 | SQL-22  | HIGH     | Testing                     | Model round-trip validation           | Save/load produces identical predictions  | TODO     |
+|         |          |                             | → Create scripts/sql/test_model_persistence.py | → Trains AR1, PCA, IForest, GMM, Regimes |          |
+|         |          |                             | → Save all 5 model types to SQL        | → ModelRegistry has 5 rows                |          |
+|         |          |                             | → Load models back from SQL            | → load_from_sql() returns objects         |          |
+|         |          |                             | → Compare predictions: orig vs loaded  | → np.allclose(pred1, pred2) passes        |          |
+|         |          |                             | → Test version selection               | → Specific version retrieval works        |          |
 | SQL-23  | MEDIUM   | Integration                 | Wire model persistence into pipeline  | Models auto-save to SQL on training      | TODO     |
+|         |          |                             | → Edit core/acm_main.py after model training | → Call mvman.save_to_sql() for each model |          |
+|         |          |                             | → Edit core/acm_main.py scoring phase  | → Try load_from_sql() before load_from_cache() |          |
+|         |          |                             | → Maintain file-based fallback         | → If SQL load fails, use artifacts/models |          |
+|         |          |                             | → Log save/load actions                | → "Saved AR1 model v3 to SQL" messages    |          |
 
 ### Phase 3: SQL-Only Production (FUTURE)
 | ID      | Priority | Module                   | Task                                  | Completion Criteria                       | Status   |
 | ------- | -------- | ------------------------ | ------------------------------------- | ----------------------------------------- | -------- |
 | SQL-30  | MEDIUM   | `core/acm_main.py`       | Historian integration                 | Live data ingestion working               | PLANNED  |
+|         |          |                          | → Add XStudio_Historian database config | → configs/sql_connection.ini has [historian] section |          |
+|         |          |                          | → Create core/historian_client.py     | → Queries sensor data by timestamp range  |          |
+|         |          |                          | → Modify run_pipeline() data source   | → Accepts --source historian flag         |          |
+|         |          |                          | → Map sensor tags to ACM columns      | → Tag mapping table in database           |          |
+|         |          |                          | → Handle missing/stale data           | → Graceful fallback or alert              |          |
 | SQL-31  | MEDIUM   | `core/output_manager.py` | Disable file writes in SQL-only mode  | SQL-only flag working                     | PLANNED  |
+|         |          |                          | → Add sql_only flag to OutputManager  | → When True, skip all CSV writes          |          |
+|         |          |                          | → Preserve directory structure checks | → Still create artifacts/ for logs        |          |
+|         |          |                          | → Update write_tables() logic          | → File writes only if not sql_only        |          |
+|         |          |                          | → Test with --sql-only CLI flag       | → Zero CSV files created                  |          |
 | SQL-32  | MEDIUM   | Scripts                  | Equipment scheduler                   | Automated multi-equipment runs            | PLANNED  |
+|         |          |                          | → Create scripts/run_all_equipment.py | → Loops through Equipment table           |          |
+|         |          |                          | → Parallel execution support           | → multiprocessing for concurrent runs     |          |
+|         |          |                          | → Error handling and logging           | → Failed runs logged to SQL Runs table    |          |
+|         |          |                          | → Email/Teams notifications            | → Alerts on failures                      |          |
 | SQL-33  | LOW      | Deployment               | Production deployment setup           | Scheduled tasks + monitoring              | PLANNED  |
+|         |          |                          | → Windows Task Scheduler configuration | → Daily runs at 02:00 local time          |          |
+|         |          |                          | → Service account credentials          | → SQL write permissions verified          |          |
+|         |          |                          | → Monitoring dashboard                 | → Query v_Equip_Latest_Run for status     |          |
+|         |          |                          | → Retention policy for old data        | → Archive runs older than 1 year          |          |
 
 ### Legacy Items (Superseded)
 | ID      | Priority | Module                   | Task                           | Completion Criteria                       | Status      |

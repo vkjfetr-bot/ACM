@@ -199,17 +199,18 @@ python scripts\sql\verify_acm_connection.py
 
 ---
 
-###  Phase 1: Dual-Write Validation (NEXT - START HERE)
+###  Phase 1: Dual-Write Validation (IMMEDIATE - START HERE)
 **Objective:** Run pipeline in dual-write mode, validate SQL outputs against file outputs
 
 **Duration:** 1-2 weeks  
 **Risk:** Low (file output preserved as fallback)  
 **Data Source:** CSV files (existing)  
 **Output:** Files + SQL (both)  
+**Task IDs:** SQL-10 through SQL-15 (from Task Backlog)
 
 #### Implementation Steps:
 
-**Step 1.1: Enable Dual-Write Mode** ⏳
+**Step 1.1 (SQL-10): Enable Dual-Write Mode** [TODO]
 ```powershell
 # Update config.yaml or set via command line
 # Add to config.yaml:
@@ -221,7 +222,7 @@ output:
 $env:ACM_DUAL_MODE = "true"
 ```
 
-**Step 1.2: Register Equipment** ⏳
+**Step 1.2 (SQL-11): Register Equipment** [TODO]
 ```sql
 -- Add equipment to database
 INSERT INTO Equipment (EquipCode, EquipName, Area, Unit, Status, CommissionDate)
@@ -230,7 +231,7 @@ VALUES
   ('GAS_TURBINE', 'Gas Turbine GT-101', 'Power Generation', 'Unit 1', 1, '2024-01-01');
 ```
 
-**Step 1.3: Run Pipeline with Dual-Write** ⏳
+**Step 1.3 (SQL-12): Run Pipeline with Dual-Write** [TODO]
 ```powershell
 cd "c:\Users\bhadk\Documents\ACM V8 SQL\ACM"
 
@@ -248,7 +249,7 @@ python -m core.acm_main `
 # - Console shows "[DUAL] SQL write succeeded" messages
 ```
 
-**Step 1.4: Validate SQL Data** ⏳
+**Step 1.4 (SQL-14): Validate SQL Data** [TODO]
 ```sql
 -- Check that data was written to SQL
 SELECT 'ScoresTS' as TableName, COUNT(*) as Rows FROM ScoresTS
@@ -260,7 +261,7 @@ UNION ALL SELECT 'Runs', COUNT(*) FROM Runs;
 -- Should show thousands of rows in ScoresTS, dozens in other tables
 ```
 
-**Step 1.5: Compare File vs SQL Outputs** ⏳
+**Step 1.5 (SQL-13): Create Validation Script** [TODO]
 Create validation script: `scripts/sql/validate_dual_write.py`
 ```python
 # Pseudo-code
@@ -280,12 +281,19 @@ assert file_scores['fused_z'].mean() == sql_scores['fused_z'].mean()
 # etc...
 ```
 
+**Step 1.6 (SQL-15): Performance Baseline** [TODO]
+Measure and document SQL write performance:
+- Current baseline: ~58s SQL writes
+- Target: <15s per run
+- Document bottlenecks and optimization opportunities
+
 #### Success Criteria Phase 1:
 -  Dual-write runs without errors
 -  SQL tables populated with correct row counts
 -  File and SQL outputs match (within floating-point tolerance)
 -  Performance acceptable (<2x slowdown vs file-only)
 -  All 26 analytics tables written to SQL
+-  Performance baseline established
 
 #### Deliverables Phase 1:
 - Equipment master data populated (2-10 assets)
@@ -295,15 +303,16 @@ assert file_scores['fused_z'].mean() == sql_scores['fused_z'].mean()
 
 ---
 
-###  Phase 2: Model Persistence in SQL (PARALLEL WITH PHASE 1)
+###  Phase 2: Model Persistence in SQL (NEXT PHASE)
 **Objective:** Store trained models in `ModelRegistry` table instead of .joblib files
 
 **Duration:** 1 week  
-**Risk:** Low (models can still serialize to JSON)
+**Risk:** Low (models can still serialize to JSON)  
+**Task IDs:** SQL-20 through SQL-23 (from Task Backlog)
 
 #### Implementation Steps:
 
-**Step 2.1: Enhance ModelVersionManager** ⏳
+**Step 2.1 (SQL-20): Implement save_to_sql()** [TODO]
 ```python
 # In core/model_persistence.py
 class ModelVersionManager:
@@ -335,9 +344,30 @@ class ModelVersionManager:
         pass
 ```
 
-**Step 2.2: Update acm_main.py** ⏳
+**Step 2.2 (SQL-21): Implement load_from_sql()** [TODO]
 ```python
-# After model training, save to SQL
+# In core/model_persistence.py
+class ModelVersionManager:
+    def load_from_sql(self, sql_client, equip_id, model_type, version=None):
+        """
+        Load model from SQL ModelRegistry table.
+        
+        Args:
+            sql_client: Active SQL connection
+            equip_id: Equipment ID
+            model_type: Type of model ('ar1', 'pca', 'iforest', 'gmm', 'regimes')
+            version: Specific version to load (None = latest)
+        
+        Returns:
+            Deserialized model object
+        """
+        # Query ModelRegistry and deserialize JSON → model object
+        pass
+```
+
+**Step 2.3 (SQL-23): Integrate into Pipeline** [TODO]
+```python
+# In core/acm_main.py - after model training, save to SQL
 if sql_client and cfg.get('output', {}).get('persist_models_sql', False):
     model_mgr.save_to_sql(sql_client, equip_id, run_id, {
         'ar1': ar1_models,
@@ -348,20 +378,24 @@ if sql_client and cfg.get('output', {}).get('persist_models_sql', False):
     })
 ```
 
-**Step 2.3: Test Model Round-Trip** ⏳
+**Step 2.4 (SQL-22): Test Model Round-Trip** [TODO]
 ```python
 # scripts/sql/test_model_persistence.py
-# 1. Train models
-# 2. Save to SQL
-# 3. Load from SQL
+# 1. Train models using sample data
+# 2. Save to SQL using save_to_sql()
+# 3. Load from SQL using load_from_sql()
 # 4. Compare predictions (should match exactly)
+# 5. Test version selection (latest, specific version)
+# 6. Validate with multiple equipment and model types
 ```
 
 #### Success Criteria Phase 2:
--  Models saved to `ModelRegistry` table
--  Models loaded from SQL produce identical predictions
--  Version tracking works (v1, v2, v3...)
+-  Models saved to `ModelRegistry` table with correct schema
+-  Models loaded from SQL produce identical predictions (bitwise match)
+-  Version tracking works (v1, v2, v3...) with monotonic increment
+-  Latest version selection works correctly
 -  File-based model cache still works as fallback
+-  All 5 model types supported (ar1, pca, iforest, gmm, regimes)
 
 ---
 
@@ -371,11 +405,12 @@ if sql_client and cfg.get('output', {}).get('persist_models_sql', False):
 **Duration:** 2-3 weeks  
 **Risk:** Medium (requires historian integration)  
 **Data Source:** XStudio_Historian (live data)  
-**Output:** SQL only (no file artifacts)
+**Output:** SQL only (no file artifacts)  
+**Task IDs:** SQL-30 through SQL-33 (from Task Backlog)
 
 #### Implementation Steps:
 
-**Step 3.1: Historian Integration** ⏳
+**Step 3.1 (SQL-30): Historian Integration** [PLANNED]
 ```python
 # Already implemented in core/historian.py
 # Wire into acm_main.py data loading section
@@ -392,7 +427,7 @@ if SQL_MODE and not dual_mode:
     )
 ```
 
-**Step 3.2: Disable File Writes** ⏳
+**Step 3.2 (SQL-31): Disable File Writes** [PLANNED]
 ```python
 # In core/output_manager.py
 if SQL_MODE and not dual_mode:
@@ -401,7 +436,7 @@ if SQL_MODE and not dual_mode:
     return
 ```
 
-**Step 3.3: Equipment Scheduler** ⏳
+**Step 3.3 (SQL-32): Equipment Scheduler** [PLANNED]
 Create `scripts/run_all_equipment.py`:
 ```python
 # Loop through all active equipment
@@ -413,7 +448,7 @@ Create `scripts/run_all_equipment.py`:
 #   5. Update Runs table with completion status
 ```
 
-**Step 3.4: Production Deployment** ⏳
+**Step 3.4 (SQL-33): Production Deployment** [PLANNED]
 - Configure scheduled task (Windows Task Scheduler or cron)
 - Run every 15 minutes / hourly / daily (per equipment cadence)
 - Monitor via `Runs` table and performance logs
