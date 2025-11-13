@@ -1,0 +1,149 @@
+python : C:\Users\Admin\AppData\Roaming\Python\Python313\site-packages\pandas\core\nanop
+s.py:1025: RuntimeWarning: overflow encountered in cast
+At line:1 char:58
++ ... M V6 SQL" ; python -m core.acm_main --equip COND_PUMP --artifact-root ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\Admin\...untered in cast:String)  
+   [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  result = result.astype(dtype, copy=False)
+C:\Users\Admin\Documents\Office\ACM V7\ACM V8 SQL\core\forecast.py:89: RuntimeWarning: 
+overflow encountered in dot
+  num = float(np.dot(xc[1:], xc[:-1]))
+C:\Users\Admin\Documents\Office\ACM V7\ACM V8 SQL\core\forecast.py:90: RuntimeWarning: 
+overflow encountered in dot
+  den = float(np.dot(xc[:-1], xc[:-1])) + self._eps
+[MHAL] \u26a0\ufe0f CRITICAL condition number (4.64e+82) - numerical instability 
+likely. Adaptive tuning recommended.
+[RUN] Exception: 'charmap' codec can't encode character '\U0001f4dd' in position 11: 
+character maps to <undefined>
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\Admin\Documents\Office\ACM V7\ACM V8 SQL\core\acm_main.py", line 3304, 
+in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\Admin\Documents\Office\ACM V7\ACM V8 SQL\core\acm_main.py", line 1391, 
+in main
+    Console.info(f"[ADAPTIVE] \U0001f4dd Writing {len(param_adjustments)} parameter 
+adjustment(s) to config...")
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Documents\Office\ACM V7\ACM V8 SQL\utils\logger.py", line 10, in 
+info
+    def info(msg: str) -> None:  print(msg, file=sys.stdout)
+                                 ~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f4dd' in position 11: 
+character maps to <undefined>
+[CFG] Cannot connect to ACM database: ('08001', '[08001] [Microsoft][ODBC Driver 18 for SQL Server]Named Pipes Provider: Could not open a connection to SQL Server [53].  (53) (SQLDriverConnect); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Login timeout expired (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]Invalid connection string attribute (0); [08001] [Microsoft][ODBC Driver 18 for SQL Server]A network-related or instance-specific error has occurred while establishing a connection to WIN-RUDDRTU01A8. Server is not found or not accessible. Check if instance name is correct and if SQL Server is configured to allow remote connections. For more information see SQL Server Books Online. (53)')
+[CFG] Could not load config from SQL: SQL config load failed and CSV fallback disabled
+[CFG] Loading config for COND_PUMP (EquipID=4505) from configs\config_table.csv
+[CFG] Config signature: ac0df0884d42ba9e
+[CFG] Config deep-copied to prevent accidental mutations
+[CFG] Config signature: ac0df0884d42ba9e
+[ACM] Inside Main Now
+--- Starting ACM V5 for COND_PUMP ---
+[CFG] storage_backend=file  |  artifacts=artifacts\COND_PUMP
+[RUN] Creating unique run directory: artifacts\COND_PUMP\run_20251110_181821
+[OUTPUT] Manager initialized (batch_size=5000, batching=ON, sql_cache=60.0s, io_workers=8)
+[..] Loading data (read -> parse ts -> sort -> resample -> interpolate) ...
+[DATA] Using baseline (train_csv): data/Cond Pump Motor Training Set.csv
+[DATA] Using batch (score_csv): data/Cond Pump Motor Fault Set.csv
+[..] Reading CSVs (train & score) à
+[OK] Reading CSVs (train & score) done in 0.04s
+[..] Parsing timestamps & indexing à
+[OK] Parsing timestamps & indexing done in 0.03s
+[..] Selecting numeric sensor columns à
+[OK] Selecting numeric sensor columns done in 0.00s
+[..] Cadence check / resample / fill small gaps à
+[OK] Cadence check / resample / fill small gaps done in 0.00s
+[DATA] Removing 5279 duplicate timestamps from TRAIN data
+[DATA] Removing 5183 duplicate timestamps from SCORE data
+[DATA] Index integrity verified: BASELINE=3650 unique, BATCH=3507 unique
+[TIMER] load_data              0.084s
+[OK] Loading data (read -> parse ts -> sort -> resample -> interpolate) done in 0.09s
+[DATA] timestamp=TS cadence_ok=True kept=15 drop=0
+[TIMER] shapes               train=(3650, 15) score=(3507, 15)
+[TIMER] baseline.seed          0.000s
+[DATA] Wrote data quality summary -> artifacts\COND_PUMP\run_20251110_181821\tables\data_quality.csv (15 sensors)
+[TIMER] data.guardrails.data_quality   0.038s
+[TIMER] data.guardrails        0.039s
+[FEAT] Building features with window=16 (fast_features)
+[FEAT] Computed 15 fill values from training data (prevents leakage)
+[TIMER] features.compute_fill_values   0.001s
+[TIMER] features.polars_convert   0.031s
+[FEAT] Using Polars for feature computation (7,157 rows > 5,000 threshold)
+[FEAT] Building train features...
+[TIMER] compute_basic_features_pl   0.021s
+[TIMER] compute_basic_features   0.029s
+[TIMER] features.compute_train   0.029s
+[FEAT] Building score features (using train fill values)...
+[TIMER] compute_basic_features_pl   0.018s
+[TIMER] compute_basic_features   0.021s
+[TIMER] features.compute_score   0.021s
+[TIMER] features.normalize     0.021s
+[TIMER] shapes_post_features train=(3650, 120) score=(3507, 120)
+[TIMER] features.build         0.104s
+[FEAT] Imputing non-finite values in features using train medians
+[FEAT] Dropping 8 unusable feature columns (0 NaN, 8 low-variance)
+[FEAT] Dropped columns preview: ['VTIBY_MOTOR IB BRG VIB Y_rz', 'VTIBY_MOTOR IB BRG VIB Y_mad', 'VTIBY_MOTOR IB BRG VIB Y_slope', 'VTIBY_MOTOR IB BRG VIB Y_skew', 'VTIBY_MOTOR IB BRG VIB Y_std', 'VTIBY_MOTOR IB BRG VIB Y_kurt', 'VTIBY_MOTOR IB BRG VIB Y_med', 'VTIBY_MOTOR IB BRG VIB Y_mean']
+[FEAT] Logged 8 dropped features -> artifacts\COND_PUMP\run_20251110_181821\tables\feature_drop_log.csv
+[TIMER] features.log_drops     0.002s
+[TIMER] features.impute        0.059s
+[HASH] Stable hash computed: 9efdfc778d5d7db9 (shape=3650x112)
+[TIMER] features.hash          0.010s
+[TIMER] models.refit_flag      0.000s
+[TIMER] data.equip_id_infer    0.000s
+[MODEL] No cached models found - will train from scratch
+[TIMER] models.persistence.load   0.003s
+[REGIME] No cached regime model found at artifacts\COND_PUMP\models\regime_model.joblib
+[..] Fitting heads (AR1, Correlation, Outliers) ...
+[TIMER] fit.ar1                0.010s
+[PCA] Subspace detector fitted with 5 components.
+[PCA] Cached train scores: SPE=3650 samples, T¦=3650 samples
+[TIMER] fit.pca_subspace       0.156s
+[MHAL] Using regularization: 1.0
+[TIMER] fit.mhal               0.023s
+[TIMER] fit.iforest            0.251s
+[..] - Fitting heads (AR1, Correlation, Outliers) | ~6s left | next: score heads
+[GMM] BIC search selected k=3
+[GMM] Fitted k=3, cov=diag, reg=0.001
+[TIMER] fit.gmm                1.857s
+[OMR] Fitted PLS model: 3650 samples, 112 features, 5 components, std=3.617
+[TIMER] fit.omr                0.094s
+[OK] Fitting heads (AR1, Correlation, Outliers) done in 2.39s
+[ADAPTIVE] Checking model health...
+[ADAPTIVE] [TUNE] Mahalanobis needs tuning: 1.0 -> 10.0
+[TIMER] -- Summary ------------------------------
+[TIMER] fit.gmm                1.857s (  7.5%)
+[TIMER] fit.iforest            0.251s (  1.0%)
+[TIMER] fit.pca_subspace       0.156s (  0.6%)
+[TIMER] features.build         0.104s (  0.4%)
+[TIMER] fit.omr                0.094s (  0.4%)
+[TIMER] load_data              0.084s (  0.3%)
+[TIMER] features.impute        0.059s (  0.2%)
+[TIMER] data.guardrails        0.039s (  0.2%)
+[TIMER] data.guardrails.data_quality   0.038s (  0.2%)
+[TIMER] features.polars_convert   0.031s (  0.1%)
+[TIMER] features.compute_train   0.029s (  0.1%)
+[TIMER] fit.mhal               0.023s (  0.1%)
+[TIMER] features.compute_score   0.021s (  0.1%)
+[TIMER] features.normalize     0.021s (  0.1%)
+[TIMER] fit.ar1                0.010s (  0.0%)
+[TIMER] features.hash          0.010s (  0.0%)
+[TIMER] models.persistence.load   0.003s (  0.0%)
+[TIMER] features.log_drops     0.002s (  0.0%)
+[TIMER] features.compute_fill_values   0.001s (  0.0%)
+[TIMER] models.refit_flag      0.000s (  0.0%)
+[TIMER] baseline.seed          0.000s (  0.0%)
+[TIMER] data.equip_id_infer    0.000s (  0.0%)
+[TIMER] total_run             24.791s
+[TIMER] -- Summary ------------------------------
+[TIMER] compute_basic_features   0.051s (  0.2%)
+[TIMER] compute_basic_features_pl   0.039s (  0.2%)
+[TIMER] total_run             24.823s
