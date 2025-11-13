@@ -1,12 +1,6 @@
 # ACM V8 - Autonomous Asset Condition Monitoring
 
-ACM V8 is an autonomous condition monitoring pipeline for industrial equipment. It ingests
-
-historian exports (CSV) or SQL Server data, self-tunes detectors, and publishes operator-ready
-
-outputs under `artifacts/{EQUIP}/run_*`.ACM V8 is an autonomous condition monitoring pipeline for industrial equipment. It ingests historian exports (CSV) or SQL Server data, self-tunes detectors, and publishes operator-ready tables and charts under `artifacts/{EQUIP}/run_*`.ACM V8 is an autonomous condition monitoring pipeline for industrial equipment. It ingests historian exports (CSV) or SQL Server data, self-tunes detectors, and publishes operator-ready tables and charts under `artifacts/{EQUIP}/run_*`.
-
-
+ACM V8 is an autonomous condition monitoring pipeline for industrial equipment. 
 
 ## System Overview
 
