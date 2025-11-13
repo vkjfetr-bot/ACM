@@ -9,13 +9,13 @@
 ## Executive Summary
 
 The ACM system is **fully equipped** for SQL-based operation. All infrastructure is in place:
-- ✅ **21 tables** created and ready
-- ✅ **19 stored procedures** for data writes
-- ✅ **5 views** for analytics queries
-- ✅ **Dual-write mode** implemented in code
-- ✅ **Model registry** table for persisting trained models
-- ✅ **Equipment management** table for asset tracking
-- ✅ **Run tracking** system for pipeline execution logs
+-  **21 tables** created and ready
+-  **19 stored procedures** for data writes
+-  **5 views** for analytics queries
+-  **Dual-write mode** implemented in code
+-  **Model registry** table for persisting trained models
+-  **Equipment management** table for asset tracking
+-  **Run tracking** system for pipeline execution logs
 
 **Current State:** Database schema complete, code supports dual-write, **ZERO data** in tables (fresh start)
 
@@ -25,73 +25,73 @@ The ACM system is **fully equipped** for SQL-based operation. All infrastructure
 
 ## Database Schema Status (Verified November 13, 2025)
 
-### ✅ Core Tables (21 tables ready)
+###  Core Tables (21 tables ready)
 ```sql
 BASE TABLES:
-✅ Equipment                    -- Asset master data (0 rows - ready for population)
-✅ Runs                         -- Pipeline execution tracking (0 rows)
-✅ ModelRegistry                -- Trained model storage (0 rows)
-✅ ConfigLog                    -- Configuration change audit trail (0 rows)
-✅ Historian                    -- Raw time-series cache (0 rows)
+ Equipment                    -- Asset master data (0 rows - ready for population)
+ Runs                         -- Pipeline execution tracking (0 rows)
+ ModelRegistry                -- Trained model storage (0 rows)
+ ConfigLog                    -- Configuration change audit trail (0 rows)
+ Historian                    -- Raw time-series cache (0 rows)
 
 TIME-SERIES OUTPUTS:
-✅ ScoresTS                     -- Detector scores (fused_z, ar1_z, pca_spe_z, etc.)
-✅ DriftTS                      -- Multi-feature drift signals
-✅ PCA_ScoresTS                 -- PCA T² and SPE scores
-✅ ForecastResidualsTS          -- AR1 residual tracking
-✅ DataQualityTS                -- Data quality metrics over time
+ ScoresTS                     -- Detector scores (fused_z, ar1_z, pca_spe_z, etc.)
+ DriftTS                      -- Multi-feature drift signals
+ PCA_ScoresTS                 -- PCA T² and SPE scores
+ ForecastResidualsTS          -- AR1 residual tracking
+ DataQualityTS                -- Data quality metrics over time
 
 ANALYTICS TABLES:
-✅ AnomalyEvents                -- Episode detection results
-✅ RegimeEpisodes               -- Operating regime periods
-✅ AnomalyTopSpikes             -- Top contributing sensors per episode
-✅ XCorrTopPairs                -- Sensor correlation rankings
-✅ FeatureImportance            -- Drift culprit analysis
-✅ DriftSummary                 -- Drift change point summary
-✅ CPD_Points                   -- Change point detection results
-✅ RunStats                     -- Run-level quality metrics
+ AnomalyEvents                -- Episode detection results
+ RegimeEpisodes               -- Operating regime periods
+ AnomalyTopSpikes             -- Top contributing sensors per episode
+ XCorrTopPairs                -- Sensor correlation rankings
+ FeatureImportance            -- Drift culprit analysis
+ DriftSummary                 -- Drift change point summary
+ CPD_Points                   -- Change point detection results
+ RunStats                     -- Run-level quality metrics
 
 MODEL PERSISTENCE:
-✅ PCA_Model                    -- PCA model parameters
-✅ PCA_Components               -- PCA loadings/components
-✅ PCA_Metrics                  -- PCA quality metrics
+ PCA_Model                    -- PCA model parameters
+ PCA_Components               -- PCA loadings/components
+ PCA_Metrics                  -- PCA quality metrics
 ```
 
-### ✅ Views (5 analytical views)
+###  Views (5 analytical views)
 ```sql
-✅ v_Equip_Anomalies            -- Equipment anomaly summary
-✅ v_Equip_DriftTS              -- Equipment drift timeline
-✅ v_Equip_SensorTS             -- Equipment sensor time-series
-✅ v_PCA_Loadings               -- PCA component interpretation
-✅ v_PCA_Scree                  -- PCA variance explained plot data
+ v_Equip_Anomalies            -- Equipment anomaly summary
+ v_Equip_DriftTS              -- Equipment drift timeline
+ v_Equip_SensorTS             -- Equipment sensor time-series
+ v_PCA_Loadings               -- PCA component interpretation
+ v_PCA_Scree                  -- PCA variance explained plot data
 ```
 
-### ✅ Stored Procedures (19 write procedures)
+###  Stored Procedures (19 write procedures)
 ```sql
 CORE LIFECYCLE:
-✅ usp_ACM_StartRun             -- Initialize pipeline run
-✅ usp_ACM_FinalizeRun          -- Complete pipeline run
+ usp_ACM_StartRun             -- Initialize pipeline run
+ usp_ACM_FinalizeRun          -- Complete pipeline run
 
 DATA WRITES:
-✅ usp_Write_ScoresTS           -- Batch insert detector scores
-✅ usp_Write_DriftTS            -- Batch insert drift signals
-✅ usp_Write_AnomalyEvents      -- Write episode detections
-✅ usp_Write_RegimeEpisodes     -- Write regime transitions
-✅ usp_Write_AnomalyTopSpikes   -- Write culprit sensors
-✅ usp_Write_XCorrTopPairs      -- Write correlation pairs
-✅ usp_Write_FeatureImportance  -- Write drift culprits
-✅ usp_Write_DriftSummary       -- Write drift summary
-✅ usp_Write_CPD_Points         -- Write change points
-✅ usp_Write_DataQualityTS      -- Write quality metrics
-✅ usp_Write_ForecastResidualsTS -- Write forecast residuals
-✅ usp_Write_ConfigLog          -- Write config changes
-✅ usp_Write_RunStats           -- Write run statistics
+ usp_Write_ScoresTS           -- Batch insert detector scores
+ usp_Write_DriftTS            -- Batch insert drift signals
+ usp_Write_AnomalyEvents      -- Write episode detections
+ usp_Write_RegimeEpisodes     -- Write regime transitions
+ usp_Write_AnomalyTopSpikes   -- Write culprit sensors
+ usp_Write_XCorrTopPairs      -- Write correlation pairs
+ usp_Write_FeatureImportance  -- Write drift culprits
+ usp_Write_DriftSummary       -- Write drift summary
+ usp_Write_CPD_Points         -- Write change points
+ usp_Write_DataQualityTS      -- Write quality metrics
+ usp_Write_ForecastResidualsTS -- Write forecast residuals
+ usp_Write_ConfigLog          -- Write config changes
+ usp_Write_RunStats           -- Write run statistics
 
 PCA MODEL WRITES:
-✅ usp_Write_PCA_Model          -- Persist PCA model
-✅ usp_Write_PCA_Metrics        -- Write PCA quality metrics
-✅ usp_Write_PCA_Loadings       -- Write PCA components
-✅ usp_Write_PCA_ScoresTS       -- Write PCA scores
+ usp_Write_PCA_Model          -- Persist PCA model
+ usp_Write_PCA_Metrics        -- Write PCA quality metrics
+ usp_Write_PCA_Loadings       -- Write PCA components
+ usp_Write_PCA_ScoresTS       -- Write PCA scores
 ```
 
 ---
@@ -102,7 +102,7 @@ PCA MODEL WRITES:
 
 ## Code Infrastructure (Ready for SQL Operation)
 
-### 1. ✅ SQL Connection & Authentication
+### 1.  SQL Connection & Authentication
 **File:** `configs/sql_connection.ini` (local, gitignored)
 - Windows Authentication configured
 - Connected to: `localhost\B19CL3PCQLSERVER`
@@ -115,7 +115,7 @@ PCA MODEL WRITES:
 - Connection pooling and error handling
 - Multi-database connection management
 
-### 2. ✅ Dual-Write Mode (Implemented)
+### 2.  Dual-Write Mode (Implemented)
 **File:** `core/output_manager.py` (Lines 1-4547)
 - **Smart dual-write coordination** - writes to both file AND SQL
 - `write_table()` method with automatic SQL fallback
@@ -132,7 +132,7 @@ PCA MODEL WRITES:
 - Equipment ID resolution
 - Run lifecycle integration
 
-### 3. ✅ SQL Performance Optimization
+### 3.  SQL Performance Optimization
 **File:** `core/sql_performance.py`
 - `SQLBatchWriter` - Optimized bulk inserts
 - `SQLPerformanceMonitor` - Performance tracking
@@ -140,7 +140,7 @@ PCA MODEL WRITES:
 - `fast_executemany` enabled
 - Target: <15s for full write batch
 
-### 4. ✅ Model Persistence Architecture
+### 4.  Model Persistence Architecture
 **File:** `core/model_persistence.py`
 - `ModelVersionManager` - Model versioning system
 - Version tracking (v1, v2, v3...)
@@ -155,7 +155,7 @@ PCA MODEL WRITES:
   - `RunID` (uniqueidentifier) - Link to training run
   - `EntryDateTime` (datetime2) - Creation timestamp
 
-### 5. ✅ Configuration Management
+### 5.  Configuration Management
 **File:** `utils/sql_config.py`
 - SQL-based config loading (priority over YAML)
 - Equipment-specific parameter overrides
@@ -167,7 +167,7 @@ PCA MODEL WRITES:
 - Config seeding script ready: `scripts/sql/40_seed_config.sql`
 - `ConfigLog` table tracks all config changes
 
-### 6. ✅ Equipment Discovery Integration
+### 6.  Equipment Discovery Integration
 **File:** `scripts/sql/25_equipment_discovery_procs.sql`
 - Stored procedures for DOW integration
 - Equipment metadata synchronization
@@ -181,8 +181,8 @@ PCA MODEL WRITES:
 
 ## Migration Phases (Revised for Complete SQL)
 
-### ✅ Phase 0: Infrastructure Setup (COMPLETE)
-**Status:** ✅ Done (November 13, 2025)
+###  Phase 0: Infrastructure Setup (COMPLETE)
+**Status:**  Done (November 13, 2025)
 - Database created: `ACM`
 - 21 tables created and ready
 - 19 stored procedures deployed
@@ -199,7 +199,7 @@ python scripts\sql\verify_acm_connection.py
 
 ---
 
-### 🎯 Phase 1: Dual-Write Validation (NEXT - START HERE)
+###  Phase 1: Dual-Write Validation (NEXT - START HERE)
 **Objective:** Run pipeline in dual-write mode, validate SQL outputs against file outputs
 
 **Duration:** 1-2 weeks  
@@ -281,11 +281,11 @@ assert file_scores['fused_z'].mean() == sql_scores['fused_z'].mean()
 ```
 
 #### Success Criteria Phase 1:
-- ✅ Dual-write runs without errors
-- ✅ SQL tables populated with correct row counts
-- ✅ File and SQL outputs match (within floating-point tolerance)
-- ✅ Performance acceptable (<2x slowdown vs file-only)
-- ✅ All 26 analytics tables written to SQL
+-  Dual-write runs without errors
+-  SQL tables populated with correct row counts
+-  File and SQL outputs match (within floating-point tolerance)
+-  Performance acceptable (<2x slowdown vs file-only)
+-  All 26 analytics tables written to SQL
 
 #### Deliverables Phase 1:
 - Equipment master data populated (2-10 assets)
@@ -295,7 +295,7 @@ assert file_scores['fused_z'].mean() == sql_scores['fused_z'].mean()
 
 ---
 
-### 🚀 Phase 2: Model Persistence in SQL (PARALLEL WITH PHASE 1)
+###  Phase 2: Model Persistence in SQL (PARALLEL WITH PHASE 1)
 **Objective:** Store trained models in `ModelRegistry` table instead of .joblib files
 
 **Duration:** 1 week  
@@ -358,14 +358,14 @@ if sql_client and cfg.get('output', {}).get('persist_models_sql', False):
 ```
 
 #### Success Criteria Phase 2:
-- ✅ Models saved to `ModelRegistry` table
-- ✅ Models loaded from SQL produce identical predictions
-- ✅ Version tracking works (v1, v2, v3...)
-- ✅ File-based model cache still works as fallback
+-  Models saved to `ModelRegistry` table
+-  Models loaded from SQL produce identical predictions
+-  Version tracking works (v1, v2, v3...)
+-  File-based model cache still works as fallback
 
 ---
 
-### 🎯 Phase 3: SQL-Only Mode (PRODUCTION)
+###  Phase 3: SQL-Only Mode (PRODUCTION)
 **Objective:** Disable file outputs, use SQL as primary storage
 
 **Duration:** 2-3 weeks  
@@ -420,11 +420,11 @@ Create `scripts/run_all_equipment.py`:
 - Dashboard queries against SQL views
 
 #### Success Criteria Phase 3:
-- ✅ Pipeline runs without file I/O (SQL only)
-- ✅ Historian integration working (live data ingest)
-- ✅ Scheduled execution running unattended
-- ✅ Dashboards/BI tools query SQL tables successfully
-- ✅ Performance meets SLA (<15s per run)
+-  Pipeline runs without file I/O (SQL only)
+-  Historian integration working (live data ingest)
+-  Scheduled execution running unattended
+-  Dashboards/BI tools query SQL tables successfully
+-  Performance meets SLA (<15s per run)
 
 ---
 
@@ -432,62 +432,62 @@ Create `scripts/run_all_equipment.py`:
 
 ### Week 1: Dual-Write Validation
 **Day 1-2:**
-1. ✅ Update config to enable `dual_mode: true`
-2. ✅ Register 2 test equipment (FD_FAN, GAS_TURBINE) in `Equipment` table
-3. ✅ Run 3 dual-write pipelines (FD_FAN, GAS_TURBINE, repeat)
-4. ✅ Verify SQL tables populated
+1.  Update config to enable `dual_mode: true`
+2.  Register 2 test equipment (FD_FAN, GAS_TURBINE) in `Equipment` table
+3.  Run 3 dual-write pipelines (FD_FAN, GAS_TURBINE, repeat)
+4.  Verify SQL tables populated
 
 **Day 3-4:**
-5. ✅ Create validation script (`validate_dual_write.py`)
-6. ✅ Compare file vs SQL outputs (row counts, statistics, keys)
-7. ✅ Measure performance baseline
-8. ✅ Fix any schema mismatches or write errors
+5.  Create validation script (`validate_dual_write.py`)
+6.  Compare file vs SQL outputs (row counts, statistics, keys)
+7.  Measure performance baseline
+8.  Fix any schema mismatches or write errors
 
 **Day 5:**
-9. ✅ Run 10 dual-write cycles on multiple equipment
-10. ✅ Document validation results
-11. ✅ Tune SQL batch writer performance
+9.  Run 10 dual-write cycles on multiple equipment
+10.  Document validation results
+11.  Tune SQL batch writer performance
 
 ### Week 2: Model Persistence
 **Day 6-8:**
-12. ✅ Implement `save_to_sql()` in ModelVersionManager
-13. ✅ Implement `load_from_sql()` with version selection
-14. ✅ Test model round-trip (save → load → predict)
+12.  Implement `save_to_sql()` in ModelVersionManager
+13.  Implement `load_from_sql()` with version selection
+14.  Test model round-trip (save → load → predict)
 
 **Day 9-10:**
-15. ✅ Integrate model persistence into main pipeline
-16. ✅ Run 5 training cycles, verify models in `ModelRegistry`
-17. ✅ Test cold-start with SQL-loaded models
+15.  Integrate model persistence into main pipeline
+16.  Run 5 training cycles, verify models in `ModelRegistry`
+17.  Test cold-start with SQL-loaded models
 
 ### Week 3: Planning Phase 3
 **Day 11-15:**
-18. ✅ Review historian integration code (`core/historian.py`)
-19. ✅ Plan equipment scheduler architecture
-20. ✅ Design monitoring dashboard queries
-21. ✅ Plan production deployment (scheduler, alerts, backups)
+18.  Review historian integration code (`core/historian.py`)
+19.  Plan equipment scheduler architecture
+20.  Design monitoring dashboard queries
+21.  Plan production deployment (scheduler, alerts, backups)
 
 ---
 
 ## Key Design Decisions (Updated)
 
-### 1. ✅ Dual-Write as Safety Net
+### 1.  Dual-Write as Safety Net
 - **Why:** Validate SQL outputs before committing to SQL-only
 - **How:** OutputManager supports `dual_mode` flag, writes to both destinations
 - **Result:** Zero risk - file mode always works even if SQL fails
 
-### 2. ✅ Model Storage Strategy
+### 2.  Model Storage Strategy
 - **File:** .joblib + manifest.json (fast, large files, version control hard)
 - **SQL:** ModelRegistry table (centralized, versioned, queryable, slower)
 - **Decision:** Use SQL for production, keep file cache for dev/debugging
 
-### 3. ✅ Time-Series Storage
+### 3.  Time-Series Storage
 - **Challenge:** ScoresTS table will grow large (millions of rows)
 - **Solution:** 
   - Partition by EquipID + datetime (future)
   - Retention policy (archive old data after 1 year)
   - Indexed columns: EquipID, RunID, dt_local
 
-### 4. ✅ Performance Optimization
+### 4.  Performance Optimization
 - **Target:** <15s for full SQL write batch (currently ~58s baseline)
 - **Techniques:**
   - `fast_executemany` enabled (10x speedup)
@@ -495,12 +495,12 @@ Create `scripts/run_all_equipment.py`:
   - Parameterized stored procedures (usp_Write_* family)
   - Remove unnecessary indexes during bulk insert (future)
 
-### 5. ✅ Equipment Master Data
+### 5.  Equipment Master Data
 - **Source:** XStudio_DOW (equipment metadata database)
 - **Strategy:** One-time sync to populate `Equipment` table
 - **Maintenance:** Manual updates for new equipment commissioning
 
-### 6. ✅ Configuration Hierarchy
+### 6.  Configuration Hierarchy
 **Priority (highest to lowest):**
 1. SQL `ConfigLog` table (runtime overrides)
 2. SQL default config (seeded via `40_seed_config.sql`)
@@ -559,7 +559,7 @@ Create `scripts/run_all_equipment.py`:
 ## Testing Strategy
 
 ### Unit Tests
-- ✅ `tests/test_dual_write.py` - Dual-write logic
+-  `tests/test_dual_write.py` - Dual-write logic
 - ⏳ `tests/test_model_persistence_sql.py` - Model save/load
 - ⏳ `tests/test_sql_client.py` - Connection handling
 
@@ -693,43 +693,43 @@ docs/sql/
 ```
 ACM/
 ├── configs/
-│   ├── sql_connection.ini          ✅ Local SQL connection (Windows Auth)
-│   ├── config.yaml                 ✅ Base config with dual_mode flag
-│   └── config_table.csv            ✅ Legacy config fallback
+│   ├── sql_connection.ini           Local SQL connection (Windows Auth)
+│   ├── config.yaml                  Base config with dual_mode flag
+│   └── config_table.csv             Legacy config fallback
 │
 ├── core/
-│   ├── acm_main.py                 ✅ Main pipeline (dual-write ready, line 658)
-│   ├── sql_client.py               ✅ SQL connection manager (Windows Auth)
-│   ├── output_manager.py           ✅ Dual-write coordinator (4547 lines)
-│   ├── sql_performance.py          ✅ Batch writer + performance monitor
-│   ├── model_persistence.py        ✅ Model versioning (ready for SQL)
-│   └── historian.py                ✅ Historian client (Phase 3)
+│   ├── acm_main.py                  Main pipeline (dual-write ready, line 658)
+│   ├── sql_client.py                SQL connection manager (Windows Auth)
+│   ├── output_manager.py            Dual-write coordinator (4547 lines)
+│   ├── sql_performance.py           Batch writer + performance monitor
+│   ├── model_persistence.py         Model versioning (ready for SQL)
+│   └── historian.py                 Historian client (Phase 3)
 │
 ├── utils/
-│   ├── sql_config.py               ✅ SQL config reader/writer
-│   └── logger.py                   ✅ Console logging
+│   ├── sql_config.py                SQL config reader/writer
+│   └── logger.py                    Console logging
 │
 ├── scripts/sql/
-│   ├── 00_create_database.sql      ✅ Create ACM database
-│   ├── 10_core_tables.sql          ✅ 21 tables (Equipment, Runs, etc.)
-│   ├── 15_config_tables.sql        ✅ Config + audit tables
-│   ├── 20_stored_procs.sql         ✅ 19 write procedures
-│   ├── 25_equipment_discovery_procs.sql ✅ DOW integration
-│   ├── 30_views.sql                ✅ 5 analytical views
-│   ├── 40_seed_config.sql          ✅ Config seeding script
-│   ├── verify_acm_connection.py    ✅ Connection test script
-│   ├── test_config_load.py         ✅ Config validation script
+│   ├── 00_create_database.sql       Create ACM database
+│   ├── 10_core_tables.sql           21 tables (Equipment, Runs, etc.)
+│   ├── 15_config_tables.sql         Config + audit tables
+│   ├── 20_stored_procs.sql          19 write procedures
+│   ├── 25_equipment_discovery_procs.sql  DOW integration
+│   ├── 30_views.sql                 5 analytical views
+│   ├── 40_seed_config.sql           Config seeding script
+│   ├── verify_acm_connection.py     Connection test script
+│   ├── test_config_load.py          Config validation script
 │   ├── validate_dual_write.py      ⏳ TO CREATE (Phase 1)
 │   └── test_model_persistence.py   ⏳ TO CREATE (Phase 2)
 │
-├── data/                           ✅ CSV input files (Phase 1 data source)
+├── data/                            CSV input files (Phase 1 data source)
 │   ├── FD FAN TRAINING DATA.csv
 │   └── Gas Turbine Training Data Set.csv
 │
-└── artifacts/                      ✅ File outputs (dual-write destination)
+└── artifacts/                       File outputs (dual-write destination)
     └── {EQUIP}/
-        ├── run_{timestamp}/        ✅ CSV/JSON/PNG outputs
-        └── models/                 ✅ .joblib model cache
+        ├── run_{timestamp}/         CSV/JSON/PNG outputs
+        └── models/                  .joblib model cache
 ```
 
 ---
@@ -755,12 +755,12 @@ ACM/
 - Zero breaking changes
 
 **What's next (IMMEDIATE ACTIONS):**
-1. ✅ **Enable dual-write mode** in config.yaml (set `output.dual_mode: true`)
-2. ✅ **Register equipment** in Equipment table (FD_FAN, GAS_TURBINE)
-3. ✅ **Run 3-5 pipelines** with dual-write enabled
-4. ✅ **Verify SQL tables** populated with correct data
-5. ✅ **Create validation script** to compare file vs SQL outputs
-6. ✅ **Measure performance** baseline (target <15s SQL writes)
+1.  **Enable dual-write mode** in config.yaml (set `output.dual_mode: true`)
+2.  **Register equipment** in Equipment table (FD_FAN, GAS_TURBINE)
+3.  **Run 3-5 pipelines** with dual-write enabled
+4.  **Verify SQL tables** populated with correct data
+5.  **Create validation script** to compare file vs SQL outputs
+6.  **Measure performance** baseline (target <15s SQL writes)
 7. ⏳ **Implement model persistence** to ModelRegistry table
 8. ⏳ **Plan Phase 3** historian integration and SQL-only mode
 
