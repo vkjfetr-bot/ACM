@@ -19,6 +19,7 @@
           "uid": "${datasource}"
         },
         "enable": true,
+        "hide": false,
         "iconColor": "#dc2626",
         "name": "Episodes",
         "rawQuery": "SELECT StartTimestamp as time, CONCAT('Episode: ', PrimaryDetector, ' (', CAST(DurationHours as VARCHAR), 'h)') as text, 'Episode' as tags FROM ACM_CulpritHistory WHERE EquipID = $equipment AND StartTimestamp >= $__timeFrom() AND StartTimestamp <= $__timeTo()",
@@ -30,6 +31,7 @@
           "uid": "${datasource}"
         },
         "enable": true,
+        "hide": false,
         "iconColor": "#f59e0b",
         "name": "Drift Events",
         "rawQuery": "SELECT Timestamp as time, CONCAT('Drift: ', CAST(Value as VARCHAR)) as text, 'Drift' as tags FROM ACM_DriftEvents WHERE EquipID = $equipment AND Timestamp >= $__timeFrom() AND Timestamp <= $__timeTo()",
@@ -40,9 +42,8 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": null,
+  "id": 0,
   "links": [],
-  "liveNow": false,
   "panels": [
     {
       "datasource": {
@@ -79,14 +80,25 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 6,
+        "h": 3,
+        "w": 3,
         "x": 0,
         "y": 0
       },
       "id": 1,
       "options": {
-        "orientation": "auto",
+        "displayMode": "gradient",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -94,10 +106,11 @@
           "fields": "",
           "values": false
         },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -107,7 +120,7 @@
         }
       ],
       "title": "Overall Health Score",
-      "type": "gauge"
+      "type": "bargauge"
     },
     {
       "datasource": {
@@ -124,8 +137,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "text",
-                "value": null
+                "color": "#e9f1ff",
+                "value": 0
               }
             ]
           },
@@ -134,9 +147,9 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 4,
-        "x": 6,
+        "h": 3,
+        "w": 5,
+        "x": 3,
         "y": 0
       },
       "id": 2,
@@ -145,23 +158,44 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/^Status$/",
           "values": false
         },
+        "showPercentChange": false,
         "text": {},
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
+          "editorMode": "code",
           "format": "table",
           "rawQuery": true,
           "rawSql": "SELECT TOP 1 \n           CASE \n             WHEN HealthIndex >= 85 THEN 'HEALTHY'\n             WHEN HealthIndex >= 70 THEN 'CAUTION'\n             ELSE 'ALERT'\n           END as Status\n           FROM ACM_HealthTimeline \n           WHERE EquipID = $equipment \n           ORDER BY Timestamp DESC",
-          "refId": "A"
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
         }
       ],
       "title": "Current Status",
@@ -183,7 +217,86 @@
             "steps": [
               {
                 "color": "text",
-                "value": null
+                "value": 0
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 6,
+        "x": 8,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^WorstSensor$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {},
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT TOP 1 \n           CONCAT(SensorName, ' (z=', CAST(ROUND(LatestAbsZ, 2) as VARCHAR), ')') as WorstSensor\n           FROM ACM_SensorHotspots \n           WHERE EquipID = $equipment \n           ORDER BY LatestAbsZ DESC",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Worst Sensor",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": 0
               }
             ]
           },
@@ -192,9 +305,9 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 3,
         "w": 4,
-        "x": 10,
+        "x": 14,
         "y": 0
       },
       "id": 3,
@@ -203,6 +316,7 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -210,10 +324,12 @@
           "fields": "",
           "values": false
         },
+        "showPercentChange": false,
         "text": {},
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -241,7 +357,7 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -258,9 +374,9 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 3,
         "w": 3,
-        "x": 14,
+        "x": 18,
         "y": 0
       },
       "id": 4,
@@ -269,6 +385,7 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -276,10 +393,12 @@
           "fields": "",
           "values": false
         },
+        "showPercentChange": false,
         "text": {},
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -307,7 +426,7 @@
             "steps": [
               {
                 "color": "text",
-                "value": null
+                "value": 0
               }
             ]
           },
@@ -316,65 +435,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 4,
-        "x": 17,
-        "y": 0
-      },
-      "id": 5,
-      "options": {
-        "colorMode": "none",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "text": {},
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT TOP 1 \n           CONCAT(SensorName, ' (z=', CAST(ROUND(LatestAbsZ, 2) as VARCHAR), ')') as WorstSensor\n           FROM ACM_SensorHotspots \n           WHERE EquipID = $equipment \n           ORDER BY LatestAbsZ DESC",
-          "refId": "A"
-        }
-      ],
-      "title": "Worst Sensor",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "mssql",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
+        "h": 3,
         "w": 3,
         "x": 21,
         "y": 0
@@ -385,17 +446,20 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/^CurrentRegime$/",
           "values": false
         },
+        "showPercentChange": false,
         "text": {},
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -418,19 +482,22 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 30,
             "gradientMode": "none",
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "pointSize": 5,
@@ -438,6 +505,7 @@
               "type": "linear"
             },
             "showPoints": "never",
+            "showValues": false,
             "spanNulls": false,
             "stacking": {
               "group": "A",
@@ -470,10 +538,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 10,
+        "h": 6,
         "w": 24,
         "x": 0,
-        "y": 8
+        "y": 3
       },
       "id": 7,
       "options": {
@@ -484,16 +552,36 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         }
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
+          "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp as time, HealthIndex, HealthZone\n           FROM ACM_HealthTimeline \n           WHERE EquipID = $equipment \n           AND Timestamp >= $__timeFrom() AND Timestamp <= $__timeTo()\n           ORDER BY Timestamp",
-          "refId": "A"
+          "rawSql": "SELECT TOP (1000) [Timestamp] as time\n      ,[HealthIndex]\n      ,[HealthZone]\n      ,[FusedZ]\n\n      ,[EquipID]\n  FROM [ACM].[dbo].[ACM_HealthTimeline]\nWHERE\n  EquipID = $equipment\n\nORDER BY\n  Timestamp",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
         }
       ],
       "title": "Health Index Timeline",
@@ -510,7 +598,14 @@
             "mode": "thresholds"
           },
           "custom": {
+            "axisPlacement": "auto",
             "fillOpacity": 70,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
             "lineWidth": 0,
             "spanNulls": false
           },
@@ -520,7 +615,7 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               }
             ]
           }
@@ -528,10 +623,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 7,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 9
       },
       "id": 8,
       "options": {
@@ -545,16 +640,36 @@
         "rowHeight": 0.9,
         "showValue": "auto",
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         }
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
+          "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp as time, \n           CONCAT('Regime ', CAST(RegimeLabel as VARCHAR)) as regime,\n           RegimeState as state\n           FROM ACM_RegimeTimeline \n           WHERE EquipID = $equipment \n           AND Timestamp >= $__timeFrom() AND Timestamp <= $__timeTo()\n           ORDER BY Timestamp",
-          "refId": "A"
+          "rawSql": "SELECT\n  Timestamp as time,\n  CONCAT('Regime ', CAST(RegimeLabel as VARCHAR)) as regime,\n  RegimeState as state\nFROM\n  ACM_RegimeTimeline\nWHERE\n  EquipID = $equipment\nORDER BY\n  Timestamp",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
         }
       ],
       "title": "Operating Regime Timeline",
@@ -571,6 +686,7 @@
             "mode": "thresholds"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -578,13 +694,16 @@
             "fillOpacity": 80,
             "gradientMode": "none",
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
             "lineWidth": 1,
             "scaleDistribution": {
               "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
             }
           },
           "mappings": [],
@@ -593,7 +712,7 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -613,7 +732,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 22
+        "y": 16
       },
       "id": 9,
       "options": {
@@ -631,12 +750,14 @@
         "showValue": "auto",
         "stacking": "none",
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         },
         "xTickLabelRotation": 0,
         "xTickLabelSpacing": 0
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -659,19 +780,22 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "pointSize": 5,
@@ -679,8 +803,10 @@
               "type": "linear"
             },
             "showPoints": "never",
+            "showValues": false,
             "spanNulls": false,
             "stacking": {
+              "group": "A",
               "mode": "normal"
             },
             "thresholdsStyle": {
@@ -693,7 +819,7 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               }
             ]
           },
@@ -705,7 +831,7 @@
         "h": 10,
         "w": 16,
         "x": 8,
-        "y": 22
+        "y": 16
       },
       "id": 10,
       "options": {
@@ -716,16 +842,36 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         }
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
+          "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
           "rawSql": "SELECT Timestamp as time, \n           DetectorType as metric, \n           ContributionPct as value\n           FROM ACM_ContributionTimeline \n           WHERE EquipID = $equipment \n           AND Timestamp >= $__timeFrom() AND Timestamp <= $__timeTo()\n           ORDER BY Timestamp, DetectorType",
-          "refId": "A"
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
         }
       ],
       "title": "Sensor Contributions Over Time",
@@ -746,6 +892,9 @@
             "cellOptions": {
               "type": "auto"
             },
+            "footer": {
+              "reducers": []
+            },
             "inspect": false
           },
           "mappings": [],
@@ -754,11 +903,11 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
-                "value": 2.0
+                "value": 2
               },
               {
                 "color": "orange",
@@ -766,7 +915,7 @@
               },
               {
                 "color": "red",
-                "value": 3.0
+                "value": 3
               }
             ]
           }
@@ -808,19 +957,11 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 26
       },
       "id": 11,
       "options": {
         "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
         "showHeader": true,
         "sortBy": [
           {
@@ -829,7 +970,7 @@
           }
         ]
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -850,15 +991,14 @@
         "defaults": {
           "custom": {
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
             "scaleDistribution": {
               "type": "linear"
             }
-          },
-          "mappings": []
+          }
         },
         "overrides": []
       },
@@ -866,7 +1006,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 34
       },
       "id": 12,
       "options": {
@@ -886,7 +1026,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -895,7 +1035,8 @@
           "layout": "auto"
         },
         "tooltip": {
-          "show": true,
+          "mode": "single",
+          "showColorScale": false,
           "yHistogram": false
         },
         "yAxis": {
@@ -903,7 +1044,7 @@
           "reverse": false
         }
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -926,6 +1067,7 @@
             "mode": "thresholds"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
@@ -933,13 +1075,16 @@
             "fillOpacity": 80,
             "gradientMode": "none",
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
             "lineWidth": 1,
             "scaleDistribution": {
               "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
             }
           },
           "mappings": [],
@@ -948,7 +1093,7 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
@@ -968,7 +1113,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 34
       },
       "id": 13,
       "options": {
@@ -988,12 +1133,14 @@
           "mode": "normal"
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         },
         "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0
+        "xTickLabelSpacing": 100
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -1016,19 +1163,22 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "points",
             "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "pointSize": 5,
@@ -1036,6 +1186,7 @@
               "type": "linear"
             },
             "showPoints": "always",
+            "showValues": false,
             "spanNulls": false,
             "stacking": {
               "group": "A",
@@ -1051,7 +1202,7 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               }
             ]
           },
@@ -1063,7 +1214,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 42
       },
       "id": 14,
       "options": {
@@ -1074,15 +1225,17 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         }
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp as time, \n           CONCAT(FromZone, ' \u2192 ', ToZone) as transition,\n           HealthIndex as health,\n           FusedZ as zscore\n           FROM ACM_DefectTimeline \n           WHERE EquipID = $equipment \n           AND Timestamp >= $__timeFrom() AND Timestamp <= $__timeTo()\n           ORDER BY Timestamp",
+          "rawSql": "SELECT Timestamp as time, \n           CONCAT(FromZone, ' → ', ToZone) as transition,\n           HealthIndex as health,\n           FusedZ as zscore\n           FROM ACM_DefectTimeline \n           WHERE EquipID = $equipment \n           AND Timestamp >= $__timeFrom() AND Timestamp <= $__timeTo()\n           ORDER BY Timestamp",
           "refId": "A"
         }
       ],
@@ -1105,7 +1258,7 @@
             "steps": [
               {
                 "color": "text",
-                "value": null
+                "value": 0
               }
             ]
           },
@@ -1117,7 +1270,7 @@
         "h": 6,
         "w": 8,
         "x": 0,
-        "y": 56
+        "y": 50
       },
       "id": 15,
       "options": {
@@ -1125,6 +1278,7 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -1132,10 +1286,12 @@
           "fields": "",
           "values": false
         },
+        "showPercentChange": false,
         "text": {},
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -1159,9 +1315,9 @@
           },
           "custom": {
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             }
           },
           "mappings": []
@@ -1172,7 +1328,7 @@
         "h": 6,
         "w": 8,
         "x": 8,
-        "y": 56
+        "y": 50
       },
       "id": 16,
       "options": {
@@ -1196,11 +1352,14 @@
           "fields": "",
           "values": false
         },
+        "sort": "desc",
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         }
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -1223,19 +1382,22 @@
             "mode": "palette-classic"
           },
           "custom": {
+            "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
+            "barWidthFactor": 0.6,
             "drawStyle": "line",
             "fillOpacity": 0,
             "gradientMode": "none",
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
+            "insertNulls": false,
             "lineInterpolation": "smooth",
             "lineWidth": 2,
             "pointSize": 5,
@@ -1243,6 +1405,7 @@
               "type": "linear"
             },
             "showPoints": "never",
+            "showValues": false,
             "spanNulls": false,
             "stacking": {
               "group": "A",
@@ -1262,7 +1425,7 @@
               },
               {
                 "color": "red",
-                "value": 3.0
+                "value": 3
               }
             ]
           },
@@ -1274,7 +1437,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 56
+        "y": 50
       },
       "id": 17,
       "options": {
@@ -1285,10 +1448,12 @@
           "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "single",
           "sort": "none"
         }
       },
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "time_series",
@@ -1309,23 +1474,22 @@
         "defaults": {
           "custom": {
             "hideFrom": {
+              "legend": false,
               "tooltip": false,
-              "viz": false,
-              "legend": false
+              "viz": false
             },
             "scaleDistribution": {
               "type": "linear"
             }
-          },
-          "mappings": []
+          }
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 10,
+        "h": 6,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 56
       },
       "id": 18,
       "options": {
@@ -1345,7 +1509,7 @@
           "color": "rgba(255,0,255,0.7)"
         },
         "filterValues": {
-          "le": 1e-09
+          "le": 1e-9
         },
         "legend": {
           "show": true
@@ -1354,7 +1518,8 @@
           "layout": "auto"
         },
         "tooltip": {
-          "show": true,
+          "mode": "single",
+          "showColorScale": false,
           "yHistogram": false
         },
         "yAxis": {
@@ -1362,7 +1527,7 @@
           "reverse": false
         }
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -1389,6 +1554,9 @@
             "cellOptions": {
               "type": "auto"
             },
+            "footer": {
+              "reducers": []
+            },
             "inspect": false
           },
           "mappings": [],
@@ -1397,11 +1565,11 @@
             "steps": [
               {
                 "color": "green",
-                "value": null
+                "value": 0
               },
               {
                 "color": "yellow",
-                "value": 2.0
+                "value": 2
               },
               {
                 "color": "orange",
@@ -1409,7 +1577,7 @@
               },
               {
                 "color": "red",
-                "value": 3.0
+                "value": 3
               }
             ]
           }
@@ -1451,19 +1619,11 @@
         "h": 6,
         "w": 16,
         "x": 0,
-        "y": 72
+        "y": 62
       },
       "id": 19,
       "options": {
         "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
         "showHeader": true,
         "sortBy": [
           {
@@ -1472,7 +1632,7 @@
           }
         ]
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -1500,7 +1660,7 @@
             "steps": [
               {
                 "color": "text",
-                "value": null
+                "value": 0
               }
             ]
           },
@@ -1512,7 +1672,7 @@
         "h": 6,
         "w": 8,
         "x": 16,
-        "y": 72
+        "y": 62
       },
       "id": 20,
       "options": {
@@ -1520,6 +1680,7 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
+        "percentChangeColorMode": "standard",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -1527,10 +1688,12 @@
           "fields": "",
           "values": false
         },
+        "showPercentChange": false,
         "text": {},
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "10.0.0",
+      "pluginVersion": "12.2.1",
       "targets": [
         {
           "format": "table",
@@ -1543,9 +1706,9 @@
       "type": "stat"
     }
   ],
+  "preload": false,
   "refresh": "5m",
-  "schemaVersion": 38,
-  "style": "dark",
+  "schemaVersion": 42,
   "tags": [
     "acm",
     "asset-health",
@@ -1554,45 +1717,52 @@
   "templating": {
     "list": [
       {
-        "current": {},
-        "hide": 0,
+        "current": {
+          "text": "B19CL3PCSQLSERVER",
+          "value": "cf42m5bbjxmo0e"
+        },
         "includeAll": false,
         "label": "Data Source",
-        "multi": false,
         "name": "datasource",
         "options": [],
         "query": "mssql",
         "refresh": 1,
         "regex": "",
-        "skipUrlSync": false,
         "type": "datasource"
       },
       {
-        "current": {},
+        "current": {
+          "text": "2621",
+          "value": "2621"
+        },
         "datasource": {
           "type": "mssql",
           "uid": "${datasource}"
         },
         "definition": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline ORDER BY EquipID",
-        "hide": 0,
         "includeAll": false,
         "label": "Equipment",
-        "multi": false,
         "name": "equipment",
         "options": [],
         "query": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline ORDER BY EquipID",
         "refresh": 1,
         "regex": "",
-        "skipUrlSync": false,
         "sort": 1,
         "type": "query"
       },
       {
         "current": {
-          "text": "All",
-          "value": "$__all"
+          "text": [
+            "GOOD",
+            "WATCH",
+            "ALERT"
+          ],
+          "value": [
+            "GOOD",
+            "WATCH",
+            "ALERT"
+          ]
         },
-        "hide": 0,
         "includeAll": true,
         "label": "Health Zone",
         "multi": true,
@@ -1600,35 +1770,28 @@
         "options": [
           {
             "selected": true,
-            "text": "All",
-            "value": "$__all"
-          },
-          {
-            "selected": false,
             "text": "GOOD",
             "value": "GOOD"
           },
           {
-            "selected": false,
+            "selected": true,
             "text": "WATCH",
             "value": "WATCH"
           },
           {
-            "selected": false,
+            "selected": true,
             "text": "ALERT",
             "value": "ALERT"
           }
         ],
         "query": "GOOD,WATCH,ALERT",
-        "queryValue": "",
-        "skipUrlSync": false,
         "type": "custom"
       }
     ]
   },
   "time": {
-    "from": "now-30d",
-    "to": "now"
+    "from": "2025-09-28T11:49:32.267Z",
+    "to": "2025-11-14T06:41:43.161Z"
   },
   "timepicker": {
     "refresh_intervals": [
@@ -1638,22 +1801,10 @@
       "15m",
       "30m",
       "1h"
-    ],
-    "time_options": [
-      "5m",
-      "15m",
-      "1h",
-      "6h",
-      "12h",
-      "24h",
-      "7d",
-      "30d",
-      "90d"
     ]
   },
   "timezone": "",
   "title": "ACM Asset Health Dashboard",
   "uid": "acm-asset-health",
-  "version": 1,
-  "weekStart": ""
+  "version": 16
 }

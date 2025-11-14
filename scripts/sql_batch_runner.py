@@ -447,6 +447,9 @@ class SQLBatchRunner:
         Returns:
             True if processing completed successfully
         """
+        import time
+        start_time = time.time()
+        
         print(f"\n{'#'*60}")
         print(f"# Processing Equipment: {equip_name}")
         print(f"{'#'*60}")
@@ -482,11 +485,17 @@ class SQLBatchRunner:
         # Phase 2: Batch processing
         batches = self._process_batches(equip_name, dry_run=dry_run, resume=resume)
         
+        elapsed_time = time.time() - start_time
+        elapsed_minutes = int(elapsed_time / 60)
+        elapsed_seconds = int(elapsed_time % 60)
+        
         if batches > 0:
             print(f"\n[SUCCESS] {equip_name}: Completed - {batches} batch(es) processed")
+            print(f"[TIMING] {equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s")
             return True
         else:
             print(f"\n[WARN] {equip_name}: No batches processed")
+            print(f"[TIMING] {equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s")
             return False
 
 
@@ -573,6 +582,9 @@ def main() -> int:
     print(f"Dry Run: {args.dry_run}")
     print("="*60)
 
+    import time
+    overall_start_time = time.time()
+
     # Process equipment (sequentially or in parallel)
     if max_workers == 1:
         # Sequential processing
@@ -611,7 +623,13 @@ def main() -> int:
                     errors.append(f"{equip}: {exc_text}")
                     print(f"[ERROR] {equip}: {exc_text}", file=sys.stderr)
 
+    overall_elapsed = time.time() - overall_start_time
+    overall_minutes = int(overall_elapsed / 60)
+    overall_seconds = int(overall_elapsed % 60)
+
     print("\n" + "="*60)
+    print(f"[TIMING] Overall execution time: {overall_minutes}m {overall_seconds}s")
+    print("="*60)
     if errors:
         print("BATCH RUNNER COMPLETED WITH ERRORS:")
         for line in errors:
