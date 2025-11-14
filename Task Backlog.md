@@ -110,17 +110,16 @@ All tabular output hardening items are complete (see Completed Task Stats). No o
 ### 4.2 Chart Quality & Reliability
 
 | ID        | Priority | Module                   | Task                                   | Completion Criteria                                | Status  |
-| --------- | -------- | ------------------------ | -------------------------------------- | -------------------------------------------------- | ------- |
-| CHART-08  | High     | `core/outliers.py`       | omr_diagnostics.csv reporting          | Table lists model stats, saturation, calibration   | Planned |
+| ~~CHART-08~~  | ~~High~~     | ~~`core/outliers.py`~~       | ~~omr_diagnostics.csv reporting~~          | ~~Table lists model stats, saturation, calibration~~   | ~~Planned~~ |
 | ~~CHART-10~~  | ~~High~~     | ~~`core/fuse.py`~~           | ~~fusion_quality_report.csv~~              | ~~Fusion weights + quality flags exported~~            | ✅ **DONE** - Superseded by `fusion_metrics.csv` (auto-tuned weights + diagnostics). |
-| CHART-11  | Medium   | `core/output_manager.py` | Forecast confidence bands              | ±1σ/±2σ shading added to forecast overlay chart    | Planned |
+| ~~CHART-11~~  | ~~Medium~~   | ~~`core/output_manager.py`~~ | ~~Forecast confidence bands~~              | ~~±1σ/±2σ shading added to forecast overlay chart~~    | ~~Planned~~ |
 | ~~CHART-13~~ | ~~Medium~~ | ~~`core/output_manager.py`~~ | ~~Episode annotations on timelines~~       | ~~Timeline charts display episode IDs~~                | ✅ **DONE** - Episode timeline now shows EP-IDs and severity labels inline. |
 | ~~CHART-15~~ | ~~Medium~~ | ~~`core/output_manager.py`~~ | ~~OMR saturation warning banner~~          | ~~Warning banner rendered when saturation > 30 %~~     | ✅ **DONE** - Detector comparison issues a banner when OMR saturation breaches 30%. |
 | ~~CHART-16~~ | ~~Medium~~ | ~~`core/output_manager.py`~~ | ~~Detector weight overlay~~                | ~~Detector charts annotate current fusion weight~~     | ✅ **DONE** - Fusion weights added to detector legend entries. |
 | ~~CHART-17~~ | ~~Medium~~ | ~~`core/output_manager.py`~~ | ~~Regime boundary markers~~                | ~~Timeline charts show regime transitions~~            | ✅ **DONE** - Health timeline annotates regime entry points as per ACM explainer guidance. |
 | ~~CHART-18~~ | ~~Medium~~ | ~~`core/output_manager.py`~~ | ~~Drift event annotations~~                | ~~Drift magnitude + timestamp callouts on timeline~~   | ✅ **DONE** - Drift spans plus labels render on health timeline. |
-| CHART-19  | Medium   | `scripts/validate_charts.py` | Chart validation script             | Automated validation reports chart issues          | Planned |
-| CHART-20  | Medium   | `docs/`                  | Chart documentation refresh            | Catalog updated with latest preconditions/examples | Planned |
+| ~~CHART-19~~  | ~~Medium~~   | ~~`scripts/validate_charts.py`~~ | ~~Chart validation script~~             | ~~Automated validation reports chart issues~~          | ~~Planned~~ |
+| ~~CHART-20~~  | ~~Medium~~   | ~~`docs/`~~                  | ~~Chart documentation refresh~~            | ~~Catalog updated with latest preconditions/examples~~ | ~~Planned~~ |
 
 ---
 
