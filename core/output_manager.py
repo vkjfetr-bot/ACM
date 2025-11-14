@@ -31,6 +31,13 @@ from datetime import datetime, timezone
 
 from utils.logger import Console
 
+# Optional import for reusing AR(1) forecast helper in per-sensor forecasting
+try:  # pragma: no cover - defensive import
+    from core.rul_estimator import RULConfig, _simple_ar1_forecast  # type: ignore
+except Exception:  # pragma: no cover
+    RULConfig = None  # type: ignore
+    _simple_ar1_forecast = None  # type: ignore
+
 # whitelist of SQL tables we will write to (defined early so class methods can use it)
 ALLOWED_TABLES = {
     'ACM_Scores_Wide','ACM_Episodes',
@@ -50,6 +57,10 @@ ALLOWED_TABLES = {
     'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
     'ACM_Run_Stats', 'ACM_SinceWhen',
     'ACM_SensorHotspots','ACM_SensorHotspotTimeline',
+    # Forecasting & RUL tables
+    'ACM_HealthForecast_TS','ACM_FailureForecast_TS',
+    'ACM_RUL_TS','ACM_RUL_Summary','ACM_RUL_Attribution',
+    'ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
@@ -2251,6 +2262,81 @@ class OutputManager:
                     )
                     table_count += 1
                     if result.get('sql_written'): sql_count += 1
+
+                    # Optional: per-sensor forecasting for top sensors (ACM_SensorForecast_TS)
+                    if _simple_ar1_forecast is not None and RULConfig is not None:
+                        try:
+                            # Determine forecast horizon from config (fallback to 24h)
+                            forecast_cfg = (cfg.get('forecast', {}) or {})
+                            horizon_hours = float(forecast_cfg.get('horizon_hours', 24.0) or 24.0)
+                            rul_cfg = RULConfig(max_forecast_hours=horizon_hours)
+
+                            # Rank sensors by max absolute z-score over the window
+                            sensor_abs_z = sensor_zscores.abs()
+                            max_z = sensor_abs_z.max().sort_values(ascending=False)
+                            # Use a modest number of sensors for forecasting to keep load reasonable
+                            top_forecast_n = int((cfg.get('output', {}) or {}).get('sensor_forecast_top_n', 5) or 5)
+                            top_sensors = max_z.index[:top_forecast_n].tolist()
+
+                            forecast_rows: List[Dict[str, Any]] = []
+                            for sensor_name in top_sensors:
+                                series = sensor_values.get(sensor_name)
+                                if series is None:
+                                    continue
+                                # Ensure datetime index
+                                try:
+                                    ts = pd.to_datetime(series.index)
+                                except Exception:
+                                    continue
+                                s = pd.Series(series.values, index=ts).dropna()
+                                if s.size < rul_cfg.min_points:
+                                    continue
+
+                                fc, fc_std, _ = _simple_ar1_forecast(s, rul_cfg)
+                                if fc.empty or fc_std.size == 0:
+                                    continue
+
+                                ci_k = 1.96
+                                ci_low = fc - ci_k * fc_std
+                                ci_up = fc + ci_k * fc_std
+
+                                for t, val, lo, hi, std in zip(fc.index, fc.values, ci_low.values, ci_up.values, fc_std):
+                                    row: Dict[str, Any] = {
+                                        "SensorName": str(sensor_name),
+                                        "Timestamp": t,
+                                        "ForecastValue": float(val),
+                                        "CiLower": float(lo),
+                                        "CiUpper": float(hi),
+                                        "ForecastStd": float(std),
+                                        "Method": "AR1_Sensor",
+                                    }
+                                    # Stamp IDs if available
+                                    if self.run_id:
+                                        row["RunID"] = self.run_id
+                                    if self.equip_id is not None:
+                                        row["EquipID"] = int(self.equip_id)
+                                    forecast_rows.append(row)
+
+                            if forecast_rows:
+                                sensor_forecast_df = pd.DataFrame(forecast_rows)
+                                # Ensure consistent column ordering
+                                cols_order = [
+                                    c for c in ["RunID", "EquipID", "SensorName", "Timestamp",
+                                                "ForecastValue", "CiLower", "CiUpper",
+                                                "ForecastStd", "Method"] if c in sensor_forecast_df.columns
+                                ]
+                                sensor_forecast_df = sensor_forecast_df[cols_order]
+                                result = self.write_dataframe(
+                                    sensor_forecast_df,
+                                    tables_dir / "sensor_forecast_ts.csv",
+                                    sql_table="ACM_SensorForecast_TS" if force_sql else None,
+                                    non_numeric_cols={"SensorName", "Method"},
+                                    add_created_at=True,
+                                )
+                                table_count += 1
+                                if result.get('sql_written'): sql_count += 1
+                        except Exception as e:
+                            Console.warn(f"[ANALYTICS] Sensor forecast generation skipped: {e}")
                 
                 # 18. Already generated: data_quality.csv
                 

@@ -152,9 +152,9 @@ CHART-03 (OMR gating fixed self.cfg→cfg), CHART-04 (Timestamp format default),
 
 | ID      | Priority | Module            | Task                                               | Completion Criteria                                       | Status  |
 | ------- | -------- | ----------------- | -------------------------------------------------- | --------------------------------------------------------- | ------- |
-| FCST-01 | Critical | `core/forecast.py`| Implement growing forecast variance for AR(1)      | Confidence intervals widen with forecast horizon          | Planned |
-| FCST-02 | Critical | `core/forecast.py`| Fix warm start bias in AR(1) scoring               | First residual is not a spurious anomaly                  | Planned |
-| FCST-03 | Critical | `core/forecast.py`| Exclude first residual from std dev calculation    | Residual standard deviation is not biased by first point  | Planned |
+| FCST-01 | Critical | `core/forecast.py`| Implement growing forecast variance for AR(1)      | Confidence intervals widen with forecast horizon          | Done    |
+| FCST-02 | Critical | `core/forecast.py`| Fix warm start bias in AR(1) scoring               | First residual is not a spurious anomaly                  | Done    |
+| FCST-03 | Critical | `core/forecast.py`| Exclude first residual from std dev calculation    | Residual standard deviation is not biased by first point  | Done    |
 | FCST-04 | High     | `core/forecast.py`| Add stability checks for AR(1) coefficient         | Unstable coefficients are clamped and logged              | Planned |
 | FCST-05 | High     | `core/forecast.py`| Improve frequency regex validation                 | Invalid frequency strings are handled gracefully          | Planned |
 | FCST-06 | High     | `core/forecast.py`| Make horizon clamping explicit and warn user       | User is warned when forecast horizon is clamped           | Planned |

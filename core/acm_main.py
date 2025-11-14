@@ -40,6 +40,7 @@ from core.omr import OMRDetector  # OMR-02: Overall Model Residual
 
 # Import the unified output system
 from core.output_manager import OutputManager
+from core import rul_estimator
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
 # Import episode culprits writer
@@ -2904,8 +2905,9 @@ def main() -> None:
                 Console.info(f"[OUTPUTS] Generated {table_count} analytics tables via OutputManager")
                 Console.info(f"[OUTPUTS] Tables: {tables_dir}")
                 
-                # === FORECAST GENERATION (disabled by default in SQL-only mode) ===
-                forecast_enabled = cfg.get("output", {}).get("enable_forecast", False)
+                # === FORECAST GENERATION (enabled by default; opt-out via output.enable_forecast=False) ===
+                output_cfg = (cfg.get("output", {}) or {})
+                forecast_enabled = bool(output_cfg.get("enable_forecast", True))
                 if forecast_enabled:
                     Console.info("[FORECAST] Generating forecast with uncertainty bands...")
                     try:
@@ -2927,6 +2929,46 @@ def main() -> None:
                                 if forecast_result.get("metrics"):
                                     metrics = forecast_result["metrics"]
                                     Console.info(f"[FORECAST] Series: {metrics.get('series_used', 'N/A')}, phi={metrics.get('ar1_phi', 0):.3f}, Horizon: {metrics.get('horizon', 0)} ({metrics.get('horizon_hours', 24)}h)")
+
+                                # === RUL + SQL surfacing of forecast ===
+                                try:
+                                    health_threshold = float(
+                                        (cfg.get("analytics", {}) or {}).get(
+                                            "health_alert_threshold", 70.0
+                                        )
+                                    )
+                                except Exception:
+                                    health_threshold = 70.0
+                                try:
+                                    rul_tables = rul_estimator.estimate_rul_and_failure(
+                                        tables_dir=tables_dir,
+                                        equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                                        run_id=str(run_id) if run_id is not None else None,
+                                        health_threshold=health_threshold,
+                                    )
+                                    if rul_tables:
+                                        Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables")
+                                        enable_sql_rul = getattr(output_manager, "sql_client", None) is not None
+                                        for sql_name, df in rul_tables.items():
+                                            if df is None or df.empty:
+                                                continue
+                                            csv_name = {
+                                                "ACM_HealthForecast_TS": "health_forecast_ts.csv",
+                                                "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
+                                                "ACM_RUL_TS": "rul_timeseries.csv",
+                                                "ACM_RUL_Summary": "rul_summary.csv",
+                                                "ACM_RUL_Attribution": "rul_attribution.csv",
+                                                "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
+                                            }.get(sql_name, f"{sql_name}.csv")
+                                            out_path = tables_dir / csv_name
+                                            output_manager.write_dataframe(
+                                                df,
+                                                out_path,
+                                                sql_table=sql_name if enable_sql_rul else None,
+                                                add_created_at="CreatedAt" not in df.columns,
+                                            )
+                                except Exception as e:
+                                    Console.warn(f"[RUL] RUL estimation failed: {e}")
                             else:
                                 Console.warn(f"[FORECAST] {forecast_result['error']['message']}")
                     except Exception as e:
