@@ -413,7 +413,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(*) as ActiveEpisodes\n           FROM ACM_CulpritHistory \n           WHERE EquipID = $equipment \n           AND EndTimestamp IS NULL OR EndTimestamp >= DATEADD(hour, -24, GETDATE())",
+          "rawSql": "SELECT COUNT(*) as ActiveEpisodes\n           FROM ACM_CulpritHistory \n           WHERE EquipID = $equipment \n           AND (EndTimestamp IS NULL OR EndTimestamp >= DATEADD(hour, -24, GETDATE()))",
           "refId": "A"
         }
       ],
@@ -734,7 +734,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex AS \"Health Index\",\n    FusedZ      AS \"Fused Score\"\n    -- keep FromZone/ToZone out of the time-series shape\n    -- or add them only if you later use a table+transform\nFROM ACM_DefectTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
+          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex AS \"Health Index\",\n    FusedZ      AS \"Fused Score\"\nFROM ACM_DefectTimeline\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_DefectTimeline\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1690,7 +1690,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp as time, DriftValue as value\n           FROM ACM_DriftSeries \n           WHERE EquipID = $equipment \n           AND Timestamp >= $__timeFrom() AND Timestamp <= $__timeTo()\n           ORDER BY Timestamp",
+          "rawSql": "SELECT Timestamp as time, DriftValue as value\n           FROM ACM_DriftSeries \n           WHERE EquipID = $equipment \n           AND RunID = (\n               SELECT TOP 1 RunID\n               FROM ACM_DriftSeries\n               WHERE EquipID = $equipment\n               ORDER BY RunID DESC\n           )\n           AND $__timeFilter(Timestamp)\n           ORDER BY Timestamp",
           "refId": "A"
         }
       ],
@@ -1764,7 +1764,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT \n           PeriodStart as time,\n           DetectorType as sensor,\n           AnomalyRatePct as value\n           FROM ACM_SensorAnomalyByPeriod \n           WHERE EquipID = $equipment \n           AND PeriodStart >= $__timeFrom() AND PeriodStart <= $__timeTo()\n           ORDER BY PeriodStart, DetectorType",
+          "rawSql": "SELECT \n           PeriodStart as time,\n           DetectorType as detector,\n           AnomalyRatePct as value\n           FROM ACM_SensorAnomalyByPeriod \n           WHERE EquipID = $equipment \n           AND RunID = (\n               SELECT TOP 1 RunID\n               FROM ACM_SensorAnomalyByPeriod\n               WHERE EquipID = $equipment\n               ORDER BY RunID DESC\n           )\n           AND $__timeFilter(PeriodStart)\n           ORDER BY PeriodStart, DetectorType",
           "refId": "A"
         }
       ],

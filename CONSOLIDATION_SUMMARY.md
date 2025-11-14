@@ -144,6 +144,56 @@ The consolidated `# To Do.md` now contains:
 
 ---
 
+## 2025-11-14 Repository Delta Audit (SQL + Grafana)
+
+This section records a light‑weight follow‑up audit after the first full consolidation, focusing on SQL integration outputs and Grafana dashboards.
+
+### A. SQL Outputs & Run Logging
+
+- **Status:** SQL integration still ~89% complete, but core dual‑write path is functioning correctly for FD_FAN and GAS_TURBINE.
+- **Evidence:** `gas_turbine_test.log` and `fd_fan_coldstart.log` show successful inserts into all key analytics tables:
+  - `ACM_HealthTimeline`, `ACM_RegimeTimeline`, `ACM_ContributionCurrent`, `ACM_ContributionTimeline`,
+    `ACM_SensorHotspots`, `ACM_SensorHotspotTimeline`, `ACM_HealthZoneByPeriod`, `ACM_SensorAnomalyByPeriod`,
+    `ACM_DefectSummary`, `ACM_DefectTimeline`, `ACM_SensorDefects`, `ACM_EpisodeMetrics`, `ACM_Episodes`, etc.
+- **Run scoping:** Many Grafana queries previously ignored `RunID` and mixed historical runs. Panels for health, contributions, defect timeline, drift and anomaly rates have now been updated to consistently scope to the **latest RunID per EquipID** where appropriate.
+
+### B. Grafana Dashboards & SQL Queries
+
+- Created a new **ACM Operator View** dashboard (`grafana_dashboards/acm_operator_dashboard.json`) that reuses the same SQL tables but presents a simplified, run‑scoped story for operators.
+- Tightened and documented queries in `grafana_dashboards/docs/SQL_QUERIES_REFERENCE.md`:
+  - Clarified detector vs sensor semantics (`DetectorType` vs `SensorName`).
+  - Added explicit `RunID` filters for “current/latest run” panels.
+  - Pivoted `ACM_HealthZoneByPeriod` for stack‑bar views (GOOD/WATCH/ALERT per period).
+  - Documented the `Detector Explanations` panel built from `ACM_SensorDefects` + `ACM_DetectorMetadata`.
+- Added `scripts/sql/56_create_detector_metadata.sql` to define `ACM_DetectorMetadata` (per‑family explanations and operator hints).
+
+### C. Files Archived as Non‑Essential
+
+The following files were moved to `artifacts/archive/` as **non‑essential runtime artefacts** (logs/HTML exports). They can be deleted later without affecting code:
+
+- Root logs / outputs:
+  - `batch_run_fd_fan.log`, `batch_run_gas_turbine.log`
+  - `fd_fan_coldstart.log`, `gas_turbine_final_test.log`, `gas_turbine_test.log`, `pipeline_run.log`
+  - `cond_pump_output.txt`, `test_output.txt`
+- HTML exports (redundant with markdown):
+  - `docs/SQL_INTEGRATION_PLAN.html`
+  - `docs/SQL_MODE_STATUS.html`
+  - `Task Backlog.html`
+
+These were left in place under `artifacts/archive/` for traceability; the canonical sources are the corresponding `.md` documents and the SQL tables.
+
+### D. Open Follow‑ups (no new IDs added)
+
+Rather than introducing new task IDs, the following should be tracked against existing sections in `# To Do.md`:
+
+- Verify `ACM_DriftEvents` schema and populate it with rich drift event data (timestamps, values) so Grafana drift annotations become meaningful.
+- Decide on a final visual for detector correlation (table with colored cells vs heatmap) and wire it to `ACM_DetectorCorrelation`.
+- Consider adding per‑sensor anomaly‑rate aggregation if operators need a true “sensor × time” anomaly heatmap (new table derived from existing outputs).
+
+No additional task IDs were added to the master backlog; these items can be recorded under the existing SQL/Visualization or Architecture sections as needed.
+
+---
+
 **Consolidation Completed:** 2025-11-13  
 **Consolidated By:** GitHub Copilot Agent  
 **Total Tasks Added:** 36 (from 4 audit documents)  
