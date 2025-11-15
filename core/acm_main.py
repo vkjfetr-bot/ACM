@@ -2935,13 +2935,14 @@ def main() -> None:
                 # === FORECAST GENERATION (enabled by default; opt-out via output.enable_forecast=False) ===
                 output_cfg = (cfg.get("output", {}) or {})
                 forecast_enabled = bool(output_cfg.get("enable_forecast", True))
-                # In SQL-only mode, skip file-based forecast module entirely.
-                if forecast_enabled and not SQL_MODE:
+                # FCST-15: Now works in SQL-only mode via artifact cache
+                if forecast_enabled:
                     Console.info("[FORECAST] Generating forecast with uncertainty bands...")
                     try:
                         with T.section("outputs.forecast"):
                             charts_dir = run_dir / "charts"
-                            charts_dir.mkdir(exist_ok=True)
+                            if not SQL_MODE:
+                                charts_dir.mkdir(exist_ok=True)
 
                             forecast_ctx = {
                                 "run_dir": run_dir,
@@ -2950,6 +2951,7 @@ def main() -> None:
                                 "config": cfg,
                                 "run_id": run_id,
                                 "equip_id": int(equip_id) if 'equip_id' in locals() else None,
+                                "output_manager": output_manager,  # FCST-15: Pass output_manager for artifact cache
                             }
                             forecast_result = forecast.run(forecast_ctx)
                             if "error" not in forecast_result:

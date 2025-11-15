@@ -453,6 +453,11 @@ class OutputManager:
         self._table_exists_cache: Dict[str, bool] = {}
         self._table_columns_cache: Dict[str, set] = {}
         self._table_insertable_cache: Dict[str, set] = {}
+        
+        # FCST-15: Artifact cache for SQL-only mode
+        # Stores DataFrames written to files/SQL so they can be consumed by downstream modules
+        # without file system dependencies
+        self._artifact_cache: Dict[str, pd.DataFrame] = {}
 
         # Minimal per-table NOT NULL requirements with safe defaults
         # 'ts' indicates we should use a sentinel timestamp (1900-01-01 00:00:00)
@@ -1227,6 +1232,13 @@ class OutputManager:
         finally:
             elapsed = time.time() - start_time
             self.stats['write_time'] += elapsed
+            
+            # FCST-15: Cache written DataFrame for downstream modules in SQL-only mode
+            # Store by filename (without path) so modules can reference by simple name
+            if result.get('file_written') or result.get('sql_written'):
+                cache_key = file_path.name  # e.g., "scores.csv"
+                self._artifact_cache[cache_key] = df.copy()
+                Console.info(f"[OUTPUT] Cached {cache_key} in artifact cache ({len(df)} rows)")
         
         return result
 
@@ -1482,6 +1494,44 @@ class OutputManager:
         self.stats['files_written'] += 1
         self.stats['total_rows'] += len(records)
         Console.info(f"[OUTPUT] JSONL written: {file_path} ({len(records)} records)")
+    
+    # ==================== ARTIFACT CACHE METHODS (FCST-15) ====================
+    
+    def get_cached_table(self, table_name: str) -> Optional[pd.DataFrame]:
+        """
+        Retrieve a cached DataFrame from the artifact cache.
+        
+        This enables SQL-only mode by allowing downstream modules (forecast, RUL)
+        to access previously written tables without file system dependencies.
+        
+        Args:
+            table_name: Name of the table/file to retrieve (e.g., "scores.csv")
+            
+        Returns:
+            DataFrame if found in cache, None otherwise
+            
+        Example:
+            >>> scores = output_manager.get_cached_table("scores.csv")
+            >>> if scores is not None:
+            ...     # Use scores for forecasting
+        """
+        cached = self._artifact_cache.get(table_name)
+        if cached is not None:
+            Console.info(f"[OUTPUT] Retrieved {table_name} from artifact cache ({len(cached)} rows)")
+            return cached.copy()  # Return copy to prevent mutation
+        else:
+            Console.warn(f"[OUTPUT] Table {table_name} not found in artifact cache")
+            return None
+    
+    def clear_artifact_cache(self) -> None:
+        """Clear the artifact cache to free memory."""
+        count = len(self._artifact_cache)
+        self._artifact_cache.clear()
+        Console.info(f"[OUTPUT] Cleared artifact cache ({count} tables)")
+    
+    def list_cached_tables(self) -> List[str]:
+        """Return list of tables currently in the artifact cache."""
+        return list(self._artifact_cache.keys())
     
     # ==================== DATA TRANSFORMATION METHODS ====================
     
