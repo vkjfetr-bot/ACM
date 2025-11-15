@@ -2989,6 +2989,7 @@ def main() -> None:
                         run_id=str(run_id) if run_id is not None else None,
                         health_threshold=health_threshold,
                         sql_client=getattr(output_manager, "sql_client", None),
+                        output_manager=output_manager,  # RUL-01: Pass output_manager for artifact cache
                     )
                     if rul_tables:
                         Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables")
@@ -3171,6 +3172,7 @@ def main() -> None:
                     run_id=str(run_id) if run_id is not None else None,
                     health_threshold=health_threshold,
                     sql_client=getattr(output_manager, "sql_client", None),
+                    output_manager=output_manager,  # RUL-01: Pass output_manager for artifact cache
                 )
                 if rul_tables:
                     Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables (SQL mode)")
