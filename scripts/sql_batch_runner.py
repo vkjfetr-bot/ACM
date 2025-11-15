@@ -149,30 +149,40 @@ class SQLBatchRunner:
             print(f"[WARN] Could not set runtime.tick_minutes for EquipID={equip_id}: {e}")
 
     def _infer_tick_minutes_from_raw(self, equip_name: str, target_rows_per_batch: int = 5000) -> int:
-        """
-        Infer a reasonable tick size (minutes) from the raw historian table so
-        that each batch processes roughly target_rows_per_batch samples.
-        """
+        """Infer a reasonable tick size (minutes) from historian stats."""
         try:
             table_name = f"{equip_name}_Data"
             with self._get_sql_connection() as conn:
                 cur = conn.cursor()
-                cur.execute(f"SELECT MIN(EntryDateTime), MAX(EntryDateTime), COUNT(*) FROM {table_name}")
+                cur.execute(
+                    f"SELECT MIN(EntryDateTime), MAX(EntryDateTime), COUNT(*) FROM {table_name}"
+                )
                 row = cur.fetchone()
                 cur.close()
             if not row or not row[0] or not row[1] or not row[2]:
                 return self.tick_minutes
+
             min_ts, max_ts, total_rows = row[0], row[1], int(row[2])
             total_minutes = max((max_ts - min_ts).total_seconds() / 60.0, 1.0)
             rows_per_minute = total_rows / total_minutes if total_minutes > 0 else 0.0
             if rows_per_minute <= 0:
                 return self.tick_minutes
+
+            # Require a small but non-zero sample per batch so SQL loads don't NOOP.
+            min_rows_per_batch = 12  # prevents ACM from bailing on <10-row windows
+            cadence_minutes = 1.0 / rows_per_minute if rows_per_minute > 0 else 30.0
+            min_tick = int(max(5, math.ceil(min_rows_per_batch * cadence_minutes)))
+
             inferred = int(max(1, round(target_rows_per_batch / rows_per_minute)))
-            inferred = max(5, min(inferred, 240))  # clamp to sane range
+            max_tick = int(os.getenv("ACM_SQL_MAX_TICK_MINUTES", "1440"))  # allow up to 24h windows
+            inferred = max(min_tick, min(inferred, max_tick))
+
             print(
                 f"[CONFIG] Inferred tick_minutes={inferred} for {equip_name} "
-                f"(rows={total_rows}, minutes={total_minutes:.1f})"
+                f"(rows={total_rows}, minutes={total_minutes:.1f}, cadence={cadence_minutes:.2f}m)"
             )
+            if inferred == max_tick:
+                print("[CONFIG] Clamped by ACM_SQL_MAX_TICK_MINUTES; override env var to expand further")
             return inferred
         except Exception as e:
             print(f"[WARN] Could not infer tick_minutes from raw table for {equip_name}: {e}")
@@ -454,12 +464,35 @@ class SQLBatchRunner:
         # are used instead of legacy CSV/file mode, regardless of older config.
         env = dict(os.environ)
         env["ACM_FORCE_SQL_MODE"] = "1"
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
-        
+
+        # Stream child output live so devs can see progress (instead of buffering everything).
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        captured_lines: list[str] = []
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                print(line, end="")
+                captured_lines.append(line)
+        except KeyboardInterrupt:
+            process.kill()
+            raise
+        finally:
+            if process.stdout:
+                process.stdout.close()
+        process.wait()
+
+        stdout_text = "".join(captured_lines)
         # Parse outcome from logs
         outcome = "FAIL"
-        if result.returncode == 0:
-            for line in result.stdout.split('\n'):
+        if process.returncode == 0:
+            for line in stdout_text.split('\n'):
                 if 'outcome=OK' in line:
                     outcome = "OK"
                     break
@@ -469,18 +502,15 @@ class SQLBatchRunner:
             else:
                 outcome = "OK"
         
-        success = result.returncode == 0
+        success = process.returncode == 0
 
         # If the batch failed or outcome was not OK/NOOP, surface logs so the
         # caller can see exactly what went wrong inside acm_main.
         if not success or outcome == "FAIL":
-            print(f"[RUN-DEBUG] {equip_name}: acm_main exited with code {result.returncode}")
-            if result.stdout:
-                print(f"[RUN-DEBUG] {equip_name}: --- acm_main stdout ---")
-                print(result.stdout)
-            if result.stderr:
-                print(f"[RUN-DEBUG] {equip_name}: --- acm_main stderr ---", file=sys.stderr)
-                print(result.stderr, file=sys.stderr)
+            print(f"[RUN-DEBUG] {equip_name}: acm_main exited with code {process.returncode}")
+            if stdout_text:
+                print(f"[RUN-DEBUG] {equip_name}: --- acm_main stdout (captured) ---")
+                print(stdout_text)
 
         if success and outcome in ("OK", "NOOP"):
             # After a successful batch, inspect SQL outputs for this equipment
