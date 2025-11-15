@@ -195,34 +195,19 @@ def _to_naive_series(idx_or_series: Union[pd.Index, pd.Series]) -> pd.Series:
         return pd.Series(idx, index=idx)
 
 # ==================== DATA LOADING SUPPORT ====================
-# Progress indicator for long operations
-class Heartbeat:
-    def __init__(self, label: str, next_hint: Optional[str] = None, eta_hint: Optional[float] = None, interval: float = 2.0):
-        self.label, self.next_hint, self.eta_hint, self.interval = label, next_hint, eta_hint, interval
-        self._stop = threading.Event()
-        self._t0 = time.perf_counter()
-        self._thr = threading.Thread(target=self._run, daemon=True)
-
-    def start(self):
-        print(f"[..] {self.label} ...")
-        self._thr.start()
-        return self
-
-    def stop(self):
-        self._stop.set()
-        self._thr.join(timeout=0.1)
-        took = time.perf_counter() - self._t0
-        print(f"[OK] {self.label} done in {took:.2f}s")
-
-    def _run(self):
-        dots = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        i = 0
-        while not self._stop.wait(self.interval):
-            spent = time.perf_counter() - self._t0
-            eta = f" | ~{max(0.0, self.eta_hint - spent):0.0f}s left" if self.eta_hint else ""
-            nxt = f" | next: {self.next_hint}" if self.next_hint else ""
-            print(f"[..] {dots[i % len(dots)]} {self.label}{eta}{nxt}")
-            i += 1
+# Import Heartbeat from logger module (moved there for consistency)
+try:
+    from utils.logger import Heartbeat
+except ImportError:
+    # Fallback implementation if import fails
+    class Heartbeat:
+        def __init__(self, label: str, next_hint: Optional[str] = None, eta_hint: Optional[float] = None, interval: float = 2.0):
+            self.label = label
+        def start(self): 
+            print(f"[..] {self.label} ...")
+            return self
+        def stop(self): 
+            print(f"[OK] {self.label} done")
 
 @dataclass
 class DataMeta:

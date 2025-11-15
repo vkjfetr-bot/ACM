@@ -81,15 +81,9 @@ except Exception:
 
 try:
     from utils.logger import Console  # type: ignore
-except Exception:
-    class Console:
-        @staticmethod
-        def info(msg: str): print(f"[INFO] {msg}")
-        # portability shim for environments that expect `.warning`
-        warning = staticmethod(lambda msg: print(f"[WARN] {msg}"))
-        warn = staticmethod(lambda msg: print(f"[WARN] {msg}"))
-        @staticmethod
-        def error(msg: str): print(f"[ERROR] {msg}")
+except Exception as e:
+    # If logger import fails, something is seriously wrong - fail fast
+    raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
 
 
 def _nearest_indexer(index: pd.Index, targets: Sequence[Any], label: str = "indexer") -> np.ndarray:

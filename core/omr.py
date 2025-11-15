@@ -146,7 +146,8 @@ class OMRDetector:
             self (fitted)
         """
         if X.empty:
-            print("[OMR] Empty training frame, skipping fit")
+            from utils.logger import Console
+            Console.info("[OMR] Empty training frame, skipping fit")
             return self
         
         # Filter to healthy regime if labels provided
@@ -156,7 +157,8 @@ class OMRDetector:
             healthy_mask = regime_labels == healthy_regime
             if np.sum(healthy_mask) >= self.min_samples:
                 X = X.iloc[healthy_mask]
-                print(f"[OMR] Filtered to healthy regime {healthy_regime}: {np.sum(healthy_mask)} samples")
+                from utils.logger import Console
+                Console.info(f"[OMR] Filtered to healthy regime {healthy_regime}: {np.sum(healthy_mask)} samples")
         
         # Handle missing values
         X_clean = X.fillna(X.median()).values
@@ -166,9 +168,11 @@ class OMRDetector:
         if n_samples < self.min_samples:
             # Allow training when dimensionality is high despite fewer samples, but guard tiny samples
             if n_samples < max(20, min(self.min_samples // 2, n_features)):
-                print(f"[OMR] Insufficient samples ({n_samples}/{self.min_samples}), skipping fit")
+                from utils.logger import Console
+                Console.warn(f"[OMR] Insufficient samples ({n_samples}/{self.min_samples}), skipping fit")
                 return self
-            print(f"[OMR] Proceeding with reduced sample count ({n_samples} < {self.min_samples}) for high-dimensional data")
+            from utils.logger import Console
+            Console.info(f"[OMR] Proceeding with reduced sample count ({n_samples} < {self.min_samples}) for high-dimensional data")
         
         # Auto-select model type
         selected_model = self._select_model_type(n_samples, n_features)
@@ -243,12 +247,14 @@ class OMRDetector:
             )
             self._is_fitted = True
             
-            print(f"[OMR] Fitted {selected_model.upper()} model: "
+            from utils.logger import Console
+            Console.info(f"[OMR] Fitted {selected_model.upper()} model: "
                   f"{n_samples} samples, {n_features} features, "
                   f"{max_components} components, std={train_residual_std:.3f}")
             
         except Exception as e:
-            print(f"[OMR] Model fitting failed: {e}")
+            from utils.logger import Console
+            Console.error(f"[OMR] Model fitting failed: {e}")
             return self
         
         return self
@@ -306,7 +312,8 @@ class OMRDetector:
                 X_recon = X_scaled  # Fallback
                 
         except Exception as e:
-            print(f"[OMR] Reconstruction failed: {e}")
+            from utils.logger import Console
+            Console.error(f"[OMR] Reconstruction failed: {e}")
             zeros = np.zeros(len(X), dtype=np.float32)
             if return_contributions:
                 return zeros, pd.DataFrame(index=X.index, columns=X.columns)

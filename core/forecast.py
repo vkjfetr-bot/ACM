@@ -15,19 +15,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# Import Console for logging (optional - will work without it)
+# Import Console for logging
 try:
-    from utils.console import Console
-except ImportError:
-    # Fallback if Console not available
-    class Console:
-        @staticmethod
-        def warn(msg):
-            print(f"WARNING: {msg}")
-
-        @staticmethod
-        def info(msg):
-            print(f"INFO: {msg}")
+    from utils.logger import Console
+except ImportError as e:
+    # If logger import fails, something is seriously wrong - fail fast
+    raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
 
 
 class AR1Detector:
