@@ -19,7 +19,45 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import re
-from typing import Iterable, List, Dict, Set
+from typing import Any, Iterable, List, Dict, Set
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from utils.logger import Console
+
+
+_LOG_PREFIX_HANDLERS = (
+    ("[ERROR]", Console.error),
+    ("[ERR]", Console.error),
+    ("[WARN]", Console.warn),
+    ("[WARNING]", Console.warn),
+    ("[OK]", Console.ok),
+    ("[DEBUG]", Console.debug),
+)
+
+
+def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: bool = False) -> None:
+    """Route script output through the structured Console logger."""
+    message = sep.join(str(arg) for arg in args)
+    if end and end != "\n":
+        message = f"{message}{end}"
+
+    if file is sys.stderr:
+        Console.error(message)
+        return
+
+    trimmed = message.lstrip()
+    for prefix, handler in _LOG_PREFIX_HANDLERS:
+        if trimmed.startswith(prefix):
+            handler(message)
+            return
+
+    Console.info(message)
+
+
+print = _log
 
 
 def _discover_assets(chunk_root: Path, requested: Iterable[str] | None) -> List[str]:

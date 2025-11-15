@@ -296,14 +296,14 @@ Console.info("[OMR] Model fitted")
 Console.error("[ERROR] Connection failed", error=str(e))
 ```
 
-### For Script Developers (Future Work)
+### For Script Developers
 
-Scripts still use print() statements:
-- `scripts/sql_batch_runner.py` (91 statements)
-- `scripts/analyze_charts.py` (59 statements)
-- Others (125 statements)
+All CLI scripts now use the logging shim introduced in the follow-up work:
+- `scripts/sql_batch_runner.py`, `scripts/analyze_charts.py`, `scripts/chunk_replay.py`
+- SQL helpers under `scripts/sql/` (`test_*`, `verify_acm_connection.py`, `insert_wildcard_equipment.py`)
+- Analytical utilities such as `scripts/analyze_latest_run.py`
 
-**Recommendation:** Defer to follow-up PR to minimize scope.
+Each module rebinds `print()` to an internal `_log` helper that maps legacy prefixes (for example, `[WARN]`, `[ERROR]`, `✓`) to the appropriate `Console` method. This preserves existing messaging while providing structured output, ASCII-only enforcement, and consistent stdout/stderr routing.
 
 ---
 
@@ -311,11 +311,7 @@ Scripts still use print() statements:
 
 ### Phase 2 (Next PR)
 
-1. **Script Standardization** (275 print statements)
-   - Refactor all scripts to use Console logger
-   - Consistent formatting across scripts
-
-2. **Advanced Features**
+1. **Advanced Features**
    - Log aggregation integration
    - Trace ID support
    - Alert thresholds

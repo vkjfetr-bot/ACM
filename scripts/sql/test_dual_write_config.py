@@ -3,6 +3,7 @@ Test config loading and SQL connection for dual-write mode
 """
 import sys
 from pathlib import Path
+from typing import Any
 
 # Add project root to path
 project_root = Path(__file__).resolve().parents[2]
@@ -10,6 +11,41 @@ sys.path.insert(0, str(project_root))
 
 from utils.config_dict import ConfigDict
 from core.sql_client import SQLClient
+from utils.logger import Console
+
+
+_LOG_PREFIX_HANDLERS = (
+    ("✗", Console.error),
+    ("[ERROR]", Console.error),
+    ("[ERR]", Console.error),
+    ("[WARN]", Console.warn),
+    ("[WARNING]", Console.warn),
+    ("✓", Console.ok),
+)
+
+
+def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: bool = False) -> None:
+    message = sep.join(str(arg) for arg in args)
+    if end and end != "\n":
+        message = f"{message}{end}"
+
+    if not message:
+        return
+
+    if file is sys.stderr:
+        Console.error(message)
+        return
+
+    trimmed = message.lstrip()
+    for prefix, handler in _LOG_PREFIX_HANDLERS:
+        if trimmed.startswith(prefix):
+            handler(message)
+            return
+
+    Console.info(message)
+
+
+print = _log
 
 def test_config():
     print("=" * 60)

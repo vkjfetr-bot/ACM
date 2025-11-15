@@ -340,20 +340,14 @@ Console.set_level("DEBUG")
 
 ---
 
-## Future Work
+## Follow-up Completion
 
-### Deferred to Follow-up PR
+### Script Standardization (Completed 2025-11-15)
 
-**Script Standardization** (275 print statements)
-- `scripts/sql_batch_runner.py` (91 statements)
-- `scripts/analyze_charts.py` (59 statements)
-- Other scripts (125 statements)
-
-**Rationale:** Keeping this PR focused on core modules ensures:
-- Easier review
-- Lower risk
-- Clear scope
-- Faster merge
+- Converted `scripts/sql_batch_runner.py`, `scripts/analyze_charts.py`, `scripts/chunk_replay.py`
+- Updated SQL helper scripts under `scripts/sql/` and analytical tooling (`analyze_latest_run.py`)
+- Each module now routes legacy `print()` calls through `_log` helper bound to `Console`
+- Preserves existing messaging while enabling structured logging, ASCII compliance, and consistent stdout/stderr routing
 
 ### Phase 2 Enhancements
 
@@ -440,7 +434,7 @@ Analysis Result for 'python'. Found 0 alerts:
 1. Update main README with logging guide reference
 2. Announce new logging features to team
 3. Update deployment documentation
-4. Plan Phase 2 (script standardization)
+4. Plan Phase 2 (advanced logging features)
 
 ---
 

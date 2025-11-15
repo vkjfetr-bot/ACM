@@ -3,11 +3,48 @@ Test script for SQL-44: Verify SQL historian data loading
 """
 import sys
 from pathlib import Path
+from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 from core.sql_client import SQLClient
 from core.output_manager import OutputManager
+from utils.logger import Console
+
+
+_LOG_PREFIX_HANDLERS = (
+    ("[ERROR]", Console.error),
+    ("[ERR]", Console.error),
+    ("[WARN]", Console.warn),
+    ("[WARNING]", Console.warn),
+    ("[OK]", Console.ok),
+    ("[DEBUG]", Console.debug),
+)
+
+
+def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: bool = False) -> None:
+    """Route print() calls through the structured Console logger."""
+    message = sep.join(str(arg) for arg in args)
+    if end and end != "\n":
+        message = f"{message}{end}"
+
+    if not message:
+        return
+
+    if file is sys.stderr:
+        Console.error(message)
+        return
+
+    trimmed = message.lstrip()
+    for prefix, handler in _LOG_PREFIX_HANDLERS:
+        if trimmed.startswith(prefix):
+            handler(message)
+            return
+
+    Console.info(message)
+
+
+print = _log
 
 # Configuration
 EQUIPMENT = "FD_FAN"

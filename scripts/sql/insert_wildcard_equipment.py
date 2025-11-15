@@ -1,7 +1,36 @@
 """
 Insert wildcard equipment (EquipID=0) for default config parameters.
 """
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pyodbc
+
+from utils.logger import Console
+
+
+def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: bool = False) -> None:
+    message = sep.join(str(arg) for arg in args)
+    if end and end != "\n":
+        message = f"{message}{end}"
+
+    if not message:
+        return
+
+    lowered = message.lower()
+    if "error" in lowered or "failed" in lowered:
+        Console.error(message)
+        return
+
+    Console.info(message)
+
+
+print = _log
 
 def insert_wildcard_equipment():
     """Insert EquipID=0 as wildcard equipment for default config."""

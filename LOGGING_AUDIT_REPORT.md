@@ -8,6 +8,8 @@
 
 ## Executive Summary
 
+> **Update (2025-11-15, follow-up work):** All CLI scripts identified in this audit now route output through the enhanced `Console` logger via lightweight print shims. The findings below remain as historical context for the original audit run; current print counts in scripts have been reduced to zero effective this date.
+
 This audit examines the current state of logging throughout the ACM V8 codebase, identifies areas where print statements are used instead of proper logging, and recommends a comprehensive logging strategy including heartbeat functionality.
 
 ### Key Findings
