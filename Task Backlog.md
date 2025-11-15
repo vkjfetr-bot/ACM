@@ -2,8 +2,10 @@
 
 **⚠️ NOTE:** This document focuses on SQL integration tasks. For the complete consolidated task list including all audit findings, see `# To Do.md` (root directory).
 
-**Last Updated:** 2025-11-13
+**Last Updated:** 2025-11-15  
 **Focus:** Hands-Off Analytics | Continuous Adaptation | Self-Tuning | **SQL Integration (89% Complete)**
+
+**Recent Update (2025-11-15):** Added comprehensive forecast, RUL, and maintenance recommendation tasks from Forecast Audit analysis. See `Forecast RUL Maintenance Analysis.md` for detailed findings.
 
 ---
 
@@ -178,6 +180,7 @@ All tabular output hardening items are complete (see Completed Task Stats). No o
 | FCST-14 | Low      | `core/forecast.py`| Add comprehensive documentation for AR(1) model    | AR(1) model assumptions and limitations are documented    | Planned |
 | FCST-15 | Critical | `core/forecast.py`, `core/acm_main.py`, `core/output_manager.py` | Remove `scores.csv` dependency and stream results through OutputManager so forecast works in SQL-only mode | Forecast runs when `sql_only_mode=True`, reads in-memory scores, and writes forecast tables directly to SQL | Planned |
 | FCST-16 | High     | `core/forecast.py`, `core/output_manager.py`                     | Publish per-sensor/regime forecasts into `ACM_SensorForecast_TS` with quality scores for Grafana | Sensor-level forecast ribbons + diagnostics available in SQL/Grafana without manual stitching | Planned |
+| FCST-17 | Medium   | `core/enhanced_forecasting.py`, `core/acm_main.py`, `core/output_manager.py` | Integrate enhanced_forecasting.py module into pipeline | Multi-model ensemble forecasts (AR1, exponential, polynomial) run and export to SQL tables when `forecast.enhanced.enabled=true` | Planned |
 
 ### 8.1 RUL & Maintenance Intelligence
 
@@ -186,6 +189,24 @@ All tabular output hardening items are complete (see Completed Task Stats). No o
 | RUL-01  | Critical | `core/rul_estimator.py`, `core/output_manager.py` | Replace `health_timeline.csv` dependency with SQL-native ingestion + OutputManager artifact cache so RUL still runs in SQL-only mode | RUL tables populate when `sql_only_mode=True` without touching disk files   | Planned |
 | RUL-02  | High     | `core/rul_estimator.py`                        | Add probabilistic RUL bands (p10/p50/p90) and maintenance window telemetry to SQL tables | `ACM_RUL_TS`/`ACM_MaintenanceRecommendation` expose quantile columns for Grafana | Planned |
 | RUL-03  | Medium   | `core/rul_estimator.py`, `grafana_dashboards`  | Fuse sensor hotspots with `ACM_SensorForecast_TS` so RUL outputs include time-aligned driver sensors at predicted failure | Grafana dashboard shows sensor contribution trend sourced from SQL tables   | Planned |
+
+### 8.2 Maintenance Recommendations
+
+| ID       | Priority | Module                                         | Task                                                                 | Completion Criteria                                                         | Status  |
+| -------- | -------- | ---------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------- |
+| MAINT-01 | High     | `core/enhanced_forecasting.py`, `core/output_manager.py` | Implement maintenance recommendation engine | Risk assessment, urgency classification, causation attribution, and SQL table `ACM_MaintenanceRecommendation` populated | Planned |
+
+### 8.3 SQL Table Infrastructure
+
+**Note:** All required SQL tables already exist in `scripts/sql/57_create_forecast_and_rul_tables.sql`
+
+| ID        | Priority | Module                                         | Task                                                                 | Completion Criteria                                                         | Status  |
+| --------- | -------- | ---------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------- | ------- |
+| SQLTBL-01 | High     | `scripts/sql/57_create_forecast_and_rul_tables.sql`, `core/output_manager.py` | Wire `ACM_SensorForecast_TS` table to output_manager write path | Sensor forecasts written to SQL table when forecast module runs | Planned |
+| SQLTBL-02 | Medium   | `scripts/sql/57_create_forecast_and_rul_tables.sql` | Wire `ACM_HealthForecast_TS` table to output_manager | Health forecasts written to SQL table (schema verified at lines 11-26) | Planned |
+| SQLTBL-03 | Medium   | `scripts/sql/57_create_forecast_and_rul_tables.sql` | Wire `ACM_FailureForecast_TS` table to output_manager | Failure probability time series written to SQL table (schema verified at lines 29-42) | Planned |
+| SQLTBL-04 | Medium   | `scripts/sql/57_create_forecast_and_rul_tables.sql` | Wire `ACM_MaintenanceRecommendation` table to output_manager | Maintenance windows written to SQL table (schema verified at lines 118-132) | Planned |
+| SQLTBL-05 | Low      | `scripts/sql/57_create_forecast_and_rul_tables.sql` | Wire enhanced forecasting tables (`ACM_FailureCausation`, `ACM_EnhancedMaintenanceRecommendation`) | Enhanced forecasting outputs written when `forecast.enhanced.enabled=true` | Planned |
 
 ---
 
