@@ -1,4 +1,5 @@
 import sys
+<<<<<<< HEAD
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -6,6 +7,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pandas as pd
+=======
+import pandas as pd
+from pathlib import Path
+
+# Add project root to path for imports
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+>>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 from utils.logger import Console
 
 run_dir = Path(r"artifacts/FD_FAN_COLDSTART").glob("run_*")
@@ -51,7 +62,12 @@ for c in scols:
 out = pd.DataFrame(rows).sort_values('delta_alert_minus_good', key=lambda s: s.abs(), ascending=False)
 Console.info("Top 5 sensors by median change (ALERT - GOOD):")
 for _, r in out.head(5).iterrows():
+<<<<<<< HEAD
     Console.info(
         f"- {r['sensor']}: good={r['median_good']:.2f}, alert={r['median_alert']:.2f}, delta={r['delta_alert_minus_good']:+.2f}"
     )
+=======
+    Console.info(f"- {r['sensor']}: good={r['median_good']:.2f}, alert={r['median_alert']:.2f}, delta={r['delta_alert_minus_good']:+.2f}", 
+                 sensor=r['sensor'], median_good=r['median_good'], median_alert=r['median_alert'], delta=r['delta_alert_minus_good'])
+>>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 

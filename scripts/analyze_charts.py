@@ -4,12 +4,23 @@ Comprehensive Chart Analysis and Optimization Plan
 Run: 20251105_010417 (15 charts generated, 3.316s, 10.6% of runtime)
 """
 
+<<<<<<< HEAD
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+=======
+import os
+import sys
+from pathlib import Path
+
+# Add project root to path for imports
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+>>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 
 from utils.logger import Console
 
@@ -20,8 +31,13 @@ Console.info("CHART ANALYSIS & OPTIMIZATION PLAN")
 Console.info("="*70)
 Console.info(f"\n📊 Run: 20251105_010417")
 Console.info(f"📈 Charts generated: 15")
+<<<<<<< HEAD
 Console.info(f"⏱️  Time: 3.316s (10.6% of total runtime)")
 Console.info(f"📁 Location: {chart_dir}")
+=======
+Console.info(f"⏱️  Time: 3.316s (10.6% of runtime)")
+Console.info(f"📁 Location: {chart_dir}", chart_dir=str(chart_dir))
+>>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 
 charts = [
     "contribution_bars.png",
@@ -119,7 +135,11 @@ Console.info("\n📊 Current: 15 charts, 3.316s (10.6% of runtime)")
 Console.info("🎯 Target: 8-10 charts, ~1.5s (5% of runtime)")
 Console.info("💡 Approach:")
 Console.info("   1. Remove 3 low-value charts immediately: -1.0s")
+<<<<<<< HEAD
 Console.info("   2. Consolidate 2 pairs into combined figures: -0.4s")
+=======
+Console.info("   2. Consolidate 2 pairs into combined figures: -0.4s")  
+>>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 Console.info("   3. Optimize sampling/DPI: -0.4s")
 Console.info("   4. Total savings: ~1.8s (55% reduction)")
 
