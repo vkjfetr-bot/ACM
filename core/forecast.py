@@ -518,6 +518,8 @@ def run(ctx: Dict[str, Any]):
     """
     Enhanced forecast module with intelligent series selection, dynamic horizon,
     uncertainty bands, robust frequency inference, and optional plotting.
+    
+    FCST-15: Now supports SQL-only mode by accepting cached DataFrame via output_manager.
     """
     run_dir = ctx.get("run_dir", Path("."))
     plots_dir = ctx.get("plots_dir", run_dir / "plots")
@@ -527,12 +529,23 @@ def run(ctx: Dict[str, Any]):
     run_id = ctx.get("run_id")
     equip_id = ctx.get("equip_id")
     
-    p = run_dir / "scores.csv"
-    if not p.exists():
-        return {"module":"forecast","tables":[],"plots":[],"metrics":{},
-                "error":{"type":"MissingFile","message":"scores.csv not found"}}
-
-    df = _read_scores(p)
+    # FCST-15: Try to get scores from artifact cache first (SQL-only mode)
+    output_manager = ctx.get("output_manager")
+    df = None
+    
+    if output_manager is not None:
+        df = output_manager.get_cached_table("scores.csv")
+        if df is not None:
+            Console.info("[FORECAST] Using cached scores.csv from OutputManager")
+    
+    # Fallback to file-based loading if not in cache
+    if df is None:
+        p = run_dir / "scores.csv"
+        if not p.exists():
+            return {"module":"forecast","tables":[],"plots":[],"metrics":{},
+                    "error":{"type":"MissingFile","message":"scores.csv not found (no cache, no file)"}}
+        df = _read_scores(p)
+        Console.info("[FORECAST] Loaded scores.csv from file")
 
     # FCST-01: Intelligent series selection with fallbacks
     candidates = ["fused", "cusum_z", "pca_spe_z", "ar1_z", "iforest_z", "gmm_z", "mhal_z"]

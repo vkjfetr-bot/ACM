@@ -6,6 +6,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **FCST-15 & RUL-01: Artifact Cache for SQL-Only Mode** (2025-11-15):
+  - **Purpose**: Enable forecast and RUL modules to work in SQL-only mode without file system dependencies
+  - **Implementation**: 
+    - Added `_artifact_cache` dictionary to `OutputManager` to store DataFrames in memory
+    - Implemented `get_cached_table()` method to retrieve cached DataFrames for downstream modules
+    - Added `clear_artifact_cache()` and `list_cached_tables()` helper methods
+    - Modified `write_dataframe()` to automatically cache all written tables
+    - Updated `forecast.run()` to accept output_manager and use cached scores.csv
+    - Updated `_load_health_timeline()` in RUL estimator to use cached health_timeline.csv
+    - Modified `acm_main.py` to pass output_manager to forecast and RUL modules
+  - **Impact**:
+    - ✅ Forecast module no longer requires scores.csv file on disk
+    - ✅ RUL module no longer requires health_timeline.csv file on disk
+    - ✅ Both modules work seamlessly in SQL-only mode
+    - ✅ Cache persists across pipeline stages within a single run
+    - ✅ Enables true SQL-only deployments without temporary file writes
+  - **Test Coverage**: Added comprehensive test suite in `tests/test_artifact_cache.py` (6 tests, all passing)
+  - **Documentation**: FORECAST_RUL_AUDIT_SUMMARY.md updated with implementation status
+
+### Verified Already Implemented
+- **FCST-04: AR(1) Coefficient Stability Checks** (2025-11-15):
+  - Verified existing implementation checks for near-constant signal (var_xc >= 1e-8)
+  - Verified checks for near-zero denominator (abs(den) >= 1e-9)
+  - Verified warnings about short series (n < 20 samples)
+  - Status: ✅ Already complete in core/forecast.py lines 96-108
+
+- **FCST-05: Frequency Regex Validation** (2025-11-15):
+  - Verified existing validation for non-positive magnitude
+  - Verified unit validation against known time units
+  - Status: ✅ Already complete in core/forecast.py lines 268-271
+
+- **FCST-06: Horizon Clamping Warnings** (2025-11-15):
+  - Verified user warnings when horizon is clamped due to timestamp limits
+  - Status: ✅ Already complete in core/forecast.py lines 350-354
+
+- **FCST-08: Series Selection Scoring with Autocorrelation** (2025-11-15):
+  - Verified existing implementation uses autocorrelation in scoring
+  - Status: ✅ Already complete in core/forecast.py lines 374-391
+
+- **FCST-10: Forecast Backtesting** (2025-11-15):
+  - Verified existing `_validate_forecast()` function performs holdout backtesting
+  - Computes MAE, RMSE, MAPE metrics on test split
+  - Status: ✅ Already complete in core/forecast.py lines 470-515
+
+- **FCST-11: Stationarity Testing** (2025-11-15):
+  - Verified existing `_check_stationarity()` function analyzes rolling mean variance
+  - Flags likely non-stationary series
+  - Status: ✅ Already complete in core/forecast.py lines 454-467
+
+- **SQLTBL-01 through SQLTBL-05: Forecast & RUL SQL Tables** (2025-11-15):
+  - Verified all 11 forecast/RUL tables exist in `scripts/sql/57_create_forecast_and_rul_tables.sql`
+  - Verified all tables in ALLOWED_TABLES whitelist in output_manager.py
+  - Tables ready: ACM_HealthForecast_TS, ACM_FailureForecast_TS, ACM_RUL_TS, ACM_RUL_Summary, ACM_RUL_Attribution, ACM_SensorForecast_TS, ACM_MaintenanceRecommendation, and enhanced forecasting tables
+  - Status: ✅ Infrastructure complete, ready for data population
+
 ### Fixed
 - **DET-08: Mahalanobis High Condition Number** (2025-11-10):
   - **Issue**: Extremely high condition numbers indicated near-singular covariance matrices (FD_FAN: 4.80e+30, GAS_TURBINE: 4.47e+13)

@@ -49,15 +49,36 @@ def _load_health_timeline(
     sql_client: Optional[Any] = None,
     equip_id: Optional[int] = None,
     run_id: Optional[str] = None,
+    output_manager: Optional[Any] = None,
 ) -> Optional[pd.DataFrame]:
     """
     Load health timeline for RUL estimation.
 
+    RUL-01: Now supports artifact cache for SQL-only mode.
+    
     Priority:
-    1. If sql_client and identifiers are available, read from ACM_HealthTimeline.
-    2. Fallback to health_timeline.csv in tables_dir (legacy file mode).
+    1. Try artifact cache (output_manager) if available - SQL-only mode
+    2. If sql_client and identifiers are available, read from ACM_HealthTimeline
+    3. Fallback to health_timeline.csv in tables_dir (legacy file mode)
     """
-    # Prefer SQL when possible (SQL-only mode)
+    # RUL-01: First try artifact cache (SQL-only mode support)
+    if output_manager is not None:
+        df = output_manager.get_cached_table("health_timeline.csv")
+        if df is not None:
+            Console.info(f"[RUL] Using cached health_timeline.csv from OutputManager ({len(df)} rows)")
+            # Normalize column names
+            if "Timestamp" in df.columns:
+                ts_col = "Timestamp"
+            elif "timestamp" in df.columns:
+                ts_col = "timestamp"
+            else:
+                ts_col = df.columns[0]
+            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
+            df = df.dropna(subset=[ts_col]).sort_values(ts_col)
+            df = df.rename(columns={ts_col: "Timestamp"})
+            return df
+    
+    # Try SQL when possible (SQL-only mode without cache)
     if sql_client is not None and equip_id is not None and run_id:
         try:
             cur = sql_client.cursor()
@@ -90,9 +111,10 @@ def _load_health_timeline(
     # Fallback: legacy CSV path (file mode)
     p = tables_dir / "health_timeline.csv"
     if not p.exists():
-        Console.warn(f"[RUL] health_timeline.csv not found in {tables_dir}")
+        Console.warn(f"[RUL] health_timeline.csv not found in {tables_dir} (no cache, no SQL, no file)")
         return None
     df = pd.read_csv(p)
+    Console.info(f"[RUL] Loaded health_timeline.csv from file ({len(df)} rows)")
     if "Timestamp" in df.columns:
         ts_col = "Timestamp"
     elif "timestamp" in df.columns:
@@ -192,9 +214,12 @@ def estimate_rul_and_failure(
     health_threshold: float = 70.0,
     cfg: Optional[RULConfig] = None,
     sql_client: Optional[Any] = None,
+    output_manager: Optional[Any] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Main entrypoint used by acm_main.
+
+    RUL-01: Now accepts output_manager for artifact cache support in SQL-only mode.
 
     Returns a dict of DataFrames keyed by SQL table name:
     - ACM_HealthForecast_TS
@@ -206,7 +231,8 @@ def estimate_rul_and_failure(
     """
     cfg = cfg or RULConfig(health_threshold=health_threshold)
     health_df = _load_health_timeline(
-        tables_dir, sql_client=sql_client, equip_id=equip_id, run_id=run_id
+        tables_dir, sql_client=sql_client, equip_id=equip_id, run_id=run_id,
+        output_manager=output_manager
     )
     if health_df is None:
         Console.warn("[RUL] Health timeline not available; skipping RUL/forecast outputs.")
