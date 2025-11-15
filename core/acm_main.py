@@ -3034,9 +3034,62 @@ def main() -> None:
                                     f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
                                     f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
                                 )
-                            # NOTE: ef_result['tables'] contains in-memory DataFrames for
-                            # failure_probability_ts, failure_causation, enhanced_maintenance_recommendation,
-                            # and recommended_actions. These can be mapped to SQL tables in a later step.
+
+                            ef_tables = (ef_result or {}).get("tables") or {}
+                            if ef_tables:
+                                ef_sql_map = {
+                                    "failure_probability_ts": "ACM_EnhancedFailureProbability_TS",
+                                    "failure_causation": "ACM_FailureCausation",
+                                    "enhanced_maintenance_recommendation": "ACM_EnhancedMaintenanceRecommendation",
+                                    "recommended_actions": "ACM_RecommendedActions",
+                                }
+                                ef_csv_map = {
+                                    "failure_probability_ts": "enhanced_failure_probability.csv",
+                                    "failure_causation": "failure_causation.csv",
+                                    "enhanced_maintenance_recommendation": "enhanced_maintenance_recommendation.csv",
+                                    "recommended_actions": "recommended_actions.csv",
+                                }
+
+                                def _coerce_naive(df_in: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+                                    df_out = df_in.copy()
+                                    for col in columns:
+                                        if col in df_out.columns:
+                                            df_out[col] = pd.to_datetime(df_out[col], errors="coerce")
+                                            try:
+                                                df_out[col] = df_out[col].dt.tz_localize(None)
+                                            except Exception:
+                                                pass
+                                    return df_out
+
+                                for logical_name, sql_table in ef_sql_map.items():
+                                    df = ef_tables.get(logical_name)
+                                    if df is None or df.empty:
+                                        continue
+
+                                    df_to_write = df.copy()
+                                    if logical_name == "recommended_actions":
+                                        df_to_write = df_to_write.rename(
+                                            columns={
+                                                "action": "Action",
+                                                "priority": "Priority",
+                                                "estimated_duration_hours": "EstimatedDuration_Hours",
+                                            }
+                                        )
+
+                                    timestamp_cols = {
+                                        "failure_probability_ts": ["Timestamp"],
+                                        "failure_causation": ["PredictedFailureTime"],
+                                    }.get(logical_name, [])
+                                    if timestamp_cols:
+                                        df_to_write = _coerce_naive(df_to_write, timestamp_cols)
+
+                                    csv_name = ef_csv_map.get(logical_name, f"{logical_name}.csv")
+                                    output_manager.write_dataframe(
+                                        df_to_write,
+                                        tables_dir / csv_name,
+                                        sql_table=sql_table,
+                                        add_created_at="CreatedAt" not in df_to_write.columns,
+                                    )
                         # In file mode, fall back to original file-based enhanced forecasting integration.
                         elif not SQL_MODE:
                             Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (file mode)")

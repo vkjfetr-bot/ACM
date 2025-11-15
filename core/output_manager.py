@@ -61,6 +61,8 @@ ALLOWED_TABLES = {
     'ACM_HealthForecast_TS','ACM_FailureForecast_TS',
     'ACM_RUL_TS','ACM_RUL_Summary','ACM_RUL_Attribution',
     'ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
+    'ACM_EnhancedFailureProbability_TS','ACM_FailureCausation',
+    'ACM_EnhancedMaintenanceRecommendation','ACM_RecommendedActions',
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
@@ -518,6 +520,20 @@ class OutputManager:
                 'MaxAbsZ': 0.0, 'MaxSignedZ': 0.0, 'LatestAbsZ': 0.0, 'LatestSignedZ': 0.0,
                 'ValueAtPeak': 0.0, 'LatestValue': 0.0, 'TrainMean': 0.0, 'TrainStd': 0.0,
                 'AboveWarnCount': 0, 'AboveAlertCount': 0
+            },
+            'ACM_EnhancedFailureProbability_TS': {
+                'Timestamp': 'ts', 'ForecastHorizon_Hours': 0.0,
+                'FailureProbability': 0.0, 'RiskLevel': 'UNKNOWN'
+            },
+            'ACM_FailureCausation': {
+                'PredictedFailureTime': 'ts', 'Detector': 'unknown',
+                'FailurePattern': 'unknown'
+            },
+            'ACM_EnhancedMaintenanceRecommendation': {
+                'UrgencyScore': 0.0, 'MaintenanceRequired': 0
+            },
+            'ACM_RecommendedActions': {
+                'Action': 'unspecified'
             },
             'ACM_SensorHotspotTimeline': {
                 'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'Rank': 0, 'AbsZ': 0.0,
