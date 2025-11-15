@@ -1233,9 +1233,10 @@ class OutputManager:
             elapsed = time.time() - start_time
             self.stats['write_time'] += elapsed
             
-            # FCST-15: Cache written DataFrame for downstream modules in SQL-only mode
+            # FCST-15: Cache DataFrame for downstream modules (SQL-only mode support)
+            # Always cache in SQL-only mode, even if no actual write happened
             # Store by filename (without path) so modules can reference by simple name
-            if result.get('file_written') or result.get('sql_written'):
+            if self.sql_only_mode or result.get('file_written') or result.get('sql_written'):
                 cache_key = file_path.name  # e.g., "scores.csv"
                 self._artifact_cache[cache_key] = df.copy()
                 Console.info(f"[OUTPUT] Cached {cache_key} in artifact cache ({len(df)} rows)")
