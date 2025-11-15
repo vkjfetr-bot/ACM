@@ -622,7 +622,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex,\n    FusedZ\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_HealthTimeline\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
+          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex,\n    FusedZ\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -783,7 +783,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex AS \"Health Index\",\n    FusedZ      AS \"Fused Score\"\nFROM ACM_DefectTimeline\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_DefectTimeline\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
+          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex AS \"Health Index\",\n    FusedZ      AS \"Fused Score\"\nFROM ACM_DefectTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -871,7 +871,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    Timestamp AS time,\n    CONCAT('Regime ', CAST(RegimeLabel AS VARCHAR(10))) AS value\nFROM ACM_RegimeTimeline\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_RegimeTimeline\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
+          "rawSql": "SELECT\n    Timestamp AS time,\n    CONCAT('Regime ', CAST(RegimeLabel AS VARCHAR(10))) AS value\nFROM ACM_RegimeTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1161,7 +1161,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n    PeriodStart AS period,\n    HealthZone  AS zone,\n    ZonePct     AS percentage\nFROM ACM_HealthZoneByPeriod\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_HealthZoneByPeriod\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(PeriodStart)\nORDER BY PeriodStart, HealthZone",
+          "rawSql": "SELECT\n    PeriodStart AS period,\n    HealthZone  AS zone,\n    ZonePct     AS percentage\nFROM ACM_HealthZoneByPeriod\nWHERE EquipID = $equipment\n  AND $__timeFilter(PeriodStart)\nORDER BY PeriodStart, HealthZone",
           "refId": "A"
         }
       ],
@@ -1255,7 +1255,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp as time, DriftValue as value\n           FROM ACM_DriftSeries \n           WHERE EquipID = $equipment \n           AND RunID = (\n               SELECT TOP 1 RunID\n               FROM ACM_DriftSeries\n               WHERE EquipID = $equipment\n               ORDER BY RunID DESC\n           )\n           AND $__timeFilter(Timestamp)\n           ORDER BY Timestamp",
+          "rawSql": "SELECT Timestamp as time, DriftValue as value\n           FROM ACM_DriftSeries \n           WHERE EquipID = $equipment \n           AND $__timeFilter(Timestamp)\n           ORDER BY Timestamp",
           "refId": "A"
         }
       ],
@@ -1381,7 +1381,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 15\n       DetectorType AS detector,       -- or keep AS sensor if you prefer\n       ContributionPct AS contribution,\n       ZScore AS zscore\nFROM ACM_ContributionCurrent\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_ContributionCurrent\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\nORDER BY ContributionPct DESC;\n",
+          "rawSql": "SELECT TOP 15\n       DetectorType AS detector,\n       ContributionPct AS contribution,\n       ZScore AS zscore\nFROM ACM_ContributionCurrent\nWHERE EquipID = $equipment\nORDER BY ContributionPct DESC;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1490,7 +1490,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    Timestamp AS time,\n    DetectorType AS detector,       -- rename metric label\n    ContributionPct AS contribution\nFROM ACM_ContributionTimeline\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_ContributionTimeline\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)      -- or your explicit BETWEEN clause\nORDER BY Timestamp, DetectorType;\n",
+          "rawSql": "SELECT\n    Timestamp AS time,\n    DetectorType AS detector,\n    ContributionPct AS contribution\nFROM ACM_ContributionTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp, DetectorType;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1784,7 +1784,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT \n           PeriodStart as time,\n           DetectorType as detector,\n           AnomalyRatePct as value\n           FROM ACM_SensorAnomalyByPeriod \n           WHERE EquipID = $equipment \n           AND RunID = (\n               SELECT TOP 1 RunID\n               FROM ACM_SensorAnomalyByPeriod\n               WHERE EquipID = $equipment\n               ORDER BY RunID DESC\n           )\n           AND $__timeFilter(PeriodStart)\n           ORDER BY PeriodStart, DetectorType",
+          "rawSql": "SELECT \n           PeriodStart as time,\n           DetectorType as detector,\n           AnomalyRatePct as value\n           FROM ACM_SensorAnomalyByPeriod \n           WHERE EquipID = $equipment \n           AND $__timeFilter(PeriodStart)\n           ORDER BY PeriodStart, DetectorType",
           "refId": "A"
         }
       ],
@@ -2044,7 +2044,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  Timestamp AS time,\n  ForecastHealth AS [Forecast Health],\n  CiLower AS [CI Lower],\n  CiUpper AS [CI Upper]\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_HealthForecast_TS\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  ForecastHealth AS [Forecast Health],\n  CiLower AS [CI Lower],\n  CiUpper AS [CI Upper]\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
           "refId": "A"
         }
       ],
@@ -2138,7 +2138,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  Timestamp AS time,\n  FailureProb * 100.0 AS [Failure Probability]\nFROM ACM_FailureForecast_TS\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_FailureForecast_TS\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  FailureProb * 100.0 AS [Failure Probability]\nFROM ACM_FailureForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
           "refId": "A"
         }
       ],
@@ -2277,7 +2277,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 10\n  ra.SensorName,\n  ra.FailureContribution * 100.0 AS FailureContribution,\n  ra.ZScoreAtFailure,\n  ra.AlertCount,\n  ra.FailureTime,\n  ISNULL(ff.FailureProb * 100.0, 0.0) AS FailureProbabilityAtTime\nFROM ACM_RUL_Attribution ra\nOUTER APPLY (\n  SELECT TOP 1 FailureProb\n  FROM ACM_FailureForecast_TS ff\n  WHERE ff.EquipID = ra.EquipID\n    AND ff.RunID = ra.RunID\n    AND ff.Timestamp >= ra.FailureTime\n  ORDER BY ff.Timestamp ASC\n) ff\nWHERE ra.EquipID = $equipment\n  AND ra.RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_RUL_Attribution\n      WHERE EquipID = $equipment\n      ORDER BY FailureTime DESC\n  )\nORDER BY FailureContribution DESC",
+          "rawSql": "SELECT TOP 10\n  ra.SensorName,\n  ra.FailureContribution * 100.0 AS FailureContribution,\n  ra.ZScoreAtFailure,\n  ra.AlertCount,\n  ra.FailureTime,\n  ISNULL(ff.FailureProb * 100.0, 0.0) AS FailureProbabilityAtTime\nFROM ACM_RUL_Attribution ra\nOUTER APPLY (\n  SELECT TOP 1 FailureProb\n  FROM ACM_FailureForecast_TS ff\n  WHERE ff.EquipID = ra.EquipID\n    AND ff.Timestamp >= ra.FailureTime\n  ORDER BY ff.Timestamp ASC\n) ff\nWHERE ra.EquipID = $equipment\nORDER BY FailureContribution DESC",
           "refId": "A"
         }
       ],
@@ -2371,7 +2371,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  Timestamp AS time,\n  SensorName AS metric,\n  ForecastValue AS value\nFROM ACM_SensorForecast_TS\nWHERE EquipID = $equipment\n  AND RunID = (\n      SELECT TOP 1 RunID\n      FROM ACM_SensorForecast_TS\n      WHERE EquipID = $equipment\n      ORDER BY RunID DESC\n  )\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp, SensorName",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  SensorName AS metric,\n  ForecastValue AS value\nFROM ACM_SensorForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp, SensorName",
           "refId": "A"
         }
       ],
@@ -2443,7 +2443,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  EarliestMaintenance,\n  PreferredWindowStart,\n  PreferredWindowEnd,\n  FailureProbAtWindowEnd * 100.0 AS FailureProbabilityAtEnd\nFROM\n  ACM_MaintenanceRecommendation\nWHERE\n  EquipID = $equipment\n  AND RunID = (\n    SELECT\n      TOP 1 RunID\n    FROM\n      ACM_MaintenanceRecommendation\n    WHERE\n      EquipID = $equipment\n    ORDER BY\n      PreferredWindowEnd DESC\n  )",
+          "rawSql": "SELECT\n  EarliestMaintenance,\n  PreferredWindowStart,\n  PreferredWindowEnd,\n  FailureProbAtWindowEnd * 100.0 AS FailureProbabilityAtEnd\nFROM\n  ACM_MaintenanceRecommendation\nWHERE\n  EquipID = $equipment",
           "refId": "A",
           "sql": {
             "columns": [

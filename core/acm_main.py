@@ -825,6 +825,22 @@ def main() -> None:
                                  f"Total: {len(score)}, Unique: {score.index.nunique()}")
             meta.dup_timestamps_removed = int(train_dups + score_dups)
             Console.info(f"[DATA] Index integrity verified: BASELINE={len(train)} unique, BATCH={len(score)} unique")
+
+            if len(score) == 0:
+                Console.warn("[DATA] SCORE window empty after cleaning; marking run as NOOP")
+                outcome = "NOOP"
+                rows_read = 0
+                rows_written = 0
+                if sql_client and run_id:
+                    _sql_finalize_run(
+                        sql_client,
+                        run_id=run_id,
+                        outcome=outcome,
+                        rows_read=rows_read,
+                        rows_written=rows_written,
+                        err_json=None
+                    )
+                return
         hb.stop()
         Console.info(
             f"[DATA] timestamp={meta.timestamp_col} cadence_ok={meta.cadence_ok} "
