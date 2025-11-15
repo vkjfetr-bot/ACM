@@ -26,14 +26,9 @@ from scipy.optimize import curve_fit
 
 try:
     from utils.logger import Console
-except ImportError:
-    class Console:
-        @staticmethod
-        def info(msg: str): print(f"[INFO] {msg}")
-        @staticmethod
-        def warn(msg: str): print(f"[WARN] {msg}")
-        @staticmethod
-        def error(msg: str): print(f"[ERROR] {msg}")
+except ImportError as e:
+    # If logger import fails, something is seriously wrong - fail fast
+    raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
 
 
 @dataclass
