@@ -219,15 +219,28 @@ def estimate_rul_and_failure(
     hi = hi.sort_index()
     if hi.size < cfg.min_points:
         Console.warn(
-            f"[RUL] Not enough health points ({hi.size}, min={cfg.min_points}) for RUL."
+            f"[RUL] Not enough health points ({hi.size}, min={cfg.min_points}) for robust AR(1) RUL; "
+            "falling back to naive flat forecast."
         )
-        return {}
 
     # Forecast health
     forecast, forecast_std, h_hours = _simple_ar1_forecast(hi, cfg)
     if forecast.empty:
-        Console.warn("[RUL] Forecast series is empty; skipping RUL outputs.")
-        return {}
+        Console.warn("[RUL] Forecast series is empty; falling back to naive flat forecast.")
+        # Naive fallback: hold last value flat over the forecast horizon
+        last_ts = hi.index[-1]
+        last_val = float(hi.iloc[-1])
+        step_hours = 1.0
+        max_h = max(float(cfg.max_forecast_hours), step_hours)
+        h_hours = np.arange(step_hours, max_h + step_hours, step_hours, dtype=float)
+        idx_fore = last_ts + pd.to_timedelta(h_hours, unit="h")
+        forecast_values = np.full_like(h_hours, last_val, dtype=float)
+        # Use empirical std of history as uncertainty; default to 1.0 if degenerate
+        hist_std = float(np.nanstd(hi.values)) if hi.size > 1 else 1.0
+        if not np.isfinite(hist_std) or hist_std <= 0:
+            hist_std = 1.0
+        forecast_std = np.full_like(h_hours, hist_std, dtype=float)
+        forecast = pd.Series(forecast_values, index=idx_fore, name="ForecastHealth")
 
     ci_k = 1.96
     ci_lower = forecast - ci_k * forecast_std

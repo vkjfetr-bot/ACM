@@ -493,17 +493,8 @@ def _ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
 # SQL helpers (local)
 # =======================
 def _sql_mode(cfg: Dict[str, Any]) -> bool:
-    """Check if SQL mode is enabled. SQL mode is now the DEFAULT.
-
-    Allows an environment override via ACM_FORCE_SQL_MODE so callers
-    like the SQL batch runner can force SQL mode even if older configs
-    still have runtime.storage_backend='file'.
-    """
-    force = os.getenv("ACM_FORCE_SQL_MODE", "").strip().lower()
-    if force in ("1", "true", "yes", "sql"):
-        return True
-    backend = cfg.get("runtime", {}).get("storage_backend", "sql")  # Changed default from "file" to "sql"
-    return backend == "sql"
+    """SQL-only mode: always use SQL backend, ignore file-based storage."""
+    return True
 
 def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
     if not SQLClient:
