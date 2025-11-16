@@ -15,12 +15,8 @@ from typing import Any, Callable, Dict
 # Import Console for consistent logging
 try:
     from utils.logger import Console
-except ImportError:
-    # Fallback if import fails
-    class Console:
-        @staticmethod
-        def info(msg: str, **kv: Any) -> None:
-            print(msg)
+except Exception as exc:
+    raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {exc}") from exc
 
 class Timer:
     """Lightweight stage timer. Usage:

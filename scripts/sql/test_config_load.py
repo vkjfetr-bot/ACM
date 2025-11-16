@@ -46,44 +46,44 @@ def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: b
 
 print = _log
 
-print("="*60)
-print("Testing SQL Config Loading")
-print("="*60)
+_log("="*60)
+_log("Testing SQL Config Loading")
+_log("="*60)
 
 # Test 1: Load global defaults
-print("\n1. Loading global defaults (EquipID=0)...")
+_log("\n1. Loading global defaults (EquipID=0)...")
 try:
     cfg = get_equipment_config(equipment_code=None, use_sql=True, fallback_to_yaml=False)
-    print(f"✓ Loaded {len(cfg)} top-level config categories")
-    print(f"  Categories: {list(cfg.keys())}")
+    _log(f"✓ Loaded {len(cfg)} top-level config categories")
+    _log(f"  Categories: {list(cfg.keys())}")
     
     # Show some sample values
-    print(f"\n  Sample values:")
-    print(f"    features.window = {cfg['features']['window']}")
-    print(f"    fusion.weights.ar1_z = {cfg['fusion']['weights']['ar1_z']}")
-    print(f"    thresholds.q = {cfg['thresholds']['q']}")
-    print(f"    models.pca.n_components = {cfg['models']['pca']['n_components']}")
+    _log(f"\n  Sample values:")
+    _log(f"    features.window = {cfg['features']['window']}")
+    _log(f"    fusion.weights.ar1_z = {cfg['fusion']['weights']['ar1_z']}")
+    _log(f"    thresholds.q = {cfg['thresholds']['q']}")
+    _log(f"    models.pca.n_components = {cfg['models']['pca']['n_components']}")
     
 except Exception as e:
-    print(f"✗ Failed: {e}")
+    _log(f"✗ Failed: {e}")
 
 # Test 2: Try loading for non-existent equipment (should use global defaults)
-print("\n2. Loading for non-existent equipment (should use global)...")
+_log("\n2. Loading for non-existent equipment (should use global)...")
 try:
     cfg = get_equipment_config(equipment_code='TEST_EQUIPMENT_999', use_sql=True, fallback_to_yaml=False)
-    print(f"✓ Loaded config (using global defaults)")
+    _log(f"✓ Loaded config (using global defaults)")
     
 except Exception as e:
-    print(f"✗ Failed: {e}")
+    _log(f"✗ Failed: {e}")
 
 # Test 3: Show full fusion config
-print("\n3. Full fusion configuration:")
+_log("\n3. Full fusion configuration:")
 try:
     cfg = get_equipment_config(use_sql=True, fallback_to_yaml=False)
-    print(json.dumps(cfg['fusion'], indent=2))
+    _log(json.dumps(cfg['fusion'], indent=2))
 except Exception as e:
-    print(f"✗ Failed: {e}")
+    _log(f"✗ Failed: {e}")
 
-print("\n" + "="*60)
-print("Test Complete")
-print("="*60)
+_log("\n" + "="*60)
+_log("Test Complete")
+_log("="*60)

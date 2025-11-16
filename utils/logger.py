@@ -11,6 +11,7 @@ Provides a unified logging interface with support for:
 - Heartbeat progress indicator
 """
 from __future__ import annotations
+import inspect
 import json
 import sys
 import time
@@ -18,7 +19,7 @@ import os
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional, TextIO, Literal
+from typing import Callable, Dict, Any, Optional, TextIO, Literal, List
 from enum import IntEnum
 
 
@@ -47,6 +48,9 @@ class Logger:
         self._file_path: Optional[Path] = None
         self._ascii_only = self._get_ascii_only_from_env()
         self._setup_file_output()
+        self._module_levels: Dict[str, LogLevel] = {}
+        self._sinks: List[Callable[[Dict[str, Any]], None]] = []
+        self._sink_lock = threading.Lock()
     
     def _get_level_from_env(self) -> LogLevel:
         """Get log level from LOG_LEVEL environment variable."""
@@ -121,11 +125,43 @@ class Logger:
             except Exception as e:
                 print(f"[WARNING] Could not open log file {file_path}: {e}", file=sys.stderr)
     
-    def _format_message(self, level: LogLevel, msg: str, context: Dict[str, Any]) -> str:
+    @property
+    def ascii_only(self) -> bool:
+        return self._ascii_only
+
+    def clear_module_levels(self) -> None:
+        """Remove all module-specific level overrides."""
+        self._module_levels.clear()
+
+    def set_module_level(self, module: str, level: str | LogLevel) -> None:
+        """Set log level for a specific module."""
+        if isinstance(level, str):
+            level_map = {
+                "DEBUG": LogLevel.DEBUG,
+                "INFO": LogLevel.INFO,
+                "WARNING": LogLevel.WARNING,
+                "WARN": LogLevel.WARNING,
+                "ERROR": LogLevel.ERROR,
+                "CRITICAL": LogLevel.CRITICAL,
+            }
+            level = level_map.get(level.upper(), LogLevel.INFO)
+        self._module_levels[module] = level
+
+    def add_sink(self, sink: Callable[[Dict[str, Any]], None]) -> None:
+        """Register an additional sink for structured log records."""
+        with self._sink_lock:
+            self._sinks.append(sink)
+
+    def remove_sink(self, sink: Callable[[Dict[str, Any]], None]) -> None:
+        """Remove a previously registered sink."""
+        with self._sink_lock:
+            self._sinks = [s for s in self._sinks if s is not sink]
+
+    def _format_message(self, level: LogLevel, msg: str, context: Dict[str, Any], ts: datetime) -> str:
         """Format a log message according to the current format."""
         if self._format == LogFormat.JSON:
             record = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": ts.isoformat(),
                 "level": level.name,
                 "message": msg,
             }
@@ -134,18 +170,26 @@ class Logger:
             return json.dumps(record, ensure_ascii=True)
         else:
             # Text format
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
             context_str = ""
             if context:
                 context_str = " " + " ".join(f"{k}={v}" for k, v in context.items())
             return f"[{timestamp}] [{level.name}] {msg}{context_str}"
-    
+
     def _log(self, level: LogLevel, msg: str, **context: Any) -> None:
         """Internal logging method."""
-        if level < self._level:
+        ctx = dict(context) if context else {}
+        module_name = ctx.get("module")
+        if module_name is None:
+            module_name = self._infer_module_name()
+            ctx["module"] = module_name
+
+        effective_level = self._module_levels.get(module_name, self._level)
+        if level < effective_level:
             return
-        
-        formatted = self._format_message(level, msg, context)
+
+        timestamp = datetime.utcnow()
+        formatted = self._format_message(level, msg, ctx, timestamp)
         
         # Determine output stream
         stream = sys.stderr if level >= LogLevel.ERROR else sys.stdout
@@ -160,6 +204,41 @@ class Logger:
                 self._file.flush()
             except Exception:
                 pass  # Silent failure to avoid recursion
+
+        sinks = None
+        if self._sinks:
+            with self._sink_lock:
+                sinks = list(self._sinks)
+        if sinks:
+            record = {
+                "timestamp": timestamp.isoformat(),
+                "level": level.name,
+                "message": msg,
+                "module": module_name,
+                "context": ctx,
+            }
+            for sink in sinks:
+                try:
+                    sink(record)
+                except Exception:
+                    pass
+
+    def _infer_module_name(self) -> str:
+        """Best-effort inference of the caller's module name."""
+        frame = inspect.currentframe()
+        if not frame:
+            return "__main__"
+        try:
+            caller = frame
+            # Skip frames: _log -> Console.<method> -> caller
+            for _ in range(3):
+                if caller.f_back:
+                    caller = caller.f_back
+                else:
+                    break
+            return caller.f_globals.get("__name__", "__main__")
+        finally:
+            del frame
     
     def debug(self, msg: str, **context: Any) -> None:
         """Log a debug message."""
@@ -268,6 +347,26 @@ class Console:
     def ascii_only() -> bool:
         """Return whether ASCII-only mode is enabled."""
         return _logger.ascii_only
+    
+    @staticmethod
+    def set_module_level(module: str, level: str | LogLevel) -> None:
+        """Set log level for a specific module."""
+        _logger.set_module_level(module, level)
+    
+    @staticmethod
+    def clear_module_levels() -> None:
+        """Clear all module-specific level overrides."""
+        _logger.clear_module_levels()
+    
+    @staticmethod
+    def add_sink(sink: Callable[[Dict[str, Any]], None]) -> None:
+        """Register a structured log sink."""
+        _logger.add_sink(sink)
+    
+    @staticmethod
+    def remove_sink(sink: Callable[[Dict[str, Any]], None]) -> None:
+        """Remove a structured log sink."""
+        _logger.remove_sink(sink)
 
 
 class Heartbeat:

@@ -23,7 +23,7 @@ _LOG_PREFIX_HANDLERS = (
 
 
 def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: bool = False) -> None:
-    """Route print() calls through the structured Console logger."""
+    """Route _log("") calls through the structured Console logger."""
     message = sep.join(str(arg) for arg in args)
     if end and end != "\n":
         message = f"{message}{end}"
@@ -51,30 +51,30 @@ EQUIPMENT = "FD_FAN"
 START_TIME = "2012-01-06 00:00:00"  # Use full date range from SQL table
 END_TIME = "2012-03-01 00:00:00"    # ~2 months should give us plenty of data
 
-print("="*70)
-print("SQL-44: Testing SQL Historian Data Loading")
-print("="*70)
-print()
+_log("="*70)
+_log("SQL-44: Testing SQL Historian Data Loading")
+_log("="*70)
+_log("")
 
 # Connect to SQL
-print("[SQL] Connecting to ACM database...")
+_log("[SQL] Connecting to ACM database...")
 try:
     sql_client = SQLClient.from_ini('acm')
     sql_client.connect()
-    print("  [OK] Connected successfully")
+    _log("  [OK] Connected successfully")
 except Exception as e:
-    print(f"  [ERROR] Failed to connect: {e}")
+    _log(f"  [ERROR] Failed to connect: {e}")
     sys.exit(1)
 
 # Create OutputManager
-print()
-print("[INIT] Creating OutputManager...")
+_log("")
+_log("[INIT] Creating OutputManager...")
 output_mgr = OutputManager(
     sql_client=sql_client,
     run_id="test-sql-44",
     equip_id=1  # FD_FAN
 )
-print("  [OK] OutputManager created")
+_log("  [OK] OutputManager created")
 
 # Minimal config for data loading
 cfg = {
@@ -94,8 +94,8 @@ cfg = {
 }
 
 # Test SQL historian data loading
-print()
-print(f"[LOAD] Loading data for {EQUIPMENT} from {START_TIME} to {END_TIME}...")
+_log("")
+_log(f"[LOAD] Loading data for {EQUIPMENT} from {START_TIME} to {END_TIME}...")
 try:
     start_utc = pd.Timestamp(START_TIME)
     end_utc = pd.Timestamp(END_TIME)
@@ -108,36 +108,36 @@ try:
         sql_mode=True
     )
     
-    print()
-    print("="*70)
-    print("SUCCESS! Data loaded from SQL historian")
-    print("="*70)
-    print()
-    print(f"[RESULT] Train shape: {train.shape}")
-    print(f"[RESULT] Score shape: {score.shape}")
-    print(f"[RESULT] Total rows: {len(train) + len(score)}")
-    print()
-    print(f"[META] Timestamp column: {meta.timestamp_col}")
-    print(f"[META] Cadence OK: {meta.cadence_ok}")
-    print(f"[META] Kept columns: {len(meta.kept_cols)}")
-    print(f"[META] Dropped columns: {len(meta.dropped_cols)}")
-    print(f"[META] Sampling seconds: {meta.sampling_seconds}")
-    print()
-    print("Train columns:", list(train.columns[:5]), "..." if len(train.columns) > 5 else "")
-    print("Score columns:", list(score.columns[:5]), "..." if len(score.columns) > 5 else "")
-    print()
-    print("Train index range:", train.index.min(), "to", train.index.max())
-    print("Score index range:", score.index.min(), "to", score.index.max())
-    print()
-    print("="*70)
-    print("✓ SQL-44 implementation validated!")
-    print("="*70)
+    _log("")
+    _log("="*70)
+    _log("SUCCESS! Data loaded from SQL historian")
+    _log("="*70)
+    _log("")
+    _log(f"[RESULT] Train shape: {train.shape}")
+    _log(f"[RESULT] Score shape: {score.shape}")
+    _log(f"[RESULT] Total rows: {len(train) + len(score)}")
+    _log("")
+    _log(f"[META] Timestamp column: {meta.timestamp_col}")
+    _log(f"[META] Cadence OK: {meta.cadence_ok}")
+    _log(f"[META] Kept columns: {len(meta.kept_cols)}")
+    _log(f"[META] Dropped columns: {len(meta.dropped_cols)}")
+    _log(f"[META] Sampling seconds: {meta.sampling_seconds}")
+    _log("")
+    _log("Train columns:", list(train.columns[:5]), "..." if len(train.columns) > 5 else "")
+    _log("Score columns:", list(score.columns[:5]), "..." if len(score.columns) > 5 else "")
+    _log("")
+    _log("Train index range:", train.index.min(), "to", train.index.max())
+    _log("Score index range:", score.index.min(), "to", score.index.max())
+    _log("")
+    _log("="*70)
+    _log("✓ SQL-44 implementation validated!")
+    _log("="*70)
     
 except Exception as e:
-    print()
-    print("="*70)
-    print(f"[ERROR] Failed to load data: {e}")
-    print("="*70)
+    _log("")
+    _log("="*70)
+    _log(f"[ERROR] Failed to load data: {e}")
+    _log("="*70)
     import traceback
     traceback.print_exc()
     sys.exit(1)

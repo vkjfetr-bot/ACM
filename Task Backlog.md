@@ -157,6 +157,8 @@ All tabular output hardening items are complete (see Completed Task Stats). No o
 | DEBT-07 | Medium   | Multiple           | Error handling tightening          | Narrow exceptions with structured errors  | Pending |
 | DEBT-14 | Low      | `core/acm_main.py` | Testing hooks / path handling      | Functions factored for unit tests         | Pending |
 | DEBT-15 | Low      | `core/acm_main.py` | Error truncation policy            | Full stack persisted with truncation note | Pending |
+| DEBT-16 | High     | `utils/logger.py`, `core/acm_main.py` | Structured log streaming to SQL/monitoring | `ACM_RunLogs` captures Console output with context for every run; Grafana/monitoring dashboards consume it | ✅ **DONE** – SQL log sink + CLI toggle landed 2025-11-15 |
+| DEBT-17 | Medium   | `utils/logger.py` | Per-module log level + CLI overrides | `--log-level`/`--log-format` flags, module overrides, and docs/tests implemented | ✅ **DONE** – Module-level overrides + CLI flags + docs/tests merged 2025-11-15 |
 
 ---
 

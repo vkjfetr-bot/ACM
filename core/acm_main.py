@@ -44,6 +44,7 @@ from core.output_manager import OutputManager
 from core import rul_estimator
 from core import enhanced_forecasting  # file-based (non-SQL) enhanced forecasting
 from core import enhanced_forecasting_sql  # SQL-only wrapper for enhanced forecasting
+from core.sql_logger import SqlLogSink
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
 # Import episode culprits writer
@@ -80,10 +81,67 @@ except Exception:
         def log(self, *a, **k): pass
 
 try:
-    from utils.logger import Console  # type: ignore
+    from utils.logger import Console, Heartbeat  # type: ignore
 except Exception as e:
     # If logger import fails, something is seriously wrong - fail fast
-    raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
+    raise SystemExit(f"FATAL: Cannot import utils.logger: {e}") from e
+
+
+class _NoOpHeartbeat:
+    """Lightweight stand-in used when heartbeat output is disabled."""
+
+    def stop(self) -> None:  # pragma: no cover - trivial
+        return
+
+
+def _start_heartbeat(enabled: bool, *args, **kwargs):
+    """Start a heartbeat when enabled; otherwise return a no-op object."""
+    if not enabled:
+        return _NoOpHeartbeat()
+    return Heartbeat(*args, **kwargs).start()
+
+
+def _apply_module_overrides(entries):
+    """Configure module-specific log levels."""
+    Console.clear_module_levels()
+    for entry in entries or []:
+        if not entry or "=" not in entry:
+            continue
+        module, level = entry.split("=", 1)
+        module = module.strip()
+        level = level.strip()
+        if module and level:
+            Console.set_module_level(module, level)
+
+
+def _configure_logging(logging_cfg, args):
+    """Apply CLI/config logging overrides and return flags."""
+    enable_sql_logging = bool((logging_cfg or {}).get("enable_sql_sink", True))
+
+    if args.log_level or (logging_cfg or {}).get("level"):
+        Console.set_level(args.log_level or logging_cfg.get("level"))
+
+    if args.log_format or (logging_cfg or {}).get("format"):
+        Console.set_format(args.log_format or logging_cfg.get("format"))
+
+    log_file = args.log_file or (logging_cfg or {}).get("file")
+    if log_file:
+        Console.set_output(Path(log_file))
+
+    module_levels = []
+    cfg_module_levels = (logging_cfg or {}).get("module_levels")
+    if isinstance(cfg_module_levels, dict):
+        module_levels.extend([f"{k}={v}" for k, v in cfg_module_levels.items()])
+    elif isinstance(cfg_module_levels, (list, tuple)):
+        module_levels.extend(cfg_module_levels)
+    if args.log_module_level:
+        module_levels.extend(args.log_module_level)
+    _apply_module_overrides(module_levels)
+
+    if args.disable_sql_logging:
+        enable_sql_logging = False
+
+    return {"enable_sql_logging": enable_sql_logging}
 
 
 def _nearest_indexer(index: pd.Index, targets: Sequence[Any], label: str = "indexer") -> np.ndarray:
@@ -308,50 +366,6 @@ def _compute_regime_volatility(regime_labels: np.ndarray, window: int = 20) -> f
     # Count transitions (label changes)
     transitions = np.sum(recent[1:] != recent[:-1])
     return float(transitions) / (len(recent) - 1)
-
-
-# ===== Heartbeat =====
-class Heartbeat:
-    """Prints a line every `interval` seconds until stop() is called."""
-    def __init__(self, label: str, interval: float = 2.0, next_hint: str | None = None, eta_hint: float | None = None, enabled: bool = True):
-        self.label = label
-        self.interval = interval
-        self.next_hint = next_hint
-        self.eta_hint = eta_hint
-        self.enabled = enabled
-        self._stop = threading.Event()
-        self._t0 = time.perf_counter()
-        self._thr = threading.Thread(target=self._run, daemon=True)
-        self._started = False
-
-    def start(self):
-        if not self.enabled:
-            return self
-        print(f"[..] {self.label} ...")
-        self._thr.start()
-        self._started = True
-        return self
-
-    def stop(self):
-        self._stop.set()
-        if self._started and self._thr.is_alive():
-            self._thr.join(timeout=0.1)
-        if self._started:
-            took = time.perf_counter() - self._t0
-            print(f"[OK] {self.label} done in {took:.2f}s")
-
-    def _run(self):
-        spinner = ["-", "\\", "|", "/"]
-        i = 0
-        while not self._stop.wait(self.interval):
-            spent = time.perf_counter() - self._t0
-            eta = ""
-            if self.eta_hint and spent < self.eta_hint * 5:
-                rem = max(0.0, self.eta_hint - spent)
-                eta = f" | ~{rem:0.0f}s left"
-            nxt = f" | next: {self.next_hint}" if self.next_hint else ""
-            print(f"[..] {spinner[i % len(spinner)]} {self.label}{eta}{nxt}")
-            i = (i + 1) % len(spinner)
 
 
 def _get_equipment_id(equipment_name: str) -> int:
@@ -589,6 +603,12 @@ def main() -> None:
     ap.add_argument("--batch-csv", dest="score_csv", help="Alias for --score-csv (batch data)")
     ap.add_argument("--mode", choices=["batch"], default="batch")
     ap.add_argument("--clear-cache", action="store_true", help="Force re-training by deleting the cached model for this equipment.")
+    ap.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Override global log level.")
+    ap.add_argument("--log-format", choices=["text", "json"], help="Override log output format.")
+    ap.add_argument("--log-file", help="Write logs to the specified file.")
+    ap.add_argument("--log-module-level", action="append", default=[], metavar="MODULE=LEVEL",
+                    help="Set per-module log level overrides (repeatable).")
+    ap.add_argument("--disable-sql-logging", action="store_true", help="Disable SQL RunLogs sink even in SQL mode.")
     args = ap.parse_args()
 
     T = Timer(enable=True)
@@ -602,6 +622,10 @@ def main() -> None:
     import copy
     cfg = copy.deepcopy(cfg)
     Console.info("[CFG] Config deep-copied to prevent accidental mutations")
+    
+    logging_cfg = (cfg.get("logging") or {})
+    logging_settings = _configure_logging(logging_cfg, args)
+    enable_sql_logging = logging_settings.get("enable_sql_logging", True)
     
     # Store equipment ID in config for later use
     equip_id = _get_equipment_id(equip)
@@ -621,6 +645,7 @@ def main() -> None:
     Console.info(f"[ACM] Inside Main Now")
     Console.info(f"--- Starting ACM V5 for {equip} ---")
     Console.info(f"[CFG] storage_backend={'sql' if SQL_MODE else 'file'}  |  artifacts={art_root}")
+    sql_log_sink = None
 
     # CRITICAL FIX: ALWAYS enforce artifacts/{EQUIP}/run_{timestamp}/ structure
     # STRICT: Only allow "artifacts" as base - strip everything else
@@ -716,6 +741,15 @@ def main() -> None:
             sql_client = None
             run_id = None
 
+    if sql_client and enable_sql_logging:
+        try:
+            sql_log_sink = SqlLogSink(sql_client, run_id=run_id, equip_id=equip_id or None)
+            Console.add_sink(sql_log_sink)
+            Console.info("[LOG] SQL log sink attached", module="acm_main")
+        except Exception as e:
+            sql_log_sink = None
+            Console.warn(f"[LOG] Failed to attach SQL log sink: {e}")
+
     # Create OutputManager early - needed for data loading and all outputs
     output_manager = OutputManager(
         sql_client=sql_client,
@@ -737,7 +771,12 @@ def main() -> None:
 
     try:
         # ===== 1) Load data (legacy CSV path; historian SQL can be wired later) =====
-        hb = Heartbeat("Loading data (read -> parse ts -> sort -> resample -> interpolate)", next_hint="build features", eta_hint=eta_load, enabled=heartbeat_on).start()
+        hb = _start_heartbeat(
+            heartbeat_on,
+            "Loading data (read -> parse ts -> sort -> resample -> interpolate)",
+            next_hint="build features",
+            eta_hint=eta_load,
+        )
         with T.section("load_data"):
             # Ensure data section exists in config
             if "data" not in cfg:
@@ -1455,7 +1494,12 @@ def main() -> None:
                     pca_detector or not pca_enabled, 
                     mhal_detector or not mhal_enabled, 
                     iforest_detector or not iforest_enabled]):
-            hb = Heartbeat("Fitting heads (AR1, Correlation, Outliers)", next_hint="score heads", eta_hint=eta_fit, enabled=heartbeat_on).start()
+            hb = _start_heartbeat(
+                heartbeat_on,
+                "Fitting heads (AR1, Correlation, Outliers)",
+                next_hint="score heads",
+                eta_hint=eta_fit,
+            )
             
             if ar1_enabled and not ar1_detector:
                 with T.section("fit.ar1"):
@@ -1647,7 +1691,12 @@ def main() -> None:
         # Maintain the same ordering as `score` to prevent misalignment when
         # assigning Series by position. Episode mapping uses a nearest-indexer
         # that safely handles non-monotonic indexes, so no sort here.
-        hb = Heartbeat("Scoring heads (AR1, Correlation, Outliers)", next_hint="calibration", eta_hint=eta_score, enabled=heartbeat_on).start()
+        hb = _start_heartbeat(
+            heartbeat_on,
+            "Scoring heads (AR1, Correlation, Outliers)",
+            next_hint="calibration",
+            eta_hint=eta_score,
+        )
         
         # PERF-03: Only score enabled detectors
         # CRITICAL FIX #6: Replace NaN with 0 after all detector .score() calls to prevent NaN propagation
@@ -3526,6 +3575,13 @@ def main() -> None:
         raise
 
     finally:
+        if sql_log_sink:
+            try:
+                Console.remove_sink(sql_log_sink)
+                sql_log_sink.close()
+            except Exception:
+                pass
+            sql_log_sink = None
         # Always finalize and close SQL in SQL mode
         if SQL_MODE and sql_client and run_id: # type: ignore
             try:

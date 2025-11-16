@@ -35,6 +35,34 @@ Console.info("Data loaded", rows=1000, columns=42)
 Console.error("Query failed", table="ACM_Scores", code=500)
 ```
 
+### CLI Overrides
+
+```bash
+python -m core.acm_main \
+  --equip FD_FAN \
+  --log-level DEBUG \
+  --log-format json \
+  --log-file artifacts/logs/fd_fan.log \
+  --log-module-level core.sql_batch_runner=WARNING
+```
+
+Use these switches to override environment/config values without editing YAML.
+
+### Configuration Block
+
+```yaml
+logging:
+  level: INFO
+  format: text
+  file: artifacts/logs/acm.log
+  module_levels:
+    core.acm_main: INFO
+    scripts.sql_batch_runner: WARNING
+  enable_sql_sink: true
+```
+
+Place this block in SQL/YAML config to set defaults for every run.
+
 ### Progress Indicator
 
 ```python
@@ -52,10 +80,6 @@ hb.stop()
 from utils.timer import Timer
 
 T = Timer()
-
-with T.section("data_loading"):
-    # ... load data ...
-    pass
 
 # Custom log entry
 T.log("batch_processed", count=1000, status="ok")
@@ -259,7 +283,7 @@ with T.section("feature_engineering"):
     # Engineer features
     pass
 
-# Timer automatically prints summary on exit
+# Timer automatically logs a summary via Console on exit
 ```
 
 **Output:**
@@ -302,6 +326,66 @@ When `LOG_FORMAT=json`, Timer outputs structured data:
 {"timer": "data_loading", "duration_s": 5.234, "event": "section_end"}
 {"event": "timer_summary", "total_duration_s": 17.690, "sections": [...]}
 ```
+
+## SQL Run Logs (ACM_RunLogs)
+
+When ACM runs in SQL-only or dual mode it streams every Console entry into
+`dbo.ACM_RunLogs`. Each row captures the timestamp, level, module, message, and
+JSON context so Grafana/monitoring dashboards can ingest logs directly.
+
+| Column | Description |
+| ------ | ----------- |
+| `RunID` | Current ACM run identifier |
+| `EquipID` | Numeric equipment ID |
+| `LoggedAt` | UTC timestamp emitted by the logger |
+| `Level` | Log level (INFO/WARNING/ERROR/…) |
+| `Module` | Originating module (auto-inferred when not provided) |
+| `Message` | Text body (truncated to 4000 chars) |
+| `Context` | JSON payload with any additional fields |
+
+Configure via CLI or config:
+
+```bash
+python -m core.acm_main --equip FD_FAN --disable-sql-logging
+```
+
+```yaml
+logging:
+  enable_sql_sink: false   # Disable streaming if needed
+```
+
+Leave the sink enabled to power Grafana dashboards and automated alerts.
+
+---
+
+## SQL Run Logs (ACM_RunLogs)
+
+When ACM runs in SQL-only or dual mode it streams every Console entry into
+`dbo.ACM_RunLogs`. Each row captures the timestamp, level, module, message, and
+JSON context so Grafana/monitoring dashboards can ingest logs directly.
+
+| Column | Description |
+| ------ | ----------- |
+| `RunID` | Current ACM run identifier |
+| `EquipID` | Numeric equipment ID |
+| `LoggedAt` | UTC timestamp emitted by the logger |
+| `Level` | Log level (INFO/WARNING/ERROR/…) |
+| `Module` | Originating module (auto-inferred when not provided) |
+| `Message` | Text body (truncated to 4000 chars) |
+| `Context` | JSON payload with any additional fields |
+
+Configure via CLI or config:
+
+```bash
+python -m core.acm_main --equip FD_FAN --disable-sql-logging
+```
+
+```yaml
+logging:
+  enable_sql_sink: false   # Disable streaming if needed
+```
+
+Leave the sink enabled to power Grafana dashboards and automated alerts.
 
 ---
 

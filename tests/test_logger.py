@@ -165,6 +165,46 @@ def test_heartbeat_ascii_spinner():
             del os.environ["ACM_HEARTBEAT"]
 
 
+def test_log_sinks():
+    """Test that custom sinks receive structured records."""
+    captured: list[dict] = []
+
+    def sink(record):
+        captured.append(record)
+
+    Console.add_sink(sink)
+    try:
+        Console.info("Sink test", module="tests.test_logger", extra="value")
+    finally:
+        Console.remove_sink(sink)
+
+    assert captured, "Sink should capture at least one record"
+    assert captured[0]["message"] == "Sink test"
+    assert captured[0]["context"]["extra"] == "value"
+    print("✓ Log sinks work")
+
+
+def test_module_level_overrides():
+    """Test module-specific log level overrides."""
+    captured: list[dict] = []
+
+    def sink(record):
+        captured.append(record)
+
+    Console.add_sink(sink)
+    Console.clear_module_levels()
+    try:
+        Console.set_module_level("tests.test_logger", "ERROR")
+        Console.info("Should be filtered", module="tests.test_logger")
+        assert not captured, "INFO log should be filtered by module override"
+        Console.error("Should pass", module="tests.test_logger")
+        assert captured and captured[-1]["level"] == "ERROR"
+    finally:
+        Console.clear_module_levels()
+        Console.remove_sink(sink)
+    print("✓ Module-level overrides work")
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n=== Running Logger Tests ===\n")
@@ -178,6 +218,8 @@ def run_all_tests():
     test_heartbeat_basic()
     test_heartbeat_disabled()
     test_heartbeat_ascii_spinner()
+    test_log_sinks()
+    test_module_level_overrides()
     
     print("\n=== All Logger Tests Passed ===\n")
 

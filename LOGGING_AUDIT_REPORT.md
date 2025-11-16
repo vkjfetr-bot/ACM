@@ -322,31 +322,7 @@ Refactor scripts to use Console logger:
 
 ---
 
-## Appendix A: File-by-File Print Statement Count
-
-```
- 91  scripts/sql_batch_runner.py
- 59  scripts/analyze_charts.py
- 40  scripts/sql/test_sql_mode_loading.py
- 21  scripts/sql/test_config_load.py
- 18  scripts/sql/test_dual_write_config.py
- 14  scripts/chunk_replay.py
-  7  core/acm_main.py
-  7  core/omr.py
-  7  scripts/sql/verify_acm_connection.py
-  5  utils/timer.py
-  5  scripts/sql/insert_wildcard_equipment.py
-  3  core/enhanced_forecasting.py
-  3  core/output_manager.py
-  2  core/correlation.py
-  2  core/forecast.py
-```
-
-**Total: 286 print() statements** (excluding utils/logger.py itself)
-
----
-
-## Appendix B: Environment Variables
+## Appendix A: Environment Variables
 
 ### Current
 - `ACM_TIMINGS=1` - Enable/disable timing output (default: enabled)
@@ -360,7 +336,7 @@ Refactor scripts to use Console logger:
 
 ---
 
-## Appendix C: Code Examples
+## Appendix B: Code Examples
 
 ### Before (Current State)
 ```python

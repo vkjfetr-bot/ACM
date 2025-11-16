@@ -29,7 +29,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
-from utils.logger import Console
+from utils.logger import Console, Heartbeat
 
 # Optional import for reusing AR(1) forecast helper in per-sensor forecasting
 try:  # pragma: no cover - defensive import
@@ -195,20 +195,6 @@ def _to_naive_series(idx_or_series: Union[pd.Index, pd.Series]) -> pd.Series:
         return pd.Series(idx, index=idx)
 
 # ==================== DATA LOADING SUPPORT ====================
-# Import Heartbeat from logger module (moved there for consistency)
-try:
-    from utils.logger import Heartbeat
-except ImportError:
-    # Fallback implementation if import fails
-    class Heartbeat:
-        def __init__(self, label: str, next_hint: Optional[str] = None, eta_hint: Optional[float] = None, interval: float = 2.0):
-            self.label = label
-        def start(self): 
-            print(f"[..] {self.label} ...")
-            return self
-        def stop(self): 
-            print(f"[OK] {self.label} done")
-
 @dataclass
 class DataMeta:
     """Metadata about loaded dataset."""
