@@ -166,7 +166,9 @@ CREATE TABLE dbo.RunStats (
     CadenceOKPct            float NULL,
     DriftP95                float NULL,
     ReconRMSE               float NULL,
-    AnomalyCount            int NULL
+    AnomalyCount            int NULL,
+    EpisodeCoveragePct      float NULL,
+    TimeInAlertPct          float NULL
 );
 END
 GO

@@ -27,7 +27,9 @@
 The sections below list the still-open themes from the merged backlogs. Each bullet either already has an associated issue or needs one created.
 
 ### 1. SQL Integration (Phase 1 and Model Persistence)
-- **SQL-12**  Finish the remaining 6/10 dual-write validation runs and capture the results in SQL tables.
+- **SQL-12**  Complete SQL-only writes for every pending detector/forecast output and log the coverage in the SQL run tables (no CSV baseline required).
+  - _Action:_ Apply the updated DDL in `scripts/sql/10_core_tables.sql`, `scripts/sql/14_complete_schema.sql`, and `scripts/sql/54_create_acm_runs_table.sql` so `ACM_Runs` / `RunStats` include `EpisodeCoveragePct` and `TimeInAlertPct`.
+  - _Manual Verification:_ Execute a SQL-only FD_FAN (or equivalent) run to confirm `ACM_Scores_Wide` populates directly via OutputManager and that the new coverage columns show up in `ACM_Runs` + `RunStats`.
 - **SQL-13**  Build `validate_dual_write.py` to compare CSV vs SQL outputs automatically.
 - **SQL-14**  Row-count/value parity checks between file and SQL storage.
 - **SQL-15**  Baseline SQL write performance (<15 s target, capture stats in Run Logs).
@@ -58,7 +60,7 @@ Use the following mapping when opening/triaging GitHub issues. Strike through en
 
 | Legacy ID | Area | Status | Action |
 | --------- | ---- | ------ | ------ |
-| SQL-12 | SQL Integration | Planned | Create/maintain issue covering the remaining dual-write validation matrix. |
+| SQL-12 | SQL Integration | Planned | Create/maintain issue covering the remaining SQL-only write conversions and coverage logging. |
 | SQL-13 | SQL Integration | Planned | Issue for the CSV vs SQL comparison tool. |
 | SQL-14 | SQL Integration | Planned | Issue for parity validation automation. |
 | SQL-15 | SQL Integration | Planned | Issue for benchmarking SQL write times. |

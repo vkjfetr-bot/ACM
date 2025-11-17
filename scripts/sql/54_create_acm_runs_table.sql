@@ -37,6 +37,8 @@ CREATE TABLE dbo.ACM_Runs (
     MinHealthIndex FLOAT NULL,
     MaxFusedZ FLOAT NULL,
     DataQualityScore FLOAT NULL,
+    EpisodeCoveragePct FLOAT NULL,
+    TimeInAlertPct FLOAT NULL,
     RefitRequested BIT DEFAULT 0,
     ErrorMessage NVARCHAR(1000) NULL,
     KeptColumns NVARCHAR(MAX) NULL, -- Comma-separated list of sensor columns

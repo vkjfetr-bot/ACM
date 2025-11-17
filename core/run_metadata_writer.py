@@ -34,6 +34,8 @@ def write_run_metadata(
     data_quality_score: float,
     refit_requested: bool,
     kept_columns: str,
+    episode_coverage_pct: Optional[float] = None,
+    time_in_alert_pct: Optional[float] = None,
     error_message: Optional[str] = None
 ) -> bool:
     """
@@ -55,6 +57,8 @@ def write_run_metadata(
         min_health_index: Minimum health index (0-100)
         max_fused_z: Maximum fused z-score
         data_quality_score: Data quality metric (0-100)
+        episode_coverage_pct: Percentage of run window covered by episodes (0-100)
+        time_in_alert_pct: Percentage of time fused z-score exceeded alert threshold
         refit_requested: Whether model refit was requested
         kept_columns: Comma-separated list of sensor columns used
         error_message: Error message if run failed (optional)
@@ -83,8 +87,9 @@ def write_run_metadata(
             RunID, EquipID, EquipName, StartedAt, CompletedAt, DurationSeconds,
             ConfigSignature, TrainRowCount, ScoreRowCount, EpisodeCount,
             HealthStatus, AvgHealthIndex, MinHealthIndex, MaxFusedZ,
-            DataQualityScore, RefitRequested, KeptColumns, ErrorMessage, CreatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            DataQualityScore, EpisodeCoveragePct, TimeInAlertPct,
+            RefitRequested, KeptColumns, ErrorMessage, CreatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         
         # Prepare record
@@ -104,6 +109,8 @@ def write_run_metadata(
             float(min_health_index) if min_health_index is not None else None,
             float(max_fused_z) if max_fused_z is not None else None,
             float(data_quality_score) if data_quality_score is not None else None,
+            float(episode_coverage_pct) if episode_coverage_pct is not None else None,
+            float(time_in_alert_pct) if time_in_alert_pct is not None else None,
             refit_requested,
             kept_columns,
             error_message,

@@ -319,6 +319,44 @@ def _maybe_write_run_meta_json(local_vars: Dict[str, Any]) -> None:
     else:
         Console.warn("[META] meta.json writer unavailable; skipping run metadata dump")
 
+
+def _compute_episode_coverage_stats(scores_df: Optional[pd.DataFrame],
+                                    episodes_df: Optional[pd.DataFrame]) -> Tuple[Optional[float], Optional[float]]:
+    """Return (coverage_pct, time_in_alert_pct) derived from scores and episodes frames."""
+    coverage_pct: Optional[float] = None
+    time_in_alert_pct: Optional[float] = None
+
+    try:
+        if isinstance(scores_df, pd.DataFrame) and len(scores_df.index):
+            idx = pd.to_datetime(scores_df.index, errors="coerce")
+            idx = idx.dropna()
+            if len(idx):
+                start_ts = idx.min()
+                end_ts = idx.max()
+                total_secs = max(1.0, (end_ts - start_ts).total_seconds())
+                covered = 0.0
+                if isinstance(episodes_df, pd.DataFrame) and len(episodes_df.index):
+                    for _, row in episodes_df.iterrows():
+                        s = pd.to_datetime(row.get("start_ts"), errors="coerce")
+                        e = pd.to_datetime(row.get("end_ts"), errors="coerce")
+                        if pd.isna(s) or pd.isna(e):
+                            continue
+                        s = max(s, start_ts)
+                        e = min(e, end_ts)
+                        if e > s:
+                            covered += (e - s).total_seconds()
+                coverage_pct = round(float(covered / total_secs * 100.0), 2)
+
+            if "fused" in scores_df.columns:
+                fused = pd.to_numeric(scores_df["fused"], errors="coerce")
+                fused = fused.dropna()
+                if len(fused):
+                    time_in_alert_pct = round(float((fused > 2.0).mean() * 100.0), 2)
+    except Exception as coverage_err:
+        Console.warn(f"[RUN] Failed to compute episode coverage stats: {coverage_err}")
+
+    return coverage_pct, time_in_alert_pct
+
 # ===== DRIFT-01: Multi-Feature Drift Detection Helpers =====
 def _compute_drift_trend(drift_series: np.ndarray, window: int = 20) -> float:
     """
@@ -3171,8 +3209,25 @@ def main() -> None:
             _maybe_write_run_meta_json(locals())
             return
 
+        if SQL_MODE:
+            with T.section("sql.persist_scores_wide"):
+                try:
+                    output_manager.write_scores(frame, run_dir, enable_sql=True)
+                except Exception as se:
+                    Console.warn(f"[SQL] Failed to write ACM_Scores_Wide: {se}")
+            with T.section("sql.cache_episodes"):
+                try:
+                    output_manager.write_episodes(episodes, run_dir, enable_sql=True)
+                except Exception as ee:
+                    Console.warn(f"[SQL] Failed to cache episodes in SQL mode: {ee}")
+
+        episode_coverage_pct, time_in_alert_pct = _compute_episode_coverage_stats(
+            frame,
+            episodes if isinstance(episodes, pd.DataFrame) else None
+        )
+
         # ---------- SQL MODE: WRITE ARTIFACTS ----------
-        
+
         # === COMPREHENSIVE ANALYTICS GENERATION (SQL MODE) ===
         try:
             # Use OutputManager directly for all output operations
@@ -3441,7 +3496,6 @@ def main() -> None:
                     recon_rmse = None
                     sensors_kept = len(getattr(meta, "kept_cols", []))
                     cadence_ok_pct = float(getattr(meta, "cadence_ok", 1.0)) * 100.0 if hasattr(meta, "cadence_ok") else None
-
                     output_manager.write_run_stats({
                         "RunID": run_id,
                         "EquipID": int(equip_id),
@@ -3453,7 +3507,9 @@ def main() -> None:
                         "CadenceOKPct": cadence_ok_pct,
                         "DriftP95": drift_p95,
                         "ReconRMSE": recon_rmse,
-                        "AnomalyCount": anomaly_count
+                        "AnomalyCount": anomaly_count,
+                        "EpisodeCoveragePct": episode_coverage_pct,
+                        "TimeInAlertPct": time_in_alert_pct
                     })
             except Exception as e: # type: ignore
                 Console.warn(f"[RUN] RunStats not recorded: {e}")
@@ -3498,6 +3554,8 @@ def main() -> None:
                         data_quality_score=data_quality_score,
                         refit_requested=refit_flag_path.exists() if 'refit_flag_path' in locals() else False,
                         kept_columns=kept_cols_str,
+                        episode_coverage_pct=episode_coverage_pct,
+                        time_in_alert_pct=time_in_alert_pct,
                         error_message=None
                     )
                     Console.info(f"[RUN_META] Successfully wrote run metadata to ACM_Runs for RunID={run_id}")
@@ -3564,6 +3622,8 @@ def main() -> None:
                     data_quality_score=0.0,
                     refit_requested=False,
                     kept_columns="",
+                    episode_coverage_pct=episode_coverage_pct,
+                    time_in_alert_pct=time_in_alert_pct,
                     error_message=str(e)[:4000]  # Truncate to fit nvarchar field
                 )
                 Console.info(f"[RUN_META] Wrote failed run metadata to ACM_Runs for RunID={run_id}")
