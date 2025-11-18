@@ -764,7 +764,7 @@ class OutputManager:
         )
         return train, score, meta
     
-    def _load_data_from_sql(self, cfg: Dict[str, Any], equipment_name: str, start_utc: Optional[pd.Timestamp], end_utc: Optional[pd.Timestamp]):
+    def _load_data_from_sql(self, cfg: Dict[str, Any], equipment_name: str, start_utc: Optional[pd.Timestamp], end_utc: Optional[pd.Timestamp], is_coldstart: bool = False):
         """
         Load training and scoring data from SQL historian using stored procedure.
         
@@ -773,6 +773,7 @@ class OutputManager:
             equipment_name: Equipment name (e.g., 'FD_FAN', 'GAS_TURBINE')
             start_utc: Start time for query window
             end_utc: End time for query window
+            is_coldstart: If True, split data for coldstart training. If False, use all data for scoring.
         
         Returns:
             Tuple of (train_df, score_df, DataMeta)
@@ -785,6 +786,7 @@ class OutputManager:
             raise ValueError("[DATA] SQL mode requires start_utc and end_utc parameters")
         
         # COLD-02: Configurable cold-start split ratio (default 0.6 = 60% train, 40% score)
+        # Only used during coldstart - regular batch mode uses ALL data for scoring
         cold_start_split_ratio = float(_cfg_get(data_cfg, "cold_start_split_ratio", 0.6))
         if not (0.1 <= cold_start_split_ratio <= 0.9):
             Console.warn(f"[DATA] Invalid cold_start_split_ratio={cold_start_split_ratio}, using default 0.6")
@@ -844,23 +846,40 @@ class OutputManager:
             )
             ts_col = "EntryDateTime"
         
-        # Split into train/score based on ratio
+        # Split into train/score based on mode
         hb = Heartbeat("Splitting train/score data", next_hint="parse timestamps", eta_hint=3).start()
-        split_idx = int(len(df_all) * cold_start_split_ratio)
-        train_raw = df_all.iloc[:split_idx].copy()
-        score_raw = df_all.iloc[split_idx:].copy()
         
-        # Warn if training samples below minimum
-        if len(train_raw) < min_train_samples:
-            Console.warn(f"[DATA] Training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)")
-            Console.warn(f"[DATA] Model quality may be degraded. Consider: wider time window, higher split_ratio (current: {cold_start_split_ratio:.2f})")
+        if is_coldstart:
+            # COLDSTART MODE: Split data for initial model training
+            split_idx = int(len(df_all) * cold_start_split_ratio)
+            train_raw = df_all.iloc[:split_idx].copy()
+            score_raw = df_all.iloc[split_idx:].copy()
+            
+            # Warn if training samples below minimum
+            if len(train_raw) < min_train_samples:
+                Console.warn(f"[DATA] Training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)")
+                Console.warn(f"[DATA] Model quality may be degraded. Consider: wider time window, higher split_ratio (current: {cold_start_split_ratio:.2f})")
+            
+            Console.info(f"[DATA] COLDSTART Split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows")
+        else:
+            # REGULAR BATCH MODE: Use ALL data for scoring, load baseline from cache
+            train_raw = pd.DataFrame()  # Empty train, will be loaded from baseline_buffer
+            score_raw = df_all.copy()
+            Console.info(f"[DATA] BATCH MODE: All {len(score_raw)} rows allocated to scoring (baseline from cache)")
         
-        Console.info(f"[DATA] Split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows")
         hb.stop()
         
         # Parse timestamps / index
         hb = Heartbeat("Parsing timestamps & indexing", next_hint="numeric pruning", eta_hint=4).start()
-        train = _parse_ts_index(train_raw, ts_col)
+        
+        # Handle empty train in batch mode
+        if len(train_raw) == 0 and not is_coldstart:
+            # Create empty DataFrame with DatetimeIndex matching score columns
+            train = pd.DataFrame(columns=train_raw.columns)
+            train.index = pd.DatetimeIndex([], name=ts_col)
+        else:
+            train = _parse_ts_index(train_raw, ts_col)
+        
         score = _parse_ts_index(score_raw, ts_col)
         hb.stop()
         
@@ -877,14 +896,28 @@ class OutputManager:
         
         # Keep numeric only (same set across train/score)
         hb = Heartbeat("Selecting numeric sensor columns", next_hint="cadence check", eta_hint=2).start()
-        train_num = _infer_numeric_cols(train)
-        score_num = _infer_numeric_cols(score)
-        kept = sorted(list(set(train_num).intersection(score_num)))
-        dropped = [c for c in train.columns if c not in kept]
-        train = train[kept]
-        score = score[kept]
-        train = train.astype(np.float32)
-        score = score.astype(np.float32)
+        
+        if len(train) == 0 and not is_coldstart:
+            # BATCH MODE: Train is empty, use all score columns
+            # Train will be loaded from baseline_buffer later in acm_main.py
+            score_num = _infer_numeric_cols(score)
+            kept = sorted(score_num)
+            dropped = [c for c in score.columns if c not in kept]
+            train = pd.DataFrame(columns=kept)  # Empty train with correct columns
+            score = score[kept]
+            score = score.astype(np.float32)
+            Console.info(f"[DATA] BATCH MODE: Train empty (will load from baseline_buffer), using all {len(kept)} score columns")
+        else:
+            # COLDSTART MODE or TRAIN EXISTS: Use intersection of train/score columns
+            train_num = _infer_numeric_cols(train)
+            score_num = _infer_numeric_cols(score)
+            kept = sorted(list(set(train_num).intersection(score_num)))
+            dropped = [c for c in train.columns if c not in kept]
+            train = train[kept]
+            score = score[kept]
+            train = train.astype(np.float32)
+            score = score.astype(np.float32)
+        
         hb.stop()
         
         Console.info(f"[DATA] Kept {len(kept)} numeric columns, dropped {len(dropped)} non-numeric")

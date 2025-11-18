@@ -73,9 +73,27 @@ class Logger:
         return LogFormat.TEXT
     
     def _get_ascii_only_from_env(self) -> bool:
-        """Get ASCII-only mode from LOG_ASCII_ONLY environment variable."""
-        ascii_str = os.getenv("LOG_ASCII_ONLY", "false").lower()
-        return ascii_str in ("true", "1", "yes", "on")
+        """Get ASCII-only mode from LOG_ASCII_ONLY environment variable or auto-detect."""
+        ascii_str = os.getenv("LOG_ASCII_ONLY", "auto").lower()
+        
+        # Explicit setting
+        if ascii_str in ("true", "1", "yes", "on"):
+            return True
+        if ascii_str in ("false", "0", "no", "off"):
+            return False
+        
+        # Auto-detect: Check if stdout can handle Unicode
+        try:
+            encoding = sys.stdout.encoding or 'ascii'
+            # Windows CP1252 and similar can't handle Unicode spinners
+            if 'cp1252' in encoding.lower() or 'ascii' in encoding.lower():
+                return True
+            # Test Unicode support
+            test_char = "⠋"
+            test_char.encode(encoding)
+            return False
+        except (UnicodeEncodeError, AttributeError, LookupError):
+            return True  # Fallback to ASCII on any encoding error
     
     def _setup_file_output(self):
         """Setup file output if LOG_FILE is specified."""
@@ -194,8 +212,13 @@ class Logger:
         # Determine output stream
         stream = sys.stderr if level >= LogLevel.ERROR else sys.stdout
         
-        # Write to console
-        print(formatted, file=stream)
+        # Write to console with Unicode error handling
+        try:
+            print(formatted, file=stream)
+        except UnicodeEncodeError:
+            # Fallback: Replace non-ASCII characters with ASCII equivalents
+            safe_formatted = formatted.encode(stream.encoding or 'ascii', errors='replace').decode(stream.encoding or 'ascii')
+            print(safe_formatted, file=stream)
         
         # Write to file if configured
         if self._file:

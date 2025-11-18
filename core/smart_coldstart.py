@@ -287,8 +287,8 @@ class SmartColdstart:
         
         if not state.needs_coldstart:
             Console.info(f"[COLDSTART] Models exist for {self.equip_name}, coldstart not needed")
-            # Load with original window for incremental scoring
-            return self._load_data_window(output_manager, cfg, initial_start, initial_end, coldstart_complete=True)
+            # Load with original window for incremental scoring (ALL data goes to score)
+            return self._load_data_window(output_manager, cfg, initial_start, initial_end, coldstart_complete=True, is_coldstart=False)
         
         Console.info(f"[COLDSTART] Status: {state}")
         
@@ -314,9 +314,9 @@ class SmartColdstart:
                 window_hours = (attempt_end - attempt_start).total_seconds() / 3600
                 Console.info(f"[COLDSTART] Attempt {attempt}/{max_attempts}: Loading {window_hours:.1f} hours [{attempt_start} to {attempt_end}]")
                 
-                # Try to load data
+                # Try to load data WITH COLDSTART SPLIT
                 train, score, meta = output_manager._load_data_from_sql(
-                    cfg, self.equip_name, attempt_start, attempt_end
+                    cfg, self.equip_name, attempt_start, attempt_end, is_coldstart=True
                 )
                 
                 rows_loaded = len(train) + len(score) if train is not None and score is not None else 0
@@ -379,10 +379,10 @@ class SmartColdstart:
         
         return None, None, None, False
     
-    def _load_data_window(self, output_manager, cfg, start, end, coldstart_complete=False):
+    def _load_data_window(self, output_manager, cfg, start, end, coldstart_complete=False, is_coldstart=False):
         """Helper to load data for a specific window."""
         try:
-            train, score, meta = output_manager._load_data_from_sql(cfg, self.equip_name, start, end)
+            train, score, meta = output_manager._load_data_from_sql(cfg, self.equip_name, start, end, is_coldstart=is_coldstart)
             return train, score, meta, coldstart_complete
         except Exception as e:
             Console.error(f"[COLDSTART] Failed to load data window: {e}")
