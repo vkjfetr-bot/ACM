@@ -101,26 +101,6 @@
 
 ---
 
-## Recommended Next Steps
-
-### Immediate (Critical Tasks)
-1. **FCST-01**: Fix forecast variance calculation (CRITICAL - statistically incorrect)
-2. **FCST-02**: Fix AR(1) warm start bias (causes false alarms)
-3. **FCST-03**: Fix residual std dev calculation (biases uncertainty estimates)
-
-### Short Term (High Priority)
-1. Review and prioritize the 15 high-priority tasks
-2. Address REG-09 through REG-14 (regime clustering improvements)
-3. Implement ARCH-02 and ARCH-03 (pipeline architecture improvements)
-4. Fix QUAL-01 and QUAL-02 (code quality and performance)
-
-### Medium Term
-1. Complete remaining forecast improvements (FCST-07 through FCST-11)
-2. Finish regime enhancements (REG-15, REG-16)
-3. Begin architecture refactoring (ARCH-01, ARCH-04)
-
----
-
 ## Document Structure
 
 The consolidated `Task Backlog.md` now contains:
