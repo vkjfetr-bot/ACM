@@ -18,7 +18,7 @@
 3. **Cross-reference this file** from the issue description so the original context is preserved.
 4. **Close issues** via pull requests. Avoid adding new TODO tables in markdown?use Issues/Projects for status tracking.
 
-> ? The old `Task Backlog.md` file has been removed. If you come across references to it, update them to point here or directly to the GitHub Issues board.
+> The old `Task Backlog.md` file has been removed. If you come across references to it, update them to point here or directly to the GitHub Issues board.
 
 ---
 
@@ -39,11 +39,6 @@ The sections below list the still-open themes from the merged backlogs. Each bul
 - **RUL-01**  Make `rul_estimator.py` consume SQL health timelines instead of CSVs.
 - **RUL-02**  Add probabilistic RUL bands and maintenance telemetry to the SQL outputs.
 - *(FCST-17, RUL-03, SQL-57, etc., were completed or superseded and do not need new issues.)*
-
-### 3. Charting & Documentation
-- **CHART-19**  Build `scripts/validate_charts.py` (chart smoke tests).
-- **CHART-20**  Refresh chart documentation/quick-reference guides.
-- All older chart tasks that were already done (CHART-03/04/13/15/16/17/18, OUT-24, etc.) remain marked completed.
 
 ### 4. Technical Debt & Ops
 - **DEBT-07**  Tighten error handling around detector training and SQL IO.
@@ -79,3 +74,231 @@ All other historical tasks were either completed (already struck through in prev
 - SQL Run Logs, module-level logging overrides, and CLI logging flags now ship, so DEBT-16/17 are closed.
 
 For everything else, the single source of truth is now **GitHub Issues**. This document will be updated only when the set of workstreams changes (e.g., adding a new audit area or closing a pillar entirely).
+
+
+## New Tasks Created after analysis
+
+Pending SQL-Related Tasks
+🔴 HIGH PRIORITY - Empty Table Implementations
+1. ACM_DataQuality ⚠️ CRITICAL
+Purpose: Track data quality metrics per run (nulls, gaps, flatlines, statistics)
+Schema: 24 columns (train/score metrics + sensor + RunID)
+Current Status: Table exists, no write logic implemented
+Implementation Location: output_manager.py after data loading
+Business Value: HIGH - Essential for operations monitoring and data reliability
+Estimated Effort: 2-4 hours
+Blocked By: None
+Note: Previously skipped due to pyodbc NULL float handling - needs resolution
+2. ACM_RecommendedActions ⚠️ CRITICAL
+Purpose: Automated maintenance action suggestions per run
+Schema: 6 columns (Action, Priority, EstimatedDuration_Hours, RunID, EquipID, CreatedAt)
+Current Status: Table exists, no write logic implemented
+Implementation Location: acm_main.py or output_manager.py
+Business Value: HIGH - Operator decision support and action tracking
+Estimated Effort: 3-5 hours (requires recommendation engine logic)
+Blocked By: None
+Note: ACM_MaintenanceRecommendation (42 rows) is simpler version already working
+3. ACM_Scores_Wide 🟡 MEDIUM
+Purpose: Wide-format detector scores (one row per timestamp, all detectors as columns)
+Schema: 15 columns (Timestamp + 10 detector z-scores + fused + regime + RunID + EquipID)
+Current Status: Table exists, no write logic implemented
+Implementation Location: output_manager.py as alternative score output
+Business Value: MEDIUM - Nice-to-have for time-series export/visualization
+Estimated Effort: 2-3 hours (pivot existing score data)
+Blocked By: None
+Note: May be redundant with existing ACM_ContributionTimeline
+
+MEDIUM PRIORITY - Enhanced Feature Tables (Future Enhancements)
+1. ACM_FailureCausation 🔮 PLANNED
+Purpose: Advanced failure mode analysis with detector-level causation
+Current Status: Schema exists (per FORECAST_RUL_AUDIT_SUMMARY.md), no data
+Business Value: MEDIUM - Enhanced diagnostics beyond current hotspot analysis
+Estimated Effort: 8-12 hours (new analytics logic required)
+Blocked By: Requires enhanced forecasting framework expansion
+1. ACM_EnhancedFailureProbability_TS 🔮 PLANNED
+Purpose: Enhanced failure probability time-series with confidence intervals
+Current Status: Schema exists, no data
+Business Value: MEDIUM - Improvement over existing ACM_FailureForecast_TS (1,104 rows working)
+Estimated Effort: 6-10 hours
+Blocked By: Requires enhanced forecasting module (core/enhanced_forecasting.py expansion)
+1. ACM_EnhancedMaintenanceRecommendation 🔮 PLANNED
+Purpose: Enhanced maintenance recommendations with causation links
+Current Status: Schema exists, no data
+Business Value: MEDIUM - Enhancement over existing ACM_MaintenanceRecommendation (42 rows working)
+Estimated Effort: 5-8 hours
+Blocked By: Requires enhanced recommendation engine
+
+SQL INTEGRATION TASKS (Phase 3: Pure SQL Operation)
+SQL-45: Remove CSV Output Writes ⏳ PENDING
+Objective: Eliminate all CSV file writes, keep SQL-only
+Current State: Dual-write active (both CSV and SQL)
+Changes Required:
+Remove write_dataframe() CSV writes from output_manager.py
+Keep SQL table writes only (ALLOWED_TABLES whitelist)
+Remove scores.csv, episodes.csv, metrics.csv exports
+Keep: Charts/PNG generation (visual outputs separate from storage)
+Impact: artifacts directory will only contain charts, no data CSVs
+Estimated Effort: 3-4 hours
+Priority: MEDIUM (system working, cleanup for production)
+SQL-46: Eliminate Model Filesystem Persistence ⏳ PENDING
+Objective: Remove .joblib file writes, use SQL ModelRegistry only
+Current State: Models saved as .joblib files in artifacts/{equip}/models/
+Changes Required:
+Remove filesystem save/load from model_persistence.py
+Keep SQL ModelRegistry writes only
+Remove stable_models_dir fallback logic
+Remove .joblib file writes
+Impact: No model files in filesystem, all models in SQL
+Estimated Effort: 4-6 hours
+Priority: MEDIUM (covered by SQL-20/21/22/23 below)
+Related: SQL-20/21/22/23 (ModelRegistry save/load)
+SQL-50: End-to-End Pure SQL Validation ⏳ PENDING
+Objective: Validate complete SQL-only operation for 30+ days
+Validation Steps:
+Run full pipeline with storage_backend='sql'
+Verify: No files created in artifacts (except charts)
+Verify: All results in SQL tables only
+Confirm: Pipeline runs successfully start-to-finish
+Performance: SQL write time <15s per run
+Stability: 30+ days unattended operation
+Estimated Effort: Ongoing validation (2-4 weeks monitoring)
+Priority: MEDIUM (system working, formal validation needed)
+
+VALIDATION & TESTING TASKS
+SQL-12: Complete Dual-Write Validation Matrix ⏳ 6/10 REMAINING
+Objective: Validate CSV vs SQL output parity across all tables
+Current State: 4/10 validation runs completed
+Remaining: 6 more validation runs with different equipment/time windows
+Estimated Effort: 3-4 hours (1 hour per equipment run + analysis)
+Priority: HIGH (quality assurance)
+SQL-13: Build validate_dual_write.py Comparison Tool 🆕 PLANNED
+Objective: Automated CSV vs SQL comparison for all 40+ tables
+Current State: No tool exists
+Implementation:
+Compare row counts between CSV and SQL
+Compare column values (floating point tolerance)
+Report discrepancies automatically
+Estimated Effort: 4-6 hours
+Priority: HIGH (prevents manual validation burden)
+SQL-14: Row-Count/Value Parity Checks 🆕 PLANNED
+Objective: Automated parity validation as part of CI/test suite
+Current State: Manual validation only
+Implementation: pytest fixtures that compare outputs
+Estimated Effort: 3-5 hours
+Priority: MEDIUM
+SQL-15: Baseline SQL Write Performance 🆕 PLANNED
+Objective: Benchmark SQL write times (<15s target per run)
+Current State: No formal benchmarks captured
+Implementation: Add timing instrumentation to OutputManager
+Estimated Effort: 2-3 hours
+Priority: MEDIUM
+
+MODEL PERSISTENCE TO SQL
+SQL-20: Save Detectors to ModelRegistry 🆕 PLANNED
+Objective: Serialize detector models to SQL ModelRegistry table
+Current State: ModelRegistry table exists, no save logic
+Implementation: model_persistence.py serialize to binary + metadata
+Estimated Effort: 5-7 hours
+Priority: MEDIUM
+Blocked By: None
+SQL-21: Load Detectors from ModelRegistry 🆕 PLANNED
+Objective: Deserialize detector models from SQL
+Current State: No load logic implemented
+Implementation: model_persistence.py fetch + deserialize
+Estimated Effort: 4-6 hours
+Priority: MEDIUM
+Depends On: SQL-20
+SQL-22: Wire ModelRegistry into Training Pipeline 🆕 PLANNED
+Objective: Replace .joblib file save/load with SQL calls
+Current State: Pipeline uses filesystem
+Implementation: Update acm_main.py training/loading logic
+Estimated Effort: 3-5 hours
+Priority: MEDIUM
+Depends On: SQL-20, SQL-21
+SQL-23: Test ModelRegistry End-to-End 🆕 PLANNED
+Objective: Validate model persistence across runs
+Implementation: pytest fixtures validating save → load → predict cycle
+Estimated Effort: 3-4 hours
+Priority: MEDIUM
+Depends On: SQL-22
+
+FORECAST & RUL ENHANCEMENTS
+FCST-15: Remove scores.csv Dependency ⏳ PENDING
+Objective: Forecasting works in SQL-only runs (no CSV dependency)
+Current State: forecast.py may still read scores.csv
+Implementation: Ensure forecast reads from SQL tables only
+Estimated Effort: 2-3 hours
+Priority: HIGH (blocks SQL-only operation)
+FCST-16: Per-Sensor/Regime Forecasts to ACM_SensorForecast_TS 🆕 PLANNED
+Objective: Publish sensor-level forecasts with regime breakdown
+Current State: Only equipment-level forecasts published
+Implementation: Expand forecast logic, write to ACM_SensorForecast_TS
+Estimated Effort: 6-8 hours
+Priority: MEDIUM
+RUL-01: SQL-Based RUL Estimation ⏳ PENDING
+Objective: rul_estimator.py consumes SQL health timelines instead of CSVs
+Current State: May still read from CSV files
+Implementation: Update RUL data loading to query ACM_HealthTimeline
+Estimated Effort: 3-4 hours
+Priority: HIGH (blocks SQL-only operation)
+RUL-02: Probabilistic RUL Bands ⏳ PENDING
+Objective: Add P10/P50/P90 RUL confidence intervals
+Current State: Single-point RUL estimates only
+Implementation: Add probabilistic modeling to rul_estimator.py
+Estimated Effort: 8-12 hours
+Priority: MEDIUM
+
+TECHNICAL DEBT
+DEBT-07: Tighten Error Handling ⏳ PENDING
+Objective: Robust error handling around detector training and SQL IO
+Current State: Some unhandled exceptions possible
+Implementation: Add try-except blocks with proper logging
+Estimated Effort: 4-6 hours
+Priority: MEDIUM
+DEBT-14/15: Test Hooks & Path Handling ⏳ PENDING
+Objective: Improve test fixtures and error stack truncation
+Current State: Some test paths hard-coded
+Implementation: Refactor acm_main.py test support
+Estimated Effort: 3-5 hours
+Priority: LOW
+
+SUMMARY BY PRIORITY
+
+CRITICAL (Implement Now)
+ACM_DataQuality writes (2-4 hrs) - Operations monitoring
+ACM_RecommendedActions writes (3-5 hrs) - Operator decision support
+
+HIGH PRIORITY (Next Sprint)
+SQL-12: Complete dual-write validation (3-4 hrs)
+SQL-13: Build validate_dual_write.py tool (4-6 hrs)
+FCST-15: Remove scores.csv dependency (2-3 hrs)
+RUL-01: SQL-based RUL estimation (3-4 hrs)
+
+MEDIUM PRIORITY (Following Sprint)
+ACM_Scores_Wide writes (2-3 hrs) - Nice-to-have pivot table
+SQL-14/15: Parity checks + performance benchmarking (5-8 hrs)
+SQL-20/21/22/23: ModelRegistry implementation (15-22 hrs total)
+SQL-45/46/50: Pure SQL operation cleanup (7-14 hrs)
+FCST-16, RUL-02: Enhanced forecasting/RUL (14-20 hrs)
+DEBT-07: Error handling improvements (4-6 hrs)
+🔮 FUTURE ENHANCEMENTS (Backlog)
+ACM_FailureCausation (8-12 hrs)
+ACM_EnhancedFailureProbability_TS (6-10 hrs)
+ACM_EnhancedMaintenanceRecommendation (5-8 hrs)
+DEBT-14/15: Test infrastructure (3-5 hrs)
+
+📊 EFFORT ESTIMATE TOTALS
+Critical: 5-9 hours
+High Priority: 12-17 hours
+Medium Priority: 43-73 hours
+Future Enhancements: 22-35 hours
+Total Pending SQL Work: ~82-134 hours (10-17 developer days)
+
+RECENTLY COMPLETED (For Context)
+Fixed batch data truncation (60% data loss eliminated)
+Fixed Unicode encoding errors in Heartbeat spinner
+Comprehensive 46-table analysis (92/100 data quality score)
+SQL logging infrastructure (SQL-57 complete)
+All 40 core analytics tables actively populating
+Forecasting & RUL tables working (1,104+ rows each)
+Health timeline, sensor hotspots, regime detection all operational

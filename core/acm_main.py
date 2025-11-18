@@ -2764,18 +2764,16 @@ def main() -> None:
         # FILE_MODE: Now explicitly enabled via config flag (default is SQL-only)
         file_mode_enabled = cfg.get("output", {}).get("enable_file_mode", False)
         
-        if not SQL_MODE and file_mode_enabled:
-            # ---------- FILE MODE (or DUAL MODE) ----------
+        if SQL_MODE or file_mode_enabled:
+            # ---------- FILE/SQL persistence for scores ----------
             with T.section("persist"):
-                out_log = run_dir / "run.jsonl"
+                if not SQL_MODE:
+                    out_log = run_dir / "run.jsonl"
                 
-                # Use unified OutputManager for all file operations
-                # Note: output_manager is already created at the start of main()
-                
+                # Use unified OutputManager for persistence
                 with T.section("persist.write_scores"):
                     try:
-                        # Write scores using OutputManager
-                        output_manager.write_scores(frame, run_dir, enable_sql=dual_mode)
+                        output_manager.write_scores(frame, run_dir, enable_sql=(SQL_MODE or dual_mode))
                         
                         # Generate schema.json descriptor for scores.csv
                         try:

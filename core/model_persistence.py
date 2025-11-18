@@ -258,8 +258,16 @@ class ModelVersionManager:
         return version
     
     def _save_models_to_sql(self, models: Dict[str, Any], metadata: Dict[str, Any], version: int):
-        """Save models to SQL ModelRegistry table."""
-        Console.info(f"[MODEL-SQL] Saving models to SQL ModelRegistry...")
+        """
+        Save models to SQL ModelRegistry table with atomic transaction handling.
+        
+        SQL-20 Implementation:
+        - Serializes all model types to binary using joblib
+        - Stores comprehensive metadata as JSON
+        - Uses atomic transactions (rollback on any failure)
+        - Handles special model types (ar1_params, mhal_params, omr_model)
+        """
+        Console.info(f"[MODEL-SQL] Saving models to SQL ModelRegistry v{version}...")
         
         if not self.sql_client.conn:
             Console.warn("[MODEL-SQL] SQL connection not available")
@@ -267,56 +275,101 @@ class ModelVersionManager:
         
         cursor = self.sql_client.conn.cursor()
         saved_count = 0
+        errors = []
         
-        for model_name, model_obj in models.items():
-            if model_obj is None:
-                continue
+        try:
+            # Begin transaction - will rollback if any model fails
+            # (SQL Server auto-starts transaction on first command)
             
+            # Delete existing models for this version if they exist (replace strategy)
+            delete_sql = "DELETE FROM ModelRegistry WHERE EquipID = ? AND Version = ?"
+            cursor.execute(delete_sql, (self.equip_id, version))
+            deleted_count = cursor.rowcount
+            if deleted_count > 0:
+                Console.info(f"[MODEL-SQL] Replaced {deleted_count} existing models for v{version}")
+            
+            for model_name, model_obj in models.items():
+                if model_obj is None:
+                    Console.debug(f"[MODEL-SQL]   - Skipping None model: {model_name}")
+                    continue
+                
+                try:
+                    # Serialize model to bytes using joblib
+                    buffer = BytesIO()
+                    joblib.dump(model_obj, buffer)
+                    model_bytes = buffer.getvalue()
+                    
+                    # Extract model-specific metadata
+                    model_meta = metadata.get("models", {}).get(model_name.replace("_params", "").replace("_model", ""), {})
+                    params_json = json.dumps(model_meta) if model_meta else None
+                    
+                    # Get overall stats (include full metadata for reconstruction)
+                    stats_meta = {
+                        "train_rows": metadata.get("train_rows"),
+                        "train_sensors": metadata.get("train_sensors"),
+                        "config_signature": metadata.get("config_signature"),
+                        "created_at": metadata.get("created_at"),
+                        "training_duration_s": metadata.get("training_duration_s"),
+                        "data_stats": metadata.get("data_stats"),
+                        "feature_stats": metadata.get("feature_stats")
+                    }
+                    stats_json = json.dumps(stats_meta)
+                    
+                    # Insert into ModelRegistry
+                    insert_sql = """
+                    INSERT INTO ModelRegistry 
+                    (ModelType, EquipID, Version, EntryDateTime, ParamsJSON, StatsJSON, ModelBytes, RunID)
+                    VALUES (?, ?, ?, SYSUTCDATETIME(), ?, ?, ?, NULL)
+                    """
+                    
+                    cursor.execute(insert_sql, (
+                        model_name,
+                        self.equip_id,
+                        version,
+                        params_json,
+                        stats_json,
+                        model_bytes
+                    ))
+                    
+                    saved_count += 1
+                    Console.info(f"[MODEL-SQL]   - Saved {model_name} ({len(model_bytes):,} bytes)")
+                    
+                except Exception as e:
+                    error_msg = f"Failed to save {model_name}: {e}"
+                    errors.append(error_msg)
+                    Console.warn(f"[MODEL-SQL]   - {error_msg}")
+                    # Don't break - try to save other models, but will rollback all if any fail
+            
+            # Commit transaction if all successful
+            if errors:
+                Console.warn(f"[MODEL-SQL] Rolling back transaction due to {len(errors)} error(s)")
+                self.sql_client.conn.rollback()
+                Console.warn(f"[MODEL-SQL] Transaction rolled back - no models saved")
+            else:
+                self.sql_client.conn.commit()
+                Console.info(f"[MODEL-SQL] ✓ Committed {saved_count}/{len(models)} models to SQL ModelRegistry v{version}")
+                
+        except Exception as e:
+            Console.warn(f"[MODEL-SQL] Critical error during save, rolling back: {e}")
             try:
-                # Serialize model to bytes using joblib
-                buffer = BytesIO()
-                joblib.dump(model_obj, buffer)
-                model_bytes = buffer.getvalue()
-                
-                # Extract model-specific metadata
-                model_meta = metadata.get("models", {}).get(model_name, {})
-                params_json = json.dumps(model_meta) if model_meta else None
-                
-                # Get overall stats
-                stats_meta = {
-                    "train_rows": metadata.get("train_rows"),
-                    "config_signature": metadata.get("config_signature"),
-                    "created_at": metadata.get("created_at")
-                }
-                stats_json = json.dumps(stats_meta)
-                
-                # Insert into ModelRegistry
-                sql = """
-                INSERT INTO ModelRegistry 
-                (ModelType, EquipID, Version, EntryDateTime, ParamsJSON, StatsJSON, ModelBytes, RunID)
-                VALUES (?, ?, ?, SYSUTCDATETIME(), ?, ?, ?, NULL)
-                """
-                
-                cursor.execute(sql, (
-                    model_name,
-                    self.equip_id,
-                    version,
-                    params_json,
-                    stats_json,
-                    model_bytes
-                ))
-                
-                saved_count += 1
-                Console.info(f"[MODEL-SQL]   - Saved {model_name} ({len(model_bytes):,} bytes)")
-                
-            except Exception as e:
-                Console.warn(f"[MODEL-SQL]   - Failed to save {model_name} to SQL: {e}")
-        
-        self.sql_client.conn.commit()
-        Console.info(f"[MODEL-SQL] Saved {saved_count} models to SQL ModelRegistry v{version}")
+                self.sql_client.conn.rollback()
+            except Exception:
+                pass
+            raise
     
-    def _load_models_from_sql(self, version: int) -> Optional[Dict[str, Any]]:
-        """Load models from SQL ModelRegistry table."""
+    def _load_models_from_sql(self, version: int) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """
+        Load models from SQL ModelRegistry table with metadata reconstruction.
+        
+        SQL-21 Implementation:
+        - Retrieves all model types for equipment + version
+        - Deserializes binary model data using joblib
+        - Reconstructs manifest from StatsJSON and ParamsJSON
+        - Returns (models_dict, manifest_dict) tuple
+        
+        Returns:
+            Tuple of (models_dict, manifest_dict) or None if not found
+        """
         Console.info(f"[MODEL-SQL] Loading models from SQL ModelRegistry v{version}...")
         
         if not self.sql_client or not self.sql_client.conn:
@@ -326,8 +379,9 @@ class ModelVersionManager:
         try:
             cursor = self.sql_client.conn.cursor()
             
+            # Query to get all models and their metadata
             sql = """
-            SELECT ModelType, ModelBytes 
+            SELECT ModelType, ModelBytes, ParamsJSON, StatsJSON, EntryDateTime
             FROM ModelRegistry 
             WHERE EquipID = ? AND Version = ?
             ORDER BY ModelType
@@ -341,25 +395,73 @@ class ModelVersionManager:
                 return None
             
             models = {}
+            all_params = {}
+            all_stats = {}
+            entry_datetime = None
+            
             for row in rows:
                 model_type = row[0]
                 model_bytes = row[1]
+                params_json = row[2]
+                stats_json = row[3]
+                entry_dt = row[4]
                 
+                if entry_datetime is None and entry_dt:
+                    entry_datetime = entry_dt
+                
+                # Deserialize model bytes
                 if model_bytes:
                     try:
-                        # Deserialize from bytes
                         buffer = BytesIO(model_bytes)
                         model_obj = joblib.load(buffer)
                         models[model_type] = model_obj
                         Console.info(f"[MODEL-SQL]   - Loaded {model_type} ({len(model_bytes):,} bytes)")
                     except Exception as e:
                         Console.warn(f"[MODEL-SQL]   - Failed to deserialize {model_type}: {e}")
+                        continue
+                
+                # Collect metadata
+                if params_json:
+                    try:
+                        params = json.loads(params_json)
+                        # Store with normalized key (remove _params/_model suffix)
+                        key = model_type.replace("_params", "").replace("_model", "")
+                        all_params[key] = params
+                    except Exception as e:
+                        Console.warn(f"[MODEL-SQL]   - Failed to parse ParamsJSON for {model_type}: {e}")
+                
+                if stats_json:
+                    try:
+                        stats = json.loads(stats_json)
+                        all_stats.update(stats)  # Merge stats from all models
+                    except Exception as e:
+                        Console.warn(f"[MODEL-SQL]   - Failed to parse StatsJSON for {model_type}: {e}")
             
-            Console.info(f"[MODEL-SQL] Loaded {len(models)} models from SQL")
-            return models if models else None
+            if not models:
+                Console.warn(f"[MODEL-SQL] No models successfully deserialized")
+                return None
+            
+            # Reconstruct manifest from SQL metadata
+            manifest = {
+                "version": version,
+                "source": "sql",
+                "equip": self.equip,
+                "saved_models": list(models.keys()),
+                "loaded_from_sql": True,
+                "models": all_params,
+                **all_stats  # Include train_rows, config_signature, created_at, etc.
+            }
+            
+            if entry_datetime:
+                manifest["entry_datetime"] = str(entry_datetime)
+            
+            Console.info(f"[MODEL-SQL] ✓ Loaded {len(models)}/{len(rows)} models from SQL ModelRegistry v{version}")
+            return models, manifest
             
         except Exception as e:
             Console.warn(f"[MODEL-SQL] Failed to load models from SQL: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def load_models(
@@ -387,12 +489,11 @@ class ModelVersionManager:
         # SQL-46: In SQL-only mode, only try SQL (no filesystem fallback)
         if self.sql_only_mode:
             if self.sql_client and self.equip_id is not None:
-                sql_models = self._load_models_from_sql(version)
-                if sql_models:
-                    Console.info(f"[MODEL] Loaded from SQL successfully (SQL-only mode)")
-                    # Create minimal manifest from SQL metadata
-                    manifest = {"version": version, "source": "sql", "equip": self.equip}
-                    return sql_models, manifest
+                result = self._load_models_from_sql(version)
+                if result:
+                    sql_models, sql_manifest = result
+                    Console.info(f"[MODEL] ✓ Loaded from SQL successfully (SQL-only mode)")
+                    return sql_models, sql_manifest
                 else:
                     Console.warn(f"[MODEL] SQL-only mode: Failed to load from SQL, no fallback available")
                     return None, None
@@ -402,21 +503,23 @@ class ModelVersionManager:
         
         # Try SQL first if available and preferred (dual-write mode)
         if prefer_sql and self.sql_client and self.equip_id is not None:
-            sql_models = self._load_models_from_sql(version)
-            if sql_models:
-                # Load manifest from filesystem for metadata
+            result = self._load_models_from_sql(version)
+            if result:
+                sql_models, sql_manifest = result
+                Console.info(f"[MODEL] ✓ Loaded from SQL successfully (dual-write mode)")
+                # Optionally enrich with filesystem manifest if available
                 version_dir = self.get_version_path(version)
                 manifest_path = version_dir / "manifest.json"
-                manifest = None
                 if manifest_path.exists():
                     try:
                         with open(manifest_path, "r") as f:
-                            manifest = json.load(f)
+                            fs_manifest = json.load(f)
+                            # Merge filesystem manifest (prioritize SQL metadata)
+                            sql_manifest = {**fs_manifest, **sql_manifest, "source": "sql+filesystem"}
                     except Exception as e:
-                        Console.warn(f"[MODEL] Failed to load manifest: {e}")
+                        Console.warn(f"[MODEL] Failed to load filesystem manifest for enrichment: {e}")
                 
-                Console.info(f"[MODEL] Loaded from SQL successfully")
-                return sql_models, manifest
+                return sql_models, sql_manifest
             else:
                 Console.info(f"[MODEL] SQL load failed, falling back to filesystem")
         

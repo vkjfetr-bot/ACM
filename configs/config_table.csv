@@ -198,7 +198,7 @@ EquipID,Category,ParamPath,ParamValue,ValueType,LastUpdated,UpdatedBy,ChangeReas
 0,forecasting,enhanced_enabled,True,bool,2025-11-15 00:00:00,SYSTEM,Enable enhanced forecasting module,
 0,forecasting,failure_threshold,70.0,float,2025-11-15 00:00:00,SYSTEM,Health threshold for failure prediction,
 0,forecasting,forecast_horizons,"[24, 72, 168]",list,2025-11-15 00:00:00,SYSTEM,Forecast horizons in hours,
-0,forecasting,models,"[ar1, exponential, polynomial, ensemble]",list,2025-11-15 00:00:00,SYSTEM,Models to use for forecasting,
+0,forecasting,models,"[""ar1"", ""exponential"", ""polynomial"", ""ensemble""]",list,2025-11-15 00:00:00,SYSTEM,Models to use for forecasting,
 0,forecasting,confidence_min,0.6,float,2025-11-15 00:00:00,SYSTEM,Minimum confidence threshold,
 0,forecasting,max_forecast_hours,168.0,float,2025-11-15 00:00:00,SYSTEM,Maximum forecast horizon,
 0,maintenance,urgency_threshold,50.0,float,2025-11-15 00:00:00,SYSTEM,Urgency score threshold for required maintenance,
