@@ -1,7 +1,22 @@
 # ACM V8 Unified Backlog & Issue Tracker
 
-**Last Updated:** 2025-11-16  
+**Last Updated:** 2025-11-19  
 **Scope:** SQL Mode rollout, Forecast/RUL roadmap, charting/documentation polish, and technical debt items carried over from the prior To-Do documents.
+
+---
+
+## Recent Completions (2025-11-19)
+
+### ✅ CONSOLIDATED: Forecasting Module Consolidation (Commits: a7edfff, b1aacb1)
+- **Problem**: Three separate forecasting modules (forecast.py, enhanced_forecasting.py, enhanced_forecasting_sql.py) caused confusion
+- **Solution**: Unified into single `core/forecasting.py` module
+- **Changes**:
+  - Added AR1Detector class to forecasting.py
+  - Updated all imports in acm_main.py to use `from core import forecasting`
+  - Renamed old modules to `*_deprecated.py` for reference
+  - Created FORECASTING_CONSOLIDATION.md with migration guide
+- **Benefits**: Single import, clear entrypoint, reduced complexity (2410 lines → 528 lines active)
+- **Status**: ✅ COMPLETE - SQL-mode tested and working
 
 ---
 
