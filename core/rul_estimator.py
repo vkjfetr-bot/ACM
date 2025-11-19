@@ -152,6 +152,10 @@ def _simple_ar1_forecast(
         den = float(np.dot(xc[:-1], xc[:-1]))
         if abs(den) >= 1e-9:
             phi = num / den
+    # Stabilize AR(1) to avoid near-unit-root explosions
+    if not np.isfinite(phi):
+        phi = 0.0
+    phi = float(np.clip(phi, -0.99, 0.99))
 
     # TRAIN residual std
     x_shift = np.empty_like(x, dtype=np.float64)
@@ -161,6 +165,8 @@ def _simple_ar1_forecast(
     resid = x - pred_train
     resid_for_sd = resid[1:] if resid.size > 1 else resid
     sd_train = float(np.std(resid_for_sd)) or 1.0
+    if not np.isfinite(sd_train) or sd_train <= 0:
+        sd_train = 1.0
 
     # infer cadence
     idx = y.index
@@ -312,7 +318,7 @@ def estimate_rul_and_failure(
         return {}
 
     # Prepare health time series
-    hi = health_df["HealthIndex"].astype(float)
+    hi = health_df["HealthIndex"].astype(float).clip(lower=0.0, upper=100.0)
     hi.index = pd.to_datetime(health_df["Timestamp"], utc=True)
     hi = hi.sort_index()
     if hi.size < cfg.min_points:
@@ -339,17 +345,25 @@ def estimate_rul_and_failure(
             hist_std = 1.0
         forecast_std = np.full_like(h_hours, hist_std, dtype=float)
         forecast = pd.Series(forecast_values, index=idx_fore, name="ForecastHealth")
+    # Ensure strictly positive, finite std
+    forecast_std = np.asarray(forecast_std, dtype=float)
+    forecast_std = np.where(np.isfinite(forecast_std), forecast_std, 1.0)
+    forecast_std = np.clip(forecast_std, 1e-6, None)
 
     ci_k = 1.96
     ci_lower = forecast - ci_k * forecast_std
     ci_upper = forecast + ci_k * forecast_std
 
     # Failure probability by horizon (prob HealthIndex <= threshold)
-    z = (health_threshold - forecast.values) / (forecast_std + 1e-9)
+    thr = float(np.clip(health_threshold, 0.0, 100.0))
+    z = (thr - forecast.values) / (forecast_std + 1e-9)
     failure_prob = np.clip(_norm_cdf(z), 0.0, 1.0)
+    # Enforce non-decreasing failure probability across horizon for interpretability
+    if failure_prob.size:
+        failure_prob = np.maximum.accumulate(failure_prob)
 
     # Determine RUL: earliest horizon where central forecast crosses threshold
-    below = forecast.values <= health_threshold
+    below = forecast.values <= thr
     if below.any():
         first_idx = int(np.argmax(below))
         rul_hours = float(h_hours[first_idx])
@@ -360,13 +374,15 @@ def estimate_rul_and_failure(
         failure_time = forecast.index[-1]
 
     # Bounds: use CI crossing points
-    lower_cross = ci_lower.values <= health_threshold
-    upper_cross = ci_upper.values <= health_threshold
+    lower_cross = ci_lower.values <= thr
+    upper_cross = ci_upper.values <= thr
     lower_bound_hours = float(h_hours[np.argmax(lower_cross)]) if lower_cross.any() else float(h_hours[-1])
     upper_bound_hours = float(h_hours[np.argmax(upper_cross)]) if upper_cross.any() else float(h_hours[-1])
+    if lower_bound_hours > upper_bound_hours:
+        lower_bound_hours, upper_bound_hours = upper_bound_hours, lower_bound_hours
 
     # Confidence: narrower CI => higher confidence
-    ci_width_norm = (ci_upper.values - ci_lower.values) / (health_threshold + 1e-9)
+    ci_width_norm = (ci_upper.values - ci_lower.values) / (thr + 1e-9)
     conf = float(np.clip(1.0 - np.nanmean(ci_width_norm), 0.0, 1.0))
 
     # Build DataFrames for SQL
@@ -403,7 +419,7 @@ def estimate_rul_and_failure(
         {
             "Timestamp": forecast.index,
             "FailureProb": failure_prob,
-            "ThresholdUsed": health_threshold,
+            "ThresholdUsed": thr,
             "Method": "AR1_Health",
         }
     )

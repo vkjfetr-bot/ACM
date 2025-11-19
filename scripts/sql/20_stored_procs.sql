@@ -48,13 +48,45 @@ CREATE PROCEDURE dbo.usp_ACM_StartRun
     @Stage       nvarchar(32) = N'started',
     @Version     nvarchar(32) = NULL,
     @TriggerReason nvarchar(64) = NULL,
-    @RunID       uniqueidentifier OUTPUT
+    @TickMinutes int = 30,
+    @DefaultStartUtc datetime2(3) = NULL,
+    @RunID       uniqueidentifier OUTPUT,
+    @EquipIDOut  int OUTPUT
 AS
 BEGIN
     SET NOCOUNT ON;
     IF @RunID IS NULL SET @RunID = NEWID();
     DECLARE @now datetime2(3) = SYSUTCDATETIME();
+    
+    -- Set EquipIDOut for the caller
+    SET @EquipIDOut = @EquipID;
 
+    -- 1. Determine Window Start
+    -- If not provided, look for the last successful run's end time
+    IF @WindowStartEntryDateTime IS NULL
+    BEGIN
+        SELECT TOP 1 @WindowStartEntryDateTime = WindowEndEntryDateTime
+        FROM dbo.RunLog
+        WHERE EquipID = @EquipID 
+          AND Outcome = 'OK' 
+          AND WindowEndEntryDateTime IS NOT NULL
+        ORDER BY WindowEndEntryDateTime DESC;
+        
+        -- If no previous run, use DefaultStartUtc or fallback to a fixed start (e.g. 2023-10-15 for this dataset)
+        IF @WindowStartEntryDateTime IS NULL
+        BEGIN
+            SET @WindowStartEntryDateTime = COALESCE(@DefaultStartUtc, '2023-10-15T00:00:00.000');
+        END
+    END
+
+    -- 2. Determine Window End
+    -- If not provided, add TickMinutes to Start
+    IF @WindowEndEntryDateTime IS NULL
+    BEGIN
+        SET @WindowEndEntryDateTime = DATEADD(minute, @TickMinutes, @WindowStartEntryDateTime);
+    END
+
+    -- 3. Log the run
     INSERT INTO dbo.RunLog(
         RunID, EquipID, Stage, StartEntryDateTime, EndEntryDateTime,
         Outcome, RowsRead, RowsWritten, ErrorJSON, TriggerReason, Version, ConfigHash,
@@ -67,11 +99,14 @@ BEGIN
     );
 
     -- Delete prior partial artifacts for same RunID if any (idempotent re-run)
-    DELETE FROM dbo.ScoresTS WHERE RunID = @RunID;
-    DELETE FROM dbo.DriftTS WHERE RunID = @RunID;
-    DELETE FROM dbo.AnomalyEvents WHERE RunID = @RunID;
-    DELETE FROM dbo.RegimeEpisodes WHERE RunID = @RunID;
-    DELETE FROM dbo.PCA_Metrics WHERE RunID = @RunID;
+    DELETE FROM dbo.ACM_Scores_Long WHERE RunID = @RunID;
+    DELETE FROM dbo.ACM_Drift_TS WHERE RunID = @RunID;
+    DELETE FROM dbo.ACM_Anomaly_Events WHERE RunID = @RunID;
+    DELETE FROM dbo.ACM_Regime_Episodes WHERE RunID = @RunID;
+    DELETE FROM dbo.ACM_PCA_Metrics WHERE RunID = @RunID;
+    -- Also clear new tables
+    DELETE FROM dbo.ACM_HealthTimeline WHERE RunID = @RunID;
+    DELETE FROM dbo.ACM_DefectTimeline WHERE RunID = @RunID;
 END
 GO
 

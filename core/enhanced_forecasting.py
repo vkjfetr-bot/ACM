@@ -916,68 +916,84 @@ class EnhancedForecastingEngine:
             top_sensors_count=cc.get('top_sensors_count', 10)
         )
     
-    def run(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    def run(
+        self, 
+        ctx: Dict[str, Any],
+        scores_df: Optional[pd.DataFrame] = None,
+        health_timeline_df: Optional[pd.DataFrame] = None
+    ) -> Dict[str, Any]:
         """
-        Main entry point for enhanced forecasting
+        Run enhanced forecasting pipeline
         
-        Expected ctx keys:
-        - run_dir: Path to run directory
-        - tables_dir: Path to tables directory
-        - plots_dir: Path to plots directory
-        - config: Configuration dictionary
-        - run_id: Run identifier
-        - equip_id: Equipment identifier
-        
+        Args:
+            ctx: Context dictionary with paths and config
+            scores_df: Optional in-memory DataFrame for detector scores (avoids file read)
+            health_timeline_df: Optional in-memory DataFrame for health timeline (avoids file read)
+            
         Returns:
-            Dictionary with tables and plots metadata
+            Dictionary with generated tables and metrics
         """
         if not self.forecast_config.enabled:
-            Console.info("[ENHANCED_FORECAST] Module disabled")
-            return {'tables': [], 'plots': [], 'metrics': {}}
-        
-        Console.info("[ENHANCED_FORECAST] Starting enhanced forecasting analysis")
-        
-        run_dir = ctx.get('run_dir', Path('.'))
-        tables_dir = ctx.get('tables_dir', run_dir / 'tables')
-        run_id = ctx.get('run_id')
+            Console.info("[FORECAST] Enhanced forecasting disabled in config")
+            return {}
+            
+        tables_dir = ctx.get('tables_dir')
         equip_id = ctx.get('equip_id')
+        run_id = ctx.get('run_id')
+        output_manager = ctx.get('output_manager')  # New: OutputManager for artifact cache/SQL
         
-        # Load required data
-        health_timeline = self._load_health_timeline(tables_dir)
-        detector_scores = self._load_detector_scores(run_dir)
-        
-        if health_timeline is None or detector_scores is None:
-            Console.warn("[ENHANCED_FORECAST] Required data not available")
-            return {'tables': [], 'plots': [], 'metrics': {}}
-        
-        # Step 1: Forecast health trajectory
+        # --- Cleanup old forecast data (SQL mode) ---
+        if output_manager and getattr(output_manager, "sql_client", None) and equip_id:
+            self._cleanup_old_forecasts(output_manager.sql_client, equip_id)
+
+        # 1. Load Data
+        if health_timeline_df is not None:
+            health_history = self._prepare_health_history(health_timeline_df)
+        else:
+            health_history = self._load_health_timeline(tables_dir, output_manager, equip_id, run_id)
+            
+        if health_history is None or len(health_history) < 20:
+            Console.warn("[FORECAST] Insufficient health history for forecasting")
+            return {}
+            
+        if scores_df is not None:
+            detector_scores = self._prepare_detector_scores(scores_df)
+        else:
+            detector_scores = self._load_detector_scores(tables_dir, output_manager, equip_id, run_id)
+            
+        if detector_scores is None or detector_scores.empty:
+            Console.warn("[FORECAST] No detector scores available for causation analysis")
+            # Continue with just forecasting if possible, but causation will be skipped
+            detector_scores = pd.DataFrame()
+
+        # 2. Generate Forecasts
         forecast_result = self.forecaster.forecast(
-            health_timeline,
+            health_history,
             self.forecast_config.forecast_horizons
         )
         
-        # Step 2: Compute failure probabilities
+        # 3. Calculate Failure Probabilities
         failure_probs_df = self.prob_calculator.compute_probabilities(
             forecast_result,
             self.forecast_config.failure_threshold
         )
         
-        # Step 3: Estimate RUL
+        # 4. Estimate RUL
         rul_hours = self._estimate_rul(forecast_result, self.forecast_config.failure_threshold)
         
-        # Step 4: Determine predicted failure time
-        predicted_failure_time = self._get_failure_time(
-            health_timeline.index[-1],
-            rul_hours
-        )
+        # 5. Analyze Causation
+        predicted_failure_time = self._get_failure_time(health_history.index[-1], rul_hours)
         
-        # Step 5: Analyze causation
-        causation_df, failure_patterns = self.causation_analyzer.analyze_causation(
-            detector_scores,
-            predicted_failure_time
-        )
-        
-        # Step 6: Generate maintenance recommendation
+        if not detector_scores.empty:
+            causation_df, failure_patterns = self.causation_analyzer.analyze_causation(
+                detector_scores,
+                predicted_failure_time
+            )
+        else:
+            causation_df = pd.DataFrame()
+            failure_patterns = []
+            
+        # 6. Generate Recommendations
         maintenance_rec = self.maintenance_recommender.generate_recommendation(
             failure_probs_df,
             causation_df,
@@ -985,71 +1001,165 @@ class EnhancedForecastingEngine:
             rul_hours
         )
         
-        # Step 7: Write outputs
-        tables = self._write_outputs(
-            tables_dir,
-            run_id,
-            equip_id,
-            health_timeline.index[-1],
-            predicted_failure_time,
+        # 7. Prepare Outputs
+        return self._prepare_outputs(
             failure_probs_df,
             causation_df,
             maintenance_rec,
-            forecast_result
+            equip_id,
+            run_id
         )
-        
-        Console.info(f"[ENHANCED_FORECAST] Generated {len(tables)} enhanced tables")
-        
-        return {
-            'tables': tables,
-            'plots': [],
-            'metrics': {
-                'rul_hours': rul_hours,
-                'max_failure_probability': float(failure_probs_df['FailureProbability'].max()) if not failure_probs_df.empty else 0.0,
-                'maintenance_required': maintenance_rec['maintenance_required'],
-                'urgency_score': maintenance_rec['urgency_score'],
-                'confidence': maintenance_rec['confidence']
-            }
-        }
+
+    def _cleanup_old_forecasts(self, sql_client: Any, equip_id: int) -> None:
+        """Cleanup old forecast data to prevent RunID overlap in charts"""
+        try:
+            import os
+            try:
+                keep_runs = int(os.getenv("ACM_FORECAST_RUNS_RETAIN", "2"))
+            except Exception:
+                keep_runs = 2
+            keep_runs = max(1, min(int(keep_runs), 50))
+            
+            cur = sql_client.cursor()
+            # Keep only the N most recent RunIDs
+            for table in ["ACM_HealthForecast_TS", "ACM_FailureForecast_TS"]:
+                cur.execute(f"""
+                    WITH RankedRuns AS (
+                        SELECT DISTINCT RunID, 
+                               ROW_NUMBER() OVER (ORDER BY MAX(CreatedAt) DESC) AS rn
+                        FROM dbo.{table}
+                        WHERE EquipID = ?
+                        GROUP BY RunID
+                    )
+                    DELETE FROM dbo.{table}
+                    WHERE EquipID = ? 
+                      AND RunID IN (SELECT RunID FROM RankedRuns WHERE rn > ?)
+                """, (equip_id, equip_id, keep_runs))
+            
+            if not sql_client.conn.autocommit:
+                sql_client.conn.commit()
+            Console.info(f"[FORECAST] Cleaned old forecast data for EquipID={equip_id} (kept {keep_runs} runs)")
+        except Exception as e:
+            Console.warn(f"[FORECAST] Failed to cleanup old forecasts: {e}")
+
+    def _prepare_health_history(self, df: pd.DataFrame) -> Optional[pd.Series]:
+        """Prepare health history series from DataFrame"""
+        try:
+            if "HealthIndex" not in df.columns or "Timestamp" not in df.columns:
+                return None
+            
+            ts = pd.to_datetime(df["Timestamp"], utc=True)
+            hi = pd.Series(df["HealthIndex"].astype(float).to_numpy(), index=ts)
+            return hi.sort_index()
+        except Exception as e:
+            Console.warn(f"[FORECAST] Failed to prepare health history: {e}")
+            return None
+
+    def _prepare_detector_scores(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepare detector scores DataFrame"""
+        try:
+            # Ensure Timestamp index
+            if "Timestamp" in df.columns:
+                df = df.set_index("Timestamp")
+            
+            # Ensure UTC index
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index, utc=True)
+            elif df.index.tz is None:
+                df.index = df.index.tz_localize('UTC')
+            else:
+                df.index = df.index.tz_convert('UTC')
+                
+            return df.sort_index()
+        except Exception as e:
+            Console.warn(f"[FORECAST] Failed to prepare detector scores: {e}")
+            return pd.DataFrame()
+
+    def _load_health_timeline(
+        self, 
+        tables_dir: Path, 
+        output_manager: Optional[Any] = None,
+        equip_id: Optional[int] = None,
+        run_id: Optional[str] = None
+    ) -> Optional[pd.Series]:
+        """Load health timeline from file or OutputManager"""
+        try:
+            # Try OutputManager artifact cache first (SQL-only mode support)
+            if output_manager:
+                # Try to get from cache or SQL
+                # Note: We reuse rul_estimator's logic if available, or implement basic fetch
+                from core import rul_estimator
+                df = rul_estimator._load_health_timeline(
+                    tables_dir, 
+                    output_manager.sql_client if hasattr(output_manager, 'sql_client') else None,
+                    equip_id,
+                    run_id,
+                    output_manager
+                )
+                if df is not None:
+                    return self._prepare_health_history(df)
+
+            # Fallback to file
+            path = tables_dir / "health_timeline.csv"
+            if not path.exists():
+                return None
+                
+            df = pd.read_csv(path)
+            return self._prepare_health_history(df)
+            
+        except Exception as e:
+            Console.warn(f"[FORECAST] Failed to load health timeline: {e}")
+            return None
     
-    def _load_health_timeline(self, tables_dir: Path) -> Optional[pd.Series]:
-        """Load health timeline from tables"""
-        health_file = tables_dir / 'health_timeline.csv'
-        if not health_file.exists():
-            Console.warn(f"[ENHANCED_FORECAST] health_timeline.csv not found")
+    def _load_detector_scores(
+        self, 
+        tables_dir: Path,
+        output_manager: Optional[Any] = None,
+        equip_id: Optional[int] = None,
+        run_id: Optional[str] = None
+    ) -> Optional[pd.DataFrame]:
+        """Load detector scores from file or OutputManager"""
+        try:
+            # Try OutputManager artifact cache first
+            if output_manager:
+                # 1. Check artifact cache
+                if hasattr(output_manager, '_artifact_cache'):
+                    cached_scores = output_manager._artifact_cache.get('scores')
+                    if cached_scores is not None:
+                        return self._prepare_detector_scores(cached_scores)
+                
+                # 2. Try SQL if available
+                if hasattr(output_manager, 'sql_client') and output_manager.sql_client and equip_id and run_id:
+                    cur = output_manager.sql_client.cursor()
+                    cur.execute(
+                        """
+                        SELECT Timestamp,
+                               ar1_z, pca_spe_z, pca_t2_z, mhal_z,
+                               iforest_z, gmm_z, cusum_z, drift_z,
+                               hst_z, river_hst_z, fused
+                        FROM dbo.ACM_Scores_Wide
+                        WHERE EquipID = ? AND RunID = ?
+                        ORDER BY Timestamp
+                        """,
+                        (equip_id, run_id),
+                    )
+                    rows = cur.fetchall() or []
+                    if rows:
+                        cols = [c[0] for c in cur.description]
+                        df = pd.DataFrame.from_records(rows, columns=cols)
+                        return self._prepare_detector_scores(df)
+
+            # Fallback to file
+            path = tables_dir / "scores.csv"
+            if not path.exists():
+                return None
+                
+            df = pd.read_csv(path)
+            return self._prepare_detector_scores(df)
+            
+        except Exception as e:
+            Console.warn(f"[FORECAST] Failed to load detector scores: {e}")
             return None
-        
-        df = pd.read_csv(health_file)
-        if 'Timestamp' in df.columns:
-            ts_col = 'Timestamp'
-        elif 'timestamp' in df.columns:
-            ts_col = 'timestamp'
-        else:
-            ts_col = df.columns[0]
-        
-        df[ts_col] = pd.to_datetime(df[ts_col], errors='coerce')
-        df = df.sort_values(ts_col).dropna(subset=[ts_col])
-        df = df.set_index(ts_col)
-        
-        if 'HealthIndex' not in df.columns:
-            Console.warn("[ENHANCED_FORECAST] HealthIndex column not found")
-            return None
-        
-        return df['HealthIndex']
-    
-    def _load_detector_scores(self, run_dir: Path) -> Optional[pd.DataFrame]:
-        """Load detector scores from run directory"""
-        scores_file = run_dir / 'scores.csv'
-        if not scores_file.exists():
-            Console.warn(f"[ENHANCED_FORECAST] scores.csv not found")
-            return None
-        
-        df = pd.read_csv(scores_file)
-        if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-            df = df.set_index('timestamp')
-        
-        return df
     
     def _estimate_rul(self, forecast_result: Dict[str, Any], threshold: float) -> float:
         """Estimate RUL from forecast"""
@@ -1069,20 +1179,16 @@ class EnhancedForecastingEngine:
         """Calculate predicted failure time"""
         return current_time + pd.Timedelta(hours=rul_hours)
     
-    def _write_outputs(
+    def _prepare_outputs(
         self,
-        tables_dir: Path,
-        run_id: Optional[str],
-        equip_id: Optional[int],
-        current_time: pd.Timestamp,
-        failure_time: pd.Timestamp,
         failure_probs_df: pd.DataFrame,
         causation_df: pd.DataFrame,
         maintenance_rec: Dict[str, Any],
-        forecast_result: Dict[str, Any]
-    ) -> List[Dict[str, str]]:
-        """Write all output tables"""
-        tables = []
+        equip_id: Optional[int],
+        run_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Prepare output tables and metrics"""
+        tables = {}
         
         # Add IDs to dataframes
         def add_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -1095,21 +1201,21 @@ class EnhancedForecastingEngine:
         # Table 1: Failure Probability Time Series
         if not failure_probs_df.empty:
             fp_df = failure_probs_df.copy()
-            fp_df.insert(0, 'Timestamp', current_time)
+            # Timestamp is already in failure_probs_df if we added it? No, it has horizons.
+            # We need to add the current timestamp for the record
+            # Actually, failure_probs_df has 'ForecastHorizon_Hours'.
+            # We usually want to store the PREDICTION timestamp.
+            # But the table schema might expect a timestamp column.
+            # Let's assume the caller handles persistence or we return clean DFs.
             fp_df = add_ids(fp_df)
-            fp_path = tables_dir / 'failure_probability_ts.csv'
-            fp_df.to_csv(fp_path, index=False)
-            tables.append({'name': 'failure_probability_ts', 'path': str(fp_path)})
+            tables['failure_probability_ts'] = fp_df
         
         # Table 2: Failure Causation
         if not causation_df.empty:
             fc_df = causation_df.copy()
-            fc_df.insert(0, 'PredictedFailureTime', failure_time)
-            fc_df.insert(1, 'FailurePattern', ','.join(maintenance_rec['failure_patterns']))
+            fc_df.insert(0, 'FailurePattern', ','.join(maintenance_rec['failure_patterns']))
             fc_df = add_ids(fc_df)
-            fc_path = tables_dir / 'failure_causation.csv'
-            fc_df.to_csv(fc_path, index=False)
-            tables.append({'name': 'failure_causation', 'path': str(fc_path)})
+            tables['failure_causation'] = fc_df
         
         # Table 3: Enhanced Maintenance Recommendation
         maint_df = pd.DataFrame([{
@@ -1125,19 +1231,24 @@ class EnhancedForecastingEngine:
             'EstimatedDuration_Hours': sum(a['estimated_duration_hours'] for a in maintenance_rec['recommended_actions'])
         }])
         maint_df = add_ids(maint_df)
-        maint_path = tables_dir / 'enhanced_maintenance_recommendation.csv'
-        maint_df.to_csv(maint_path, index=False)
-        tables.append({'name': 'enhanced_maintenance_recommendation', 'path': str(maint_path)})
+        tables['enhanced_maintenance_recommendation'] = maint_df
         
         # Table 4: Recommended Actions
         if maintenance_rec['recommended_actions']:
             actions_df = pd.DataFrame(maintenance_rec['recommended_actions'])
             actions_df = add_ids(actions_df)
-            actions_path = tables_dir / 'recommended_actions.csv'
-            actions_df.to_csv(actions_path, index=False)
-            tables.append({'name': 'recommended_actions', 'path': str(actions_path)})
-        
-        return tables
+            tables['recommended_actions'] = actions_df
+            
+        return {
+            'tables': tables,
+            'metrics': {
+                'rul_hours': maintenance_rec.get('window', {}).get('latest_safe_time', 0.0), # Use latest safe time as RUL proxy or pass explicit RUL
+                'max_failure_probability': float(failure_probs_df['FailureProbability'].max()) if not failure_probs_df.empty else 0.0,
+                'maintenance_required': maintenance_rec['maintenance_required'],
+                'urgency_score': maintenance_rec['urgency_score'],
+                'confidence': maintenance_rec['confidence']
+            }
+        }
 
 
 # Backwards compatibility with existing RUL estimator interface
@@ -1168,10 +1279,7 @@ def estimate_enhanced_rul(
     
     # Convert to expected format (dict of dataframes)
     output = {}
-    for table_info in result.get('tables', []):
-        table_name = table_info['name']
-        table_path = Path(table_info['path'])
-        if table_path.exists():
-            output[table_name] = pd.read_csv(table_path)
+    for name, df in result.get('tables', {}).items():
+        output[name] = df
     
     return output

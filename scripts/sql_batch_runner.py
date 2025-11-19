@@ -68,6 +68,48 @@ class SQLBatchRunner:
         self.progress_file = artifact_root / ".sql_batch_progress.json"
         self.max_batches = max_batches
         self.start_from_beginning = start_from_beginning
+
+    def _log_historian_overview(self, equip_name: str) -> bool:
+        """Preflight: Log historian table coverage and return True when data exists.
+
+        This helps quickly diagnose cases where batch runs appear to succeed
+        but no outputs are written because the historian query returns no rows.
+        """
+        try:
+            table_name = f"{equip_name}_Data"
+            with self._get_sql_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(f"SELECT MIN(EntryDateTime), MAX(EntryDateTime), COUNT(*) FROM {table_name}")
+                row = cur.fetchone()
+                if not row:
+                    Console.warn(f"[PRECHECK] {equip_name}: Historian table query returned no result", equipment=equip_name)
+                    return False
+                min_ts, max_ts, total_rows = row[0], row[1], int(row[2]) if row[2] is not None else 0
+                if not min_ts or not max_ts:
+                    Console.warn(f"[PRECHECK] {equip_name}: Historian table has no min/max timestamps", equipment=equip_name)
+                    return False
+                if total_rows <= 0:
+                    Console.warn(
+                        f"[PRECHECK] {equip_name}: Historian table has 0 rows; skipping processing",
+                        equipment=equip_name,
+                    )
+                    Console.info(
+                        f"[PRECHECK] {equip_name}: Ensure raw table {table_name} is populated for the expected window",
+                        equipment=equip_name,
+                        table=table_name,
+                    )
+                    return False
+                Console.info(
+                    f"[PRECHECK] {equip_name}: Historian coverage OK — range=[{min_ts},{max_ts}], rows={total_rows}",
+                    equipment=equip_name,
+                    min_timestamp=min_ts,
+                    max_timestamp=max_ts,
+                    total_rows=total_rows,
+                )
+                return True
+        except Exception as e:
+            Console.warn(f"[PRECHECK] {equip_name}: Historian overview failed: {e}", equipment=equip_name, error=str(e))
+            return False
     
     def _get_sql_connection(self) -> pyodbc.Connection:
         """Create SQL connection with a short timeout."""
@@ -97,12 +139,38 @@ class SQLBatchRunner:
     # SQL helpers (config/progress)
     # ------------------------
     def _get_equip_id(self, equip_name: str) -> Optional[int]:
+        """Resolve or register EquipID for a given equipment code.
+
+        Prefers calling dbo.usp_ACM_RegisterEquipment to create/return a stable ID.
+        Falls back to reading from dbo.Equipment when the procedure isn't available.
+        """
         try:
             with self._get_sql_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT EquipID FROM dbo.Equipment WHERE EquipCode = ?", (equip_name,))
-                row = cur.fetchone()
-                return int(row[0]) if row else None
+                # Try registration procedure first (preferred)
+                try:
+                    tsql = (
+                        "DECLARE @EID INT;\n"
+                        "EXEC dbo.usp_ACM_RegisterEquipment @EquipCode = ?, @EquipID = @EID OUTPUT;\n"
+                        "SELECT @EID;"
+                    )
+                    cur.execute(tsql, (equip_name,))
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        eid = int(row[0])
+                        Console.info(f"[ID] Registered/Resolved EquipID={eid} for {equip_name}", equipment=equip_name, equip_id=eid)
+                        return eid
+                except Exception:
+                    # Fall back to direct lookup when SP missing or errors
+                    pass
+
+                # Fallback: direct lookup
+                try:
+                    cur.execute("SELECT EquipID FROM dbo.Equipment WHERE EquipCode = ?", (equip_name,))
+                    row = cur.fetchone()
+                    return int(row[0]) if row else None
+                except Exception:
+                    return None
         except Exception as e:
             Console.warn(f"[WARN] Could not resolve EquipID for {equip_name}: {e}", error=str(e))
             return None
@@ -243,22 +311,95 @@ class SQLBatchRunner:
                 return
             with self._get_sql_connection() as conn:
                 cur = conn.cursor()
-                # ACM_Runs schema uses StartedAt/CompletedAt, not window columns.
-                # For QA we just need the latest RunID for this EquipID.
-                cur.execute(
-                    "SELECT TOP 1 RunID, StartedAt, CompletedAt "
-                    "FROM dbo.ACM_Runs WHERE EquipID = ? ORDER BY StartedAt DESC",
-                    (equip_id,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    Console.warn(f"[QA] No ACM_Runs entry found for EquipID={equip_id}, skipping inspection", equip_id=equip_id)
-                    return
-                run_id, started_at, completed_at = row[0], row[1], row[2]
+                # Prefer deriving the latest RunID from freshly written forecast tables
+                # to avoid mismatches when ACM_Runs ordering differs.
+                run_id = None
+                run_source = None
+                # Try ACM_HealthForecast_TS first
+                try:
+                    cur.execute(
+                        """
+                        IF OBJECT_ID('dbo.ACM_HealthForecast_TS','U') IS NOT NULL
+                        BEGIN
+                          IF EXISTS(SELECT 1 FROM dbo.ACM_HealthForecast_TS WHERE EquipID = ?)
+                          BEGIN
+                            IF COL_LENGTH('dbo.ACM_HealthForecast_TS','CreatedAt') IS NOT NULL
+                              SELECT TOP 1 RunID FROM dbo.ACM_HealthForecast_TS WHERE EquipID = ? GROUP BY RunID ORDER BY MAX(CreatedAt) DESC;
+                            ELSE
+                              SELECT TOP 1 RunID FROM dbo.ACM_HealthForecast_TS WHERE EquipID = ? GROUP BY RunID ORDER BY MAX([Timestamp]) DESC;
+                          END
+                          ELSE SELECT CAST(NULL AS UNIQUEIDENTIFIER);
+                        END
+                        ELSE SELECT CAST(NULL AS UNIQUEIDENTIFIER);
+                        """,
+                        (equip_id, equip_id, equip_id),
+                    )
+                    r = cur.fetchone()
+                    if r and r[0]:
+                        run_id = r[0]
+                        run_source = "ACM_HealthForecast_TS"
+                except Exception:
+                    pass
+
+                # Fallback: derive from ACM_FailureForecast_TS
+                if run_id is None:
+                    try:
+                        cur.execute(
+                            """
+                            IF OBJECT_ID('dbo.ACM_FailureForecast_TS','U') IS NOT NULL
+                            BEGIN
+                              IF EXISTS(SELECT 1 FROM dbo.ACM_FailureForecast_TS WHERE EquipID = ?)
+                              BEGIN
+                                IF COL_LENGTH('dbo.ACM_FailureForecast_TS','CreatedAt') IS NOT NULL
+                                  SELECT TOP 1 RunID FROM dbo.ACM_FailureForecast_TS WHERE EquipID = ? GROUP BY RunID ORDER BY MAX(CreatedAt) DESC;
+                                ELSE
+                                  SELECT TOP 1 RunID FROM dbo.ACM_FailureForecast_TS WHERE EquipID = ? GROUP BY RunID ORDER BY MAX([Timestamp]) DESC;
+                              END
+                              ELSE SELECT CAST(NULL AS UNIQUEIDENTIFIER);
+                            END
+                            ELSE SELECT CAST(NULL AS UNIQUEIDENTIFIER);
+                            """,
+                            (equip_id, equip_id, equip_id),
+                        )
+                        r = cur.fetchone()
+                        if r and r[0]:
+                            run_id = r[0]
+                            run_source = "ACM_FailureForecast_TS"
+                    except Exception:
+                        pass
+
+                # Final fallback: latest in ACM_Runs by StartedAt
+                started_at = None
+                completed_at = None
+                if run_id is None:
+                    cur.execute(
+                        "SELECT TOP 1 RunID, StartedAt, CompletedAt FROM dbo.ACM_Runs WHERE EquipID = ? ORDER BY StartedAt DESC",
+                        (equip_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        Console.warn(f"[QA] No ACM_Runs entry found for EquipID={equip_id}, skipping inspection", equip_id=equip_id)
+                        return
+                    run_id, started_at, completed_at = row[0], row[1], row[2]
+                    run_source = "ACM_Runs"
+
+                # If we derived from forecast tables, try to enrich with window from ACM_Runs
+                if started_at is None or completed_at is None:
+                    try:
+                        cur.execute(
+                            "SELECT TOP 1 StartedAt, CompletedAt FROM dbo.ACM_Runs WHERE RunID = ?",
+                            (run_id,),
+                        )
+                        rw = cur.fetchone()
+                        if rw:
+                            started_at, completed_at = rw[0], rw[1]
+                    except Exception:
+                        pass
+
                 Console.info(
-                    f"[QA] Inspecting outputs for EquipID={equip_id}, RunID={run_id}, "
+                    f"[QA] Inspecting outputs for EquipID={equip_id}, RunID={run_id} (from {run_source}), "
                     f"window=[{started_at},{completed_at})",
-                    equip_id=equip_id, run_id=run_id
+                    equip_id=equip_id, run_id=str(run_id)
                 )
                 tables_to_check: List[Tuple[str, bool]] = [
                     ("ACM_HealthTimeline", True),
@@ -708,6 +849,7 @@ class SQLBatchRunner:
         # Apply per-run configuration overrides
         equip_id = self._get_equip_id(equip_name)
         if equip_id:
+            Console.info(f"[PRECHECK] {equip_name}: Resolved EquipID={equip_id}", equipment=equip_name, equip_id=equip_id)
             # In dev mode, optionally infer tick size from raw data
             if self.start_from_beginning and not resume:
                 inferred = self._infer_tick_minutes_from_raw(equip_name)
@@ -721,6 +863,13 @@ class SQLBatchRunner:
                 self._set_tick_minutes(equip_id, self.tick_minutes)
             if self.start_from_beginning and not resume:
                 self._reset_progress_to_beginning(equip_id)
+        else:
+            Console.warn(f"[PRECHECK] {equip_name}: EquipID not found in dbo.Equipment; downstream writes will fail", equipment=equip_name)
+
+        # Historian preflight: if no data rows, stop early with a clear message
+        if not self._log_historian_overview(equip_name):
+            Console.error(f"[ERROR] {equip_name}: Historian has no data — aborting this equipment run", equipment=equip_name)
+            return False
         
         # Check if coldstart already complete
         coldstart_complete = equip_progress.get('coldstart_complete', False)

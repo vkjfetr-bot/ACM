@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import argparse
 import sys
 import json
 import time
@@ -19,20 +20,19 @@ import joblib
 try:
     # import ONLY core modules relatively
     from . import regimes, drift, fuse
-    from . import correlation, outliers, forecast, river_models # New modules
+    from . import correlation, outliers, forecast, river_models  # New modules
     from . import fast_features
     # DEPRECATED: from . import storage  # Use output_manager instead
 except ImportError:
     import pathlib
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
     from core import regimes, drift, fuse
-    from core import correlation, outliers, forecast
-    from core import river_models
+    from core import correlation, outliers, forecast, river_models
     # DEPRECATED: from core import storage  # Use output_manager instead
     try:
         from core import fast_features
     except Exception:
-        fast_features = None
+        fast_features = None  # Optional dependency
 
 # Note: models/ directory deleted - all functionality consolidated into core/
 # PCA, IForest, GMM → core/outliers.py and core/correlation.py
@@ -47,19 +47,6 @@ from core import enhanced_forecasting_sql  # SQL-only wrapper for enhanced forec
 from core.sql_logger import SqlLogSink
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
-# Import episode culprits writer
-from core.episode_culprits_writer import write_episode_culprits_enhanced
-# Import config history writer
-from core.config_history_writer import log_auto_tune_changes
-# ---
-
-import argparse
-
-# Config
-try:
-    import yaml
-except ImportError as e:
-    raise SystemExit("pyyaml is required: pip install pyyaml") from e
 
 # SQL client (optional; only used in SQL mode)
 try:
@@ -525,8 +512,8 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
     Calls dbo.usp_ACM_StartRun and returns (run_id, window_start, window_end, equip_id).
     Uses a T-SQL block with OUTPUT parameters and a SELECT for capture.
     """
-    # Get EquipID from equipment name (but let SP do the lookup)
-    equip_id = _get_equipment_id(equip_code)  # Keep for return value
+    # Get EquipID from equipment name
+    equip_id = _get_equipment_id(equip_code)
     
     stage = cfg.get("runtime", {}).get("stage", "score")
     version = cfg.get("runtime", {}).get("version", "v5.0.0")
@@ -534,46 +521,51 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
     trigger = "timer"
     tick_minutes = cfg.get("runtime", {}).get("tick_minutes", 30)  # Default 30-minute intervals
     
-    # For now, use NULL for the datetime parameters since the procedure will calculate them
-    window_start = None
-    window_end = None
+    # Calculate window based on tick_minutes
+    now_utc = pd.Timestamp.now(tz='UTC').replace(tzinfo=None)
+    window_start = now_utc - pd.Timedelta(minutes=tick_minutes)
+    window_end = now_utc
 
+    # SP signature matches user's actual procedure: @EquipID, @ConfigHash, @WindowStartEntryDateTime, @WindowEndEntryDateTime, @Stage, @Version, @TriggerReason, @TickMinutes, @DefaultStartUtc, @RunID OUT, @EquipIDOut OUT
     tsql = """
-    DECLARE @RunID UNIQUEIDENTIFIER, @WS DATETIME2(3), @WE DATETIME2(3), @EID INT;
+    DECLARE @RunID UNIQUEIDENTIFIER, @EID INT;
     EXEC dbo.usp_ACM_StartRun
-        @EquipCode = ?, @EquipID = NULL, @Stage = ?, @TickMinutes = ?,
-        @DefaultStartUtc = ?, @Version = ?, @ConfigHash = ?, @TriggerReason = ?,
+        @EquipID = ?,
+        @ConfigHash = ?,
+        @WindowStartEntryDateTime = ?,
+        @WindowEndEntryDateTime = ?,
+        @Stage = ?,
+        @Version = ?,
+        @TriggerReason = ?,
+        @TickMinutes = ?,
+        @DefaultStartUtc = ?,
         @RunID = @RunID OUTPUT,
-        @WindowStartEntryDateTime = @WS OUTPUT,
-        @WindowEndEntryDateTime = @WE OUTPUT,
         @EquipIDOut = @EID OUTPUT;
-    SELECT CONVERT(varchar(36), @RunID) AS RunID, @WS AS WindowStartEntryDateTime, @WE AS WindowEndEntryDateTime, @EID AS EquipID;
+    SELECT CONVERT(varchar(36), @RunID) AS RunID, ? AS WindowStart, ? AS WindowEnd, @EID AS EquipID;
     """
-    """
-    Calls the database stored procedure to start a new run.
-
-    This procedure is expected to:
-    1. Log the run start in a database table.
-    2. Return a unique RunID for this execution.
-    3. Determine and return the data processing window (start and end timestamps).
-    """
+    
     cur = cli.cursor()
     try:
-        Console.info(f"[DEBUG] Calling usp_ACM_StartRun with params: EquipCode={equip_code}, Stage={stage}, TickMinutes={tick_minutes}")
-        cur.execute(tsql, (equip_code, stage, tick_minutes, window_start, version, config_hash, trigger))
+        Console.info(f"[DEBUG] Calling usp_ACM_StartRun with EquipID={equip_id}, Stage={stage}, TickMinutes={tick_minutes}")
+        # Params: @EquipID, @ConfigHash, @WindowStartEntryDateTime, @WindowEndEntryDateTime, @Stage, @Version, @TriggerReason, @TickMinutes, @DefaultStartUtc, then 2 for SELECT
+        cur.execute(tsql, (equip_id, config_hash, window_start, window_end, stage, version, trigger, tick_minutes, window_start, window_start, window_end))
         row = cur.fetchone()
         if not row or row[0] is None:
             raise RuntimeError("usp_ACM_StartRun did not return a RunID.")
         run_id = str(row[0])
-        ws = pd.to_datetime(row[1]) if row[1] else pd.Timestamp.now()
-        we = pd.to_datetime(row[2]) if row[2] else pd.Timestamp.now()
+        ws = pd.to_datetime(row[1]) if row[1] else window_start
+        we = pd.to_datetime(row[2]) if row[2] else window_end
         # Get EquipID from stored procedure output (4th column)
-        equip_id = int(row[3]) if len(row) > 3 and row[3] is not None else equip_id
+        equip_id_out = int(row[3]) if len(row) > 3 and row[3] is not None else equip_id
         cli.conn.commit()
-        Console.info(f"[RUN] Started RunID={run_id} window=[{ws},{we}) equip='{equip_code}' EquipID={equip_id}")
-        return run_id, ws, we, equip_id
-    except Exception:
-        cli.conn.rollback()
+        Console.info(f"[RUN] Started RunID={run_id} window=[{ws},{we}) equip='{equip_code}' EquipID={equip_id_out}")
+        return run_id, ws, we, equip_id_out
+    except Exception as e:
+        try:
+            cli.conn.rollback()
+        except Exception:
+            pass
+        Console.error(f"[RUN] Failed to start SQL run: {e}")
         raise
     finally:
         cur.close()
@@ -586,7 +578,14 @@ def _sql_finalize_run(cli: Any, run_id: str, outcome: str, rows_read: int, rows_
         "RowsWritten": rows_written,
         "ErrorJSON": err_json
     }
-    cli.call_proc("dbo.usp_ACM_FinalizeRun", params)
+    try:
+        cli.call_proc("dbo.usp_ACM_FinalizeRun", params)
+    except Exception as e:
+        # Environments may lack FinalizeRun proc/tables; do not fail the pipeline
+        try:
+            Console.warn(f"[RUN] FinalizeRun skipped: {e}")
+        except Exception:
+            pass
 
 # =======================
 

@@ -51,7 +51,7 @@ ALLOWED_TABLES = {
     'ACM_DetectorCorrelation','ACM_CalibrationSummary',
     'ACM_RegimeTransitions','ACM_RegimeDwellStats',
     'ACM_DriftEvents','ACM_CulpritHistory','ACM_EpisodeMetrics',
-    #'ACM_DataQuality',  # Skip - has all-NULL floats that pyodbc cannot handle
+    'ACM_DataQuality',
     'ACM_Scores_Long','ACM_Drift_TS',
     'ACM_Anomaly_Events','ACM_Regime_Episodes',
     'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
@@ -63,6 +63,7 @@ ALLOWED_TABLES = {
     'ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
     'ACM_EnhancedFailureProbability_TS','ACM_FailureCausation',
     'ACM_EnhancedMaintenanceRecommendation','ACM_RecommendedActions',
+    'ACM_SensorNormalized_TS',
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
@@ -118,6 +119,17 @@ class AnalyticsConstants:
     TARGET_SAMPLING_POINTS = 500
     HEALTH_ALERT_THRESHOLD = 70.0
     HEALTH_WATCH_THRESHOLD = 85.0
+
+    @staticmethod
+    def anomaly_level(abs_z: float, warn: float, alert: float) -> str:
+        try:
+            if abs_z >= float(alert):
+                return "ALERT"
+            if abs_z >= float(warn):
+                return "WARN"
+        except Exception:
+            pass
+        return "GOOD"
 
 # CHART-12: Centralized severity color palette
 SEVERITY_COLORS = {
@@ -517,6 +529,10 @@ class OutputManager:
             },
             'ACM_SinceWhen': {
                 'AlertZone': 'GOOD', 'DurationHours': 0.0, 'StartTimestamp': 'ts', 'RecordCount': 0
+            },
+            'ACM_SensorNormalized_TS': {
+                'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'NormValue': 0.0,
+                'ZScore': 0.0, 'AnomalyLevel': 'GOOD', 'EpisodeActive': 0
             }
             ,
             'ACM_AlertAge': {
@@ -2345,6 +2361,31 @@ class OutputManager:
                     table_count += 1
                     if result.get('sql_written'): sql_count += 1
 
+                    # Normalized raw sensor timeline with anomaly flags and episode overlays
+                    try:
+                        norm_top_n = int((cfg.get('output', {}) or {}).get('sensor_normalized_top_n', 20) or 20)
+                        sensor_norm_df = self._generate_sensor_normalized_ts(
+                            sensor_values=sensor_values,
+                            sensor_train_mean=sensor_train_mean,
+                            sensor_train_std=sensor_train_std,
+                            sensor_zscores=sensor_zscores,
+                            episodes_df=episodes_df,
+                            warn_z=warn_threshold,
+                            alert_z=alert_threshold,
+                            top_n=norm_top_n
+                        )
+                        result = self.write_dataframe(
+                            sensor_norm_df,
+                            tables_dir / "sensor_normalized_ts.csv",
+                            sql_table="ACM_SensorNormalized_TS" if force_sql else None,
+                            non_numeric_cols={"SensorName", "AnomalyLevel"},
+                            add_created_at=True
+                        )
+                        table_count += 1
+                        if result.get('sql_written'): sql_count += 1
+                    except Exception as e:
+                        Console.warn(f"[ANALYTICS] Sensor normalized timeline skipped: {e}")
+
                     sensor_timeline_df = self._generate_sensor_hotspot_timeline(
                         sensor_zscores,
                         sensor_values,
@@ -3946,6 +3987,103 @@ class OutputManager:
                 })
         
         return pd.DataFrame(results)
+
+    def _generate_sensor_normalized_ts(
+        self,
+        sensor_values: pd.DataFrame,
+        sensor_train_mean: Optional[pd.Series],
+        sensor_train_std: Optional[pd.Series],
+        sensor_zscores: pd.DataFrame,
+        episodes_df: Optional[pd.DataFrame],
+        warn_z: float,
+        alert_z: float,
+        top_n: int = 20,
+    ) -> pd.DataFrame:
+        """Build a long-form normalized sensor timeline with anomalies and episode overlays.
+
+        Columns: Timestamp, SensorName, NormValue, ZScore, AnomalyLevel, EpisodeActive
+        """
+        if sensor_values is None or sensor_values.empty:
+            return pd.DataFrame({
+                'Timestamp': [], 'SensorName': [], 'NormValue': [], 'ZScore': [],
+                'AnomalyLevel': [], 'EpisodeActive': []
+            })
+
+        # Determine sensors to include based on peak |z|
+        try:
+            abs_z = sensor_zscores.abs() if sensor_zscores is not None else None
+            if abs_z is not None and not abs_z.empty:
+                ranked = abs_z.max().sort_values(ascending=False)
+                sensors = ranked.index[:max(1, int(top_n))].tolist()
+            else:
+                sensors = list(sensor_values.columns)
+        except Exception:
+            sensors = list(sensor_values.columns)
+
+        values = sensor_values[sensors].copy()
+
+        # Compute normalized values using training mean/std when present; otherwise fallback to zscores or per-column std
+        if isinstance(sensor_train_mean, pd.Series) and isinstance(sensor_train_std, pd.Series):
+            mean = sensor_train_mean.reindex(values.columns)
+            std = sensor_train_std.reindex(values.columns).replace(0.0, np.nan)
+            norm = (values - mean) / std
+        elif sensor_zscores is not None and not sensor_zscores.empty:
+            norm = sensor_zscores[sensors].copy()
+        else:
+            col_mean = values.mean(axis=0)
+            col_std = values.std(axis=0).replace(0.0, np.nan)
+            norm = (values - col_mean) / col_std
+
+        norm = norm.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        # ZScore source for anomaly marking
+        if sensor_zscores is not None and not sensor_zscores.empty:
+            z_for_mark = sensor_zscores[sensors].copy()
+        else:
+            z_for_mark = norm.copy()
+
+        # Build episode active mask per timestamp
+        episode_active = pd.Series(0, index=values.index)
+        if episodes_df is not None and not episodes_df.empty and {'start_ts', 'end_ts'}.issubset(set(episodes_df.columns)):
+            for _, ep in episodes_df.iterrows():
+                try:
+                    s = pd.to_datetime(ep['start_ts'], errors='coerce')
+                    e = pd.to_datetime(ep['end_ts'], errors='coerce')
+                    if pd.notna(s) and pd.notna(e) and e >= s:
+                        mask = (values.index >= s) & (values.index <= e)
+                        if mask.any():
+                            episode_active.loc[mask] = 1
+                except Exception:
+                    continue
+
+        # Melt into long format
+        df_norm = norm.copy()
+        df_norm.index.name = 'Timestamp'
+        long_norm = df_norm.reset_index().melt(id_vars=['Timestamp'], var_name='SensorName', value_name='NormValue')
+
+        df_z = z_for_mark.copy()
+        df_z.index.name = 'Timestamp'
+        long_z = df_z.reset_index().melt(id_vars=['Timestamp'], var_name='SensorName', value_name='ZScore')
+
+        out = long_norm.merge(long_z, on=['Timestamp', 'SensorName'], how='left')
+
+        # Map anomaly level
+        abs_z_vals = out['ZScore'].abs()
+        out['AnomalyLevel'] = np.where(abs_z_vals >= float(alert_z), 'ALERT',
+                                np.where(abs_z_vals >= float(warn_z), 'WARN', 'GOOD'))
+
+        # Attach episode flag
+        ep_flag = episode_active.reset_index()
+        ep_flag.columns = ['Timestamp', 'EpisodeActive']
+        out = out.merge(ep_flag, on='Timestamp', how='left')
+        out['EpisodeActive'] = out['EpisodeActive'].fillna(0).astype(int)
+
+        # Convert timestamps to naive local policy
+        out['Timestamp'] = out['Timestamp'].apply(_to_naive)
+
+        # Order columns
+        out = out[['Timestamp', 'SensorName', 'NormValue', 'ZScore', 'AnomalyLevel', 'EpisodeActive']]
+        return out
 
     def _generate_sensor_hotspots_table(
         self,
