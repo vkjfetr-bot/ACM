@@ -256,7 +256,23 @@ CREATE NONCLUSTERED INDEX IX_DefectTimeline_EquipID_Time ON dbo.ACM_DefectTimeli
 END
 GO
 
--- 15. Sensor Hotspot Timeline
+-- 15. PCA Metrics (Variance Explained, Component Count)
+IF OBJECT_ID('dbo.ACM_PCA_Metrics','U') IS NULL
+BEGIN
+CREATE TABLE dbo.ACM_PCA_Metrics (
+    RunID              uniqueidentifier NOT NULL,
+    EquipID            int NOT NULL,
+    ComponentName      nvarchar(50) NOT NULL,  -- 'PC1', 'PC2', ..., 'Total'
+    MetricType         nvarchar(50) NOT NULL,  -- 'VarianceRatio', 'CumulativeVariance', 'ComponentCount'
+    Value              float NULL,
+    CreatedAt          datetime2(3) NOT NULL CONSTRAINT DF_ACM_PCA_Metrics_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT PK_ACM_PCA_Metrics PRIMARY KEY CLUSTERED (RunID, EquipID, ComponentName, MetricType)
+);
+CREATE NONCLUSTERED INDEX IX_PCA_Metrics_EquipID ON dbo.ACM_PCA_Metrics(EquipID, RunID);
+END
+GO
+
+-- 16. Sensor Hotspot Timeline
 IF OBJECT_ID('dbo.ACM_SensorHotspotTimeline','U') IS NULL
 BEGIN
 CREATE TABLE dbo.ACM_SensorHotspotTimeline (
