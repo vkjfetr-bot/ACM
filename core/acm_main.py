@@ -1509,6 +1509,13 @@ def main() -> None:
                     # Cache TRAIN raw PCA scores to eliminate double computation in calibration
                     pca_train_spe, pca_train_t2 = pca_detector.score(train)
                     Console.info(f"[PCA] Cached train scores: SPE={len(pca_train_spe)} samples, T²={len(pca_train_t2)} samples")
+                    # Write PCA metrics (variance explained, component count)
+                    if output_manager:
+                        output_manager.write_pca_metrics(
+                            pca_detector=pca_detector,
+                            tables_dir=tables_dir,
+                            enable_sql=(sql_client is not None)
+                        )
             
             if mhal_enabled and not mhal_detector:
                 with T.section("fit.mhal"):

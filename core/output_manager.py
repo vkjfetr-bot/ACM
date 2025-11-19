@@ -1878,6 +1878,68 @@ class OutputManager:
             date_format="%Y-%m-%d %H:%M:%S"
         )
     
+    def write_pca_metrics(self,
+                         pca_detector,
+                         tables_dir: Path,
+                         enable_sql: bool = False) -> Dict[str, Any]:
+        """
+        Write PCA metrics (variance explained, components) to ACM_PCA_Metrics table.
+        
+        Args:
+            pca_detector: Fitted PCASubspaceDetector with .pca attribute
+            tables_dir: Directory for CSV output (SQL-only mode skips)
+            enable_sql: Whether to write to SQL database
+            
+        Returns:
+            Write result dict with csv_path and sql_count
+        """
+        if not hasattr(pca_detector, 'pca') or pca_detector.pca is None:
+            Console.warn("[OUTPUT] PCA detector not fitted, skipping metrics output")
+            return {"csv_path": None, "sql_count": None}
+        
+        pca = pca_detector.pca
+        metrics_data = []
+        
+        # Add variance explained per component
+        if hasattr(pca, 'explained_variance_ratio_'):
+            for i, var_ratio in enumerate(pca.explained_variance_ratio_):
+                metrics_data.append({
+                    'ComponentName': f'PC{i+1}',
+                    'MetricType': 'VarianceRatio',
+                    'Value': round(float(var_ratio), 6)
+                })
+        
+        # Add cumulative variance
+        if hasattr(pca, 'explained_variance_ratio_'):
+            cumulative_var = pca.explained_variance_ratio_.cumsum()
+            for i, cum_var in enumerate(cumulative_var):
+                metrics_data.append({
+                    'ComponentName': f'PC{i+1}',
+                    'MetricType': 'CumulativeVariance',
+                    'Value': round(float(cum_var), 6)
+                })
+        
+        # Add total components count
+        if hasattr(pca, 'n_components_'):
+            metrics_data.append({
+                'ComponentName': 'Total',
+                'MetricType': 'ComponentCount',
+                'Value': int(pca.n_components_)
+            })
+        
+        if not metrics_data:
+            Console.warn("[OUTPUT] No PCA metrics available to write")
+            return {"csv_path": None, "sql_count": None}
+        
+        pca_metrics_df = pd.DataFrame(metrics_data)
+        
+        return self.write_dataframe(
+            pca_metrics_df,
+            tables_dir / "pca_metrics.csv",
+            table_name="ACM_PCA_Metrics",
+            enable_sql=enable_sql
+        )
+    
     def write_episodes(self, 
                       episodes_df: pd.DataFrame, 
                       run_dir: Path,

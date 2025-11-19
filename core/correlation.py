@@ -59,9 +59,10 @@ class MahalanobisDetector:
         
         # ANA-07: Lower action thresholds (warn at 1e8, increase reg at 1e10)
         if self.cond_num > 1e10:
-            # Auto-increase regularization by 10x
+            # Auto-increase regularization more aggressively (100x instead of 10x)
+            # This helps with very ill-conditioned covariance matrices
             old_reg = self.l2
-            self.l2 = self.l2 * 10.0
+            self.l2 = self.l2 * 100.0  # Increased from 10x to 100x
             Console.warn(f"[MHAL] CRITICAL condition number ({self.cond_num:.2e}) detected. Auto-increasing regularization: {old_reg:.2e} -> {self.l2:.2e}")
             # Re-compute with increased regularization
             S = np.cov(Xn, rowvar=False)
@@ -71,6 +72,18 @@ class MahalanobisDetector:
             self.S_inv = np.linalg.pinv(S)
             self.cond_num = np.linalg.cond(S)
             Console.info(f"[MHAL] After re-regularization: cond_num={self.cond_num:.2e}")
+            # If still too high, increase again
+            if self.cond_num > 1e10:
+                old_reg = self.l2
+                self.l2 = self.l2 * 10.0
+                Console.warn(f"[MHAL] Still critical after 100x increase. Applying additional 10x: {old_reg:.2e} -> {self.l2:.2e}")
+                S = np.cov(Xn, rowvar=False)
+                if not np.all(np.isfinite(S)):
+                    S = np.nan_to_num(S, nan=0.0, posinf=0.0, neginf=0.0)
+                S += self.l2 * np.eye(S.shape[0], dtype=np.float64)
+                self.S_inv = np.linalg.pinv(S)
+                self.cond_num = np.linalg.cond(S)
+                Console.info(f"[MHAL] Final condition number after 1000x total increase: {self.cond_num:.2e}")
         elif self.cond_num > 1e8:
             Console.warn(f"[MHAL] High condition number ({self.cond_num:.2e}). Consider increasing regularization (current: {self.l2:.2e}).")
         else:
