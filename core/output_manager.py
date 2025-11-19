@@ -118,7 +118,7 @@ class AnalyticsConstants:
     DEFAULT_CLIP_Z = 30.0
     TARGET_SAMPLING_POINTS = 500
     HEALTH_ALERT_THRESHOLD = 70.0
-    HEALTH_WATCH_THRESHOLD = 85.0
+    HEALTH_CAUTION_THRESHOLD = 85.0  # Previously WATCH
 
     @staticmethod
     def anomaly_level(abs_z: float, warn: float, alert: float) -> str:
@@ -126,7 +126,7 @@ class AnalyticsConstants:
             if abs_z >= float(alert):
                 return "ALERT"
             if abs_z >= float(warn):
-                return "WARN"
+                return "CAUTION"
         except Exception:
             pass
         return "GOOD"
@@ -2640,9 +2640,9 @@ class OutputManager:
                                         if max(tr_pct, sc_pct) >= 80:
                                             return 'FAIL'
                                         if max(tr_pct, sc_pct) >= 10:
-                                            return 'WARN'
+                                            return 'CAUTION'
                                         if 'low_variance_train' in notes:
-                                            return 'WARN'
+                                            return 'CAUTION'
                                         return 'OK'
                                     except Exception:
                                         return 'OK'
@@ -2855,7 +2855,7 @@ class OutputManager:
                           has_severity,
                           "No episodes with severity information"):
                 # OUT-30: Map severity levels to categorical order for proper visualization
-                severity_order = ['low', 'medium', 'high', 'critical', 'info', 'warn', 'alert']
+                severity_order = ['low', 'medium', 'high', 'critical', 'info', 'caution', 'alert']
                 episodes_with_sev = episodes[episodes[severity_col].notna()].copy()
                 episodes_with_sev['severity_lower'] = episodes_with_sev[severity_col].astype(str).str.lower()
                 
@@ -2870,7 +2870,7 @@ class OutputManager:
                     # Color map: low=green, medium=yellow, high=orange, critical=red
                     color_map = {
                         'low': '#10b981', 'medium': '#fbbf24', 'high': '#f97316', 
-                        'critical': '#dc2626', 'info': '#3b82f6', 'warn': '#f59e0b', 'alert': '#ef4444'
+                        'critical': '#dc2626', 'info': '#3b82f6', 'caution': '#f59e0b', 'alert': '#ef4444'
                     }
                     colors = [color_map.get(s, '#6b7280') for s in ordered_counts.index]
                     
@@ -3095,7 +3095,7 @@ class OutputManager:
                 fig, ax = plt.subplots(figsize=(11, 4))
                 ax.plot(ts_local, health_idx, color='#2563eb', linewidth=1.6, label='Health Index')
                 ax.axhline(AnalyticsConstants.HEALTH_ALERT_THRESHOLD, color='#dc2626', linestyle='--', linewidth=1.0, alpha=0.7, label='Alert threshold')
-                ax.axhline(AnalyticsConstants.HEALTH_WATCH_THRESHOLD, color='#f59e0b', linestyle='--', linewidth=1.0, alpha=0.7, label='Watch threshold')
+                ax.axhline(AnalyticsConstants.HEALTH_CAUTION_THRESHOLD, color='#f59e0b', linestyle='--', linewidth=1.0, alpha=0.7, label='Caution threshold')
                 ax.set_ylim(0, 100)
                 ax.set_ylabel('Health Index')
                 ax.set_title('Health Timeline (see health_timeline.csv)')
