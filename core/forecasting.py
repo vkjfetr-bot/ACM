@@ -1,26 +1,234 @@
 """
-SQL-backed wrapper for Enhanced Forecasting
-===========================================
+Unified Forecasting Module
+===========================
 
-Provides a SQL-only entrypoint that reuses the modeling logic from
-`core.enhanced_forecasting` but:
-- Loads inputs from SQL tables (ACM_HealthTimeline, ACM_Scores_Wide)
-- Does not create any directories or write CSV files
-- Returns in-memory DataFrames and metrics for the caller to persist.
+Single source of truth for all ACM forecasting capabilities:
+- AR(1) baseline detector for per-sensor residual analysis
+- Enhanced multi-model forecasting with SQL integration
+- RUL estimation and failure probability calculation
+
+Replaces legacy modules:
+- forecast.py (AR1Detector)
+- enhanced_forecasting.py (file-based engine)
+- enhanced_forecasting_sql.py (SQL wrapper)
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, Literal
 
 import numpy as np
 import pandas as pd
 
 from utils.logger import Console  # type: ignore
-
-from core import enhanced_forecasting
 from core import rul_estimator  # type: ignore
+
+# Temporary import for file-based enhanced forecasting until fully migrated
+try:
+    from core import enhanced_forecasting_deprecated as _enhanced_forecasting
+    # Alias for backward compatibility
+    EnhancedForecastingEngine = _enhanced_forecasting.EnhancedForecastingEngine
+except ImportError:
+    Console.warn("[FORECASTING] enhanced_forecasting_deprecated not found; file-mode forecasting unavailable")
+    EnhancedForecastingEngine = None  # type: ignore
+
+
+# ============================================================================
+# AR(1) Baseline Detector
+# ============================================================================
+
+class AR1Detector:
+    """
+    Per-sensor AR(1) baseline model for residual scoring.
+    
+    Calculates AR(1) coefficients (phi) and mean (mu) for each sensor.
+    Scores new data by calculating the absolute z-score of the residuals, 
+    normalized by the TRAIN-time residual standard deviation.
+    
+    Usage:
+        detector = AR1Detector(ar1_cfg={})
+        detector.fit(train_df)
+        scores = detector.score(test_df)
+    """
+    
+    def __init__(self, ar1_cfg: Dict[str, Any] | None = None):
+        """
+        Initialize the AR(1) detector.
+        
+        Args:
+            ar1_cfg: Configuration dict with optional keys:
+                - eps (float): Numeric stability epsilon (default: 1e-9)
+                - phi_cap (float): Max absolute phi value (default: 0.999)
+                - sd_floor (float): Min std dev (default: 1e-6)
+                - fuse (str): Fusion strategy "mean"|"median"|"p95" (default: "mean")
+        """
+        self.cfg = ar1_cfg or {}
+        self._eps: float = float(self.cfg.get("eps", 1e-9))
+        self._phi_cap: float = float(self.cfg.get("phi_cap", 0.999))
+        self._sd_floor: float = float(self.cfg.get("sd_floor", 1e-6))
+        self._fuse: Literal["mean", "median", "p95"] = self.cfg.get("fuse", "mean")
+        
+        # Trained parameters per column: (phi, mu)
+        self.phimap: Dict[str, Tuple[float, float]] = {}
+        # TRAIN residual std per column for normalization
+        self.sdmap: Dict[str, float] = {}
+        self._is_fitted = False
+    
+    def fit(self, X: pd.DataFrame) -> "AR1Detector":
+        """
+        Fit the AR(1) model for each column in the training data.
+        
+        Args:
+            X: Training feature matrix
+            
+        Returns:
+            self for chaining
+        """
+        self.phimap = {}
+        self.sdmap = {}
+        
+        if not isinstance(X, pd.DataFrame) or X.shape[0] == 0:
+            self._is_fitted = True
+            return self
+        
+        for c in X.columns:
+            col = X[c].to_numpy(copy=False, dtype=np.float32)
+            finite = np.isfinite(col)
+            x = col[finite]
+            
+            if x.size < 3:
+                mu = float(np.nanmean(col)) if x.size else 0.0
+                if not np.isfinite(mu):
+                    mu = 0.0
+                phi = 0.0
+                self.phimap[c] = (phi, mu)
+                resid = (x - mu) if x.size else np.array([0.0], dtype=np.float32)
+                sd = float(np.std(resid)) if resid.size else self._sd_floor
+                self.sdmap[c] = max(sd, self._sd_floor)
+                continue
+            
+            mu = float(np.nanmean(x))
+            if not np.isfinite(mu):
+                mu = 0.0
+            xc = x - mu
+            var_xc = float(np.var(xc)) if xc.size else 0.0
+            phi = 0.0
+            
+            if np.isfinite(var_xc) and var_xc >= 1e-8:
+                num = float(np.dot(xc[1:], xc[:-1]))
+                den = float(np.dot(xc[:-1], xc[:-1]))
+                if abs(den) >= 1e-9:
+                    phi = num / den
+            else:
+                Console.warn(f"[AR1] Column '{c}': near-constant signal; using phi=0")
+            
+            if abs(phi) > self._phi_cap:
+                original_phi = phi
+                phi = float(np.sign(phi) * self._phi_cap)
+                Console.warn(f"[AR1] Column '{c}': phi={original_phi:.3f} clamped to {phi:.3f}")
+            
+            if len(x) < 20:
+                Console.warn(f"[AR1] Column '{c}': only {len(x)} samples; coefficients may be unstable")
+            
+            self.phimap[c] = (phi, mu)
+            
+            # Compute TRAIN residuals & std for normalization during score()
+            x_shift = np.empty_like(x, dtype=np.float32)
+            x_shift[0] = mu
+            x_shift[1:] = x[:-1]
+            pred = (x_shift - mu) * phi + mu
+            resid = x - pred
+            resid_for_sd = resid[1:] if resid.size > 1 else resid
+            sd = float(np.std(resid_for_sd))
+            self.sdmap[c] = max(sd, self._sd_floor)
+        
+        self._is_fitted = True
+        return self
+    
+    def score(self, X: pd.DataFrame, return_per_sensor: bool = False) -> np.ndarray | Tuple[np.ndarray, pd.DataFrame]:
+        """
+        Calculate absolute z-scores of residuals using TRAIN-time residual std.
+        
+        Args:
+            X: Scoring feature matrix
+            return_per_sensor: If True, also return DataFrame of per-sensor |z|
+            
+        Returns:
+            Fused absolute z-scores (len == len(X))
+            Optionally: (fused_scores, per_sensor_df) when return_per_sensor=True
+        """
+        if not self._is_fitted:
+            return np.zeros(len(X), dtype=np.float32)
+        
+        per_cols: Dict[str, np.ndarray] = {}
+        n = len(X)
+        
+        if n == 0 or X.shape[1] == 0:
+            return (np.zeros(0, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(0, dtype=np.float32)
+        
+        for c in X.columns:
+            series = X[c].to_numpy(copy=False, dtype=np.float32)
+            ph, mu = self.phimap.get(c, (0.0, float(np.nanmean(series))))
+            if not np.isfinite(mu):
+                mu = 0.0
+            
+            sd_train = self.sdmap.get(c, self._sd_floor)
+            if not np.isfinite(sd_train) or sd_train <= self._sd_floor:
+                sd_train = self._sd_floor
+            
+            # Impute NaNs to mu for prediction path
+            series_finite = series.copy()
+            if np.isnan(series_finite).any():
+                series_finite = np.where(np.isfinite(series_finite), series_finite, mu).astype(np.float32, copy=False)
+            
+            # One-step AR(1) prediction
+            pred = np.empty_like(series_finite, dtype=np.float32)
+            first_obs = series_finite[0] if series_finite.size else mu
+            pred[0] = first_obs if np.isfinite(first_obs) else mu
+            if n > 1:
+                pred[1:] = (series_finite[:-1] - mu) * ph + mu
+            
+            resid = series - pred  # Keep NaNs where original series had NaNs
+            z = np.abs(resid) / sd_train
+            per_cols[c] = z.astype(np.float32, copy=False)
+        
+        if not per_cols:
+            return (np.zeros(n, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(n, dtype=np.float32)
+        
+        col_names = list(per_cols.keys())
+        matrix = np.column_stack([per_cols[name] for name in col_names]) if col_names else np.zeros((n, 0), dtype=np.float32)
+        
+        with np.errstate(all="ignore"):
+            if self._fuse == "median":
+                fused = np.nanmedian(matrix, axis=1).astype(np.float32)
+            elif self._fuse == "p95":
+                fused = np.nanpercentile(matrix, 95, axis=1).astype(np.float32)
+            else:
+                fused = np.nanmean(matrix, axis=1).astype(np.float32)
+        
+        if return_per_sensor:
+            Z = pd.DataFrame({name: matrix[:, i] for i, name in enumerate(col_names)}, index=X.index)
+            return fused, Z
+        return fused
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize detector state for persistence."""
+        return {"phimap": self.phimap, "sdmap": self.sdmap, "cfg": self.cfg}
+    
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "AR1Detector":
+        """Deserialize detector state from dict."""
+        inst = cls(payload.get("cfg"))
+        inst.phimap = dict(payload.get("phimap", {}))
+        inst.sdmap = dict(payload.get("sdmap", {}))
+        inst._is_fitted = True
+        return inst
+
+
+# ============================================================================
+# Enhanced Forecasting (SQL-backed)
+# ============================================================================
 
 
 def run_enhanced_forecasting_sql(

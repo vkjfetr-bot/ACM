@@ -20,14 +20,16 @@ import joblib
 try:
     # import ONLY core modules relatively
     from . import regimes, drift, fuse
-    from . import correlation, outliers, forecast, river_models  # New modules
+    from . import correlation, outliers, river_models  # New modules
+    from . import forecasting  # CONSOLIDATED: replaces forecast, enhanced_forecasting, enhanced_forecasting_sql
     from . import fast_features
     # DEPRECATED: from . import storage  # Use output_manager instead
 except ImportError:
     import pathlib
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
     from core import regimes, drift, fuse
-    from core import correlation, outliers, forecast, river_models
+    from core import correlation, outliers, river_models
+    from core import forecasting  # CONSOLIDATED: replaces forecast, enhanced_forecasting, enhanced_forecasting_sql
     # DEPRECATED: from core import storage  # Use output_manager instead
     try:
         from core import fast_features
@@ -42,8 +44,6 @@ from core.omr import OMRDetector  # OMR-02: Overall Model Residual
 # Import the unified output system
 from core.output_manager import OutputManager
 from core import rul_estimator
-from core import enhanced_forecasting  # file-based (non-SQL) enhanced forecasting
-from core import enhanced_forecasting_sql  # SQL-only wrapper for enhanced forecasting
 from core.sql_logger import SqlLogSink
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
@@ -1404,7 +1404,7 @@ def main() -> None:
                     # Reconstruct detector objects from cached models
                     # Note: We need to pass empty configs since we're loading pre-trained models
                     if "ar1_params" in cached_models and cached_models["ar1_params"]:
-                        ar1_detector = forecast.AR1Detector(ar1_cfg={})
+                        ar1_detector = forecasting.AR1Detector(ar1_cfg={})
                         ar1_detector.phimap = cached_models["ar1_params"]["phimap"]
                         ar1_detector.sdmap = cached_models["ar1_params"]["sdmap"]
                         ar1_detector._is_fitted = True
@@ -1499,7 +1499,7 @@ def main() -> None:
             
             if ar1_enabled and not ar1_detector:
                 with T.section("fit.ar1"):
-                    ar1_detector = forecast.AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
+                    ar1_detector = forecasting.AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
             
             if pca_enabled and not pca_detector:
                 with T.section("fit.pca_subspace"):
@@ -3068,7 +3068,7 @@ def main() -> None:
                         # In SQL mode, use the SQL-only wrapper to avoid filesystem dependencies.
                         if SQL_MODE and getattr(output_manager, "sql_client", None) is not None:
                             Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
-                            ef_result = enhanced_forecasting_sql.run_enhanced_forecasting_sql(
+                            ef_result = forecasting.run_enhanced_forecasting_sql(
                                 sql_client=output_manager.sql_client,
                                 equip_id=int(equip_id) if 'equip_id' in locals() else None,
                                 run_id=str(run_id) if run_id is not None else None,
@@ -3150,7 +3150,7 @@ def main() -> None:
                                 "run_id": str(run_id) if run_id is not None else None,
                                 "equip_id": int(equip_id) if 'equip_id' in locals() else None,
                             }
-                            enhanced_result = enhanced_forecasting.EnhancedForecastingEngine(cfg).run(enhanced_ctx)
+                            enhanced_result = forecasting.EnhancedForecastingEngine(cfg).run(enhanced_ctx) if forecasting.EnhancedForecastingEngine else {}
                             if enhanced_result and enhanced_result.get("tables"):
                                 Console.info(
                                     f"[ENHANCED_FORECAST] Generated {len(enhanced_result['tables'])} enhanced tables"
