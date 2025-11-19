@@ -3027,14 +3027,29 @@ def main() -> None:
                 except Exception:
                     health_threshold = 70.0
                 try:
-                    rul_tables = rul_estimator.estimate_rul_and_failure(
-                        tables_dir=tables_dir,
-                        equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                        run_id=str(run_id) if run_id is not None else None,
-                        health_threshold=health_threshold,
-                        sql_client=getattr(output_manager, "sql_client", None),
-                        output_manager=output_manager,  # RUL-01: Pass output_manager for artifact cache
-                    )
+                    # Check if enhanced RUL estimator is enabled
+                    use_enhanced_rul = (cfg.get("rul", {}) or {}).get("use_enhanced", False)
+                    
+                    if use_enhanced_rul:
+                        from core import enhanced_rul_estimator
+                        Console.info("[RUL] Using enhanced RUL estimator (adaptive learning enabled)")
+                        rul_tables = enhanced_rul_estimator.estimate_rul_and_failure(
+                            tables_dir=tables_dir,
+                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                            run_id=str(run_id) if run_id is not None else None,
+                            health_threshold=health_threshold,
+                            sql_client=getattr(output_manager, "sql_client", None),
+                            output_manager=output_manager,
+                        )
+                    else:
+                        rul_tables = rul_estimator.estimate_rul_and_failure(
+                            tables_dir=tables_dir,
+                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                            run_id=str(run_id) if run_id is not None else None,
+                            health_threshold=health_threshold,
+                            sql_client=getattr(output_manager, "sql_client", None),
+                            output_manager=output_manager,  # RUL-01: Pass output_manager for artifact cache
+                        )
                     if rul_tables:
                         Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables")
                         enable_sql_rul = getattr(output_manager, "sql_client", None) is not None

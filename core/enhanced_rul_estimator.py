@@ -589,7 +589,8 @@ def estimate_rul_and_failure(
     thr = float(np.clip(health_threshold, 0.0, 100.0))
     z = (thr - forecast.values) / (forecast_std + 1e-9)
     failure_prob = np.clip(_norm_cdf(z), 0.0, 1.0)
-    failure_prob = np.maximum.accumulate(failure_prob)  # Monotonic
+    # NOTE: Removed np.maximum.accumulate - it was forcing all probabilities to be identical
+    # Failure probability should reflect the actual forecast distribution at each time point
 
     # RUL estimation
     below = forecast.values <= thr
