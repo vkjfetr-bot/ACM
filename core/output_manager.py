@@ -69,6 +69,7 @@ ALLOWED_TABLES = {
     'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
     # OMR enhancements
     'ACM_OMR_Metrics','ACM_OMR_TopContributors','ACM_OMR_SensorContributions',
+    'ACM_DetectorContributions',
     'ACM_HealthDistributionOverTime','ACM_ChartGenerationLog',
     'ACM_FusionMetrics',
     # Continuous forecasting enhancements
