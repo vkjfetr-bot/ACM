@@ -34,6 +34,11 @@ class OMRModel:
     feature_names: list[str]
     train_residual_std: float  # For z-score normalization
     n_components: int  # Number of latent components (PLS/PCA)
+    train_samples: int = 0
+    train_features: int = 0
+    train_residual_mean: float = 0.0
+    train_residual_p95: float = 0.0
+    train_residual_max: float = 0.0
     linear_models: Optional[List[Dict[str, Any]]] = None  # Stored ridge sub-models for linear mode
     
     def to_dict(self) -> Dict[str, Any]:
@@ -56,6 +61,11 @@ class OMRModel:
             "feature_names": self.feature_names,
             "train_residual_std": self.train_residual_std,
             "n_components": self.n_components,
+            "train_samples": self.train_samples,
+            "train_features": self.train_features,
+            "train_residual_mean": self.train_residual_mean,
+            "train_residual_p95": self.train_residual_p95,
+            "train_residual_max": self.train_residual_max,
             "model_bytes": model_bytes.read(),
             "scaler_bytes": scaler_bytes.read(),
         }
@@ -231,6 +241,9 @@ class OMRDetector:
             # Compute residuals
             residuals = X_scaled - X_recon
             residual_norm = np.linalg.norm(residuals, axis=1)  # L2 norm per sample
+            train_residual_mean = float(np.mean(residual_norm))
+            train_residual_p95 = float(np.percentile(residual_norm, 95))
+            train_residual_max = float(np.max(residual_norm))
             train_residual_std = float(np.std(residual_norm))
             
             # OMR-FIX-01: Enforce lower bound to prevent division by zero without muting anomalies
@@ -243,6 +256,11 @@ class OMRDetector:
                 feature_names=feature_names,
                 train_residual_std=train_residual_std,
                 n_components=max_components,
+                train_samples=int(n_samples),
+                train_features=int(n_features),
+                train_residual_mean=train_residual_mean,
+                train_residual_p95=train_residual_p95,
+                train_residual_max=train_residual_max,
                 linear_models=linear_models if selected_model == "linear" else None
             )
             self._is_fitted = True
@@ -414,6 +432,11 @@ class OMRDetector:
                 feature_names=model_dict["feature_names"],
                 train_residual_std=model_dict["train_residual_std"],
                 n_components=model_dict["n_components"],
+                train_samples=int(model_dict.get("train_samples", 0)),
+                train_features=int(model_dict.get("train_features", len(model_dict.get("feature_names", [])))),
+                train_residual_mean=float(model_dict.get("train_residual_mean", 0.0)),
+                train_residual_p95=float(model_dict.get("train_residual_p95", 0.0)),
+                train_residual_max=float(model_dict.get("train_residual_max", 0.0)),
                 linear_models=linear_models
             )
             inst._is_fitted = True

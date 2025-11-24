@@ -67,6 +67,8 @@ ALLOWED_TABLES = {
     'ACM_SensorNormalized_TS',
     'ACM_OMRContributions','ACM_OMRContributionsLong','ACM_FusionQuality','ACM_FusionQualityReport',
     'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
+    # OMR enhancements
+    'ACM_OMR_Metrics','ACM_OMR_TopContributors','ACM_OMR_SensorContributions',
     'ACM_HealthDistributionOverTime','ACM_ChartGenerationLog',
     'ACM_FusionMetrics',
     # Continuous forecasting enhancements
@@ -2193,10 +2195,55 @@ class OutputManager:
                 table_count += 1
                 if result.get('sql_written'): sql_count += 1
 
-                # Write OMR per-sensor contributions (long format) when available
-                if omr_contributions is not None and not omr_contributions.empty:
+                # Compute OMR gating and metrics upfront
+                omr_series = pd.to_numeric(scores_df.get('omr_z'), errors='coerce') if 'omr_z' in scores_df.columns else pd.Series(dtype=float)
+                try:
+                    weights = (cfg.get('fusion', {}) or {}).get('weights', {})
+                    omr_weight = float(weights.get('omr_z', weights.get('omr', 0.0)))
+                except Exception:
+                    omr_weight = 0.0
+                # Use clip consistent with OMR z clipping (±10); allow config override if present
+                try:
+                    clip_z_cfg = float(((cfg.get('thresholds', {}) or {}).get('self_tune', {}) or {}).get('clip_z', 10.0) or 10.0)
+                except Exception:
+                    clip_z_cfg = 10.0
+                omr_saturation = float(((omr_series.abs() >= max(clip_z_cfg - 0.5, 0.0)).mean() * 100.0) if len(omr_series) else 0.0)
+                omr_std = float(np.nanstd(omr_series.values)) if len(omr_series) else 0.0
+                omr_points = int(len(omr_series))
+                quality_ok = bool((omr_std > 1e-6) and (omr_saturation < 20.0))
+                gating_ok = bool((omr_weight >= 0.05) and quality_ok)
+
+                # OMR metrics table
+                try:
+                    omr_metrics_rows = [
+                        {"MetricName": "OMR_Weight", "MetricValue": round(omr_weight, 6)},
+                        {"MetricName": "OMR_Z_Std", "MetricValue": round(omr_std, 6)},
+                        {"MetricName": "OMR_Z_Median", "MetricValue": round(float(np.nanmedian(omr_series.values)) if omr_points else 0.0, 6)},
+                        {"MetricName": "OMR_Z_P90", "MetricValue": round(float(np.nanpercentile(omr_series.values, 90)) if omr_points else 0.0, 6)},
+                        {"MetricName": "OMR_Z_P99", "MetricValue": round(float(np.nanpercentile(omr_series.values, 99)) if omr_points else 0.0, 6)},
+                        {"MetricName": "OMR_SaturationPct", "MetricValue": round(omr_saturation, 4)},
+                        {"MetricName": "OMR_ClipZ", "MetricValue": round(clip_z_cfg, 4)},
+                        {"MetricName": "OMR_Points", "MetricValue": float(omr_points)},
+                        {"MetricName": "QualityOK", "MetricValue": 1.0 if quality_ok else 0.0},
+                        {"MetricName": "OMR_DISABLED", "MetricValue": 0.0 if gating_ok else 1.0},
+                    ]
+                    omr_metrics_df = pd.DataFrame(omr_metrics_rows)
+                    result = self.write_dataframe(
+                        omr_metrics_df,
+                        tables_dir / "omr_metrics.csv",
+                        sql_table="ACM_OMR_Metrics" if force_sql else None,
+                        add_created_at=True
+                    )
+                    table_count += 1
+                    if result.get('sql_written'): sql_count += 1
+                except Exception as e:
+                    Console.warn(f"[ANALYTICS] Failed to write omr_metrics.csv: {e}")
+
+                # Write OMR per-sensor contributions (long format) when available and enabled
+                if gating_ok and omr_contributions is not None and not omr_contributions.empty:
                     try:
                         omr_long = self._generate_omr_contributions_long(scores_df, omr_contributions)
+                        # Primary long table
                         result = self.write_dataframe(
                             omr_long,
                             tables_dir / "omr_contributions_long.csv",
@@ -2207,8 +2254,19 @@ class OutputManager:
                         )
                         table_count += 1
                         if result.get('sql_written'): sql_count += 1
+                        # Alias to ACM_OMR_SensorContributions to match downstream expectations
+                        result = self.write_dataframe(
+                            omr_long,
+                            tables_dir / "omr_sensor_contributions.csv",
+                            sql_table="ACM_OMR_SensorContributions" if force_sql else None,
+                            add_created_at=True,
+                            sql_columns={"Sensor": "SensorName"},
+                            non_numeric_cols={"SensorName"}
+                        )
+                        table_count += 1
+                        if result.get('sql_written'): sql_count += 1
                     except Exception as e:
-                        Console.warn(f"[ANALYTICS] Failed to write omr_contributions_long.csv: {e}")
+                        Console.warn(f"[ANALYTICS] Failed to write OMR contributions: {e}")
 
                 # Fusion quality snapshot (weights + basic stats)
                 try:
@@ -2306,6 +2364,26 @@ class OutputManager:
                         if result.get('sql_written'): sql_count += 1
                     except Exception as e:
                         Console.warn(f"[ANALYTICS] Failed to write omr_timeline.csv: {e}")
+
+                    # OMR Top Contributors per episode (when available and enabled)
+                    if gating_ok and omr_contributions is not None and not omr_contributions.empty:
+                        try:
+                            topc_df = self._generate_omr_top_contributors(scores_df, episodes_df, omr_contributions)
+                            if not topc_df.empty:
+                                result = self.write_dataframe(
+                                    topc_df,
+                                    tables_dir / "omr_top_contributors.csv",
+                                    sql_table="ACM_OMR_TopContributors" if force_sql else None,
+                                    add_created_at=True,
+                                    sql_columns={"Sensor": "SensorName"},
+                                    non_numeric_cols={"SensorName"}
+                                )
+                                table_count += 1
+                                if result.get('sql_written'): sql_count += 1
+                            else:
+                                table_count += 1
+                        except Exception as e:
+                            Console.warn(f"[ANALYTICS] Failed to write omr_top_contributors.csv: {e}")
 
                     # Compact regime stats for dashboards
                     try:
@@ -5297,6 +5375,107 @@ class OutputManager:
             'OMR_Z': omr_series.round(4).to_list(),
             'OMR_Weight': [omr_weight] * len(ts_values)
         })
+
+    def _generate_omr_top_contributors(
+        self,
+        scores_df: pd.DataFrame,
+        episodes_df: Optional[pd.DataFrame],
+        omr_contributions: pd.DataFrame,
+        top_n: int = 5,
+    ) -> pd.DataFrame:
+        """Return top-N OMR contributors per episode window.
+
+        Columns: EpisodeID, EpisodeStart, Rank, Sensor, SensorName, Contribution, ContributionPct
+        """
+        if episodes_df is None or len(episodes_df) == 0:
+            return pd.DataFrame(columns=[
+                'EpisodeID','EpisodeStart','Rank','Sensor','SensorName','Contribution','ContributionPct'
+            ])
+
+        # Normalize episode column names
+        cols = {str(c).lower(): c for c in episodes_df.columns}
+        ep_id_col = cols.get('episode_id') or cols.get('episodeid')
+        start_col = cols.get('start_ts') or cols.get('startts') or cols.get('starttime') or cols.get('start')
+        end_col = cols.get('end_ts') or cols.get('endts') or cols.get('endtime') or cols.get('end')
+
+        # Synthesize IDs if not present
+        if ep_id_col is None:
+            episodes_df = episodes_df.copy()
+            episodes_df['EpisodeID'] = range(1, len(episodes_df) + 1)
+            ep_id_col = 'EpisodeID'
+
+        if start_col is None:
+            # Cannot compute without time window
+            return pd.DataFrame(columns=[
+                'EpisodeID','EpisodeStart','Rank','Sensor','SensorName','Contribution','ContributionPct'
+            ])
+
+        omr_series = pd.to_numeric(scores_df.get('omr_z'), errors='coerce') if 'omr_z' in scores_df.columns else pd.Series(dtype=float)
+
+        # Flatten multiindex contributions columns if needed
+        if isinstance(omr_contributions.columns, pd.MultiIndex):
+            try:
+                omr_contributions = omr_contributions.copy()
+                omr_contributions.columns = [str(c[-1]) for c in omr_contributions.columns]
+            except Exception:
+                pass
+
+        records: List[Dict[str, Any]] = []
+        for _, ep in episodes_df.iterrows():
+            try:
+                ep_id = ep[ep_id_col]
+                start_ts = pd.to_datetime(ep[start_col], errors='coerce') if start_col in ep else None
+                if start_ts is None or pd.isna(start_ts):
+                    continue
+                end_ts = pd.to_datetime(ep[end_col], errors='coerce') if end_col and end_col in ep else None
+                if end_ts is None or pd.isna(end_ts):
+                    end_ts = start_ts + pd.Timedelta(hours=1)
+
+                contrib_win = omr_contributions.loc[(omr_contributions.index >= start_ts) & (omr_contributions.index <= end_ts)]
+                if contrib_win.empty:
+                    continue
+
+                # Choose timestamp of peak OMR within window when possible
+                if len(omr_series):
+                    omr_win = omr_series.loc[(omr_series.index >= start_ts) & (omr_series.index <= end_ts)]
+                    if not omr_win.empty:
+                        peak_ts = omr_win.idxmax()
+                        if peak_ts in contrib_win.index:
+                            contrib_at_peak = contrib_win.loc[peak_ts]
+                        else:
+                            # nearest index
+                            try:
+                                nearest_idx = contrib_win.index.get_indexer([peak_ts], method='nearest')[0]
+                                contrib_at_peak = contrib_win.iloc[int(nearest_idx)]
+                            except Exception:
+                                contrib_at_peak = contrib_win.iloc[-1]
+                    else:
+                        contrib_at_peak = contrib_win.iloc[-1]
+                else:
+                    contrib_at_peak = contrib_win.iloc[-1]
+
+                s = pd.to_numeric(contrib_at_peak, errors='coerce').fillna(0.0)
+                total = float(np.nansum(np.abs(s.values)))
+                pct = (s / total * 100.0) if total > 0 else (s * 0.0)
+
+                top = s.sort_values(ascending=False).head(int(top_n))
+                for rank, (sensor, value) in enumerate(top.items(), start=1):
+                    records.append({
+                        'EpisodeID': ep_id,
+                        'EpisodeStart': start_ts,
+                        'Rank': int(rank),
+                        'Sensor': str(sensor),
+                        'SensorName': str(sensor),
+                        'Contribution': float(value),
+                        'ContributionPct': float(pct.get(sensor, 0.0)),
+                    })
+            except Exception:
+                continue
+
+        df = pd.DataFrame.from_records(records)
+        if not df.empty:
+            df['EpisodeStart'] = _to_naive_series(df['EpisodeStart'])
+        return df
 
 def create_output_manager(sql_client=None, run_id: str = None, equip_id: int = None, **kwargs) -> OutputManager:
     """Factory function for creating OutputManager instances."""
