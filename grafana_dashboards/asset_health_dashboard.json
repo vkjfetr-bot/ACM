@@ -3055,11 +3055,11 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp AS time, Sensor AS metric, ContributionPct AS value FROM ACM_OMRContributionsLong WHERE EquipID = $equipment AND $__timeFilter(Timestamp) ORDER BY Timestamp, Sensor",
+          "rawSql": "WITH RankedContribs AS (\n  SELECT \n    Timestamp,\n    SensorName,\n    ContributionPct,\n    ROW_NUMBER() OVER (PARTITION BY Timestamp ORDER BY ContributionPct DESC) as rn\n  FROM ACM_OMRContributionsLong\n  WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\n)\nSELECT \n  Timestamp AS time,\n  SensorName AS metric,\n  ContributionPct AS value\nFROM RankedContribs\nWHERE rn <= 10\nORDER BY Timestamp, ContributionPct DESC",
           "refId": "A"
         }
       ],
-      "title": "OMR Sensor Contributions (%)",
+      "title": "OMR Top 10 Feature Contributions (%)",
       "type": "timeseries"
     },
     {
