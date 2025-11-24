@@ -2992,8 +2992,8 @@
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 50,
+            "drawStyle": "bars",
+            "fillOpacity": 100,
             "gradientMode": "none",
             "hideFrom": {
               "tooltip": false,
@@ -3002,7 +3002,7 @@
             },
             "insertNulls": false,
             "lineInterpolation": "linear",
-            "lineWidth": 1,
+            "lineWidth": 0,
             "pointSize": 5,
             "scaleDistribution": {
               "type": "linear"
@@ -3040,9 +3040,9 @@
       "id": 31,
       "options": {
         "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
+          "calcs": ["mean", "max"],
+          "displayMode": "table",
+          "placement": "right",
           "showLegend": true
         },
         "tooltip": {
@@ -3055,11 +3055,11 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "WITH RankedContribs AS (\n  SELECT \n    Timestamp,\n    SensorName,\n    ContributionPct,\n    ROW_NUMBER() OVER (PARTITION BY Timestamp ORDER BY ContributionPct DESC) as rn\n  FROM ACM_OMRContributionsLong\n  WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\n)\nSELECT \n  Timestamp AS time,\n  SensorName AS metric,\n  ContributionPct AS value\nFROM RankedContribs\nWHERE rn <= 10\nORDER BY Timestamp, ContributionPct DESC",
+          "rawSql": "WITH RankedContribs AS (\n  SELECT \n    Timestamp,\n    SensorName,\n    ContributionPct,\n    ROW_NUMBER() OVER (PARTITION BY Timestamp ORDER BY ContributionPct DESC) as rn\n  FROM ACM_OMRContributionsLong\n  WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\n)\nSELECT \n  Timestamp AS time,\n  SUBSTRING(SensorName, 1, 30) AS metric,\n  ContributionPct AS value\nFROM RankedContribs\nWHERE rn <= 5\nORDER BY Timestamp, ContributionPct DESC",
           "refId": "A"
         }
       ],
-      "title": "OMR Top 10 Feature Contributions (%)",
+      "title": "OMR Top 5 Contributors (Stacked %)",
       "type": "timeseries"
     },
     {
