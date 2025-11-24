@@ -2794,7 +2794,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic-by-name"
           },
           "custom": {
             "axisBorderShow": false,
@@ -2815,7 +2815,7 @@
             "insertNulls": false,
             "lineInterpolation": "smooth",
             "lineWidth": 0,
-            "pointSize": 6,
+            "pointSize": 3,
             "scaleDistribution": {
               "type": "linear"
             },
@@ -2861,9 +2861,11 @@
       "id": 28,
       "options": {
         "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "right",
           "showLegend": true
         },
         "tooltip": {
@@ -2911,8 +2913,8 @@
       },
       {
         "current": {
-          "text": "2621",
-          "value": "2621"
+          "text": "1",
+          "value": "1"
         },
         "datasource": {
           "type": "mssql",
@@ -2969,8 +2971,8 @@
     ]
   },
   "time": {
-    "from": "2023-10-03T10:32:37.940Z",
-    "to": "2023-11-19T04:52:51.756Z"
+    "from": "2024-05-16T02:43:13.987Z",
+    "to": "2024-06-16T18:09:39.146Z"
   },
   "timepicker": {
     "refresh_intervals": [
@@ -2985,5 +2987,5 @@
   "timezone": "",
   "title": "ACM Asset Health Dashboard",
   "uid": "addfw6x",
-  "version": 31
+  "version": 33
 }

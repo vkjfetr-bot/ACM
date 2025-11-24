@@ -84,9 +84,9 @@ All other historical tasks were either completed (already struck through in prev
 
 ## Historical Context
 
-- The previous `Task Backlog.md` and `Task Backlog.md` documents were audited on 2025-11-16. Duplicates were removed, chart/CSV-only tasks were archived, and completed logging upgrades were marked done.
-- `CHART-03/04/13/15/16/17/18`, OUT-03/05/20/21/24/26/27/28, DEBT-04, CFG-07, SQL-57, and all logging upgrades are confirmed complete.
-- SQL Run Logs, module-level logging overrides, and CLI logging flags now ship, so DEBT-16/17 are closed.
+~~- The previous `Task Backlog.md` and `Task Backlog.md` documents were audited on 2025-11-16. Duplicates were removed, chart/CSV-only tasks were archived, and completed logging upgrades were marked done.~~
+~~- `CHART-03/04/13/15/16/17/18`, OUT-03/05/20/21/24/26/27/28, DEBT-04, CFG-07, SQL-57, and all logging upgrades are confirmed complete.~~
+~~- SQL Run Logs, module-level logging overrides, and CLI logging flags now ship, so DEBT-16/17 are closed.~~
 
 For everything else, the single source of truth is now **GitHub Issues**. This document will be updated only when the set of workstreams changes (e.g., adding a new audit area or closing a pillar entirely).
 
