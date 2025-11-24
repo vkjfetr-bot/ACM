@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import joblib
+import uuid
 
 # --- import guard to support both `python -m core.acm_main` and `python core\acm_main.py`
 try:
@@ -43,7 +44,6 @@ from core.omr import OMRDetector  # OMR-02: Overall Model Residual
 
 # Import the unified output system
 from core.output_manager import OutputManager
-from core import rul_estimator
 from core.sql_logger import SqlLogSink
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
@@ -509,63 +509,66 @@ def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
 
 def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str, pd.Timestamp, pd.Timestamp, int]:
     """
-    Calls dbo.usp_ACM_StartRun and returns (run_id, window_start, window_end, equip_id).
-    Uses a T-SQL block with OUTPUT parameters and a SELECT for capture.
+    Calls dbo.usp_ACM_StartRun using the current stored-proc signature.
     """
-    # Get EquipID from equipment name
     equip_id = _get_equipment_id(equip_code)
-    
     stage = cfg.get("runtime", {}).get("stage", "score")
     version = cfg.get("runtime", {}).get("version", "v5.0.0")
     config_hash = cfg.get("hash", "")
     trigger = "timer"
-    tick_minutes = cfg.get("runtime", {}).get("tick_minutes", 30)  # Default 30-minute intervals
-    
-    # Calculate window based on tick_minutes
-    now_utc = pd.Timestamp.now(tz='UTC').replace(tzinfo=None)
-    window_start = now_utc - pd.Timedelta(minutes=tick_minutes)
-    window_end = now_utc
+    tick_minutes = cfg.get("runtime", {}).get("tick_minutes", 30)
 
-    # SP signature matches user's actual procedure: @EquipID, @ConfigHash, @WindowStartEntryDateTime, @WindowEndEntryDateTime, @Stage, @Version, @TriggerReason, @TickMinutes, @DefaultStartUtc, @RunID OUT, @EquipIDOut OUT
+    default_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=tick_minutes)
+
     tsql = """
-    DECLARE @RunID UNIQUEIDENTIFIER, @EID INT;
+    DECLARE @RunID UNIQUEIDENTIFIER, @WS DATETIME2(3), @WE DATETIME2(3), @EID INT;
     EXEC dbo.usp_ACM_StartRun
+        @EquipCode = NULL,
         @EquipID = ?,
-        @ConfigHash = ?,
-        @WindowStartEntryDateTime = ?,
-        @WindowEndEntryDateTime = ?,
         @Stage = ?,
-        @Version = ?,
-        @TriggerReason = ?,
         @TickMinutes = ?,
         @DefaultStartUtc = ?,
+        @Version = ?,
+        @ConfigHash = ?,
+        @TriggerReason = ?,
         @RunID = @RunID OUTPUT,
+        @WindowStartEntryDateTime = @WS OUTPUT,
+        @WindowEndEntryDateTime = @WE OUTPUT,
         @EquipIDOut = @EID OUTPUT;
-    SELECT CONVERT(varchar(36), @RunID) AS RunID, ? AS WindowStart, ? AS WindowEnd, @EID AS EquipID;
+    SELECT CONVERT(varchar(36), @RunID) AS RunID, @WS AS WindowStart, @WE AS WindowEnd, @EID AS EquipID;
     """
-    
+
     cur = cli.cursor()
     try:
-        Console.info(f"[DEBUG] Calling usp_ACM_StartRun with EquipID={equip_id}, Stage={stage}, TickMinutes={tick_minutes}")
-        # Params: @EquipID, @ConfigHash, @WindowStartEntryDateTime, @WindowEndEntryDateTime, @Stage, @Version, @TriggerReason, @TickMinutes, @DefaultStartUtc, then 2 for SELECT
-        cur.execute(tsql, (equip_id, config_hash, window_start, window_end, stage, version, trigger, tick_minutes, window_start, window_start, window_end))
+        Console.info(f"[DEBUG] Calling usp_ACM_StartRun (stage={stage}, tick={tick_minutes})")
+        cur.execute(
+            tsql,
+        (
+            equip_id,
+            stage,
+            tick_minutes,
+            default_start,
+            version,
+            config_hash,
+            trigger,
+        ),
+        )
         row = cur.fetchone()
         if not row or row[0] is None:
             raise RuntimeError("usp_ACM_StartRun did not return a RunID.")
         run_id = str(row[0])
-        ws = pd.to_datetime(row[1]) if row[1] else window_start
-        we = pd.to_datetime(row[2]) if row[2] else window_end
-        # Get EquipID from stored procedure output (4th column)
-        equip_id_out = int(row[3]) if len(row) > 3 and row[3] is not None else equip_id
+        window_start = pd.to_datetime(row[1]) if row[1] is not None else default_start
+        window_end = pd.to_datetime(row[2]) if row[2] is not None else window_start + pd.Timedelta(minutes=tick_minutes)
+        equip_id_out = int(row[3]) if row[3] is not None else 0
         cli.conn.commit()
-        Console.info(f"[RUN] Started RunID={run_id} window=[{ws},{we}) equip='{equip_code}' EquipID={equip_id_out}")
-        return run_id, ws, we, equip_id_out
-    except Exception as e:
+        Console.info(f"[RUN] Started RunID={run_id} window=[{window_start},{window_end}) equip='{equip_code}' EquipID={equip_id_out}")
+        return run_id, window_start, window_end, equip_id_out
+    except Exception as exc:
         try:
             cli.conn.rollback()
         except Exception:
             pass
-        Console.error(f"[RUN] Failed to start SQL run: {e}")
+        Console.error(f"[RUN] Failed to start SQL run: {exc}")
         raise
     finally:
         cur.close()
@@ -605,6 +608,8 @@ def main() -> None:
     ap.add_argument("--log-module-level", action="append", default=[], metavar="MODULE=LEVEL",
                     help="Set per-module log level overrides (repeatable).")
     ap.add_argument("--disable-sql-logging", action="store_true", help="Disable SQL RunLogs sink even in SQL mode.")
+    ap.add_argument("--start-time", help="Override start time for SQL run (ISO format).")
+    ap.add_argument("--end-time", help="Override end time for SQL run (ISO format).")
     args = ap.parse_args()
 
     T = Timer(enable=True)
@@ -718,6 +723,22 @@ def main() -> None:
             equip_code = str(equip_codes[0] if isinstance(equip_codes, list) else equip)
             Console.info(f"[DEBUG] Final equip_code={equip_code}")
             run_id, win_start, win_end, equip_id = _sql_start_run(sql_client, cfg, equip_code)
+            
+            # Override window if CLI args provided (e.g. for batch backfill)
+            if args.start_time:
+                try:
+                    win_start = pd.Timestamp(args.start_time)
+                    Console.info(f"[RUN] Overriding WindowStart from CLI: {win_start}")
+                except Exception as e:
+                    Console.warn(f"[RUN] Failed to parse --start-time: {e}")
+            
+            if args.end_time:
+                try:
+                    win_end = pd.Timestamp(args.end_time)
+                    Console.info(f"[RUN] Overriding WindowEnd from CLI: {win_end}")
+                except Exception as e:
+                    Console.warn(f"[RUN] Failed to parse --end-time: {e}")
+
         except Exception as e:
             Console.error(f"[RUN] Failed to start SQL run: {e}")
             # ensure finalize in finally still runs with whatever we have
@@ -1386,15 +1407,36 @@ def main() -> None:
         if disabled_detectors:
             Console.info(f"[PERF] Lazy evaluation: skipping disabled detectors: {', '.join(disabled_detectors)}")
         
-        # Try loading cached regime model from joblib persistence (new system)
+        # Try loading cached regime model from joblib persistence (new system) OR RegimeState
         regime_model = None
+        regime_state_version = 0
         try:
-            regime_model = regimes.load_regime_model(stable_models_dir)
-            if regime_model is not None:
-                Console.info(f"[REGIME] Loaded cached regime model: K={regime_model.kmeans.n_clusters}, hash={regime_model.train_hash}")
+            # REGIME-STATE-01: Try loading from RegimeState first (enables continuity)
+            from core.model_persistence import load_regime_state
+            regime_state = load_regime_state(
+                artifact_root=Path(art_root),
+                equip=equip,
+                equip_id=equip_id if SQL_MODE or dual_mode else None,
+                sql_client=sql_client if SQL_MODE or dual_mode else None
+            )
+            
+            if regime_state is not None and regime_state.quality_ok:
+                Console.info(f"[REGIME_STATE] Loaded state v{regime_state.state_version}: K={regime_state.n_clusters}, silhouette={regime_state.silhouette_score:.3f}")
+                regime_state_version = regime_state.state_version
+                
+                # Reconstruct RegimeModel from state (will be validated against current basis later)
+                # Note: Feature columns will be set from regime_basis_train when available
+                regime_model = "STATE_LOADED"  # Placeholder, will be reconstructed in label()
+            else:
+                # Fallback to old joblib persistence
+                regime_model = regimes.load_regime_model(stable_models_dir)
+                if regime_model is not None:
+                    Console.info(f"[REGIME] Loaded cached regime model (legacy): K={regime_model.kmeans.n_clusters}, hash={regime_model.train_hash}")
         except Exception as e:
-            Console.warn(f"[REGIME] Failed to load cached regime model: {e}")
+            Console.warn(f"[REGIME] Failed to load cached regime state/model: {e}")
             regime_model = None
+            regime_state = None
+            regime_state_version = 0
         
         # Try loading from cache (either old detector_cache or new persistence system)
         if cached_models:
@@ -1752,18 +1794,40 @@ def main() -> None:
         # ===== 4) Regimes (Run before calibration to enable regime-aware thresholds) =====
         train_regime_labels = None
         score_regime_labels = None
+        regime_model_was_trained = False
+        
         with T.section("regimes.label"):
+            # REGIME-STATE-02: Reconstruct model from loaded state if available
+            if regime_model == "STATE_LOADED" and regime_state is not None and regime_basis_train is not None:
+                try:
+                    regime_model = regimes.regime_state_to_model(
+                        state=regime_state,
+                        feature_columns=list(regime_basis_train.columns),
+                        raw_tags=list(train_numeric.columns) if train_numeric is not None else [],
+                        train_hash=regime_basis_hash
+                    )
+                    Console.info(f"[REGIME_STATE] Reconstructed RegimeModel from state v{regime_state.state_version}")
+                except Exception as e:
+                    Console.warn(f"[REGIME_STATE] Failed to reconstruct model from state: {e}")
+                    regime_model = None
+            
             regime_ctx: Dict[str, Any] = {
                 "regime_basis_train": regime_basis_train,
                 "regime_basis_score": regime_basis_score,
                 "basis_meta": regime_basis_meta,
-                "regime_model": regime_model,
+                "regime_model": regime_model if regime_model != "STATE_LOADED" else None,
                 "regime_basis_hash": regime_basis_hash,
                 "X_train": train,
             }
             regime_out = regimes.label(score, regime_ctx, {"frame": frame}, cfg)
             frame = regime_out.get("frame", frame)
-            regime_model = regime_out.get("regime_model", regime_model)
+            new_regime_model = regime_out.get("regime_model", regime_model)
+            
+            # Check if model was retrained
+            if new_regime_model is not regime_model and new_regime_model is not None:
+                regime_model_was_trained = True
+                regime_model = new_regime_model
+            
             score_regime_labels = regime_out.get("regime_labels")
             train_regime_labels = regime_out.get("regime_labels_train")
             regime_quality_ok = bool(regime_out.get("regime_quality_ok", True))
@@ -1771,6 +1835,39 @@ def main() -> None:
                 train_regime_labels = regimes.predict_regime(regime_model, regime_basis_train)
             if score_regime_labels is None and regime_model is not None and regime_basis_score is not None:
                 score_regime_labels = regimes.predict_regime(regime_model, regime_basis_score)
+            
+            # REGIME-STATE-03: Save regime state if model was trained
+            if regime_model_was_trained and regime_model is not None:
+                try:
+                    from core.model_persistence import save_regime_state
+                    import hashlib
+                    
+                    # Generate config hash for change detection
+                    regime_cfg_str = str(cfg.get("regimes", {}))
+                    config_hash = hashlib.sha256(regime_cfg_str.encode()).hexdigest()[:16]
+                    
+                    # Convert model to state
+                    new_state = regimes.regime_model_to_state(
+                        model=regime_model,
+                        equip_id=equip_id,
+                        state_version=regime_state_version + 1,
+                        config_hash=config_hash,
+                        regime_basis_hash=str(regime_basis_hash) if regime_basis_hash else ""
+                    )
+                    
+                    # Save state
+                    save_regime_state(
+                        state=new_state,
+                        artifact_root=Path(art_root),
+                        equip=equip,
+                        sql_client=sql_client if SQL_MODE or dual_mode else None
+                    )
+                    
+                    regime_state_version = new_state.state_version
+                    Console.info(f"[REGIME_STATE] Saved state v{regime_state_version}: K={new_state.n_clusters}, quality_ok={new_state.quality_ok}")
+                except Exception as e:
+                    Console.warn(f"[REGIME_STATE] Failed to save regime state: {e}")
+        
         score_out = regime_out
         regime_quality_ok = bool(regime_out.get("regime_quality_ok", True))
 
@@ -2967,10 +3064,25 @@ def main() -> None:
                         # Regime timeline (if available)
                         if 'regime_label' in frame.columns:
                             regime_df = pd.DataFrame({
-                                'timestamp': frame.index.strftime('%Y-%m-%d %H:%M:%S'),
-                                'regime_label': frame['regime_label']
+                                'Timestamp': frame.index,
+                                'RegimeLabel': frame['regime_label'].astype(int),
+                                'EquipID': equip_id,
+                                'RunID': run_id
                             })
-                            output_manager.write_dataframe(regime_df, tables_dir / "regime_timeline.csv")
+                            # Add RegimeState based on regime_model if available
+                            if regime_model and hasattr(regime_model, 'health_labels'):
+                                regime_df['RegimeState'] = regime_df['RegimeLabel'].map(
+                                    lambda x: regime_model.health_labels.get(int(x), 'unknown')
+                                )
+                            else:
+                                regime_df['RegimeState'] = 'unknown'
+                            
+                            output_manager.write_dataframe(
+                                regime_df, 
+                                tables_dir / "regime_timeline.csv",
+                                sql_table="ACM_RegimeTimeline" if SQL_MODE else None,
+                                add_created_at=True
+                            )
                             table_count += 1
 
                 Console.info(f"[OUTPUTS] Generated {table_count} analytics tables via OutputManager")
@@ -2997,6 +3109,8 @@ def main() -> None:
                                 "equip_id": int(equip_id) if 'equip_id' in locals() else None,
                                 "output_manager": output_manager,  # FCST-15: Pass output_manager for artifact cache
                             }
+                            # Import deprecated forecast module for legacy forecast.run() function
+                            from core import forecast_deprecated as forecast
                             forecast_result = forecast.run(forecast_ctx)
                             if "error" not in forecast_result:
                                 Console.info(
@@ -3019,24 +3133,15 @@ def main() -> None:
 
                 # === RUL + SQL surfacing of forecast ===
                 try:
-                    health_threshold = float(
-                        (cfg.get("analytics", {}) or {}).get(
-                            "health_alert_threshold", 70.0
-                        )
-                    )
-                except Exception:
-                    health_threshold = 70.0
-                try:
-                    # Use enhanced RUL estimator (with adaptive learning, ensemble models, Bayesian updating)
-                    from core import enhanced_rul_estimator
-                    rul_tables = enhanced_rul_estimator.estimate_rul_and_failure(
+                    # STACK-01: Unified RUL estimation via forecasting module
+                    rul_tables = forecasting.estimate_rul(
                         tables_dir=tables_dir,
                         equip_id=int(equip_id) if 'equip_id' in locals() else None,
                         run_id=str(run_id) if run_id is not None else None,
-                        health_threshold=health_threshold,
+                        config=cfg,
                         sql_client=getattr(output_manager, "sql_client", None),
-                            output_manager=output_manager,  # RUL-01: Pass output_manager for artifact cache
-                        )
+                        output_manager=output_manager,
+                    )
                     if rul_tables:
                         Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables")
                         enable_sql_rul = getattr(output_manager, "sql_client", None) is not None
@@ -3063,107 +3168,52 @@ def main() -> None:
 
                 # === ENHANCED FORECASTING ===
                 try:
-                    enhanced_enabled = (cfg.get("forecasting", {}) or {}).get("enhanced_enabled", True)
-                    if enhanced_enabled:
-                        # In SQL mode, use the SQL-only wrapper to avoid filesystem dependencies.
-                        if SQL_MODE and getattr(output_manager, "sql_client", None) is not None:
-                            Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
-                            ef_result = forecasting.run_enhanced_forecasting_sql(
-                                sql_client=output_manager.sql_client,
-                                equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                                run_id=str(run_id) if run_id is not None else None,
-                                config=cfg,
-                            )
-                            metrics = (ef_result or {}).get("metrics") or {}
-                            if metrics:
-                                Console.info(
-                                    "[ENHANCED_FORECAST] "
-                                    f"RUL={metrics.get('rul_hours', 0.0):.1f}h, "
-                                    f"MaxFailProb={metrics.get('max_failure_probability', 0.0)*100:.1f}%, "
-                                    f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
-                                    f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
+                    Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
+                    # Extract latest batch time from frame.index for proper sliding window queries
+                    batch_time = None
+                    if 'frame' in locals() and frame is not None and not frame.empty:
+                        try:
+                            batch_time = pd.to_datetime(frame.index.max())
+                        except Exception:
+                            pass
+                    metrics = forecasting.run_and_persist_enhanced_forecasting(
+                        sql_client=output_manager.sql_client,
+                        equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                        run_id=str(run_id) if run_id is not None else None,
+                        config=cfg,
+                        output_manager=output_manager,
+                        tables_dir=tables_dir,
+                        artifact_root=Path("artifacts"),
+                        equip=equip,
+                        current_batch_time=batch_time,
+                    )
+                    if metrics:
+                        Console.info(
+                            "[ENHANCED_FORECAST] "
+                            f"RUL={metrics.get('rul_hours', 0.0):.1f}h, "
+                            f"MaxFailProb={metrics.get('max_failure_probability', 0.0)*100:.1f}%, "
+                            f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
+                            f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
+                        )
+                        # Write retrain metadata (ACM_RunMetadata)
+                        try:
+                            if getattr(output_manager, 'sql_client', None):
+                                from core.run_metadata_writer import write_retrain_metadata
+                                write_retrain_metadata(
+                                    sql_client=output_manager.sql_client,
+                                    run_id=str(run_id),
+                                    equip_id=int(equip_id),
+                                    equip_name=str(equip),
+                                    retrain_decision=bool(metrics.get('retrain_needed', False)),
+                                    retrain_reason=str(metrics.get('retrain_reason', 'N/A')),
+                                    forecast_state_version=int(metrics.get('forecast_state_version', 0)),
+                                    model_age_batches=None,
+                                    forecast_rmse=metrics.get('forecast_rmse'),
+                                    forecast_mae=metrics.get('forecast_mae'),
+                                    forecast_mape=metrics.get('forecast_mape'),
                                 )
-
-                            ef_tables = (ef_result or {}).get("tables") or {}
-                            if ef_tables:
-                                ef_sql_map = {
-                                    "failure_probability_ts": "ACM_EnhancedFailureProbability_TS",
-                                    "failure_causation": "ACM_FailureCausation",
-                                    "enhanced_maintenance_recommendation": "ACM_EnhancedMaintenanceRecommendation",
-                                    "recommended_actions": "ACM_RecommendedActions",
-                                }
-                                ef_csv_map = {
-                                    "failure_probability_ts": "enhanced_failure_probability.csv",
-                                    "failure_causation": "failure_causation.csv",
-                                    "enhanced_maintenance_recommendation": "enhanced_maintenance_recommendation.csv",
-                                    "recommended_actions": "recommended_actions.csv",
-                                }
-
-                                def _coerce_naive(df_in: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-                                    df_out = df_in.copy()
-                                    for col in columns:
-                                        if col in df_out.columns:
-                                            df_out[col] = pd.to_datetime(df_out[col], errors="coerce")
-                                            try:
-                                                df_out[col] = df_out[col].dt.tz_localize(None)
-                                            except Exception:
-                                                pass
-                                    return df_out
-
-                                for logical_name, sql_table in ef_sql_map.items():
-                                    df = ef_tables.get(logical_name)
-                                    if df is None or df.empty:
-                                        continue
-
-                                    df_to_write = df.copy()
-                                    if logical_name == "recommended_actions":
-                                        df_to_write = df_to_write.rename(
-                                            columns={
-                                                "action": "Action",
-                                                "priority": "Priority",
-                                                "estimated_duration_hours": "EstimatedDuration_Hours",
-                                            }
-                                        )
-
-                                    timestamp_cols = {
-                                        "failure_probability_ts": ["Timestamp"],
-                                        "failure_causation": ["PredictedFailureTime"],
-                                    }.get(logical_name, [])
-                                    if timestamp_cols:
-                                        df_to_write = _coerce_naive(df_to_write, timestamp_cols)
-
-                                    csv_name = ef_csv_map.get(logical_name, f"{logical_name}.csv")
-                                    output_manager.write_dataframe(
-                                        df_to_write,
-                                        tables_dir / csv_name,
-                                        sql_table=sql_table,
-                                        add_created_at="CreatedAt" not in df_to_write.columns,
-                                    )
-                        # In file mode, fall back to original file-based enhanced forecasting integration.
-                        elif not SQL_MODE:
-                            Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (file mode)")
-                            enhanced_ctx = {
-                                "run_dir": run_dir,
-                                "tables_dir": tables_dir,
-                                "plots_dir": plots_dir,
-                                "config": cfg,
-                                "run_id": str(run_id) if run_id is not None else None,
-                                "equip_id": int(equip_id) if 'equip_id' in locals() else None,
-                            }
-                            enhanced_result = forecasting.EnhancedForecastingEngine(cfg).run(enhanced_ctx) if forecasting.EnhancedForecastingEngine else {}
-                            if enhanced_result and enhanced_result.get("tables"):
-                                Console.info(
-                                    f"[ENHANCED_FORECAST] Generated {len(enhanced_result['tables'])} enhanced tables"
-                                )
-                            if enhanced_result and enhanced_result.get("metrics"):
-                                m = enhanced_result["metrics"]
-                                Console.info(
-                                    "[ENHANCED_FORECAST] "
-                                    f"RUL={m.get('rul_hours', 0.0):.1f}h, "
-                                    f"MaxFailProb={m.get('max_failure_probability', 0.0)*100:.1f}%, "
-                                    f"MaintenanceRequired={m.get('maintenance_required', False)}, "
-                                    f"Urgency={m.get('urgency_score', 0.0):.0f}/100"
-                                )
+                        except Exception as e:
+                            Console.warn(f"[RUN_META] Failed to write ACM_RunMetadata (file-mode block): {e}")
                 except Exception as e:
                     Console.warn(f"[ENHANCED_FORECAST] Enhanced forecasting failed: {e}")
             except Exception as e:
@@ -3203,22 +3253,14 @@ def main() -> None:
 
             # === RUL + SQL surfacing of forecast (SQL mode) ===
             try:
-                try:
-                    health_threshold = float(
-                        (cfg.get("analytics", {}) or {}).get(
-                            "health_alert_threshold", 70.0
-                        )
-                    )
-                except Exception:
-                    health_threshold = 70.0
-
-                rul_tables = rul_estimator.estimate_rul_and_failure(
+                # STACK-01: Unified RUL estimation via forecasting module
+                rul_tables = forecasting.estimate_rul(
                     tables_dir=tables_dir,
                     equip_id=int(equip_id) if 'equip_id' in locals() else None,
                     run_id=str(run_id) if run_id is not None else None,
-                    health_threshold=health_threshold,
+                    config=cfg,
                     sql_client=getattr(output_manager, "sql_client", None),
-                    output_manager=output_manager,  # RUL-01: Pass output_manager for artifact cache
+                    output_manager=output_manager,
                 )
                 if rul_tables:
                     Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables (SQL mode)")
@@ -3246,6 +3288,57 @@ def main() -> None:
 
         except Exception as e:
             Console.warn(f"[OUTPUTS] Comprehensive analytics generation failed: {e}")
+
+        # === ENHANCED FORECASTING (SQL MODE) ===
+        try:
+            Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
+            # Extract latest batch time from frame.index for proper sliding window queries
+            batch_time = None
+            if 'frame' in locals() and frame is not None and not frame.empty:
+                try:
+                    batch_time = pd.to_datetime(frame.index.max())
+                except Exception:
+                    pass
+            metrics = forecasting.run_and_persist_enhanced_forecasting(
+                sql_client=output_manager.sql_client,
+                equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                run_id=str(run_id) if run_id is not None else None,
+                config=cfg,
+                output_manager=output_manager,
+                tables_dir=tables_dir,
+                artifact_root=Path("artifacts"),
+                equip=equip,
+                current_batch_time=batch_time,
+            )
+            if metrics:
+                Console.info(
+                    "[ENHANCED_FORECAST] "
+                    f"RUL={metrics.get('rul_hours', 0.0):.1f}h, "
+                    f"MaxFailProb={metrics.get('max_failure_probability', 0.0)*100:.1f}%, "
+                    f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
+                    f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
+                )
+                # Write retrain metadata (ACM_RunMetadata)
+                try:
+                    if getattr(output_manager, 'sql_client', None):
+                        from core.run_metadata_writer import write_retrain_metadata
+                        write_retrain_metadata(
+                            sql_client=output_manager.sql_client,
+                            run_id=str(run_id),
+                            equip_id=int(equip_id),
+                            equip_name=str(equip),
+                            retrain_decision=bool(metrics.get('retrain_needed', False)),
+                            retrain_reason=str(metrics.get('retrain_reason', 'N/A')),
+                            forecast_state_version=int(metrics.get('forecast_state_version', 0)),
+                            model_age_batches=None,
+                            forecast_rmse=metrics.get('forecast_rmse'),
+                            forecast_mae=metrics.get('forecast_mae'),
+                            forecast_mape=metrics.get('forecast_mape'),
+                        )
+                except Exception as e:
+                    Console.warn(f"[RUN_META] Failed to write ACM_RunMetadata (SQL-mode block): {e}")
+        except Exception as e:
+            Console.warn(f"[ENHANCED_FORECAST] Enhanced forecasting (SQL mode) failed: {e}")
 
         # === SQL-SPECIFIC ARTIFACT WRITING (BATCHED TRANSACTION) ===
         # Batch all SQL writes in a single transaction to prevent connection pool exhaustion

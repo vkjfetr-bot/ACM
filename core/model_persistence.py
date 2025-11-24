@@ -49,10 +49,480 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timezone
 from io import BytesIO
+from dataclasses import dataclass, asdict
 import pandas as pd
 import numpy as np
 from utils.logger import Console
 
+
+# ============================================================================
+# Forecast State Persistence (FORECAST-STATE-01)
+# ============================================================================
+
+@dataclass
+class ForecastState:
+    """
+    Persistent state for continuous forecasting between batches.
+    Enables temporal continuity and conditional retraining.
+    
+    Attributes:
+        equip_id: Equipment ID
+        state_version: Incremental version number
+        model_type: Forecasting model type (AR1, ARIMA, ETS)
+        model_params: Serializable model parameters (phi, mu, sigma for AR1)
+        residual_variance: Model residual variance for quality tracking
+        last_forecast_horizon_json: JSON string of last forecast DataFrame
+        hazard_baseline: EWMA smoothed hazard rate for probability continuity
+        last_retrain_time: Timestamp of last full retrain
+        training_data_hash: Hash of training window for change detection
+        training_window_hours: Length of training window in hours
+        forecast_quality: Dict with rmse, mae, mape metrics
+    """
+    equip_id: int
+    state_version: int
+    model_type: str
+    model_params: Dict[str, Any]
+    residual_variance: float
+    last_forecast_horizon_json: str  # JSON array of {Timestamp, ForecastHealth, CI_Lower, CI_Upper}
+    hazard_baseline: float
+    last_retrain_time: str  # ISO format datetime string
+    training_data_hash: str
+    training_window_hours: int
+    forecast_quality: Dict[str, float]  # {rmse, mae, mape}
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return asdict(self)
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ForecastState":
+        """Create ForecastState from dictionary."""
+        return cls(**data)
+    
+    def get_last_forecast_horizon(self) -> pd.DataFrame:
+        """Deserialize forecast horizon from JSON string."""
+        try:
+            import json
+            horizon_data = json.loads(self.last_forecast_horizon_json)
+            df = pd.DataFrame(horizon_data)
+            if not df.empty and "Timestamp" in df.columns:
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+            return df
+        except Exception as e:
+            Console.warn(f"[FORECAST_STATE] Failed to deserialize forecast horizon: {e}")
+            return pd.DataFrame()
+    
+    @staticmethod
+    def serialize_forecast_horizon(df: pd.DataFrame) -> str:
+        """Serialize forecast horizon DataFrame to JSON string."""
+        try:
+            import json
+            if df.empty:
+                return "[]"
+            # Convert Timestamp to ISO string for JSON compatibility
+            df_copy = df.copy()
+            if "Timestamp" in df_copy.columns:
+                df_copy["Timestamp"] = df_copy["Timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S")
+            return json.dumps(df_copy.to_dict(orient="records"))
+        except Exception as e:
+            Console.warn(f"[FORECAST_STATE] Failed to serialize forecast horizon: {e}")
+            return "[]"
+
+
+def save_forecast_state(state: ForecastState, artifact_root: Path, equip: str, sql_client=None) -> None:
+    """
+    Save ForecastState to filesystem and optionally SQL.
+    
+    Args:
+        state: ForecastState object to persist
+        artifact_root: Root artifacts directory
+        equip: Equipment name
+        sql_client: Optional SQL client for dual persistence
+    """
+    # Filesystem persistence
+    if artifact_root.name == equip:
+        state_dir = artifact_root / "models"
+    else:
+        state_dir = artifact_root / equip / "models"
+    
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "forecast_state.json"
+    
+    try:
+        with open(state_file, "w") as f:
+            json.dump(state.to_dict(), f, indent=2)
+        Console.info(f"[FORECAST_STATE] Saved state v{state.state_version} to {state_file}")
+    except Exception as e:
+        Console.warn(f"[FORECAST_STATE] Failed to save state to filesystem: {e}")
+    
+    # SQL persistence (optional, dual-write)
+    if sql_client is not None:
+        try:
+            cur = sql_client.cursor()
+            
+            # Convert dicts to JSON strings for SQL storage
+            model_params_json = json.dumps(state.model_params)
+            forecast_quality_json = json.dumps(state.forecast_quality)
+            
+            # Upsert into ACM_ForecastState
+            cur.execute("""
+                MERGE INTO dbo.ACM_ForecastState AS target
+                USING (SELECT ? AS EquipID, ? AS StateVersion) AS source
+                ON target.EquipID = source.EquipID AND target.StateVersion = source.StateVersion
+                WHEN MATCHED THEN
+                    UPDATE SET
+                        ModelType = ?,
+                        ModelParamsJson = ?,
+                        ResidualVariance = ?,
+                        LastForecastHorizonJson = ?,
+                        HazardBaseline = ?,
+                        LastRetrainTime = ?,
+                        TrainingDataHash = ?,
+                        TrainingWindowHours = ?,
+                        ForecastQualityJson = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (EquipID, StateVersion, ModelType, ModelParamsJson, ResidualVariance,
+                            LastForecastHorizonJson, HazardBaseline, LastRetrainTime,
+                            TrainingDataHash, TrainingWindowHours, ForecastQualityJson)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                state.equip_id, state.state_version,  # MERGE match
+                state.model_type, model_params_json, state.residual_variance,
+                state.last_forecast_horizon_json, state.hazard_baseline,
+                state.last_retrain_time, state.training_data_hash,
+                state.training_window_hours, forecast_quality_json,  # UPDATE values
+                state.equip_id, state.state_version, state.model_type,
+                model_params_json, state.residual_variance,
+                state.last_forecast_horizon_json, state.hazard_baseline,
+                state.last_retrain_time, state.training_data_hash,
+                state.training_window_hours, forecast_quality_json  # INSERT values
+            ))
+            
+            if not sql_client.conn.autocommit:
+                sql_client.conn.commit()
+            
+            Console.info(f"[FORECAST_STATE] Saved state v{state.state_version} to ACM_ForecastState (EquipID={state.equip_id})")
+        except Exception as e:
+            Console.warn(f"[FORECAST_STATE] Failed to save state to SQL: {e}")
+
+
+def load_forecast_state(artifact_root: Path, equip: str, equip_id: Optional[int] = None, sql_client=None) -> Optional[ForecastState]:
+    """
+    Load latest ForecastState from filesystem or SQL.
+    
+    Args:
+        artifact_root: Root artifacts directory
+        equip: Equipment name
+        equip_id: Equipment ID (required for SQL loading)
+        sql_client: Optional SQL client to load from database
+    
+    Returns:
+        ForecastState object or None if not found
+    """
+    # Try SQL first if available
+    if sql_client is not None and equip_id is not None:
+        try:
+            cur = sql_client.cursor()
+            cur.execute("""
+                SELECT TOP 1
+                    EquipID, StateVersion, ModelType, ModelParamsJson, ResidualVariance,
+                    LastForecastHorizonJson, HazardBaseline, LastRetrainTime,
+                    TrainingDataHash, TrainingWindowHours, ForecastQualityJson
+                FROM dbo.ACM_ForecastState
+                WHERE EquipID = ?
+                ORDER BY StateVersion DESC
+            """, (equip_id,))
+            
+            row = cur.fetchone()
+            cur.close()
+            
+            if row:
+                state = ForecastState(
+                    equip_id=row[0],
+                    state_version=row[1],
+                    model_type=row[2],
+                    model_params=json.loads(row[3]) if row[3] else {},
+                    residual_variance=float(row[4]) if row[4] is not None else 0.0,
+                    last_forecast_horizon_json=row[5] or "[]",
+                    hazard_baseline=float(row[6]) if row[6] is not None else 0.0,
+                    last_retrain_time=row[7].isoformat() if row[7] else datetime.now(timezone.utc).isoformat(),
+                    training_data_hash=row[8] or "",
+                    training_window_hours=int(row[9]) if row[9] is not None else 72,
+                    forecast_quality=json.loads(row[10]) if row[10] else {}
+                )
+                Console.info(f"[FORECAST_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
+                return state
+        except Exception as e:
+            Console.warn(f"[FORECAST_STATE] Failed to load state from SQL: {e}")
+    
+    # Fallback to filesystem
+    if artifact_root.name == equip:
+        state_file = artifact_root / "models" / "forecast_state.json"
+    else:
+        state_file = artifact_root / equip / "models" / "forecast_state.json"
+    
+    if not state_file.exists():
+        Console.info("[FORECAST_STATE] No prior forecast state found")
+        return None
+    
+    try:
+        with open(state_file, "r") as f:
+            data = json.load(f)
+        state = ForecastState.from_dict(data)
+        Console.info(f"[FORECAST_STATE] Loaded state v{state.state_version} from {state_file}")
+        return state
+    except Exception as e:
+        Console.warn(f"[FORECAST_STATE] Failed to load state from filesystem: {e}")
+        return None
+
+
+# ============================================================================
+# Regime State Persistence (REGIME-STATE-01)
+# ============================================================================
+
+@dataclass
+class RegimeState:
+    """
+    Persistent state for regime clustering between batches.
+    Enables label continuity and conditional retraining.
+    
+    Attributes:
+        equip_id: Equipment ID
+        state_version: Incremental version number
+        n_clusters: Number of regime clusters
+        cluster_centers_json: JSON string of cluster centers (serialized numpy array)
+        scaler_mean_json: JSON string of scaler mean values
+        scaler_scale_json: JSON string of scaler scale values
+        pca_components_json: JSON string of PCA components (if used)
+        pca_explained_variance_json: JSON string of PCA explained variance ratios
+        n_pca_components: Number of PCA components (0 if not used)
+        silhouette_score: Clustering quality metric
+        quality_ok: Boolean indicating if regime model passes quality checks
+        last_trained_time: Timestamp of last training
+        config_hash: Hash of regime config for change detection
+        regime_basis_hash: Hash of regime basis features for change detection
+    """
+    equip_id: int
+    state_version: int
+    n_clusters: int
+    cluster_centers_json: str
+    scaler_mean_json: str
+    scaler_scale_json: str
+    pca_components_json: str
+    pca_explained_variance_json: str
+    n_pca_components: int
+    silhouette_score: float
+    quality_ok: bool
+    last_trained_time: str  # ISO format datetime string
+    config_hash: str
+    regime_basis_hash: str
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return asdict(self)
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RegimeState":
+        """Create RegimeState from dictionary."""
+        return cls(**data)
+    
+    def get_cluster_centers(self) -> np.ndarray:
+        """Deserialize cluster centers from JSON string."""
+        try:
+            centers = json.loads(self.cluster_centers_json)
+            return np.array(centers)
+        except Exception as e:
+            Console.warn(f"[REGIME_STATE] Failed to deserialize cluster centers: {e}")
+            return np.array([])
+    
+    def get_scaler_params(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Deserialize scaler mean and scale from JSON strings."""
+        try:
+            mean = np.array(json.loads(self.scaler_mean_json))
+            scale = np.array(json.loads(self.scaler_scale_json))
+            return mean, scale
+        except Exception as e:
+            Console.warn(f"[REGIME_STATE] Failed to deserialize scaler params: {e}")
+            return np.array([]), np.array([])
+    
+    def get_pca_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Deserialize PCA components and explained variance."""
+        if self.n_pca_components == 0:
+            return None, None
+        try:
+            components = np.array(json.loads(self.pca_components_json))
+            explained_var = np.array(json.loads(self.pca_explained_variance_json))
+            return components, explained_var
+        except Exception as e:
+            Console.warn(f"[REGIME_STATE] Failed to deserialize PCA params: {e}")
+            return None, None
+    
+    @staticmethod
+    def serialize_array(arr: np.ndarray) -> str:
+        """Serialize numpy array to JSON string."""
+        try:
+            return json.dumps(arr.tolist())
+        except Exception as e:
+            Console.warn(f"[REGIME_STATE] Failed to serialize array: {e}")
+            return "[]"
+
+
+def save_regime_state(state: RegimeState, artifact_root: Path, equip: str, sql_client=None) -> None:
+    """
+    Save RegimeState to filesystem and optionally SQL.
+    
+    Args:
+        state: RegimeState object to persist
+        artifact_root: Root artifacts directory
+        equip: Equipment name
+        sql_client: Optional SQL client for dual persistence
+    """
+    # Filesystem persistence
+    if artifact_root.name == equip:
+        state_dir = artifact_root / "models"
+    else:
+        state_dir = artifact_root / equip / "models"
+    
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "regime_state.json"
+    
+    try:
+        with open(state_file, "w") as f:
+            json.dump(state.to_dict(), f, indent=2)
+        Console.info(f"[REGIME_STATE] Saved state v{state.state_version} to {state_file}")
+    except Exception as e:
+        Console.warn(f"[REGIME_STATE] Failed to save state to filesystem: {e}")
+    
+    # SQL persistence (optional, dual-write)
+    if sql_client is not None:
+        try:
+            cur = sql_client.cursor()
+            
+            # Upsert into ACM_RegimeState
+            cur.execute("""
+                MERGE INTO dbo.ACM_RegimeState AS target
+                USING (SELECT ? AS EquipID, ? AS StateVersion) AS source
+                ON target.EquipID = source.EquipID AND target.StateVersion = source.StateVersion
+                WHEN MATCHED THEN
+                    UPDATE SET
+                        NumClusters = ?,
+                        ClusterCentersJson = ?,
+                        ScalerMeanJson = ?,
+                        ScalerScaleJson = ?,
+                        PCAComponentsJson = ?,
+                        PCAExplainedVarianceJson = ?,
+                        NumPCAComponents = ?,
+                        SilhouetteScore = ?,
+                        QualityOk = ?,
+                        LastTrainedTime = ?,
+                        ConfigHash = ?,
+                        RegimeBasisHash = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (EquipID, StateVersion, NumClusters, ClusterCentersJson,
+                            ScalerMeanJson, ScalerScaleJson, PCAComponentsJson,
+                            PCAExplainedVarianceJson, NumPCAComponents, SilhouetteScore,
+                            QualityOk, LastTrainedTime, ConfigHash, RegimeBasisHash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                state.equip_id, state.state_version,  # MERGE match
+                state.n_clusters, state.cluster_centers_json,
+                state.scaler_mean_json, state.scaler_scale_json,
+                state.pca_components_json, state.pca_explained_variance_json,
+                state.n_pca_components, state.silhouette_score, state.quality_ok,
+                state.last_trained_time, state.config_hash, state.regime_basis_hash,  # UPDATE values
+                state.equip_id, state.state_version, state.n_clusters,
+                state.cluster_centers_json, state.scaler_mean_json,
+                state.scaler_scale_json, state.pca_components_json,
+                state.pca_explained_variance_json, state.n_pca_components,
+                state.silhouette_score, state.quality_ok,
+                state.last_trained_time, state.config_hash, state.regime_basis_hash  # INSERT values
+            ))
+            
+            if not sql_client.conn.autocommit:
+                sql_client.conn.commit()
+            
+            Console.info(f"[REGIME_STATE] Saved state v{state.state_version} to ACM_RegimeState (EquipID={state.equip_id})")
+        except Exception as e:
+            Console.warn(f"[REGIME_STATE] Failed to save state to SQL: {e}")
+
+
+def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] = None, sql_client=None) -> Optional[RegimeState]:
+    """
+    Load latest RegimeState from filesystem or SQL.
+    
+    Args:
+        artifact_root: Root artifacts directory
+        equip: Equipment name
+        equip_id: Equipment ID (required for SQL loading)
+        sql_client: Optional SQL client to load from database
+    
+    Returns:
+        RegimeState object or None if not found
+    """
+    # Try SQL first if available
+    if sql_client is not None and equip_id is not None:
+        try:
+            cur = sql_client.cursor()
+            cur.execute("""
+                SELECT TOP 1
+                    EquipID, StateVersion, NumClusters, ClusterCentersJson,
+                    ScalerMeanJson, ScalerScaleJson, PCAComponentsJson,
+                    PCAExplainedVarianceJson, NumPCAComponents, SilhouetteScore,
+                    QualityOk, LastTrainedTime, ConfigHash, RegimeBasisHash
+                FROM dbo.ACM_RegimeState
+                WHERE EquipID = ?
+                ORDER BY StateVersion DESC
+            """, (equip_id,))
+            
+            row = cur.fetchone()
+            cur.close()
+            
+            if row:
+                state = RegimeState(
+                    equip_id=row[0],
+                    state_version=row[1],
+                    n_clusters=int(row[2]) if row[2] is not None else 0,
+                    cluster_centers_json=row[3] or "[]",
+                    scaler_mean_json=row[4] or "[]",
+                    scaler_scale_json=row[5] or "[]",
+                    pca_components_json=row[6] or "[]",
+                    pca_explained_variance_json=row[7] or "[]",
+                    n_pca_components=int(row[8]) if row[8] is not None else 0,
+                    silhouette_score=float(row[9]) if row[9] is not None else 0.0,
+                    quality_ok=bool(row[10]) if row[10] is not None else False,
+                    last_trained_time=row[11].isoformat() if row[11] else datetime.now(timezone.utc).isoformat(),
+                    config_hash=row[12] or "",
+                    regime_basis_hash=row[13] or ""
+                )
+                Console.info(f"[REGIME_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
+                return state
+        except Exception as e:
+            Console.warn(f"[REGIME_STATE] Failed to load state from SQL: {e}")
+    
+    # Fallback to filesystem
+    if artifact_root.name == equip:
+        state_file = artifact_root / "models" / "regime_state.json"
+    else:
+        state_file = artifact_root / equip / "models" / "regime_state.json"
+    
+    if not state_file.exists():
+        Console.info(f"[REGIME_STATE] No existing state found at {state_file}")
+        return None
+    
+    try:
+        with open(state_file, "r") as f:
+            data = json.load(f)
+        state = RegimeState.from_dict(data)
+        Console.info(f"[REGIME_STATE] Loaded state v{state.state_version} from {state_file}")
+        return state
+    except Exception as e:
+        Console.warn(f"[REGIME_STATE] Failed to load state from filesystem: {e}")
+        return None
+
+
+# ============================================================================
+# Model Version Manager
+# ============================================================================
 
 class ModelVersionManager:
     """Manages model versioning, persistence, and loading (filesystem + SQL)."""

@@ -854,6 +854,231 @@ def _fit_auto_k(
     return best_model, pca_obj, best_k, best_score, best_metric
 
 # ------------------------------------------------
+# State Persistence Helpers
+# ------------------------------------------------
+def regime_model_to_state(
+    model: RegimeModel,
+    equip_id: int,
+    state_version: int,
+    config_hash: str,
+    regime_basis_hash: str
+):
+    """
+    Convert RegimeModel to RegimeState for persistence.
+    
+    Args:
+        model: Fitted RegimeModel object
+        equip_id: Equipment ID
+        state_version: Version number for this state
+        config_hash: Hash of regime configuration
+        regime_basis_hash: Hash of regime basis features
+    
+    Returns:
+        RegimeState object for persistence
+    """
+    from core.model_persistence import RegimeState
+    import json
+    from datetime import datetime, timezone
+    
+    # Extract cluster centers
+    cluster_centers = np.asarray(model.kmeans.cluster_centers_, dtype=float)
+    cluster_centers_json = json.dumps(cluster_centers.tolist())
+    
+    # Extract scaler parameters
+    scaler_mean = np.asarray(model.scaler.mean_, dtype=float)
+    scaler_scale = np.asarray(model.scaler.scale_, dtype=float)
+    scaler_mean_json = json.dumps(scaler_mean.tolist())
+    scaler_scale_json = json.dumps(scaler_scale.tolist())
+    
+    # PCA parameters (if any)
+    n_pca = model.n_pca_components
+    if n_pca > 0 and hasattr(model, 'pca') and model.pca is not None:
+        pca_components = np.asarray(model.pca.components_, dtype=float)
+        pca_variance = np.asarray(model.pca.explained_variance_ratio_, dtype=float)
+        pca_components_json = json.dumps(pca_components.tolist())
+        pca_variance_json = json.dumps(pca_variance.tolist())
+    else:
+        pca_components_json = "[]"
+        pca_variance_json = "[]"
+    
+    # Quality metrics
+    silhouette = float(model.meta.get("fit_score", 0.0))
+    quality_ok = bool(model.meta.get("quality_ok", False))
+    
+    state = RegimeState(
+        equip_id=equip_id,
+        state_version=state_version,
+        n_clusters=int(model.kmeans.n_clusters),
+        cluster_centers_json=cluster_centers_json,
+        scaler_mean_json=scaler_mean_json,
+        scaler_scale_json=scaler_scale_json,
+        pca_components_json=pca_components_json,
+        pca_explained_variance_json=pca_variance_json,
+        n_pca_components=n_pca,
+        silhouette_score=silhouette,
+        quality_ok=quality_ok,
+        last_trained_time=datetime.now(timezone.utc).isoformat(),
+        config_hash=config_hash,
+        regime_basis_hash=regime_basis_hash
+    )
+    
+    return state
+
+
+def regime_state_to_model(
+    state,
+    feature_columns: List[str],
+    raw_tags: List[str],
+    train_hash: Optional[int] = None
+) -> RegimeModel:
+    """
+    Reconstruct RegimeModel from RegimeState.
+    
+    Args:
+        state: RegimeState object loaded from persistence
+        feature_columns: List of feature column names
+        raw_tags: List of raw sensor tag names
+        train_hash: Optional hash of training data
+    
+    Returns:
+        Reconstructed RegimeModel object
+    """
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.cluster import MiniBatchKMeans
+    
+    # Reconstruct scaler
+    scaler = StandardScaler()
+    scaler.mean_, scaler.scale_ = state.get_scaler_params()
+    scaler.n_features_in_ = len(scaler.mean_)
+    scaler.n_samples_seen_ = 1  # Required by sklearn but not critical here
+    
+    # Reconstruct KMeans
+    cluster_centers = state.get_cluster_centers()
+    kmeans = MiniBatchKMeans(n_clusters=state.n_clusters, n_init=1)
+    kmeans.cluster_centers_ = cluster_centers
+    kmeans.n_features_in_ = cluster_centers.shape[1]
+    
+    # Reconstruct PCA if used
+    pca_obj = None
+    if state.n_pca_components > 0:
+        from sklearn.decomposition import PCA
+        pca_components, pca_variance = state.get_pca_params()
+        if pca_components is not None:
+            pca_obj = PCA(n_components=state.n_pca_components)
+            pca_obj.components_ = pca_components
+            pca_obj.explained_variance_ratio_ = pca_variance
+            pca_obj.n_features_in_ = pca_components.shape[1]
+    
+    # Build RegimeModel
+    model = RegimeModel(
+        scaler=scaler,
+        kmeans=kmeans,
+        feature_columns=feature_columns,
+        raw_tags=raw_tags,
+        n_pca_components=state.n_pca_components,
+        train_hash=train_hash,
+        health_labels={},  # Will be recomputed if needed
+        stats={},
+        meta={
+            "fit_score": state.silhouette_score,
+            "fit_metric": "silhouette",
+            "quality_ok": state.quality_ok,
+            "best_k": state.n_clusters,
+            "loaded_from_state": True,
+            "state_version": state.state_version
+        }
+    )
+    
+    if pca_obj is not None:
+        model.pca = pca_obj
+    
+    return model
+
+
+def align_regime_labels(
+    new_model: RegimeModel,
+    prev_model: RegimeModel
+) -> RegimeModel:
+    """
+    Align new regime cluster labels to match previous regime labels for continuity.
+    
+    Uses nearest cluster center matching to ensure consistent regime IDs when
+    operating conditions recur across batches.
+    
+    Args:
+        new_model: Newly fitted RegimeModel
+        prev_model: Previously fitted RegimeModel for reference
+    
+    Returns:
+        RegimeModel with cluster centers reordered to match previous labels
+    """
+    if prev_model is None or new_model is None:
+        return new_model
+    
+    # Extract cluster centers
+    new_centers = np.asarray(new_model.kmeans.cluster_centers_, dtype=float)
+    prev_centers = np.asarray(prev_model.kmeans.cluster_centers_, dtype=float)
+    
+    # Handle dimension mismatch (different k or feature space)
+    if new_centers.shape[1] != prev_centers.shape[1]:
+        Console.warn(f"[REGIME_ALIGN] Feature dimension mismatch: new={new_centers.shape[1]}, prev={prev_centers.shape[1]}. Skipping alignment.")
+        return new_model
+    
+    # Handle different number of clusters
+    if new_centers.shape[0] != prev_centers.shape[0]:
+        Console.info(f"[REGIME_ALIGN] Cluster count changed: prev_k={prev_centers.shape[0]}, new_k={new_centers.shape[0]}")
+        # For different k, find best matching subset
+        # Match new clusters to nearest previous clusters
+        from sklearn.metrics import pairwise_distances_argmin
+        mapping = pairwise_distances_argmin(new_centers, prev_centers)
+        
+        # Build inverse mapping: which new cluster best matches each old cluster
+        inverse_map = {}
+        for new_idx, old_idx in enumerate(mapping):
+            if old_idx not in inverse_map:
+                inverse_map[old_idx] = []
+            inverse_map[old_idx].append(new_idx)
+        
+        Console.info(f"[REGIME_ALIGN] Cluster mapping: {dict(enumerate(mapping))}")
+        Console.info(f"[REGIME_ALIGN] Inverse mapping: {inverse_map}")
+        
+        # Note: With different k, perfect alignment isn't possible
+        # Return new model as-is but log the mapping for transparency
+        new_model.meta["prev_cluster_mapping"] = mapping.tolist()
+        return new_model
+    
+    # Same number of clusters: reorder to minimize total distance
+    from sklearn.metrics import pairwise_distances_argmin
+    
+    # Find best 1:1 mapping using greedy nearest neighbor
+    mapping = pairwise_distances_argmin(new_centers, prev_centers)
+    
+    # Check for collisions (multiple new clusters map to same old cluster)
+    unique_mapping = len(set(mapping)) == len(mapping)
+    
+    if not unique_mapping:
+        Console.warn(f"[REGIME_ALIGN] Non-unique mapping detected: {mapping}. Using optimal assignment.")
+        # Use Hungarian algorithm for optimal 1:1 assignment
+        from scipy.optimize import linear_sum_assignment
+        from scipy.spatial.distance import cdist
+        
+        cost_matrix = cdist(new_centers, prev_centers, metric='euclidean')
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        mapping = col_ind  # col_ind[i] = which old cluster maps to new cluster i
+    
+    # Reorder cluster centers
+    reordered_centers = new_centers[np.argsort(mapping)]
+    new_model.kmeans.cluster_centers_ = reordered_centers
+    
+    # Store mapping in metadata
+    new_model.meta["cluster_reorder_mapping"] = mapping.tolist()
+    
+    Console.info(f"[REGIME_ALIGN] Aligned {len(mapping)} clusters to previous model")
+    
+    return new_model
+
+
+# ------------------------------------------------
 # Public API: label(score_df, ctx, score_out, cfg)
 # ------------------------------------------------
 def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[str, Any]):

@@ -235,7 +235,80 @@ def extract_data_quality_score(data_quality_path) -> float:
             return float(quality_score)
         
         return 100.0
-        
     except Exception as e:
         Console.warn(f"[RUN_META] Failed to extract data quality score: {e}")
         return 100.0
+
+
+def write_retrain_metadata(
+    sql_client,
+    run_id: str,
+    equip_id: int,
+    equip_name: str,
+    retrain_decision: bool,
+    retrain_reason: str,
+    forecast_state_version: int,
+    model_age_batches: Optional[int] = None,
+    forecast_rmse: Optional[float] = None,
+    forecast_mae: Optional[float] = None,
+    forecast_mape: Optional[float] = None,
+) -> bool:
+    """
+    Write forecasting retrain decision + model age + quality metrics to ACM_RunMetadata.
+
+    Args:
+        sql_client: Active SQL client (must expose cursor()/conn)
+        run_id: Current run unique identifier (UUID string)
+        equip_id: Equipment numeric ID
+        equip_name: Equipment code/name
+        retrain_decision: Whether retraining occurred/is requested this batch
+        retrain_reason: Reason string from should_retrain()
+        forecast_state_version: Incrementing state version after merge
+        model_age_batches: Batches since last retrain (optional if not tracked yet)
+        forecast_rmse: Backtest RMSE (optional placeholder)
+        forecast_mae: Backtest MAE (optional placeholder)
+        forecast_mape: Backtest MAPE (optional placeholder)
+
+    Returns:
+        bool: True if insert succeeded.
+    """
+    if sql_client is None:
+        Console.warn("[RUN_META] No SQL client; skipping ACM_RunMetadata write")
+        return False
+
+    try:
+        insert_sql = """
+        INSERT INTO dbo.ACM_RunMetadata (
+            RunID, EquipID, EquipName, CreatedAt,
+            RetrainDecision, RetrainReason, ForecastStateVersion,
+            ModelAgeBatches, ForecastRMSE, ForecastMAE, ForecastMAPE
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        created_at = datetime.utcnow().replace(tzinfo=None)
+        record = (
+            run_id,
+            int(equip_id),
+            equip_name,
+            created_at,
+            bool(retrain_decision),
+            retrain_reason[:250] if retrain_reason else None,
+            int(forecast_state_version) if forecast_state_version is not None else None,
+            int(model_age_batches) if model_age_batches is not None else None,
+            float(forecast_rmse) if forecast_rmse is not None else None,
+            float(forecast_mae) if forecast_mae is not None else None,
+            float(forecast_mape) if forecast_mape is not None else None,
+        )
+
+        with sql_client.cursor() as cur:
+            cur.execute(insert_sql, record)
+        sql_client.conn.commit()
+        Console.info(f"[RUN_META] Wrote retrain metadata RunID={run_id} StateV={forecast_state_version}")
+        return True
+    except Exception as e:
+        Console.error(f"[RUN_META] Failed to write ACM_RunMetadata: {e}")
+        try:
+            sql_client.conn.rollback()
+        except Exception:
+            pass
+        return False

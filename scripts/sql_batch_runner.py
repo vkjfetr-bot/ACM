@@ -583,11 +583,13 @@ class SQLBatchRunner:
             Console.warn(f"[WARN] Could not check coldstart status: {e}", error=str(e))
             return False, 0, 50
     
-    def _run_acm_batch(self, equip_name: str, *, dry_run: bool = False) -> tuple[bool, str]:
+    def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False) -> tuple[bool, str]:
         """Run single ACM batch for equipment.
         
         Args:
             equip_name: Equipment name
+            start_time: Optional start time override
+            end_time: Optional end time override
             dry_run: If True, print command without running
             
         Returns:
@@ -597,6 +599,11 @@ class SQLBatchRunner:
             sys.executable, "-m", "core.acm_main",
             "--equip", equip_name,
         ]
+        
+        if start_time:
+            cmd.extend(["--start-time", start_time.isoformat()])
+        if end_time:
+            cmd.extend(["--end-time", end_time.isoformat()])
         
         printable = " ".join(cmd)
         if dry_run:
@@ -788,7 +795,7 @@ class SQLBatchRunner:
             Console.info(f"\n[BATCH] {equip_name}: Batch {batch_num}/{total_batches} - [{current_ts} to {next_ts})", equipment=equip_name, batch=batch_num, total=total_batches)
             
             # Run ACM (it will automatically use the current batch window from SQL)
-            success, outcome = self._run_acm_batch(equip_name, dry_run=dry_run)
+            success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run)
             
             if not success:
                 Console.error(f"[BATCH] {equip_name}: Batch {batch_num} FAILED", equipment=equip_name, batch=batch_num)

@@ -51,6 +51,7 @@ ALLOWED_TABLES = {
     'ACM_DetectorCorrelation','ACM_CalibrationSummary',
     'ACM_RegimeTransitions','ACM_RegimeDwellStats',
     'ACM_DriftEvents','ACM_CulpritHistory','ACM_EpisodeMetrics',
+    'ACM_EpisodeDiagnostics',
     'ACM_DataQuality',
     'ACM_Scores_Long','ACM_Drift_TS',
     'ACM_Anomaly_Events','ACM_Regime_Episodes',
@@ -64,6 +65,12 @@ ALLOWED_TABLES = {
     'ACM_EnhancedFailureProbability_TS','ACM_FailureCausation',
     'ACM_EnhancedMaintenanceRecommendation','ACM_RecommendedActions',
     'ACM_SensorNormalized_TS',
+    'ACM_OMRContributions','ACM_OMRContributionsLong','ACM_FusionQuality','ACM_FusionQualityReport',
+    'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
+    'ACM_HealthDistributionOverTime','ACM_ChartGenerationLog',
+    'ACM_FusionMetrics',
+    # Continuous forecasting enhancements
+    'ACM_HealthForecast_Continuous','ACM_FailureHazard_TS'
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
@@ -119,6 +126,7 @@ class AnalyticsConstants:
     TARGET_SAMPLING_POINTS = 500
     HEALTH_ALERT_THRESHOLD = 70.0
     HEALTH_CAUTION_THRESHOLD = 85.0  # Previously WATCH
+    HEALTH_WATCH_THRESHOLD = HEALTH_CAUTION_THRESHOLD  # kept for backward compatibility
 
     @staticmethod
     def anomaly_level(abs_z: float, warn: float, alert: float) -> str:
@@ -533,6 +541,47 @@ class OutputManager:
             'ACM_SensorNormalized_TS': {
                 'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'NormValue': 0.0,
                 'ZScore': 0.0, 'AnomalyLevel': 'GOOD', 'EpisodeActive': 0
+            },
+            'ACM_OMRContributionsLong': {
+                'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'ContributionScore': 0.0,
+                'ContributionPct': 0.0, 'OMR_Z': 0.0
+            },
+            'ACM_FusionQualityReport': {
+                'Detector': 'UNKNOWN', 'Weight': 0.0, 'Present': 0,
+                'MeanZ': 0.0, 'MaxZ': 0.0, 'Points': 0
+            },
+            'ACM_OMRTimeline': {
+                'Timestamp': 'ts', 'OMR_Z': 0.0, 'OMR_Weight': 0.0
+            },
+            'ACM_RegimeStats': {
+                'RegimeLabel': -1, 'OccupancyPct': 0.0, 'AvgDwellSeconds': 0.0,
+                'FusedMean': 0.0, 'FusedP90': 0.0
+            },
+            'ACM_DailyFusedProfile': {
+                'ProfileDate': 'ts', 'DayOfWeek': 0, 'Hour': 0, 'FusedMean': 0.0, 'FusedP90': 0.0,
+                'FusedP95': 0.0, 'RecordCount': 0
+            },
+            'ACM_HealthForecast_Continuous': {
+                'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
+                'SourceRunID': 'UNKNOWN', 'EquipID': 0, 'MergeWeight': 0.0
+            },
+            'ACM_FailureHazard_TS': {
+                'Timestamp': 'ts', 'HazardRaw': 0.0, 'HazardSmooth': 0.0, 'Survival': 0.0,
+                'FailureProb': 0.0, 'RunID': 'UNKNOWN', 'EquipID': 0
+            },
+            'ACM_EpisodeDiagnostics': {
+                'episode_id': 0, 'peak_z': 0.0, 'peak_timestamp': 'ts', 'duration_h': 0.0,
+                'dominant_sensor': 'UNKNOWN', 'severity': 'UNKNOWN', 'severity_reason': 'UNKNOWN',
+                'avg_z': 0.0, 'min_health_index': 0.0
+            },
+            'ACM_HealthDistributionOverTime': {
+                'BucketStart': 'ts', 'BucketSeconds': 3600, 'FusedP50': 0.0,
+                'FusedP75': 0.0, 'FusedP90': 0.0, 'FusedP95': 0.0,
+                'HealthP50': 0.0, 'HealthP10': 0.0, 'BucketCount': 0
+            },
+            'ACM_ChartGenerationLog': {
+                'ChartName': 'unknown', 'Status': 'unknown', 'Reason': '',
+                'DurationSeconds': 0.0, 'Timestamp': 'ts'
             }
             ,
             'ACM_AlertAge': {
@@ -1061,11 +1110,16 @@ class OutputManager:
         out = out.where(pd.notnull(out), None)
 
         # Convert numpy scalars to Python types
+        # Preserve integer types for ID columns to avoid SQL cast errors
+        integer_columns = {'EquipID', 'RegimeLabel', 'episode_id'}
         for col in out.columns:
             if col in non_numeric_cols:
                 continue
             if pd.api.types.is_bool_dtype(out[col]):
                 out[col] = out[col].astype(object).where(pd.isna(out[col]), out[col].astype(int))
+            elif col in integer_columns and pd.api.types.is_numeric_dtype(out[col]):
+                # Keep as integer for SQL INT columns
+                out[col] = out[col].astype('Int64')  # nullable integer
             elif pd.api.types.is_numeric_dtype(out[col]):
                 out[col] = out[col].astype(float)
 
@@ -1129,29 +1183,26 @@ class OutputManager:
                        allow_repair: bool = True,
                        **csv_kwargs) -> Dict[str, Any]:
         """
-        Write DataFrame to CSV and optionally to SQL with dual-write coordination.
+        Write DataFrame to SQL (file output disabled).
         
         Args:
             df: DataFrame to write
-            file_path: Path for CSV file
-            sql_table: Optional SQL table name for dual-write
+            file_path: Path for CSV file (used only for cache key)
+            sql_table: Optional SQL table name
             sql_columns: Optional column mapping for SQL (df_col -> sql_col)
             non_numeric_cols: Set of columns to treat as non-numeric for SQL
             add_created_at: Whether to add CreatedAt timestamp column for SQL
             allow_repair: OUT-17: If False, block SQL write when required fields missing instead of auto-repairing
-            **csv_kwargs: Additional arguments for CSV writing
+            **csv_kwargs: Ignored (legacy)
             
         Returns:
             Dictionary with write results and metadata
         """
         start_time = time.time()
         
-        # path normalization and optional base dir enforcement
+        # path normalization
         if not isinstance(file_path, Path):
             file_path = Path(file_path)
-        resolved_path = file_path.resolve()
-        if self.base_output_dir and not str(resolved_path).startswith(str(self.base_output_dir)):
-            raise ValueError(f"[OUTPUT] Path outside base_output_dir: {resolved_path}")
         
         result = {
             'file_written': False,
@@ -1169,42 +1220,6 @@ class OutputManager:
         self._wait_for_futures_capacity()
         
         try:
-            # Attach metadata identifiers to file outputs for future SQL ingestion
-            df_out = df.copy()
-            try:
-                run_id_val = self.run_id or ""
-                equip_id_val = int(self.equip_id) if self.equip_id is not None else 0
-            except Exception:
-                run_id_val, equip_id_val = "", 0
-
-            # Normalize metadata columns eagerly to avoid dtype warnings under pandas >=2.2
-            run_id_str = str(run_id_val) if run_id_val is not None else ""
-            if "RunID" not in df_out.columns:
-                df_out["RunID"] = run_id_str
-            else:
-                # Cast once to a flexible dtype before filling
-                df_out["RunID"] = df_out["RunID"].astype("string")
-                mask = df_out["RunID"].isna() | (df_out["RunID"].str.strip() == "")
-                if mask.any():
-                    df_out.loc[mask, "RunID"] = run_id_str
-
-            if "EquipID" not in df_out.columns:
-                df_out["EquipID"] = equip_id_val
-            else:
-                # Ensure numeric dtype prior to filling to prevent incompatible assignment warnings
-                df_out["EquipID"] = pd.to_numeric(df_out["EquipID"], errors="coerce")
-                mask_e = df_out["EquipID"].isna()
-                if mask_e.any():
-                    df_out.loc[mask_e, "EquipID"] = equip_id_val
-
-            # SQL-45: Skip CSV writes when in SQL-only mode
-            if not self.sql_only_mode:
-                # Write file (guaranteed fallback in dual-write mode)
-                self._write_csv_optimized(df_out, file_path, **csv_kwargs)
-                result['file_written'] = True
-            else:
-                Console.info(f"[OUTPUT] SQL-only mode: Skipping CSV write for {file_path.name}")
-            
             # OUT-18: Update batch row tracking
             with self._batch_lock:
                 self._current_batch.total_rows += len(df)
@@ -1220,8 +1235,11 @@ class OutputManager:
                         sql_df = sql_df.rename(columns=sql_columns)
                     
                     # Add metadata columns (required for all SQL tables)
-                    sql_df["RunID"] = self.run_id
-                    sql_df["EquipID"] = self.equip_id or 0
+                    # Preserve existing RunID if already present (e.g., hazard table with truncated ID)
+                    if "RunID" not in sql_df.columns:
+                        sql_df["RunID"] = self.run_id
+                    if "EquipID" not in sql_df.columns:
+                        sql_df["EquipID"] = self.equip_id or 0
                     # OUT-17: Apply per-table required NOT NULL defaults with repair policy
                     sql_df, repair_info = self._apply_sql_required_defaults(sql_table, sql_df, allow_repair)
                     
@@ -1240,9 +1258,11 @@ class OutputManager:
                         self.stats['sql_writes'] += 1
                     
                 except Exception as e:
-                    Console.warn(f"[OUTPUT] SQL write failed for {sql_table}, file fallback succeeded: {e}")
+                    Console.warn(f"[OUTPUT] SQL write failed for {sql_table}: {e}")
                     result['error'] = str(e)
                     self.stats['sql_failures'] += 1
+            elif not sql_table:
+                 Console.warn(f"[OUTPUT] No SQL table specified for {file_path.name}, and file output is disabled. Data not persisted.")
             
         except Exception as e:
             Console.error(f"[OUTPUT] Failed to write {file_path}: {e}")
@@ -1253,13 +1273,12 @@ class OutputManager:
             elapsed = time.time() - start_time
             self.stats['write_time'] += elapsed
             
-            # FCST-15: Cache DataFrame for downstream modules (SQL-only mode support)
-            # Always cache in SQL-only mode, even if no actual write happened
+            # FCST-15: Cache DataFrame for downstream modules
+            # Always cache, even if no actual write happened
             # Store by filename (without path) so modules can reference by simple name
-            if self.sql_only_mode or result.get('file_written') or result.get('sql_written'):
-                cache_key = file_path.name  # e.g., "scores.csv"
-                self._artifact_cache[cache_key] = df.copy()
-                Console.info(f"[OUTPUT] Cached {cache_key} in artifact cache ({len(df)} rows)")
+            cache_key = file_path.name  # e.g., "scores.csv"
+            self._artifact_cache[cache_key] = df.copy()
+            Console.info(f"[OUTPUT] Cached {cache_key} in artifact cache ({len(df)} rows)")
         
         return result
 
@@ -2178,20 +2197,33 @@ class OutputManager:
                 if omr_contributions is not None and not omr_contributions.empty:
                     try:
                         omr_long = self._generate_omr_contributions_long(scores_df, omr_contributions)
-                        self.write_dataframe(omr_long, tables_dir / "omr_contributions_long.csv",
-                                             sql_table=None,
-                                             add_created_at=False)
+                        result = self.write_dataframe(
+                            omr_long,
+                            tables_dir / "omr_contributions_long.csv",
+                            sql_table="ACM_OMRContributionsLong" if force_sql else None,
+                            add_created_at=True,
+                            sql_columns={"Sensor": "SensorName"},
+                            non_numeric_cols={"SensorName"}
+                        )
                         table_count += 1
+                        if result.get('sql_written'): sql_count += 1
                     except Exception as e:
                         Console.warn(f"[ANALYTICS] Failed to write omr_contributions_long.csv: {e}")
 
                 # Fusion quality snapshot (weights + basic stats)
                 try:
                     fusion_q_df = self._generate_fusion_quality_report(scores_df, cfg)
-                    result = self.write_dataframe(fusion_q_df, tables_dir / "fusion_quality_report.csv",
-                                                  sql_table=None,
-                                                  add_created_at=False)
-                    table_count += 1
+                    if not fusion_q_df.empty:
+                        result = self.write_dataframe(
+                            fusion_q_df,
+                            tables_dir / "fusion_quality_report.csv",
+                            sql_table="ACM_FusionQualityReport" if force_sql else None,
+                            add_created_at=True
+                        )
+                        table_count += 1
+                        if result.get('sql_written'): sql_count += 1
+                    else:
+                        table_count += 1
                 except Exception as e:
                     Console.warn(f"[ANALYTICS] Failed to write fusion_quality_report.csv: {e}")
                 
@@ -2239,10 +2271,15 @@ class OutputManager:
                 # 1b. Health distribution over time (hourly buckets)
                 try:
                     hdist_df = self._generate_health_distribution_over_time(scores_df)
-                    result = self.write_dataframe(hdist_df, tables_dir / "health_distribution_over_time.csv",
-                                                 sql_table=None,
-                                                 add_created_at=False)
+                    result = self.write_dataframe(
+                        hdist_df,
+                        tables_dir / "health_distribution_over_time.csv",
+                        sql_table="ACM_HealthDistributionOverTime" if force_sql else None,
+                        sql_columns={"Count": "BucketCount"},
+                        add_created_at=True
+                    )
                     table_count += 1
+                    if result.get('sql_written'): sql_count += 1
                 except Exception as e:
                     Console.warn(f"[ANALYTICS] Failed to write health_distribution_over_time.csv: {e}")
                 
@@ -2259,20 +2296,28 @@ class OutputManager:
                 if 'omr_z' in scores_df.columns:
                     try:
                         omr_tl_df = self._generate_omr_timeline(scores_df, cfg)
-                        result = self.write_dataframe(omr_tl_df, tables_dir / "omr_timeline.csv",
-                                                     sql_table=None,
-                                                     add_created_at=False)
+                        result = self.write_dataframe(
+                            omr_tl_df,
+                            tables_dir / "omr_timeline.csv",
+                            sql_table="ACM_OMRTimeline" if force_sql else None,
+                            add_created_at=True
+                        )
                         table_count += 1
+                        if result.get('sql_written'): sql_count += 1
                     except Exception as e:
                         Console.warn(f"[ANALYTICS] Failed to write omr_timeline.csv: {e}")
 
                     # Compact regime stats for dashboards
                     try:
                         regime_stats_df = self._generate_regime_stats(scores_df)
-                        self.write_dataframe(regime_stats_df, tables_dir / "regime_stats.csv",
-                                             sql_table=None,
-                                             add_created_at=False)
+                        result = self.write_dataframe(
+                            regime_stats_df,
+                            tables_dir / "regime_stats.csv",
+                            sql_table="ACM_RegimeStats" if force_sql else None,
+                            add_created_at=True
+                        )
                         table_count += 1
+                        if result.get('sql_written'): sql_count += 1
                     except Exception as e:
                         Console.warn(f"[ANALYTICS] Failed to write regime_stats.csv: {e}")
                 
@@ -2337,10 +2382,15 @@ class OutputManager:
                 try:
                     daily_profile_df = self._generate_daily_fused_profile(scores_df)
                     if not daily_profile_df.empty:
-                        self.write_dataframe(daily_profile_df, tables_dir / "daily_fused_profile.csv",
-                                             sql_table=None,
-                                             add_created_at=False)
+                        result = self.write_dataframe(
+                            daily_profile_df,
+                            tables_dir / "daily_fused_profile.csv",
+                            sql_table="ACM_DailyFusedProfile" if force_sql else None,
+                            sql_columns={"Count": "RecordCount"},
+                            add_created_at=True
+                        )
                         table_count += 1
+                        if result.get('sql_written'): sql_count += 1
                 except Exception as e:
                     Console.warn(f"[ANALYTICS] Failed to write daily_fused_profile.csv: {e}")
                 
@@ -3627,19 +3677,39 @@ class OutputManager:
             Console.warn(f"[CHARTS] OMR chart generation failed: {exc}")
 
         # OUT-14: Write chart generation log
-        if chart_log and not self.sql_only_mode:
+        if chart_log:
             try:
                 log_df = pd.DataFrame(chart_log)
                 tables_dir = charts_path.parent / "tables"
                 tables_dir.mkdir(parents=True, exist_ok=True)
                 log_path = tables_dir / "chart_generation_log.csv"
-                log_df.to_csv(log_path, index=False)
-                
+                if not self.sql_only_mode:
+                    log_df.to_csv(log_path, index=False)
+
+                sql_log = log_df.rename(columns={
+                    'chart_name': 'ChartName',
+                    'status': 'Status',
+                    'reason': 'Reason',
+                    'timestamp': 'Timestamp'
+                }).copy()
+                sql_log['DurationSeconds'] = 0.0
+                sql_log['Timestamp'] = pd.to_datetime(sql_log['Timestamp'], errors='coerce')
+                if hasattr(sql_log['Timestamp'], 'dt'):
+                    sql_log['Timestamp'] = sql_log['Timestamp'].dt.tz_localize(None)
+                result = self.write_dataframe(
+                    sql_log,
+                    log_path,
+                    sql_table="ACM_ChartGenerationLog" if force_sql else None,
+                    add_created_at=True,
+                    non_numeric_cols={"ChartName", "Status", "Reason"}
+                )
+                if result.get('sql_written'):
+                    sql_count += 1
+
                 rendered_count = len([c for c in chart_log if c['status'] == 'rendered'])
                 skipped_count = len([c for c in chart_log if c['status'] == 'skipped'])
                 Console.info(f"[CHARTS] Chart summary: {rendered_count} rendered, {skipped_count} skipped")
-                
-                # Log skip reasons breakdown
+
                 if skipped_count > 0:
                     skip_reasons = {}
                     for entry in chart_log:
@@ -5073,13 +5143,13 @@ class OutputManager:
     def _generate_daily_fused_profile(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Aggregate fused z by hour and weekday for simple dashboards."""
         if 'fused' not in scores_df.columns or scores_df.empty:
-            return pd.DataFrame(columns=['DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count'])
+            return pd.DataFrame(columns=['ProfileDate','DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count'])
         idx = pd.to_datetime(scores_df.index)
         series = pd.to_numeric(scores_df['fused'], errors='coerce')
         df = pd.DataFrame({'fused': series, 'DayOfWeek': idx.dayofweek, 'Hour': idx.hour})
         df = df.dropna(subset=['fused'])
         if df.empty:
-            return pd.DataFrame(columns=['DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count'])
+            return pd.DataFrame(columns=['ProfileDate','DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count'])
         # Group using explicit columns to prevent duplicate index-name collisions during reset_index
         grp = df.groupby(['DayOfWeek', 'Hour'])['fused']
         out = grp.agg(FusedMean='mean',
@@ -5089,7 +5159,10 @@ class OutputManager:
         out['DayOfWeek'] = out['DayOfWeek'].astype(int)
         out['Hour'] = out['Hour'].astype(int)
         out['Count'] = out['Count'].astype(int)
-        return out[['DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count']]
+        # Derive a ProfileDate representative of this run window (use earliest timestamp date if available)
+        profile_date = pd.to_datetime(idx.min()).normalize() if len(idx) else pd.Timestamp.now().normalize()
+        out['ProfileDate'] = profile_date
+        return out[['ProfileDate','DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count']]
 
     def _generate_regime_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Compact per-regime summary table."""

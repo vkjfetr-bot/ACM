@@ -80,6 +80,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Fix**: Changed weight from 0.1 → 0.0 with reason "Disabled - streaming feature not implemented"
   - **Note**: River HST detector is planned feature (STREAM-01, STREAM-02), currently disabled. Fusion already handles missing streams gracefully.
 
+- **DASH-21: PCA Explained Variance Panel Error** (2025-11-19):
+  - **Issue**: Grafana panel "PCA Explained Variance" failed with `mssql: Invalid column name 'MetricType'` and showed "No data".
+  - **Root Cause**: Deployed SQL schema for `ACM_PCA_Metrics` missing `MetricType` column (older schema) while dashboard query expected new format: rows keyed by `(ComponentName, MetricType)` where `MetricType ∈ {VarianceRatio, CumulativeVariance, ComponentCount}`.
+  - **Fix**: Added migration script `scripts/sql/patches/2025-11-19_add_metric_type_to_pca_metrics.sql` that recreates table with correct schema if `MetricType` absent and adds PK `(RunID, EquipID, ComponentName, MetricType)`.
+  - **Dashboard**: Verified existing query in `grafana_dashboards/asset_health_dashboard.json` is valid against new schema (no change needed once column exists).
+  - **Impact**: PCA variance and cumulative variance bars render again; removes blocking error tooltip; enables drill-down on PCA component coverage.
+  - **Operator Action**: Run the patch script on affected SQL instances before next pipeline run:
+    ```sql
+    :r scripts/sql/patches/2025-11-19_add_metric_type_to_pca_metrics.sql
+    ```
+  - **Data Safety**: Existing rows preserved via staged copy (old table renamed then reinserted); no loss of historical PCA metrics.
+  - **Follow-up**: Add monitoring to detect schema drift (BACKLOG: DASH-22) and surface missing columns proactively in run logs.
+\n+- **SQL-59: RunLog RunID Type Clash (coldstart failure)** (2025-11-19):
+  - **Issue**: Pipeline start failed with `Operand type clash: uniqueidentifier is incompatible with bigint` when executing `usp_ACM_StartRun`.
+  - **Root Cause**: Database had legacy `RunLog.RunID BIGINT IDENTITY` while stored procedure + Python expect `RunLog.RunID UNIQUEIDENTIFIER` (guid). Insert attempted to put a GUID into bigint column.
+  - **Symptoms**: Coldstart retry loop exhausted (10 attempts), run aborted before scoring; no RunLog row inserted; downstream tables empty.
+  - **Fix**: Added migration script `scripts/sql/patches/2025-11-19_migrate_runlog_runid_to_uniqueidentifier.sql` to convert bigint RunID to GUID safely (adds `RunID_guid`, migrates values, renames, recreates PK). Idempotent: no-op if already GUID.
+  - **Operator Action**:
+    ```sql
+    :r scripts/sql/patches/2025-11-19_migrate_runlog_runid_to_uniqueidentifier.sql
+    :r scripts/sql/20_stored_procs.sql   -- (optional redeploy to ensure latest SP signature)
+    ```
+    Then rerun: `python -m core.acm_main --equip FD_FAN --enable-report`.
+  - **Impact**: Start-run succeeds; RunID values become stable GUIDs across related tables; resolves coldstart blocking error.
+  - **Data Safety**: Legacy bigint RunIDs preserved in `RunID_bigint_backup` column for audit; can be dropped later (backlog item SQL-60).
+  - **Follow-up**: Add runtime schema check to log actionable warning when detected mismatch instead of hard failure (BACKLOG: SQL-61).
+
 ### Added
 - **SQL-57: Enhanced Forecasting Tables** (2025-11-14):
   - Added permanent SQL tables for enhanced forecasting outputs: `ACM_EnhancedFailureProbability_TS`, `ACM_FailureCausation`, `ACM_EnhancedMaintenanceRecommendation`, and `ACM_RecommendedActions`.
