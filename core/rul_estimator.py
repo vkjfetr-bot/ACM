@@ -11,6 +11,10 @@ Consumes health timeline and forecast outputs and produces:
 This module is intentionally numerically simple (AR(1)-style trend + Gaussian
 uncertainty); it can be replaced with richer models later without changing
 the SQL/Grafana contracts.
+
+Timestamp Policy:
+-----------------
+All timestamps are treated as timezone-naive local time.
 """
 
 from __future__ import annotations
@@ -21,27 +25,9 @@ from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from math import erf, sqrt
 
 from utils.logger import Console
-
-
-def _norm_cdf(x: np.ndarray) -> np.ndarray:
-    """Standard normal CDF that accepts scalars or numpy arrays."""
-    arr = np.asarray(x, dtype=float)
-    scaled = arr / sqrt(2.0)
-    # math.erf only supports scalars; vectorize to handle numpy arrays.
-    erf_vec = np.vectorize(erf, otypes=[float])
-    return 0.5 * (1.0 + erf_vec(scaled))
-
-
-@dataclass
-class RULConfig:
-    health_threshold: float = 70.0
-    min_points: int = 20
-    max_forecast_hours: float = 24.0
-    maintenance_risk_low: float = 0.2
-    maintenance_risk_high: float = 0.5
+from core.rul_common import norm_cdf, RULConfig
 
 
 def _load_health_timeline(
@@ -73,7 +59,11 @@ def _load_health_timeline(
                 ts_col = "timestamp"
             else:
                 ts_col = df.columns[0]
-            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
+            # TIME-01: Ensure naive timestamps
+            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+            if df[ts_col].dt.tz is not None:
+                df[ts_col] = df[ts_col].dt.tz_localize(None)
+            
             df = df.dropna(subset=[ts_col]).sort_values(ts_col)
             df = df.rename(columns={ts_col: "Timestamp"})
             return df
@@ -95,7 +85,11 @@ def _load_health_timeline(
             cur.close()
             if rows:
                 df = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex"])
-                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce", utc=True)
+                # TIME-01: Ensure naive timestamps
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+                if df["Timestamp"].dt.tz is not None:
+                    df["Timestamp"] = df["Timestamp"].dt.tz_localize(None)
+                
                 df = df.dropna(subset=["Timestamp"]).sort_values("Timestamp")
                 Console.info(
                     f"[RUL] Loaded {len(df)} health points from SQL for EquipID={equip_id}, RunID={run_id}"
@@ -121,7 +115,11 @@ def _load_health_timeline(
         ts_col = "timestamp"
     else:
         ts_col = df.columns[0]
-    df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
+    # TIME-01: Ensure naive timestamps
+    df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+    if df[ts_col].dt.tz is not None:
+        df[ts_col] = df[ts_col].dt.tz_localize(None)
+        
     df = df.sort_values(ts_col).dropna(subset=[ts_col])
     df = df.rename(columns={ts_col: "Timestamp"})
     return df
@@ -319,7 +317,11 @@ def estimate_rul_and_failure(
 
     # Prepare health time series
     hi = health_df["HealthIndex"].astype(float).clip(lower=0.0, upper=100.0)
-    hi.index = pd.to_datetime(health_df["Timestamp"], utc=True)
+    # TIME-01: Ensure naive timestamps
+    ts_idx = pd.to_datetime(health_df["Timestamp"], errors="coerce")
+    if ts_idx.dt.tz is not None:
+        ts_idx = ts_idx.dt.tz_localize(None)
+    hi.index = pd.DatetimeIndex(ts_idx)
     hi = hi.sort_index()
     if hi.size < cfg.min_points:
         Console.warn(
@@ -357,7 +359,7 @@ def estimate_rul_and_failure(
     # Failure probability by horizon (prob HealthIndex <= threshold)
     thr = float(np.clip(health_threshold, 0.0, 100.0))
     z = (thr - forecast.values) / (forecast_std + 1e-9)
-    failure_prob = np.clip(_norm_cdf(z), 0.0, 1.0)
+    failure_prob = np.clip(norm_cdf(z), 0.0, 1.0)
     # NOTE: Removed np.maximum.accumulate - it was forcing all probabilities to be identical
     # when forecasts were similar. Let failure probability reflect actual forecast trajectory.
     # For improving health, failure prob should decrease; for degrading health, it increases naturally.
@@ -402,7 +404,15 @@ def estimate_rul_and_failure(
     ci_lower = ci_lower.clip(lower=0.0, upper=100.0)
     ci_upper = ci_upper.clip(lower=0.0, upper=100.0)
 
-    health_forecast_df = pd.DataFrame(
+    # CONTINUITY FIX: Include recent historical health data to bridge gap between history and forecast
+    # This prevents stepped appearance in dashboard by providing smooth transition
+    lookback_hours = 24.0  # Include last 24h of history
+    last_forecast_ts = forecast.index[-1]
+    cutoff_ts = forecast.index[0] - pd.Timedelta(hours=lookback_hours)
+    recent_history = hi[hi.index >= cutoff_ts].copy()
+    
+    # Build forecast dataframe
+    forecast_df = pd.DataFrame(
         {
             "Timestamp": forecast.index,
             "ForecastHealth": forecast.values,
@@ -412,10 +422,28 @@ def estimate_rul_and_failure(
             "Method": "AR1_Health",
         }
     )
+    
+    # Build historical dataframe for recent data
+    if len(recent_history) > 0:
+        # For historical data, use actual health value and narrow CI based on measurement uncertainty
+        hist_uncertainty = 2.0  # Small fixed uncertainty for historical data
+        history_df = pd.DataFrame({
+            "Timestamp": recent_history.index,
+            "ForecastHealth": recent_history.values,
+            "CiLower": np.clip(recent_history.values - hist_uncertainty, 0.0, 100.0),
+            "CiUpper": np.clip(recent_history.values + hist_uncertainty, 0.0, 100.0),
+            "ForecastStd": hist_uncertainty,
+            "Method": "Historical",
+        })
+        # Concatenate history + forecast for seamless timeline
+        health_forecast_df = pd.concat([history_df, forecast_df], ignore_index=True)
+    else:
+        health_forecast_df = forecast_df
+    
     health_forecast_df = _insert_ids(health_forecast_df)
 
     # Failure probability TS
-    failure_ts_df = pd.DataFrame(
+    failure_forecast_df = pd.DataFrame(
         {
             "Timestamp": forecast.index,
             "FailureProb": failure_prob,
@@ -423,6 +451,23 @@ def estimate_rul_and_failure(
             "Method": "AR1_Health",
         }
     )
+    
+    # CONTINUITY FIX: Include historical failure probability (near zero for healthy history)
+    if len(recent_history) > 0:
+        # For historical data, calculate failure probability based on actual health vs threshold
+        z_hist = (thr - recent_history.values) / (hist_uncertainty + 1e-9)
+        from scipy.stats import norm as norm_dist
+        failure_prob_hist = np.clip(norm_dist.cdf(z_hist), 0.0, 1.0)
+        history_fail_df = pd.DataFrame({
+            "Timestamp": recent_history.index,
+            "FailureProb": failure_prob_hist,
+            "ThresholdUsed": thr,
+            "Method": "Historical",
+        })
+        failure_ts_df = pd.concat([history_fail_df, failure_forecast_df], ignore_index=True)
+    else:
+        failure_ts_df = failure_forecast_df
+    
     failure_ts_df = _insert_ids(failure_ts_df)
 
     # RUL TS: from each forecast point, remaining hours until predicted failure

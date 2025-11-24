@@ -8,6 +8,10 @@ Improvements:
 - Bayesian parameter updating
 - Degradation rate analysis
 - Confidence calibration based on historical accuracy
+
+Timestamp Policy:
+-----------------
+All timestamps are treated as timezone-naive local time.
 """
 
 from __future__ import annotations
@@ -24,14 +28,7 @@ from scipy.optimize import minimize_scalar
 from scipy.stats import norm, weibull_min
 
 from utils.logger import Console
-
-
-def _norm_cdf(x: np.ndarray) -> np.ndarray:
-    """Standard normal CDF that accepts scalars or numpy arrays."""
-    arr = np.asarray(x, dtype=float)
-    scaled = arr / sqrt(2.0)
-    erf_vec = np.vectorize(erf, otypes=[float])
-    return 0.5 * (1.0 + erf_vec(scaled))
+from core.rul_common import norm_cdf, RULConfig
 
 
 @dataclass
@@ -71,21 +68,6 @@ class ModelPerformanceMetrics:
             return 1.0
         # Softmax-style weighting: better models get exponentially more weight
         return float(np.exp(-self.rmse / 10.0))
-
-
-@dataclass
-class RULConfig:
-    health_threshold: float = 70.0
-    min_points: int = 20
-    max_forecast_hours: float = 24.0
-    maintenance_risk_low: float = 0.2
-    maintenance_risk_high: float = 0.5
-
-    # Adaptive learning parameters
-    learning_rate: float = 0.1
-    min_model_weight: float = 0.05
-    enable_online_learning: bool = True
-    calibration_window: int = 50  # Number of recent predictions to use for calibration
 
 
 @dataclass
@@ -557,7 +539,11 @@ def estimate_rul_and_failure(
 
     # Prepare health time series
     hi = health_df["HealthIndex"].astype(float).clip(lower=0.0, upper=100.0)
-    hi.index = pd.to_datetime(health_df["Timestamp"], utc=True)
+    # TIME-01: Ensure naive timestamps
+    ts_idx = pd.to_datetime(health_df["Timestamp"], errors="coerce")
+    if ts_idx.dt.tz is not None:
+        ts_idx = ts_idx.dt.tz_localize(None)
+    hi.index = pd.DatetimeIndex(ts_idx)
     hi = hi.sort_index()
 
     if hi.size < cfg.min_points:
@@ -588,7 +574,7 @@ def estimate_rul_and_failure(
     # Failure probability
     thr = float(np.clip(health_threshold, 0.0, 100.0))
     z = (thr - forecast.values) / (forecast_std + 1e-9)
-    failure_prob = np.clip(_norm_cdf(z), 0.0, 1.0)
+    failure_prob = np.clip(norm_cdf(z), 0.0, 1.0)
     # NOTE: Removed np.maximum.accumulate - it was forcing all probabilities to be identical
     # Failure probability should reflect the actual forecast distribution at each time point
 
@@ -639,7 +625,14 @@ def estimate_rul_and_failure(
         return df
 
     # Health forecast TS
-    health_forecast_df = pd.DataFrame(
+    # CONTINUITY FIX: Include recent historical health data to bridge gap between history and forecast
+    # This prevents stepped appearance in dashboard by providing smooth transition
+    lookback_hours = 24.0  # Include last 24h of history
+    cutoff_ts = forecast.index[0] - pd.Timedelta(hours=lookback_hours)
+    recent_history = hi[hi.index >= cutoff_ts].copy()
+    
+    # Build forecast dataframe
+    forecast_df = pd.DataFrame(
         {
             "Timestamp": forecast.index,
             "ForecastHealth": forecast.values,
@@ -650,10 +643,29 @@ def estimate_rul_and_failure(
             "ModelWeights": [str(model_weights)] * len(forecast),
         }
     )
+    
+    # Build historical dataframe for recent data
+    if len(recent_history) > 0:
+        # For historical data, use actual health value and narrow CI based on measurement uncertainty
+        hist_uncertainty = 2.0  # Small fixed uncertainty for historical data
+        history_df = pd.DataFrame({
+            "Timestamp": recent_history.index,
+            "ForecastHealth": recent_history.values,
+            "CiLower": np.clip(recent_history.values - hist_uncertainty, 0.0, 100.0),
+            "CiUpper": np.clip(recent_history.values + hist_uncertainty, 0.0, 100.0),
+            "ForecastStd": hist_uncertainty,
+            "Method": "Historical",
+            "ModelWeights": "N/A",
+        })
+        # Concatenate history + forecast for seamless timeline
+        health_forecast_df = pd.concat([history_df, forecast_df], ignore_index=True)
+    else:
+        health_forecast_df = forecast_df
+    
     health_forecast_df = _insert_ids(health_forecast_df)
 
     # Failure probability TS
-    failure_ts_df = pd.DataFrame(
+    failure_forecast_df = pd.DataFrame(
         {
             "Timestamp": forecast.index,
             "FailureProb": failure_prob,
@@ -661,6 +673,22 @@ def estimate_rul_and_failure(
             "Method": "Ensemble_Adaptive",
         }
     )
+    
+    # CONTINUITY FIX: Include historical failure probability (near zero for healthy history)
+    if len(recent_history) > 0:
+        # For historical data, calculate failure probability based on actual health vs threshold
+        z_hist = (thr - recent_history.values) / (hist_uncertainty + 1e-9)
+        failure_prob_hist = np.clip(norm_cdf(z_hist), 0.0, 1.0)
+        history_fail_df = pd.DataFrame({
+            "Timestamp": recent_history.index,
+            "FailureProb": failure_prob_hist,
+            "ThresholdUsed": thr,
+            "Method": "Historical",
+        })
+        failure_ts_df = pd.concat([history_fail_df, failure_forecast_df], ignore_index=True)
+    else:
+        failure_ts_df = failure_forecast_df
+    
     failure_ts_df = _insert_ids(failure_ts_df)
 
     # RUL TS
@@ -751,7 +779,11 @@ def _load_health_timeline(
                 ts_col = "timestamp"
             else:
                 ts_col = df.columns[0]
-            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
+            # TIME-01: Ensure naive timestamps
+            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+            if df[ts_col].dt.tz is not None:
+                df[ts_col] = df[ts_col].dt.tz_localize(None)
+            
             df = df.dropna(subset=[ts_col]).sort_values(ts_col)
             df = df.rename(columns={ts_col: "Timestamp"})
             return df
@@ -773,7 +805,11 @@ def _load_health_timeline(
             cur.close()
             if rows:
                 df = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex"])
-                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce", utc=True)
+                # TIME-01: Ensure naive timestamps
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+                if df["Timestamp"].dt.tz is not None:
+                    df["Timestamp"] = df["Timestamp"].dt.tz_localize(None)
+                
                 df = df.dropna(subset=["Timestamp"]).sort_values("Timestamp")
                 Console.info(f"[RUL] Loaded {len(df)} health points from SQL")
                 return df
@@ -794,7 +830,11 @@ def _load_health_timeline(
         ts_col = "timestamp"
     else:
         ts_col = df.columns[0]
-    df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
+    # TIME-01: Ensure naive timestamps
+    df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+    if df[ts_col].dt.tz is not None:
+        df[ts_col] = df[ts_col].dt.tz_localize(None)
+        
     df = df.sort_values(ts_col).dropna(subset=[ts_col])
     df = df.rename(columns={ts_col: "Timestamp"})
     return df
@@ -968,3 +1008,119 @@ def _build_maintenance_recommendation(
         df.insert(1 if run_id else 0, "EquipID", equip_id)
 
     return df
+
+
+# ============================================================================
+# Multi-Path RUL Derivation (FORECAST-STATE-04)
+# ============================================================================
+
+def compute_rul_multipath(
+    health_forecast: pd.DataFrame,
+    hazard_df: Optional[pd.DataFrame],
+    anomaly_energy_df: Optional[pd.DataFrame],
+    current_time: pd.Timestamp,
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Compute RUL via three independent paths and take minimum.
+    
+    Path 1 (Trajectory): Health forecast crosses failure threshold
+    Path 2 (Hazard): Cumulative failure probability reaches 0.5
+    Path 3 (Energy): Cumulative anomaly energy exceeds calibrated threshold
+    
+    Args:
+        health_forecast: DataFrame with [Timestamp, ForecastHealth, CI_Lower, CI_Upper]
+        hazard_df: DataFrame with [Timestamp, FailureProb] (optional)
+        anomaly_energy_df: DataFrame with [Timestamp, CumulativeEnergy] (optional)
+        current_time: Current timestamp
+        config: Configuration dict
+    
+    Returns:
+        Dict with RUL breakdown and dominant path
+    """
+    forecast_cfg = config.get("forecasting", {})
+    health_threshold = float(forecast_cfg.get("failure_threshold", 75.0))
+    hazard_prob_threshold = float(forecast_cfg.get("hazard_failure_prob", 0.5))
+    energy_fail_threshold = float(forecast_cfg.get("energy_fail_threshold", 1000.0))
+    max_forecast_hours = float(forecast_cfg.get("max_forecast_hours", 168.0))
+    
+    # Path 1: Trajectory crossing
+    rul_trajectory = np.inf
+    if health_forecast is not None and not health_forecast.empty:
+        trajectory_crossing = health_forecast[
+            health_forecast["ForecastHealth"] <= health_threshold
+        ]
+        if not trajectory_crossing.empty:
+            t1 = trajectory_crossing.iloc[0]["Timestamp"]
+            rul_trajectory = (t1 - current_time).total_seconds() / 3600
+            Console.info(f"[RUL-MULTIPATH] Trajectory crossing at {t1}, RUL={rul_trajectory:.1f}h")
+    
+    # Path 2: Hazard accumulation
+    rul_hazard = np.inf
+    if hazard_df is not None and not hazard_df.empty and "FailureProb" in hazard_df.columns:
+        hazard_crossing = hazard_df[hazard_df["FailureProb"] >= hazard_prob_threshold]
+        if not hazard_crossing.empty:
+            t2 = hazard_crossing.iloc[0]["Timestamp"]
+            rul_hazard = (t2 - current_time).total_seconds() / 3600
+            Console.info(f"[RUL-MULTIPATH] Hazard crossing at {t2}, RUL={rul_hazard:.1f}h")
+    
+    # Path 3: Anomaly energy threshold
+    rul_energy = np.inf
+    if anomaly_energy_df is not None and not anomaly_energy_df.empty:
+        energy_crossing = anomaly_energy_df[
+            anomaly_energy_df["CumulativeEnergy"] >= energy_fail_threshold
+        ]
+        if not energy_crossing.empty:
+            t3 = energy_crossing.iloc[0]["Timestamp"]
+            rul_energy = (t3 - current_time).total_seconds() / 3600
+            Console.info(f"[RUL-MULTIPATH] Energy crossing at {t3}, RUL={rul_energy:.1f}h")
+    
+    # Final RUL = minimum of all paths
+    rul_final = min(rul_trajectory, rul_hazard, rul_energy)
+    if rul_final == np.inf:
+        rul_final = max_forecast_hours
+        Console.info(f"[RUL-MULTIPATH] No crossing detected, using max horizon: {rul_final}h")
+    
+    # Confidence band from trajectory CI crossings
+    confidence_band = 0.0
+    if health_forecast is not None and not health_forecast.empty:
+        ci_lower_crossing = health_forecast[
+            health_forecast["CI_Lower"] <= health_threshold
+        ]
+        ci_upper_crossing = health_forecast[
+            health_forecast["CI_Upper"] <= health_threshold
+        ]
+        
+        if not ci_lower_crossing.empty and not ci_upper_crossing.empty:
+            t_lower = (ci_lower_crossing.iloc[0]["Timestamp"] - current_time).total_seconds() / 3600
+            t_upper = (ci_upper_crossing.iloc[0]["Timestamp"] - current_time).total_seconds() / 3600
+            confidence_band = abs(t_upper - t_lower)
+    
+    # Determine dominant path
+    if rul_final == rul_trajectory:
+        dominant_path = "trajectory"
+    elif rul_final == rul_hazard:
+        dominant_path = "hazard"
+    elif rul_final == rul_energy:
+        dominant_path = "energy"
+    else:
+        dominant_path = "unknown"
+    
+    result = {
+        "rul_trajectory_hours": rul_trajectory if rul_trajectory != np.inf else None,
+        "rul_hazard_hours": rul_hazard if rul_hazard != np.inf else None,
+        "rul_energy_hours": rul_energy if rul_energy != np.inf else None,
+        "rul_final_hours": rul_final,
+        "confidence_band_hours": confidence_band,
+        "dominant_path": dominant_path
+    }
+    
+    Console.info(
+        f"[RUL-MULTIPATH] Final RUL={rul_final:.1f}h "
+        f"(trajectory={result['rul_trajectory_hours']}, "
+        f"hazard={result['rul_hazard_hours']}, "
+        f"energy={result['rul_energy_hours']}, "
+        f"dominant={dominant_path})"
+    )
+    
+    return result
