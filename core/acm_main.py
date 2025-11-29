@@ -949,9 +949,9 @@ def main() -> None:
         Console.warn("[OUTPUT] Diagnostic: OutputManager.sql_client is None (SQL writes disabled)")
     else:
         try:
-            with output_manager.sql_client.get_cursor() as _cur:
-                _cur.execute("SELECT 1")
-                _ = _cur.fetchone()
+            _cur = output_manager.sql_client.cursor()
+            _cur.execute("SELECT 1")
+            _ = _cur.fetchone()
             Console.info("[OUTPUT] Diagnostic: SQL client attached and health check passed")
         except Exception as _e:
             Console.error(f"[OUTPUT] Diagnostic: SQL client attached but health check failed: {_e}")
