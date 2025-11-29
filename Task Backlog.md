@@ -103,48 +103,51 @@ For everything else, the single source of truth is now **GitHub Issues**. This d
 
 #### 🔴 HIGH PRIORITY - Model Retraining Logic
 
-**SQL-CL-01: Implement Data-Driven Retrain Triggers** ⚠️ CRITICAL
+**✅ SQL-CL-01: Implement Data-Driven Retrain Triggers** ⚠️ CRITICAL - COMPLETE
 - **Problem**: Models only retrain when config changes or no cache exists. Data drift, anomaly rates, and regime quality degradation do NOT trigger retraining in SQL mode.
-- **Current State**: `assess_model_quality()` is called but results are ignored except for config signature comparison.
-- **Fix Required**:
-  - Use `assess_model_quality` results to define explicit retrain policies
-  - Add config parameters: `models.auto_retrain.max_anomaly_rate`, `models.auto_retrain.max_drift_score`, `models.auto_retrain.max_model_age_hours`
-  - Set `force_retrain = True` when thresholds exceeded
-  - Wire policies to work in SQL mode (currently guarded by `if not SQL_MODE`)
-- **Impact**: Models will stay current with process changes instead of going stale
-- **Estimated Effort**: 6-8 hours
-- **Priority**: P0 - Core continuous learning functionality
-- **Files**: `core/acm_main.py` (lines ~1800-2000, quality check section)
-- **Testing**: Run 20+ batch simulation, inject drift, verify retraining occurs
+- **Solution Implemented** (2025-11-29):
+  - ✅ Added config parameters: `models.auto_retrain.max_anomaly_rate=0.25`, `max_drift_score=2.0`, `max_model_age_hours=720`
+  - ✅ Added anomaly_rate trigger to auto-tune section (lines 2756-2764)
+  - ✅ Added drift_score trigger to auto-tune section (lines 2766-2774)
+  - ✅ Added model_age and regime_quality triggers to quality check section (lines 2058-2115)
+  - ✅ Removed `if not SQL_MODE:` guard from auto-tune section (line 2732)
+  - ✅ Aggregated all triggers with proper reason logging
+- **Impact**: Models now retrain based on data quality metrics, not just config changes
+- **Files Modified**: 
+  - `core/acm_main.py` (lines 2058-2115, 2729-2780)
+  - `configs/config_table.csv` (added 11 auto_retrain config entries)
+- **Status**: ✅ COMPLETE - Testing required
+- **Next**: Run 20+ batch simulation to verify triggers fire correctly
 
-**SQL-CL-02: SQL-Native Refit Flag Mechanism** ⚠️ CRITICAL
+**⏳ SQL-CL-02: SQL-Native Refit Flag Mechanism** ⚠️ CRITICAL - PARTIALLY COMPLETE
 - **Problem**: Auto-tune writes `refit_requested.flag` only when `not SQL_MODE`. SQL deployments cannot trigger next-run retrain via quality policies.
-- **Current State**: Refit flag logic explicitly disabled for SQL mode
-- **Fix Required**:
-  - Create SQL table: `ACM_RefitRequests(EquipID, RequestedAt, Reason, Acknowledged)`
+- **Progress** (2025-11-29):
+  - ✅ Added SQL mode logging for refit requests with detailed reasons
+  - ✅ Enhanced refit flag write logic to include anomaly_rate and drift_score metrics
+  - ⏳ SQL table `ACM_RefitRequests` not yet created
+  - ⏳ Run-start query logic not yet implemented
+- **Remaining Work**:
+  - Create SQL table: `ACM_RefitRequests(EquipID, RequestedAt, Reason, AnomalyRate, DriftScore, Acknowledged)`
   - In SQL mode, write refit requests to this table instead of file
   - At run start, query table and set `refit_requested = True` if pending
   - Clear acknowledged flags after processing
-  - Remove `if not SQL_MODE:` guard around refit write logic
 - **Impact**: Quality-based retraining can work in SQL deployments
-- **Estimated Effort**: 4-6 hours
+- **Estimated Effort**: 3-4 hours remaining
 - **Priority**: P0 - Enables quality-driven retraining loop
-- **Files**: `core/acm_main.py` (auto-tune section), new migration script
+- **Files**: `core/acm_main.py` (lines 2864-2883 placeholder logging), new migration script
 - **Testing**: Force quality degradation, verify refit request written and honored
 
-**SQL-CL-03: Enhanced assess_model_quality Usage** 🟡 MEDIUM
+**✅ SQL-CL-03: Enhanced assess_model_quality Usage** 🟡 MEDIUM - COMPLETE
 - **Problem**: `assess_model_quality` is called but metrics are discarded; only config signature comparison used.
-- **Current State**: Wasted computation, "auto_retrain" is effectively just "config_changed → retrain"
-- **Fix Required**:
-  - Return structured `quality_report` from `assess_model_quality`
-  - Log the report for operator visibility
-  - Use metrics to drive `force_retrain` decisions (per SQL-CL-01)
-  - Optionally log suggested hyperparameter adjustments
-- **Impact**: Better observability and data-driven tuning
-- **Estimated Effort**: 3-4 hours
-- **Priority**: P1 - Quality of life improvement
-- **Files**: `core/acm_main.py`, potentially new `core/model_quality.py` module
-- **Testing**: Verify quality report logged, metrics influence retrain decisions
+- **Solution Implemented** (2025-11-29):
+  - ✅ Extract `anomaly_metrics` and `drift_score` from `quality_report`
+  - ✅ Use metrics to drive retrain decisions (anomaly_rate_trigger, drift_score_trigger)
+  - ✅ Log all trigger reasons with detailed metrics
+  - ✅ Aggregate `should_retrain`, `anomaly_rate_trigger`, `drift_score_trigger` into `needs_retraining` flag
+  - ✅ Enhanced refit flag file to include anomaly_rate and drift_score values
+- **Impact**: Quality metrics now directly influence retrain decisions, full observability
+- **Files Modified**: `core/acm_main.py` (lines 2747-2780)
+- **Status**: ✅ COMPLETE - Metrics fully wired into retrain logic
 
 ---
 

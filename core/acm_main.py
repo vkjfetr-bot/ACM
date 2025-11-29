@@ -2082,10 +2082,46 @@ def main() -> None:
                         current_sig = cfg.get("_signature", "unknown")
                         config_changed = (cached_sig != current_sig)
                     
+                    # Get auto_retrain config for SQL mode data-driven triggers
+                    auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+                    if isinstance(auto_retrain_cfg, bool):
+                        auto_retrain_cfg = {}  # Convert legacy boolean to dict
+                    
+                    # Check model age (SQL mode temporal validation)
+                    model_age_trigger = False
+                    if SQL_MODE and cached_manifest:
+                        created_at_str = cached_manifest.get("created_at")
+                        if created_at_str:
+                            try:
+                                from datetime import datetime
+                                created_at = datetime.fromisoformat(created_at_str)
+                                model_age_hours = (datetime.now() - created_at).total_seconds() / 3600
+                                max_age_hours = auto_retrain_cfg.get("max_model_age_hours", 720)  # 30 days default
+                                
+                                if model_age_hours > max_age_hours:
+                                    Console.warn(f"[MODEL] Model age {model_age_hours:.1f}h exceeds limit {max_age_hours}h - forcing retraining")
+                                    model_age_trigger = True
+                            except Exception as age_e:
+                                Console.warn(f"[MODEL] Failed to check model age: {age_e}")
+                    
+                    # Check regime quality (SQL mode data-driven trigger)
+                    regime_quality_trigger = False
+                    if SQL_MODE:
+                        min_silhouette = auto_retrain_cfg.get("min_regime_quality", 0.3)
+                        current_silhouette = regime_quality_metrics.get("silhouette", 0.0)
+                        if not regime_quality_ok or current_silhouette < min_silhouette:
+                            Console.warn(f"[MODEL] Regime quality degraded (silhouette={current_silhouette:.3f} < {min_silhouette}) - forcing retraining")
+                            regime_quality_trigger = True
+                    
+                    # Aggregate triggers
                     if config_changed:
                         Console.warn(f"[MODEL] Config changed - forcing retraining")
                         force_retrain = True
-                        # Invalidate cached models
+                    elif model_age_trigger or regime_quality_trigger:
+                        force_retrain = True
+                    
+                    # Invalidate cached models if retraining required
+                    if force_retrain:
                         cached_models = None
                         ar1_detector = pca_detector = mhal_detector = iforest_detector = gmm_detector = None
                         
@@ -2691,7 +2727,9 @@ def main() -> None:
             Console.warn("[REGIME] Clustering quality below threshold; per-regime thresholds disabled.")
 
         # ===== Autonomous Parameter Tuning: Update config based on quality =====
-        if cfg.get("models", {}).get("auto_tune", True) and not SQL_MODE:
+        # Task 2: Wire assess_model_quality results into retrain decisions
+        # Now supports SQL mode with proper retrain triggering
+        if cfg.get("models", {}).get("auto_tune", True):
             try:
                 from core.model_evaluation import assess_model_quality
                 
@@ -2710,7 +2748,38 @@ def main() -> None:
                     cached_manifest=cached_manifest if 'cached_manifest' in locals() else None
                 )
                 
-                if should_retrain:
+                # Task 1: Extract metrics for additional retrain triggers
+                auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+                if isinstance(auto_retrain_cfg, bool):
+                    auto_retrain_cfg = {}
+                
+                # Check anomaly rate trigger
+                anomaly_rate_trigger = False
+                anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
+                current_anomaly_rate = anomaly_metrics.get("anomaly_rate", 0.0)
+                max_anomaly_rate = auto_retrain_cfg.get("max_anomaly_rate", 0.25)
+                if current_anomaly_rate > max_anomaly_rate:
+                    anomaly_rate_trigger = True
+                    if not should_retrain:
+                        reasons = []
+                    reasons.append(f"anomaly_rate={current_anomaly_rate:.2%} > {max_anomaly_rate:.2%}")
+                    Console.warn(f"[RETRAIN-TRIGGER] Anomaly rate {current_anomaly_rate:.2%} exceeds threshold {max_anomaly_rate:.2%}")
+                
+                # Check drift score trigger
+                drift_score_trigger = False
+                drift_score = quality_report.get("metrics", {}).get("drift_score", 0.0)
+                max_drift_score = auto_retrain_cfg.get("max_drift_score", 2.0)
+                if drift_score > max_drift_score:
+                    drift_score_trigger = True
+                    if not should_retrain and not anomaly_rate_trigger:
+                        reasons = []
+                    reasons.append(f"drift_score={drift_score:.2f} > {max_drift_score:.2f}")
+                    Console.warn(f"[RETRAIN-TRIGGER] Drift score {drift_score:.2f} exceeds threshold {max_drift_score:.2f}")
+                
+                # Aggregate all retrain triggers
+                needs_retraining = should_retrain or anomaly_rate_trigger or drift_score_trigger
+                
+                if needs_retraining:
                     Console.warn(f"[AUTO-TUNE] Quality degradation detected: {', '.join(reasons)}")
                     
                     # Auto-tune parameters based on specific issues
@@ -2812,20 +2881,33 @@ def main() -> None:
                     else:
                         Console.info(f"[AUTO-TUNE] No automatic parameter adjustments available")
 
-                    # Persist a refit marker so next run bypasses cache even if params unchanged
+                    # Persist refit marker/request for next run
+                    # Task 3: SQL mode should write to ACM_RefitRequests table (to be implemented)
                     try:
-                        # Atomic write: create temp then replace
+                        # File mode: atomic write to refit flag
                         if not SQL_MODE:
                             tmp_path = refit_flag_path.with_suffix(".pending")
                             with tmp_path.open("w", encoding="utf-8") as rf:
                                 rf.write(f"requested_at={pd.Timestamp.now().isoformat()}\n")
                                 rf.write(f"reasons={'; '.join(reasons)}\n")
+                                if anomaly_rate_trigger:
+                                    rf.write(f"anomaly_rate={current_anomaly_rate:.2%}\n")
+                                if drift_score_trigger:
+                                    rf.write(f"drift_score={drift_score:.2f}\n")
                             try:
                                 os.replace(tmp_path, refit_flag_path)
                             except Exception:
                                 # Fallback to rename on platforms without os.replace edge cases
                                 tmp_path.rename(refit_flag_path)
                             Console.info(f"[MODEL] Refit flag written atomically -> {refit_flag_path}")
+                        else:
+                            # SQL mode: write to ACM_RefitRequests (to be implemented in Task 3)
+                            Console.warn("[MODEL] SQL mode refit request: ACM_RefitRequests table not yet implemented")
+                            Console.warn(f"[MODEL] Refit reasons: {', '.join(reasons)}")
+                            if anomaly_rate_trigger:
+                                Console.warn(f"[MODEL] Current anomaly rate: {current_anomaly_rate:.2%} (threshold: {max_anomaly_rate:.2%})")
+                            if drift_score_trigger:
+                                Console.warn(f"[MODEL] Current drift score: {drift_score:.2f} (threshold: {max_drift_score:.2f})")
                     except Exception as re:
                         Console.warn(f"[MODEL] Failed to write refit flag: {re}")
                 
