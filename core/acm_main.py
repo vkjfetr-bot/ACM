@@ -2801,7 +2801,6 @@ def main() -> None:
                                 rf.write(f"requested_at={pd.Timestamp.now().isoformat()}\n")
                                 rf.write(f"reasons={'; '.join(reasons)}\n")
                             try:
-                                import os
                                 os.replace(tmp_path, refit_flag_path)
                             except Exception:
                                 # Fallback to rename on platforms without os.replace edge cases
