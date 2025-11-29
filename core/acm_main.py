@@ -1086,38 +1086,41 @@ def main() -> None:
         score_numeric = score.copy()
 
         # ===== Adaptive Rolling Baseline (cold-start helper) =====
-        # If TRAIN is missing or too small, bootstrap it from a persisted rolling buffer
-        # or, as a fallback, from the head of SCORE data.
-        with T.section("baseline.seed"):
-            try:
-                baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-                min_points = int(baseline_cfg.get("min_points", 300))
-                buffer_path = stable_models_dir / "baseline_buffer.csv"
-                train_rows = len(train_numeric) if isinstance(train_numeric, pd.DataFrame) else 0
-                if train_rows < min_points:
-                    used: Optional[str] = None
-                    if buffer_path.exists():
-                        buf = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
-                        buf = _ensure_local_index(buf)
-                        # Align TRAIN buffer to current SCORE columns to avoid drift
-                        if isinstance(score_numeric, pd.DataFrame) and hasattr(buf, "columns"):
-                            common_cols = [c for c in buf.columns if c in score_numeric.columns]
-                            if len(common_cols) > 0:
-                                buf = buf[common_cols]
-                        train = buf.copy()
-                        train_numeric = train.copy()
-                        used = f"baseline_buffer.csv ({len(train)} rows)"
-                    else:
-                        # Seed TRAIN from the leading portion of SCORE
-                        if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
-                            seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
-                            train = score_numeric.iloc[:seed_n].copy()
+        # Task 6 & 7: Skip CSV baseline.seed and baseline_buffer.csv in SQL mode
+        # In SQL mode, SmartColdstart provides all baseline data from ACM_BaselineBuffer
+        if not SQL_MODE:
+            with T.section("baseline.seed"):
+                try:
+                    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+                    min_points = int(baseline_cfg.get("min_points", 300))
+                    buffer_path = stable_models_dir / "baseline_buffer.csv"
+                    train_rows = len(train_numeric) if isinstance(train_numeric, pd.DataFrame) else 0
+                    if train_rows < min_points:
+                        used: Optional[str] = None
+                        if buffer_path.exists():
+                            buf = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
+                            buf = _ensure_local_index(buf)
+                            # Align TRAIN buffer to current SCORE columns to avoid drift
+                            if isinstance(score_numeric, pd.DataFrame) and hasattr(buf, "columns"):
+                                common_cols = [c for c in buf.columns if c in score_numeric.columns]
+                                if len(common_cols) > 0:
+                                    buf = buf[common_cols]
+                            train = buf.copy()
                             train_numeric = train.copy()
-                            used = f"score head ({seed_n} rows)"
-                    if used:
-                        Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
-            except Exception as be:
-                Console.warn(f"[BASELINE] Cold-start baseline setup failed: {be}")
+                            used = f"baseline_buffer.csv ({len(train)} rows)"
+                        else:
+                            # Seed TRAIN from the leading portion of SCORE
+                            if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
+                                seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
+                                train = score_numeric.iloc[:seed_n].copy()
+                                train_numeric = train.copy()
+                                used = f"score head ({seed_n} rows)"
+                        if used:
+                            Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
+                except Exception as be:
+                    Console.warn(f"[BASELINE] Cold-start baseline setup failed: {be}")
+        else:
+            Console.info("[BASELINE] SQL mode: skipping CSV baseline.seed, using SmartColdstart data")
 
         # ===== Data quality guardrails (High #4) =====
         with T.section("data.guardrails"):
@@ -1580,10 +1583,22 @@ def main() -> None:
                             )
                         
                         if is_valid:
-                            Console.info(f"[MODEL] Using cached models from v{cached_manifest['version']}")
+                            # Task 10: Enhanced logging for cached model acceptance
+                            Console.info(f"[MODEL] ✓ Using cached models from v{cached_manifest['version']}")
                             Console.info(f"[MODEL] Cache created: {cached_manifest.get('created_at', 'unknown')}")
+                            Console.info(f"[MODEL] Config signature: {current_config_sig[:16]}... (unchanged)")
+                            Console.info(f"[MODEL] Sensor count: {len(current_sensors)} (matching cached)")
+                            if 'created_at' in cached_manifest:
+                                from datetime import datetime
+                                try:
+                                    created_at = datetime.fromisoformat(cached_manifest['created_at'])
+                                    age_hours = (datetime.now() - created_at).total_seconds() / 3600
+                                    Console.info(f"[MODEL] Model age: {age_hours:.1f}h ({age_hours/24:.1f}d)")
+                                except Exception:
+                                    pass
                         else:
-                            Console.warn(f"[MODEL] Cached models invalid, retraining required:")
+                            # Task 10: Enhanced logging for retrain trigger reasons
+                            Console.warn(f"[MODEL] ✗ Cached models invalid, retraining required:")
                             for reason in invalid_reasons:
                                 Console.warn(f"[MODEL]   - {reason}")
                             cached_models = None
@@ -2156,8 +2171,9 @@ def main() -> None:
                     Console.warn(f"[MODEL] Quality assessment failed: {e}")
 
         # ===== Model Persistence: Save trained models with versioning =====
-        # Save if we trained new models (not loaded from cache)
-        models_were_trained = (not cached_models and detector_cache is None) or force_retrain
+        # Task 8: Improved semantics - detectors_fitted_this_run tracks actual fitting
+        detectors_fitted_this_run = (not cached_models and detector_cache is None) or force_retrain
+        models_were_trained = detectors_fitted_this_run  # Clearer: save only if fitted this run
         if models_were_trained:
             with T.section("models.persistence.save"):
                 try:
@@ -3189,9 +3205,11 @@ def main() -> None:
         episodes["regime"] = episodes["regime"].astype(str)
 
         # ===== Rolling Baseline Buffer: Update with latest raw SCORE =====
-        try:
-            baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-            buffer_path = stable_models_dir / "baseline_buffer.csv"
+        # Task 7: Skip baseline_buffer.csv writes in SQL mode
+        if not SQL_MODE:
+            try:
+                baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+                buffer_path = stable_models_dir / "baseline_buffer.csv"
             if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
                 to_append = score_numeric.copy()
                 # Normalize index to local naive timestamps for stable CSV format
