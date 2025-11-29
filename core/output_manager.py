@@ -5395,9 +5395,19 @@ class OutputManager:
                     'Notes': notes
                 })
             
-            # Insert new thresholds
+            # Insert new thresholds via generic SQL DataFrame writer
             df = pd.DataFrame(rows)
-            self.write_sql('ACM_ThresholdMetadata', df, if_exists='append')
+            # Use a stable pseudo-file name for cache key only; file output stays disabled
+            pseudo_csv = Path("acm_thresholds.csv")
+            write_result = self.write_dataframe(
+                df=df,
+                file_path=pseudo_csv,
+                sql_table='ACM_ThresholdMetadata',
+                add_created_at=True,
+                allow_repair=True
+            )
+            if not write_result.get('sql_written', False):
+                raise RuntimeError(f"SQL write failed for ACM_ThresholdMetadata: {write_result.get('error')}")
             
             Console.info(
                 f"Threshold metadata written: {threshold_type} = "
