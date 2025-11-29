@@ -2883,6 +2883,424 @@
       ],
       "title": "Sensor Anomaly Markers (Z-Score)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Adaptive Threshold"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#10b981",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [10, 5],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hardcoded 3.0"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#dc2626",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [5, 10],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "FusedZ"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#3b82f6",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 10
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 116
+      },
+      "id": 30,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "-- FusedZ over time with adaptive vs hardcoded thresholds\nSELECT \n  ht.Timestamp AS time,\n  'FusedZ' AS metric,\n  ht.FusedZ AS value\nFROM ACM_HealthTimeline ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nUNION ALL\n\n-- Latest adaptive threshold (flat line)\nSELECT \n  ht.Timestamp AS time,\n  'Adaptive Threshold' AS metric,\n  (\n    SELECT TOP 1 ThresholdValue \n    FROM ACM_ThresholdMetadata \n    WHERE EquipID = $equipment \n      AND ThresholdType = 'fused_alert_z' \n      AND RegimeID IS NULL \n      AND IsActive = 1\n    ORDER BY CreatedAt DESC\n  ) AS value\nFROM ACM_HealthTimeline ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nUNION ALL\n\n-- Hardcoded 3.0 for comparison\nSELECT \n  ht.Timestamp AS time,\n  'Hardcoded 3.0' AS metric,\n  3.0 AS value\nFROM ACM_HealthTimeline ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nORDER BY time, metric",
+          "refId": "A"
+        }
+      ],
+      "title": "Adaptive Threshold Comparison",
+      "description": "FusedZ compared to adaptive threshold (green) vs hardcoded 3.0 (red). Shows impact of data-driven thresholds.",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ThresholdValue"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1.5
+                    },
+                    {
+                      "color": "red",
+                      "value": 3.0
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CalculationMethod"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "SampleCount"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CreatedAt"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "RegimeID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 116
+      },
+      "id": 31,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "CreatedAt"
+          }
+        ]
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Latest active thresholds per regime\nSELECT \n  tm.ThresholdType,\n  CASE \n    WHEN tm.RegimeID IS NULL THEN 'Global'\n    ELSE CAST(tm.RegimeID AS VARCHAR)\n  END AS RegimeID,\n  tm.ThresholdValue,\n  tm.CalculationMethod,\n  tm.SampleCount,\n  tm.CreatedAt,\n  DATEDIFF(HOUR, tm.TrainStartTime, tm.TrainEndTime) AS TrainingHours\nFROM ACM_ThresholdMetadata tm\nWHERE tm.EquipID = $equipment\n  AND tm.IsActive = 1\nORDER BY \n  CASE WHEN tm.ThresholdType = 'fused_alert_z' THEN 1 ELSE 2 END,\n  CASE WHEN tm.RegimeID IS NULL THEN 999 ELSE tm.RegimeID END",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Threshold Metadata",
+      "description": "Current adaptive thresholds in use. Shows global and per-regime values with calculation metadata.",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 124
+      },
+      "id": 32,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "last"],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "-- Per-regime threshold evolution over time\nSELECT \n  tm.CreatedAt AS time,\n  CONCAT(\n    CASE \n      WHEN tm.RegimeID IS NULL THEN 'Global'\n      ELSE CONCAT('Regime ', CAST(tm.RegimeID AS VARCHAR))\n    END,\n    ' - ',\n    tm.ThresholdType\n  ) AS metric,\n  tm.ThresholdValue AS value\nFROM ACM_ThresholdMetadata tm\nWHERE tm.EquipID = $equipment\n  AND $__timeFilter(tm.CreatedAt)\nORDER BY tm.CreatedAt, metric",
+          "refId": "A"
+        }
+      ],
+      "title": "Threshold Evolution History",
+      "description": "How adaptive thresholds have changed over time as more training data becomes available. Tracks threshold drift and regime-specific adjustments.",
+      "type": "timeseries"
     }
   ],
   "preload": false,
