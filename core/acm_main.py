@@ -2882,7 +2882,7 @@ def main() -> None:
                         Console.info(f"[AUTO-TUNE] No automatic parameter adjustments available")
 
                     # Persist refit marker/request for next run
-                    # Task 3: SQL mode should write to ACM_RefitRequests table (to be implemented)
+                    # SQL mode: write to ACM_RefitRequests; File mode: write flag file
                     try:
                         # File mode: atomic write to refit flag
                         if not SQL_MODE:
@@ -2901,13 +2901,51 @@ def main() -> None:
                                 tmp_path.rename(refit_flag_path)
                             Console.info(f"[MODEL] Refit flag written atomically -> {refit_flag_path}")
                         else:
-                            # SQL mode: write to ACM_RefitRequests (to be implemented in Task 3)
-                            Console.warn("[MODEL] SQL mode refit request: ACM_RefitRequests table not yet implemented")
-                            Console.warn(f"[MODEL] Refit reasons: {', '.join(reasons)}")
-                            if anomaly_rate_trigger:
-                                Console.warn(f"[MODEL] Current anomaly rate: {current_anomaly_rate:.2%} (threshold: {max_anomaly_rate:.2%})")
-                            if drift_score_trigger:
-                                Console.warn(f"[MODEL] Current drift score: {drift_score:.2f} (threshold: {max_drift_score:.2f})")
+                            # SQL mode: write to ACM_RefitRequests
+                            try:
+                                if sql_client:
+                                    with sql_client.cursor() as cur:
+                                        cur.execute(
+                                            """
+                                            IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
+                                            BEGIN
+                                                CREATE TABLE [dbo].[ACM_RefitRequests] (
+                                                    [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                                                    [EquipID] INT NOT NULL,
+                                                    [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                                                    [Reason] NVARCHAR(MAX) NULL,
+                                                    [AnomalyRate] FLOAT NULL,
+                                                    [DriftScore] FLOAT NULL,
+                                                    [ModelAgeHours] FLOAT NULL,
+                                                    [RegimeQuality] FLOAT NULL,
+                                                    [Acknowledged] BIT NOT NULL DEFAULT 0,
+                                                    [AcknowledgedAt] DATETIME2 NULL
+                                                );
+                                                CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
+                                            END
+                                            """
+                                        )
+                                        cur.execute(
+                                            """
+                                            INSERT INTO [dbo].[ACM_RefitRequests]
+                                                (EquipID, Reason, AnomalyRate, DriftScore, ModelAgeHours, RegimeQuality)
+                                            VALUES
+                                                (?, ?, ?, ?, ?, ?)
+                                            """,
+                                            (
+                                                int(equip_id),
+                                                "; ".join(reasons),
+                                                float(current_anomaly_rate) if anomaly_rate_trigger else None,
+                                                float(drift_score) if drift_score_trigger else None,
+                                                float(model_age_hours) if 'model_age_hours' in locals() else None,
+                                                float(regime_metrics.get("silhouette", 0.0)) if 'regime_metrics' in locals() else None,
+                                            ),
+                                        )
+                                    Console.info("[MODEL] SQL refit request recorded in ACM_RefitRequests")
+                                else:
+                                    Console.warn("[MODEL] SQL client unavailable; cannot write refit request")
+                            except Exception as sql_re:
+                                Console.warn(f"[MODEL] Failed to write SQL refit request: {sql_re}")
                     except Exception as re:
                         Console.warn(f"[MODEL] Failed to write refit flag: {re}")
                 
