@@ -570,6 +570,10 @@ def _calculate_adaptive_thresholds(
         
         # Store in SQL via OutputManager if available
         if output_manager is not None and output_manager.sql_client is not None:
+            Console.info(
+                f"[THRESHOLD] Persisting to SQL: equip_id={equip_id} | samples={len(fused_scores)} | "
+                f"method={threshold_results.get('method')} | conf={threshold_results.get('confidence')}"
+            )
             import hashlib
             config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
             
@@ -584,6 +588,7 @@ def _calculate_adaptive_thresholds(
                 config_signature=config_sig,
                 notes=f"Auto-calculated from {len(fused_scores)} accumulated samples"
             )
+            Console.info("[THRESHOLD] SQL write completed for fused_alert_z")
             
             output_manager.write_threshold_metadata(
                 equip_id=equip_id,
@@ -596,6 +601,7 @@ def _calculate_adaptive_thresholds(
                 config_signature=config_sig,
                 notes=f"Auto-calculated warning threshold (50% of alert)"
             )
+            Console.info("[THRESHOLD] SQL write completed for fused_warn_z")
             
             # Update cfg to use adaptive thresholds in downstream modules
             if isinstance(threshold_results['fused_alert_z'], dict):
@@ -623,6 +629,9 @@ def _calculate_adaptive_thresholds(
                 cfg["regimes"]["health"]["fused_warn_z"] = threshold_results['fused_warn_z']
         else:
             Console.warn("[THRESHOLD] SQL client not available - thresholds not persisted")
+            Console.warn(f"[THRESHOLD] Debug: output_manager is {'set' if output_manager is not None else 'None'} | "
+                         f"sql_client is {'set' if (getattr(output_manager, 'sql_client', None) is not None) else 'None'} | "
+                         f"SQL_MODE={cfg.get('runtime', {}).get('storage_backend', 'unknown')}")
         
         return threshold_results
         
