@@ -2323,6 +2323,87 @@ def main() -> None:
             if fused_np.shape[0] != len(frame.index):
                 raise RuntimeError(f"[FUSE] Fused length {fused_np.shape[0]} != frame length {len(frame.index)}")
             frame["fused"] = fused_np
+            
+            # Calculate adaptive thresholds from TRAIN FusedZ
+            with T.section("thresholds.adaptive"):
+                try:
+                    from core.adaptive_thresholds import calculate_thresholds_from_config
+                    
+                    threshold_cfg = cfg.get("thresholds", {}).get("adaptive", {})
+                    if threshold_cfg.get("enabled", True):
+                        Console.info("[THRESHOLD] Calculating adaptive thresholds from training data...")
+                        
+                        # Get TRAIN FusedZ scores
+                        train_fused_baseline_np = np.asarray(fused_baseline, dtype=np.float32).reshape(-1)
+                        
+                        # Get regime labels if per_regime enabled and quality OK
+                        train_regime_labels = None
+                        if threshold_cfg.get("per_regime", False) and regime_quality_ok and "regime_label" in train.columns:
+                            train_regime_labels = train["regime_label"].to_numpy(copy=False)
+                        
+                        # Calculate thresholds
+                        threshold_results = calculate_thresholds_from_config(
+                            train_fused_z=train_fused_baseline_np,
+                            cfg=cfg,
+                            regime_labels=train_regime_labels
+                        )
+                        
+                        # Store in SQL via OutputManager
+                        if output_manager is not None and output_manager.sql_client is not None:
+                            import hashlib
+                            config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
+                            
+                            output_manager.write_threshold_metadata(
+                                equip_id=equip_id,
+                                threshold_type='fused_alert_z',
+                                threshold_value=threshold_results['fused_alert_z'],
+                                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                                sample_count=len(train_fused_baseline_np),
+                                train_start=train.index.min() if not train.empty else None,
+                                train_end=train.index.max() if not train.empty else None,
+                                config_signature=config_sig,
+                                notes=f"Auto-calculated from {len(train_fused_baseline_np)} training samples"
+                            )
+                            
+                            output_manager.write_threshold_metadata(
+                                equip_id=equip_id,
+                                threshold_type='fused_warn_z',
+                                threshold_value=threshold_results['fused_warn_z'],
+                                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                                sample_count=len(train_fused_baseline_np),
+                                train_start=train.index.min() if not train.empty else None,
+                                train_end=train.index.max() if not train.empty else None,
+                                config_signature=config_sig,
+                                notes=f"Auto-calculated warning threshold (50% of alert)"
+                            )
+                            
+                            # Update cfg to use adaptive thresholds in downstream modules
+                            if isinstance(threshold_results['fused_alert_z'], dict):
+                                Console.info(f"[THRESHOLD] Per-regime thresholds: {threshold_results['fused_alert_z']}")
+                                # Store in cfg for regimes.update_health_labels() to use
+                                if "regimes" not in cfg:
+                                    cfg["regimes"] = {}
+                                if "health" not in cfg["regimes"]:
+                                    cfg["regimes"]["health"] = {}
+                                cfg["regimes"]["health"]["fused_alert_z_per_regime"] = threshold_results['fused_alert_z']
+                                cfg["regimes"]["health"]["fused_warn_z_per_regime"] = threshold_results['fused_warn_z']
+                            else:
+                                Console.info(
+                                    f"[THRESHOLD] Global thresholds: "
+                                    f"alert={threshold_results['fused_alert_z']:.3f}, "
+                                    f"warn={threshold_results['fused_warn_z']:.3f} "
+                                    f"(method={threshold_results['method']}, conf={threshold_results['confidence']})"
+                                )
+                                # Override static config values with adaptive ones
+                                cfg["regimes"]["health"]["fused_alert_z"] = threshold_results['fused_alert_z']
+                                cfg["regimes"]["health"]["fused_warn_z"] = threshold_results['fused_warn_z']
+                        else:
+                            Console.warn("[THRESHOLD] SQL client not available - thresholds not persisted")
+                    else:
+                        Console.info("[THRESHOLD] Adaptive thresholds disabled - using static config values")
+                except Exception as threshold_e:
+                    Console.error(f"[THRESHOLD] Adaptive threshold calculation failed: {threshold_e}")
+                    Console.warn("[THRESHOLD] Falling back to static config values")
 
         regime_stats: Dict[int, Dict[str, float]] = {}
         if not regime_quality_ok and "regime_label" in frame.columns:
