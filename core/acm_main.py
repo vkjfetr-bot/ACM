@@ -836,7 +836,8 @@ def main() -> None:
     # Heartbeat gating
     heartbeat_on = bool(cfg.get("runtime", {}).get("heartbeat", True))
 
-    reuse_models = bool(cfg.get("runtime", {}).get("reuse_model_fit", False))
+    # SQL MODE: disable legacy joblib cache reuse to avoid dual caching
+    reuse_models = bool(cfg.get("runtime", {}).get("reuse_model_fit", False)) and (not SQL_MODE)
     # CRITICAL FIX: Stable cache must match equipment root (artifacts/{EQUIP}/models/)
     stable_models_dir = equip_root / "models"
     if not SQL_MODE:
