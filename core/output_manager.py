@@ -5400,14 +5400,13 @@ class OutputManager:
             created_at = pd.Timestamp.now().tz_localize(None)
             for r in rows:
                 r['CreatedAt'] = created_at
-                r['RunID'] = self.run_id
                 # Ensure EquipID set
                 r['EquipID'] = equip_id
             
             insert_sql = (
                 "INSERT INTO ACM_ThresholdMetadata (EquipID, RegimeID, ThresholdType, ThresholdValue, "
                 "CalculationMethod, SampleCount, TrainStartTime, TrainEndTime, CreatedAt, ConfigSignature, "
-                "IsActive, Notes, RunID) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "IsActive, Notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             )
             params = [
                 (
@@ -5422,8 +5421,7 @@ class OutputManager:
                     r.get('CreatedAt'),
                     r.get('ConfigSignature'),
                     r.get('IsActive'),
-                    r.get('Notes'),
-                    r.get('RunID')
+                    r.get('Notes')
                 ) for r in rows
             ]
             with self.sql_client.cursor() as cur:
