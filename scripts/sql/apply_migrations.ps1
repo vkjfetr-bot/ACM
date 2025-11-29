@@ -21,7 +21,7 @@ function Invoke-Migration {
 }
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$migrationsDir = Join-Path (Split-Path -Parent $root) "scripts/sql/migrations"
+$migrationsDir = Join-Path $root "migrations"
 
 if (!(Test-Path $migrationsDir)) {
     throw "Migrations directory not found: $migrationsDir"
