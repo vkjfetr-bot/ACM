@@ -781,6 +781,18 @@ def main() -> None:
     threshold_update_interval = int(cl_cfg.get("threshold_update_interval", 1))  # Default: update every batch
     force_retraining = BATCH_MODE and CONTINUOUS_LEARNING  # Force retraining in continuous learning mode
     
+    # Validate interval settings for production deployment
+    if model_update_interval <= 0:
+        Console.warn(f"[CFG] Invalid model_update_interval={model_update_interval}, defaulting to 1")
+        model_update_interval = 1
+    if threshold_update_interval <= 0:
+        Console.warn(f"[CFG] Invalid threshold_update_interval={threshold_update_interval}, defaulting to 1")
+        threshold_update_interval = 1
+    
+    # Production-ready: Works with infinite batch processing (no max_batches dependency)
+    # Batch numbering uses absolute count from progress file, not loop counter
+    # Frequency control: batch_num % interval == 0 works indefinitely
+    
     # Get batch number from environment (set by sql_batch_runner)
     batch_num = int(os.getenv("ACM_BATCH_NUM", "0"))
     
