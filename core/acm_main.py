@@ -2911,14 +2911,22 @@ def main() -> None:
                         Console.info(f"[AUTO-TUNE] Retraining required on next run to apply changes")
                         
                         # Log config changes to ACM_ConfigHistory
+                        # Task 9: Check if auto_retrain.on_tuning_change is enabled to trigger refit
                         try:
                             if sql_client and run_id:
+                                auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+                                trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False)
+                                
                                 log_auto_tune_changes(
                                     sql_client=sql_client,
                                     equip_id=int(equip_id),
                                     tuning_actions=tuning_actions,
-                                    run_id=run_id
+                                    run_id=run_id,
+                                    trigger_refit=trigger_refit_on_tune
                                 )
+                                
+                                if trigger_refit_on_tune:
+                                    Console.info("[AUTO-TUNE] on_tuning_change=True: refit request created to apply config changes")
                         except Exception as log_err:
                             Console.warn(f"[CONFIG_HIST] Failed to log auto-tune changes: {log_err}")
                     else:

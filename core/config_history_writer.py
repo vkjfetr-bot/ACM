@@ -201,16 +201,19 @@ def log_auto_tune_changes(
     sql_client,
     equip_id: int,
     tuning_actions: list,
-    run_id: str
+    run_id: str,
+    trigger_refit: bool = False
 ) -> bool:
     """
     Convenience function to log auto-tuning parameter changes.
+    Task 9: Extended to support PendingApply flag and refit signaling.
     
     Args:
         sql_client: SQL connection client
         equip_id: Equipment ID
         tuning_actions: List of tuning action strings (e.g., "clip_z: 12.0->14.4")
         run_id: RunID that triggered the tuning
+        trigger_refit: If True, creates refit request to apply changes next run
     
     Returns:
         bool: True if write succeeded, False otherwise
@@ -256,11 +259,30 @@ def log_auto_tune_changes(
     if not changes:
         return True
     
-    return write_config_changes_bulk(
+    success = write_config_changes_bulk(
         sql_client=sql_client,
         equip_id=equip_id,
         changes=changes,
         changed_by="AUTO_TUNE",
         run_id=run_id
     )
+    
+    # Task 9: If trigger_refit=True, create refit request to apply config changes
+    if success and trigger_refit:
+        try:
+            with sql_client.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO [dbo].[ACM_RefitRequests]
+                        (EquipID, Reason, Acknowledged)
+                    VALUES
+                        (?, ?, 0)
+                    """,
+                    (equip_id, f"Auto-tune config changes: {', '.join([c['parameter_path'] for c in changes])}")
+                )
+            Console.info("[AUTO-TUNE] Refit request created to apply config changes next run")
+        except Exception as e:
+            Console.warn(f"[AUTO-TUNE] Failed to create refit request: {e}")
+    
+    return success
 
