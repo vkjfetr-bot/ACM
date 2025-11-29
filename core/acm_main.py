@@ -1448,19 +1448,45 @@ def main() -> None:
                 Console.warn(f"[HASH] Hash computation failed: {e}")
                 train_feature_hash = None
 
-        # Respect refit-request flag: bypass cache once and clear the flag
+        # Respect refit-request: file flag or SQL table entries
         refit_requested = False
         with T.section("models.refit_flag"):
             try:
-                if refit_flag_path.exists():
+                # File-mode flag
+                if not SQL_MODE and refit_flag_path.exists():
                     refit_requested = True
                     Console.warn(f"[MODEL] Refit requested by quality policy; bypassing cache this run")
                     try:
                         refit_flag_path.unlink()
                     except Exception:
                         pass
-            except Exception:
-                pass
+
+                # SQL-mode: check ACM_RefitRequests (Acknowledged=0)
+                if SQL_MODE and sql_client:
+                    with sql_client.cursor() as cur:
+                        cur.execute(
+                            """
+                            IF OBJECT_ID(N'[dbo].[ACM_RefitRequests]', N'U') IS NOT NULL
+                            BEGIN
+                                SELECT TOP 1 RequestID, RequestedAt, Reason
+                                FROM [dbo].[ACM_RefitRequests]
+                                WHERE EquipID = ? AND Acknowledged = 0
+                                ORDER BY RequestedAt DESC
+                            END
+                            """,
+                            (int(equip_id),),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            refit_requested = True
+                            Console.warn(f"[MODEL] SQL refit request found: id={row[0]} at {row[1]}")
+                            # Acknowledge refit so it is not re-used next run
+                            cur.execute(
+                                "UPDATE [dbo].[ACM_RefitRequests] SET Acknowledged = 1, AcknowledgedAt = SYSUTCDATETIME() WHERE RequestID = ?",
+                                (int(row[0]),),
+                            )
+            except Exception as rf_err:
+                Console.warn(f"[MODEL] Refit check failed: {rf_err}")
 
         if reuse_models and model_cache_path.exists() and not refit_requested:
             with T.section("models.cache_local"):
