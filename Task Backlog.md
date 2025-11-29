@@ -93,6 +93,172 @@ For everything else, the single source of truth is now **GitHub Issues**. This d
 
 ## New Tasks Created after analysis
 
+### SQL MODE CONTINUOUS LEARNING ARCHITECTURE FIXES (2025-11-29)
+
+**Context**: The continuous learning implementation for SQL mode is functionally safe but incomplete. Models rarely retrain based on data quality/drift, mixing two caching mechanisms, and baseline management is inconsistent. This creates a gap between what "continuous learning" suggests and what actually happens.
+
+**Reference**: Analysis provided 2025-11-29 detailing 10 specific issues with SQL mode model retraining behavior.
+
+---
+
+#### 🔴 HIGH PRIORITY - Model Retraining Logic
+
+**SQL-CL-01: Implement Data-Driven Retrain Triggers** ⚠️ CRITICAL
+- **Problem**: Models only retrain when config changes or no cache exists. Data drift, anomaly rates, and regime quality degradation do NOT trigger retraining in SQL mode.
+- **Current State**: `assess_model_quality()` is called but results are ignored except for config signature comparison.
+- **Fix Required**:
+  - Use `assess_model_quality` results to define explicit retrain policies
+  - Add config parameters: `models.auto_retrain.max_anomaly_rate`, `models.auto_retrain.max_drift_score`, `models.auto_retrain.max_model_age_hours`
+  - Set `force_retrain = True` when thresholds exceeded
+  - Wire policies to work in SQL mode (currently guarded by `if not SQL_MODE`)
+- **Impact**: Models will stay current with process changes instead of going stale
+- **Estimated Effort**: 6-8 hours
+- **Priority**: P0 - Core continuous learning functionality
+- **Files**: `core/acm_main.py` (lines ~1800-2000, quality check section)
+- **Testing**: Run 20+ batch simulation, inject drift, verify retraining occurs
+
+**SQL-CL-02: SQL-Native Refit Flag Mechanism** ⚠️ CRITICAL
+- **Problem**: Auto-tune writes `refit_requested.flag` only when `not SQL_MODE`. SQL deployments cannot trigger next-run retrain via quality policies.
+- **Current State**: Refit flag logic explicitly disabled for SQL mode
+- **Fix Required**:
+  - Create SQL table: `ACM_RefitRequests(EquipID, RequestedAt, Reason, Acknowledged)`
+  - In SQL mode, write refit requests to this table instead of file
+  - At run start, query table and set `refit_requested = True` if pending
+  - Clear acknowledged flags after processing
+  - Remove `if not SQL_MODE:` guard around refit write logic
+- **Impact**: Quality-based retraining can work in SQL deployments
+- **Estimated Effort**: 4-6 hours
+- **Priority**: P0 - Enables quality-driven retraining loop
+- **Files**: `core/acm_main.py` (auto-tune section), new migration script
+- **Testing**: Force quality degradation, verify refit request written and honored
+
+**SQL-CL-03: Enhanced assess_model_quality Usage** 🟡 MEDIUM
+- **Problem**: `assess_model_quality` is called but metrics are discarded; only config signature comparison used.
+- **Current State**: Wasted computation, "auto_retrain" is effectively just "config_changed → retrain"
+- **Fix Required**:
+  - Return structured `quality_report` from `assess_model_quality`
+  - Log the report for operator visibility
+  - Use metrics to drive `force_retrain` decisions (per SQL-CL-01)
+  - Optionally log suggested hyperparameter adjustments
+- **Impact**: Better observability and data-driven tuning
+- **Estimated Effort**: 3-4 hours
+- **Priority**: P1 - Quality of life improvement
+- **Files**: `core/acm_main.py`, potentially new `core/model_quality.py` module
+- **Testing**: Verify quality report logged, metrics influence retrain decisions
+
+---
+
+#### 🟡 MEDIUM PRIORITY - Caching & Validation
+
+**SQL-CL-04: Remove Dual-Cache Confusion in SQL Mode** 🟡 MEDIUM
+- **Problem**: Both `detectors.joblib` (legacy) and `ModelVersionManager` (SQL) are usable. Legacy requires identical train hash, SQL cache ignores it.
+- **Current State**: Two sources of truth with different validation criteria
+- **Fix Required**:
+  - In SQL mode, disable legacy joblib cache by default: set `reuse_model_fit=False` in SQL configs
+  - Or gate with `if not SQL_MODE and reuse_models:`
+  - Rely solely on `ModelVersionManager` for SQL mode
+  - Update validation criteria to handle drift (see SQL-CL-05)
+- **Impact**: Single, consistent model cache mechanism per deployment mode
+- **Estimated Effort**: 2-3 hours
+- **Priority**: P1 - Reduces confusion and potential bugs
+- **Files**: `core/acm_main.py` (cache loading sections ~1200-1400)
+- **Testing**: Verify SQL mode never touches detectors.joblib
+
+**SQL-CL-05: Extend check_model_validity Criteria** 🟡 MEDIUM
+- **Problem**: Validation checks config signature + sensor list only. Model trained a year ago still accepted if config unchanged.
+- **Current State**: No notion of training window, model age, or drift in validation
+- **Fix Required**:
+  - Extend manifest to include: `train_start`, `train_end`, `train_row_count`, `train_hash`, `baseline_version`
+  - Add validation rules: reject if model age > `models.max_model_age_days`
+  - Reject if drift indicators from last N runs exceed thresholds
+  - Make thresholds configurable
+- **Impact**: Prevents stale models from being reused indefinitely
+- **Estimated Effort**: 5-7 hours
+- **Priority**: P1 - Critical for long-running deployments
+- **Files**: `core/model_persistence.py` (ModelVersionManager class)
+- **Testing**: Create old model, verify rejection; test drift threshold enforcement
+
+**SQL-CL-06: Fix models_were_trained Semantics** 🟢 LOW
+- **Problem**: `models_were_trained = (not cached_models and detector_cache is None) or force_retrain` could save stale models if `force_retrain` set but fit skipped.
+- **Current State**: Logically works but fragile to future refactors
+- **Fix Required**:
+  - Introduce explicit `detectors_fitted_this_run` boolean
+  - Set only in the fit block after successful training
+  - Define `models_were_trained = detectors_fitted_this_run`
+  - Ensure fit block runs when `force_retrain=True` (invalidate caches first)
+- **Impact**: More robust save logic, prevents edge case bugs
+- **Estimated Effort**: 1-2 hours
+- **Priority**: P2 - Safety improvement, not urgent
+- **Files**: `core/acm_main.py` (model fitting and saving sections)
+- **Testing**: Verify models only saved when actually fitted
+
+---
+
+#### 🟡 MEDIUM PRIORITY - Baseline Management
+
+**SQL-CL-07: Remove Baseline Seed Logic in SQL Mode** 🟡 MEDIUM
+- **Problem**: Even in SQL mode, fallback to `baseline_buffer.csv` or score-head seeding if `train_rows < min_points`. SmartColdstart already enforces sufficient baseline.
+- **Current State**: Mixing SmartColdstart (SQL) with local CSV baseline seeding
+- **Fix Required**:
+  - For SQL mode, skip `baseline.seed` entirely after SmartColdstart returns `coldstart_complete=True`
+  - Make `baseline.seed` strictly file-mode-only: wrap with `if not SQL_MODE:`
+  - Baseline for SQL must come from SmartColdstart / ACM_BaselineBuffer only
+- **Impact**: Single authoritative baseline source in SQL mode
+- **Estimated Effort**: 2-3 hours
+- **Priority**: P1 - Prevents baseline inconsistencies
+- **Files**: `core/acm_main.py` (baseline section ~1000-1100)
+- **Testing**: SQL mode run, verify no baseline_buffer.csv touched
+
+**SQL-CL-08: Drop CSV Baseline in SQL Mode** 🟡 MEDIUM
+- **Problem**: In SQL mode, both `baseline_buffer.csv` and `ACM_BaselineBuffer` maintained with similar content.
+- **Current State**: Redundant, can diverge if CSV deleted or truncated
+- **Fix Required**:
+  - In SQL mode, drop CSV baseline entirely
+  - Wrap `baseline_buffer.csv` read/write with `if not SQL_MODE:`
+  - Use only `ACM_BaselineBuffer` and SmartColdstart logic for SQL
+- **Impact**: Single source of truth for baseline data
+- **Estimated Effort**: 2-3 hours
+- **Priority**: P1 - Cleanup and consistency
+- **Files**: `core/acm_main.py` (baseline buffer writes)
+- **Testing**: SQL mode run, verify no baseline CSV created
+
+---
+
+#### 🟢 LOW PRIORITY - Config Loop & Observability
+
+**SQL-CL-09: Close Auto-Tune Config Loop in SQL** 🟢 LOW
+- **Problem**: Auto-tune computes `tuning_actions` but doesn't update `ACM_Config` or trigger retraining in SQL mode.
+- **Current State**: Analysis done but loop not closed
+- **Fix Required**:
+  - Write `tuning_actions` to `ACM_ConfigHistory` with `PendingApply` flag
+  - If `models.auto_retrain.on_tuning_change=True`, raise refit signal (via SQL-CL-02)
+  - Next run picks up new config + retrains
+- **Impact**: Fully automated tuning loop
+- **Estimated Effort**: 4-6 hours
+- **Priority**: P2 - Nice to have, not blocking
+- **Files**: `core/acm_main.py` (auto-tune section)
+- **Testing**: Force tuning action, verify config updated and retrain triggered
+
+**SQL-CL-10: Improve Retrain Logging in SQL Mode** 🟢 LOW
+- **Problem**: Logs say "Using cached models" or "retraining required" but don't explain WHY (age, drift, config, etc.)
+- **Current State**: Hard to debug retrain behavior
+- **Fix Required**:
+  - When cached models accepted, log reason: config+columns unchanged, model_age=Xd < Yd, drift_ok=True
+  - When retrain triggered, log actual reason: config change vs drift vs anomaly rate vs explicit refit
+  - Add structured logging fields for parsing/monitoring
+- **Impact**: Better observability and debugging
+- **Estimated Effort**: 2-3 hours
+- **Priority**: P2 - Quality of life
+- **Files**: `core/acm_main.py` (cache and retrain sections)
+- **Testing**: Review logs from multiple scenarios, verify clarity
+
+---
+
+**Total Estimated Effort**: 31-45 hours across 10 tasks
+**Recommended Order**: SQL-CL-01 → SQL-CL-02 → SQL-CL-05 → SQL-CL-04 → SQL-CL-07 → SQL-CL-08 → SQL-CL-03 → SQL-CL-06 → SQL-CL-09 → SQL-CL-10
+
+---
+
 Pending SQL-Related Tasks
 🔴 HIGH PRIORITY - Empty Table Implementations
 1. ACM_DataQuality ⚠️ CRITICAL
