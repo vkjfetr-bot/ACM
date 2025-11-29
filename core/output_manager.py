@@ -5351,7 +5351,7 @@ class OutputManager:
             
         try:
             # Mark old thresholds as inactive for this equipment/threshold_type
-            with self.sql_client.get_cursor() as cur:
+            with self.sql_client.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE ACM_ThresholdMetadata 
