@@ -132,6 +132,9 @@ class ConfigDict(MutableMapping):
                         for k in keys[:-1]:
                             if k not in target:
                                 target[k] = {}
+                            elif not isinstance(target[k], dict):
+                                # Overwrite non-dict values (e.g., auto_retrain=True -> auto_retrain={...})
+                                target[k] = {}
                             target = target[k]
                         target[keys[-1]] = value
                     else:
