@@ -161,10 +161,11 @@
 
 ## Next Steps (Recommended)
 
-### 1. Apply SQL Migration
+### 1. Apply SQL Migration ✅ COMPLETED
 ```powershell
 .\scripts\sql\apply_migrations.ps1 -Server "localhost\B19CL3PCQLSERVER" -Database "ACM" -Auth "integrated"
 ```
+**Status**: Migration 007 applied successfully. ACM_RefitRequests table created with 10 columns.
 
 ### 2. Run Batch Simulation (20+ runs)
 ```powershell
