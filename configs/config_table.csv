@@ -220,3 +220,6 @@ EquipID,Category,ParamPath,ParamValue,ValueType,LastUpdated,UpdatedBy,ChangeReas
 0,maintenance,buffer_hours,24,int,2025-11-15 00:00:00,SYSTEM,Safety buffer for maintenance window,
 0,causation,min_detector_contribution,10.0,float,2025-11-15 00:00:00,SYSTEM,Minimum detector contribution % to report,
 0,causation,top_sensors_count,10,int,2025-11-15 00:00:00,SYSTEM,Number of top sensors to report in causation,
+0,continuous_learning,enabled,True,bool,2025-11-29 00:00:00,COPILOT,Enable continuous learning architecture for batch mode,
+0,continuous_learning,model_update_interval,1,int,2025-11-29 00:00:00,COPILOT,Number of batches between model retraining (1=every batch),
+0,continuous_learning,threshold_update_interval,1,int,2025-11-29 00:00:00,COPILOT,Number of batches between threshold recalculation (1=every batch),

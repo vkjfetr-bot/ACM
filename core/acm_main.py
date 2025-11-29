@@ -491,6 +491,18 @@ def _sql_mode(cfg: Dict[str, Any]) -> bool:
     """SQL-only mode: always use SQL backend, ignore file-based storage."""
     return True
 
+def _batch_mode() -> bool:
+    """Detect if running under sql_batch_runner (continuous learning mode)."""
+    return bool(os.getenv("ACM_BATCH_MODE", "0") == "1")
+
+def _continuous_learning_enabled(cfg: Dict[str, Any], batch_mode: bool) -> bool:
+    """Check if continuous learning is enabled for this run."""
+    # In batch mode, default to continuous learning unless explicitly disabled
+    if batch_mode:
+        return cfg.get("continuous_learning", {}).get("enabled", True)
+    # In single-run mode, default to disabled
+    return cfg.get("continuous_learning", {}).get("enabled", False)
+
 def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
     if not SQLClient:
         raise RuntimeError("SQLClient not available. Ensure core/sql_client.py exists and pyodbc is installed.")
@@ -506,6 +518,120 @@ def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
         cli = SQLClient(sql_cfg)
         cli.connect()
         return cli
+
+def _calculate_adaptive_thresholds(
+    fused_scores: np.ndarray,
+    cfg: Dict[str, Any],
+    equip_id: int,
+    output_manager: Optional[Any],
+    train_index: Optional[pd.Index] = None,
+    regime_labels: Optional[np.ndarray] = None,
+    regime_quality_ok: bool = False
+) -> Dict[str, Any]:
+    """
+    Calculate adaptive thresholds from fused z-scores.
+    
+    This is a standalone function that can be called independently of the auto-tune section.
+    It supports both global and per-regime thresholds based on configuration.
+    
+    Args:
+        fused_scores: Array of fused z-scores to calculate thresholds from
+        cfg: Configuration dictionary
+        equip_id: Equipment ID for SQL persistence
+        output_manager: OutputManager instance for writing to SQL
+        train_index: Optional datetime index for train data (for metadata)
+        regime_labels: Optional regime labels for per-regime thresholds
+        regime_quality_ok: Whether regime clustering quality is acceptable
+    
+    Returns:
+        Dictionary with threshold results including 'fused_alert_z', 'fused_warn_z', 'method', 'confidence'
+    """
+    try:
+        from core.adaptive_thresholds import calculate_thresholds_from_config
+        
+        threshold_cfg = cfg.get("thresholds", {}).get("adaptive", {})
+        if not threshold_cfg.get("enabled", True):
+            Console.info("[THRESHOLD] Adaptive thresholds disabled - using static config values")
+            return {}
+        
+        Console.info(f"[THRESHOLD] Calculating adaptive thresholds from {len(fused_scores)} samples...")
+        
+        # Get regime labels if per_regime enabled and quality OK
+        use_regime_labels = None
+        if threshold_cfg.get("per_regime", False) and regime_quality_ok and regime_labels is not None:
+            use_regime_labels = regime_labels
+        
+        # Calculate thresholds
+        threshold_results = calculate_thresholds_from_config(
+            train_fused_z=fused_scores,
+            cfg=cfg,
+            regime_labels=use_regime_labels
+        )
+        
+        # Store in SQL via OutputManager if available
+        if output_manager is not None and output_manager.sql_client is not None:
+            import hashlib
+            config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
+            
+            output_manager.write_threshold_metadata(
+                equip_id=equip_id,
+                threshold_type='fused_alert_z',
+                threshold_value=threshold_results['fused_alert_z'],
+                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                sample_count=len(fused_scores),
+                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
+                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
+                config_signature=config_sig,
+                notes=f"Auto-calculated from {len(fused_scores)} accumulated samples"
+            )
+            
+            output_manager.write_threshold_metadata(
+                equip_id=equip_id,
+                threshold_type='fused_warn_z',
+                threshold_value=threshold_results['fused_warn_z'],
+                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                sample_count=len(fused_scores),
+                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
+                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
+                config_signature=config_sig,
+                notes=f"Auto-calculated warning threshold (50% of alert)"
+            )
+            
+            # Update cfg to use adaptive thresholds in downstream modules
+            if isinstance(threshold_results['fused_alert_z'], dict):
+                Console.info(f"[THRESHOLD] Per-regime thresholds: {threshold_results['fused_alert_z']}")
+                # Store in cfg for regimes.update_health_labels() to use
+                if "regimes" not in cfg:
+                    cfg["regimes"] = {}
+                if "health" not in cfg["regimes"]:
+                    cfg["regimes"]["health"] = {}
+                cfg["regimes"]["health"]["fused_alert_z_per_regime"] = threshold_results['fused_alert_z']
+                cfg["regimes"]["health"]["fused_warn_z_per_regime"] = threshold_results['fused_warn_z']
+            else:
+                Console.info(
+                    f"[THRESHOLD] Global thresholds: "
+                    f"alert={threshold_results['fused_alert_z']:.3f}, "
+                    f"warn={threshold_results['fused_warn_z']:.3f} "
+                    f"(method={threshold_results['method']}, conf={threshold_results['confidence']})"
+                )
+                # Override static config values with adaptive ones
+                if "regimes" not in cfg:
+                    cfg["regimes"] = {}
+                if "health" not in cfg["regimes"]:
+                    cfg["regimes"]["health"] = {}
+                cfg["regimes"]["health"]["fused_alert_z"] = threshold_results['fused_alert_z']
+                cfg["regimes"]["health"]["fused_warn_z"] = threshold_results['fused_warn_z']
+        else:
+            Console.warn("[THRESHOLD] SQL client not available - thresholds not persisted")
+        
+        return threshold_results
+        
+    except Exception as threshold_e:
+        Console.error(f"[THRESHOLD] Adaptive threshold calculation failed: {threshold_e}")
+        import traceback
+        Console.warn(f"[THRESHOLD] Traceback: {traceback.format_exc()}")
+        Console.warn("[THRESHOLD] Falling back to static config values")
+        return {}
 
 def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str, pd.Timestamp, pd.Timestamp, int]:
     """
@@ -642,10 +768,33 @@ def main() -> None:
 
     # Inline Option A adapter (no extra file): derive SQL_MODE
     SQL_MODE = _sql_mode(cfg)
+    
+    # Detect batch mode (running under sql_batch_runner)
+    BATCH_MODE = _batch_mode()
+    
+    # Check if continuous learning is enabled
+    CONTINUOUS_LEARNING = _continuous_learning_enabled(cfg, BATCH_MODE)
+    
+    # Get continuous learning settings
+    cl_cfg = cfg.get("continuous_learning", {})
+    model_update_interval = int(cl_cfg.get("model_update_interval", 1))  # Default: update every batch
+    threshold_update_interval = int(cl_cfg.get("threshold_update_interval", 1))  # Default: update every batch
+    force_retraining = BATCH_MODE and CONTINUOUS_LEARNING  # Force retraining in continuous learning mode
+    
+    # Get batch number from environment (set by sql_batch_runner)
+    batch_num = int(os.getenv("ACM_BATCH_NUM", "0"))
+    
+    # Store batch number in config for access throughout pipeline
+    if "runtime" not in cfg:
+        cfg["runtime"] = {}
+    cfg["runtime"]["batch_num"] = batch_num
 
     Console.info(f"[ACM] Inside Main Now")
     Console.info(f"--- Starting ACM V5 for {equip} ---")
     Console.info(f"[CFG] storage_backend={'sql' if SQL_MODE else 'file'}  |  artifacts={art_root}")
+    Console.info(f"[CFG] batch_mode={BATCH_MODE}  |  continuous_learning={CONTINUOUS_LEARNING}")
+    if CONTINUOUS_LEARNING:
+        Console.info(f"[CFG] model_update_interval={model_update_interval}  |  threshold_update_interval={threshold_update_interval}")
     sql_log_sink = None
 
     # CRITICAL FIX: ALWAYS enforce artifacts/{EQUIP}/run_{timestamp}/ structure
@@ -1339,7 +1488,11 @@ def main() -> None:
         cached_models = None
         cached_manifest = None
         # Skip persisted caches whenever a refit was requested to force fresh training
-        use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested
+        # CONTINUOUS LEARNING: Disable caching when continuous learning is enabled to force retraining
+        use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested and not force_retraining
+        
+        if force_retraining:
+            Console.info("[MODEL] Continuous learning enabled - models will retrain on accumulated data")
         
         if use_cache and detector_cache is None:
             with T.section("models.persistence.load"):
@@ -2318,92 +2471,148 @@ def main() -> None:
                 except Exception as tune_e:
                     Console.warn(f"[TUNE] Weight auto-tuning failed: {tune_e}")
             
+            # Calculate fusion on TRAIN data for threshold calculation later
+            # Build present dict for train data
+            train_present = {}
+            for detector_name in present.keys():
+                # Map score column names to train_frame columns
+                if detector_name in train_frame.columns:
+                    train_present[detector_name] = train_frame[detector_name].to_numpy(copy=False)
+            
+            # Calculate fusion on train data (for threshold baseline)
+            if train_present and not train.empty:
+                try:
+                    train_fused, _ = fuse.combine(train_present, weights, cfg, original_features=train)
+                    train_fused_np = np.asarray(train_fused, dtype=np.float32).reshape(-1)
+                    train_frame["fused"] = train_fused_np
+                except Exception as train_fuse_e:
+                    Console.warn(f"[FUSE] Failed to calculate train fusion: {train_fuse_e}")
+                    train_frame["fused"] = np.zeros(len(train))
+            
             fused, episodes = fuse.combine(present, weights, cfg, original_features=score)
             fused_np = np.asarray(fused, dtype=np.float32).reshape(-1)
             if fused_np.shape[0] != len(frame.index):
                 raise RuntimeError(f"[FUSE] Fused length {fused_np.shape[0]} != frame length {len(frame.index)}")
             frame["fused"] = fused_np
             
-            # Calculate adaptive thresholds from TRAIN FusedZ
+            # ===== CONTINUOUS LEARNING: Calculate adaptive thresholds on accumulated data =====
+            # This runs AFTER fusion, using combined train+score data (or just train if not continuous learning)
+            # Frequency control: Only recalculate if update interval reached or first run
             with T.section("thresholds.adaptive"):
-                try:
-                    from core.adaptive_thresholds import calculate_thresholds_from_config
-                    
-                    threshold_cfg = cfg.get("thresholds", {}).get("adaptive", {})
-                    if threshold_cfg.get("enabled", True):
-                        Console.info("[THRESHOLD] Calculating adaptive thresholds from training data...")
+                # Determine if we should recalculate thresholds this batch
+                should_update_thresholds = False
+                
+                # Check if this is the first run (coldstart complete but no previous thresholds)
+                is_first_threshold_calc = coldstart_complete and not hasattr(cfg, '_thresholds_calculated')
+                
+                # Check if update interval reached (for batch mode)
+                batch_num = cfg.get("runtime", {}).get("batch_num", 0)
+                interval_reached = (batch_num % threshold_update_interval == 0) if threshold_update_interval > 0 else True
+                
+                # Update conditions:
+                # 1. First calculation after coldstart
+                # 2. Continuous learning enabled AND interval reached
+                # 3. NOT in continuous learning but coldstart just completed (single calculation)
+                if is_first_threshold_calc:
+                    should_update_thresholds = True
+                    Console.info("[THRESHOLD] First threshold calculation after coldstart")
+                elif CONTINUOUS_LEARNING and interval_reached:
+                    should_update_thresholds = True
+                    Console.info(f"[THRESHOLD] Update interval reached (batch {batch_num}, interval={threshold_update_interval})")
+                elif not CONTINUOUS_LEARNING and not hasattr(cfg, '_thresholds_calculated'):
+                    should_update_thresholds = True
+                    Console.info("[THRESHOLD] Single threshold calculation (non-continuous mode)")
+                
+                if should_update_thresholds:
+                    # Prepare data for threshold calculation
+                    # In continuous learning: use accumulated data (train + score combined)
+                    # Otherwise: use just train data
+                    if CONTINUOUS_LEARNING and not train.empty and not score.empty:
+                        Console.info("[THRESHOLD] Calculating thresholds on accumulated data (train + score)")
+                        # Combine train and score for accumulated dataset
+                        accumulated_data = pd.concat([train, score], axis=0)
                         
-                        # Get TRAIN FusedZ scores
-                        train_fused_baseline_np = np.asarray(fused_baseline, dtype=np.float32).reshape(-1)
+                        # Build detector scores dict for accumulated data
+                        accumulated_present = {}
+                        for detector_name in present.keys():
+                            if detector_name in train_frame.columns and detector_name in frame.columns:
+                                # Concatenate train and score detector scores
+                                train_scores = train_frame[detector_name].to_numpy(copy=False)
+                                score_scores = frame[detector_name].to_numpy(copy=False)
+                                accumulated_present[detector_name] = np.concatenate([train_scores, score_scores])
+                            elif detector_name in frame.columns:
+                                # Only available in score data
+                                accumulated_present[detector_name] = frame[detector_name].to_numpy(copy=False)
                         
-                        # Get regime labels if per_regime enabled and quality OK
-                        train_regime_labels = None
-                        if threshold_cfg.get("per_regime", False) and regime_quality_ok and "regime_label" in train.columns:
-                            train_regime_labels = train["regime_label"].to_numpy(copy=False)
-                        
-                        # Calculate thresholds
-                        threshold_results = calculate_thresholds_from_config(
-                            train_fused_z=train_fused_baseline_np,
-                            cfg=cfg,
-                            regime_labels=train_regime_labels
-                        )
-                        
-                        # Store in SQL via OutputManager
-                        if output_manager is not None and output_manager.sql_client is not None:
-                            import hashlib
-                            config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
-                            
-                            output_manager.write_threshold_metadata(
-                                equip_id=equip_id,
-                                threshold_type='fused_alert_z',
-                                threshold_value=threshold_results['fused_alert_z'],
-                                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
-                                sample_count=len(train_fused_baseline_np),
-                                train_start=train.index.min() if not train.empty else None,
-                                train_end=train.index.max() if not train.empty else None,
-                                config_signature=config_sig,
-                                notes=f"Auto-calculated from {len(train_fused_baseline_np)} training samples"
-                            )
-                            
-                            output_manager.write_threshold_metadata(
-                                equip_id=equip_id,
-                                threshold_type='fused_warn_z',
-                                threshold_value=threshold_results['fused_warn_z'],
-                                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
-                                sample_count=len(train_fused_baseline_np),
-                                train_start=train.index.min() if not train.empty else None,
-                                train_end=train.index.max() if not train.empty else None,
-                                config_signature=config_sig,
-                                notes=f"Auto-calculated warning threshold (50% of alert)"
-                            )
-                            
-                            # Update cfg to use adaptive thresholds in downstream modules
-                            if isinstance(threshold_results['fused_alert_z'], dict):
-                                Console.info(f"[THRESHOLD] Per-regime thresholds: {threshold_results['fused_alert_z']}")
-                                # Store in cfg for regimes.update_health_labels() to use
-                                if "regimes" not in cfg:
-                                    cfg["regimes"] = {}
-                                if "health" not in cfg["regimes"]:
-                                    cfg["regimes"]["health"] = {}
-                                cfg["regimes"]["health"]["fused_alert_z_per_regime"] = threshold_results['fused_alert_z']
-                                cfg["regimes"]["health"]["fused_warn_z_per_regime"] = threshold_results['fused_warn_z']
-                            else:
-                                Console.info(
-                                    f"[THRESHOLD] Global thresholds: "
-                                    f"alert={threshold_results['fused_alert_z']:.3f}, "
-                                    f"warn={threshold_results['fused_warn_z']:.3f} "
-                                    f"(method={threshold_results['method']}, conf={threshold_results['confidence']})"
+                        # Calculate fusion on accumulated data
+                        if accumulated_present:
+                            try:
+                                accumulated_fused, _ = fuse.combine(
+                                    accumulated_present, 
+                                    weights, 
+                                    cfg, 
+                                    original_features=accumulated_data
                                 )
-                                # Override static config values with adaptive ones
-                                cfg["regimes"]["health"]["fused_alert_z"] = threshold_results['fused_alert_z']
-                                cfg["regimes"]["health"]["fused_warn_z"] = threshold_results['fused_warn_z']
-                        else:
-                            Console.warn("[THRESHOLD] SQL client not available - thresholds not persisted")
+                                accumulated_fused_np = np.asarray(accumulated_fused, dtype=np.float32).reshape(-1)
+                                
+                                # Get regime labels if available
+                                accumulated_regime_labels = None
+                                if regime_quality_ok:
+                                    if "regime_label" in train.columns and "regime_label" in score.columns:
+                                        train_regimes = train["regime_label"].to_numpy(copy=False)
+                                        score_regimes = frame.get("regime_label")
+                                        if score_regimes is not None:
+                                            score_regimes = score_regimes.to_numpy(copy=False)
+                                            accumulated_regime_labels = np.concatenate([train_regimes, score_regimes])
+                                
+                                # Calculate thresholds using standalone function
+                                _calculate_adaptive_thresholds(
+                                    fused_scores=accumulated_fused_np,
+                                    cfg=cfg,
+                                    equip_id=equip_id,
+                                    output_manager=output_manager,
+                                    train_index=accumulated_data.index,
+                                    regime_labels=accumulated_regime_labels,
+                                    regime_quality_ok=regime_quality_ok
+                                )
+                                cfg._thresholds_calculated = True
+                            except Exception as acc_e:
+                                Console.warn(f"[THRESHOLD] Failed to calculate on accumulated data: {acc_e}")
+                                Console.warn("[THRESHOLD] Falling back to train-only calculation")
+                                # Fallback to train-only
+                                if not train.empty and "fused" in train_frame.columns:
+                                    train_fused_np = train_frame["fused"].to_numpy(copy=False)
+                                    train_regime_labels = train["regime_label"].to_numpy(copy=False) if "regime_label" in train.columns else None
+                                    _calculate_adaptive_thresholds(
+                                        fused_scores=train_fused_np,
+                                        cfg=cfg,
+                                        equip_id=equip_id,
+                                        output_manager=output_manager,
+                                        train_index=train.index,
+                                        regime_labels=train_regime_labels,
+                                        regime_quality_ok=regime_quality_ok
+                                    )
+                                    cfg._thresholds_calculated = True
                     else:
-                        Console.info("[THRESHOLD] Adaptive thresholds disabled - using static config values")
-                except Exception as threshold_e:
-                    Console.error(f"[THRESHOLD] Adaptive threshold calculation failed: {threshold_e}")
-                    Console.warn("[THRESHOLD] Falling back to static config values")
+                        # Non-continuous mode or train-only: calculate on train data
+                        Console.info("[THRESHOLD] Calculating thresholds on training data only")
+                        if not train.empty and "fused" in train_frame.columns:
+                            train_fused_np = train_frame["fused"].to_numpy(copy=False)
+                            train_regime_labels = train["regime_label"].to_numpy(copy=False) if "regime_label" in train.columns else None
+                            _calculate_adaptive_thresholds(
+                                fused_scores=train_fused_np,
+                                cfg=cfg,
+                                equip_id=equip_id,
+                                output_manager=output_manager,
+                                train_index=train.index,
+                                regime_labels=train_regime_labels,
+                                regime_quality_ok=regime_quality_ok
+                            )
+                            cfg._thresholds_calculated = True
+                        else:
+                            Console.warn("[THRESHOLD] No train data available for threshold calculation")
+                else:
+                    Console.info(f"[THRESHOLD] Skipping threshold update (batch {batch_num}, next update at batch {(batch_num // threshold_update_interval + 1) * threshold_update_interval})")
 
         regime_stats: Dict[int, Dict[str, float]] = {}
         if not regime_quality_ok and "regime_label" in frame.columns:

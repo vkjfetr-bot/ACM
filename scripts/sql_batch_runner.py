@@ -583,7 +583,7 @@ class SQLBatchRunner:
             Console.warn(f"[WARN] Could not check coldstart status: {e}", error=str(e))
             return False, 0, 50
     
-    def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False) -> tuple[bool, str]:
+    def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False, batch_num: int = 0) -> tuple[bool, str]:
         """Run single ACM batch for equipment.
         
         Args:
@@ -591,6 +591,7 @@ class SQLBatchRunner:
             start_time: Optional start time override
             end_time: Optional end time override
             dry_run: If True, print command without running
+            batch_num: Current batch number (for frequency control)
             
         Returns:
             Tuple of (success, outcome) where outcome is 'OK', 'NOOP', or 'FAIL'
@@ -613,8 +614,12 @@ class SQLBatchRunner:
         Console.info(f"[RUN] {printable}", command=printable)
         # Force SQL mode in acm_main so that SQL historian + stored procedures
         # are used instead of legacy CSV/file mode, regardless of older config.
+        # Also set ACM_BATCH_MODE to enable continuous learning mode detection
+        # Pass batch number for threshold update frequency control
         env = dict(os.environ)
         env["ACM_FORCE_SQL_MODE"] = "1"
+        env["ACM_BATCH_MODE"] = "1"
+        env["ACM_BATCH_NUM"] = str(batch_num)
 
         # Stream child output live so devs can see progress (instead of buffering everything).
         process = subprocess.Popen(
@@ -795,7 +800,8 @@ class SQLBatchRunner:
             Console.info(f"\n[BATCH] {equip_name}: Batch {batch_num}/{total_batches} - [{current_ts} to {next_ts})", equipment=equip_name, batch=batch_num, total=total_batches)
             
             # Run ACM (it will automatically use the current batch window from SQL)
-            success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run)
+            # Pass batches_completed (total count including previous runs) for frequency control
+            success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run, batch_num=batches_completed)
             
             if not success:
                 Console.error(f"[BATCH] {equip_name}: Batch {batch_num} FAILED", equipment=equip_name, batch=batch_num)
