@@ -5395,19 +5395,39 @@ class OutputManager:
                     'Notes': notes
                 })
             
-            # Insert new thresholds via generic SQL DataFrame writer
-            df = pd.DataFrame(rows)
-            # Use a stable pseudo-file name for cache key only; file output stays disabled
-            pseudo_csv = Path("acm_thresholds.csv")
-            write_result = self.write_dataframe(
-                df=df,
-                file_path=pseudo_csv,
-                sql_table='ACM_ThresholdMetadata',
-                add_created_at=True,
-                allow_repair=True
+            # Insert new thresholds directly via cursor for reliability
+            # Ensure CreatedAt and RunID present
+            created_at = pd.Timestamp.now().tz_localize(None)
+            for r in rows:
+                r['CreatedAt'] = created_at
+                r['RunID'] = self.run_id
+                # Ensure EquipID set
+                r['EquipID'] = equip_id
+            
+            insert_sql = (
+                "INSERT INTO ACM_ThresholdMetadata (EquipID, RegimeID, ThresholdType, ThresholdValue, "
+                "CalculationMethod, SampleCount, TrainStartTime, TrainEndTime, CreatedAt, ConfigSignature, "
+                "IsActive, Notes, RunID) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             )
-            if not write_result.get('sql_written', False):
-                raise RuntimeError(f"SQL write failed for ACM_ThresholdMetadata: {write_result.get('error')}")
+            params = [
+                (
+                    r.get('EquipID'),
+                    r.get('RegimeID'),
+                    r.get('ThresholdType'),
+                    r.get('ThresholdValue'),
+                    r.get('CalculationMethod'),
+                    r.get('SampleCount'),
+                    r.get('TrainStartTime'),
+                    r.get('TrainEndTime'),
+                    r.get('CreatedAt'),
+                    r.get('ConfigSignature'),
+                    r.get('IsActive'),
+                    r.get('Notes'),
+                    r.get('RunID')
+                ) for r in rows
+            ]
+            with self.sql_client.cursor() as cur:
+                cur.executemany(insert_sql, params)
             
             Console.info(
                 f"Threshold metadata written: {threshold_type} = "
