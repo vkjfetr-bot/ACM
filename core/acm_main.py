@@ -488,7 +488,10 @@ def _ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
 # SQL helpers (local)
 # =======================
 def _sql_mode(cfg: Dict[str, Any]) -> bool:
-    """SQL-only mode: always use SQL backend, ignore file-based storage."""
+    """SQL-only mode: use SQL backend unless ACM_FORCE_FILE_MODE env var is set."""
+    force_file_mode = os.getenv("ACM_FORCE_FILE_MODE", "0") == "1"
+    if force_file_mode:
+        return False
     return True
 
 def _batch_mode() -> bool:
@@ -1034,6 +1037,7 @@ def main() -> None:
             else:
                 # File mode: Load from CSV files
                 train, score, meta = output_manager.load_data(cfg)
+                coldstart_complete = True  # File mode always has complete data
                 
             train = _ensure_local_index(train)
             score = _ensure_local_index(score)
