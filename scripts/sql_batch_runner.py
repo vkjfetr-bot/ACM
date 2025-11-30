@@ -702,7 +702,9 @@ class SQLBatchRunner:
         
         # Start coldstart from earliest timestamp
         coldstart_start = min_ts
-        coldstart_end = min_ts + timedelta(minutes=self.tick_minutes)
+        # SP uses <= for end time, so we need to include the full last day
+        # For a 24h window, we want [00:00:00, 23:59:59] not [00:00:00, 00:00:00]
+        coldstart_end = min_ts + timedelta(minutes=self.tick_minutes) - timedelta(seconds=1)
         
         for attempt in range(1, self.max_coldstart_attempts + 1):
             Console.info(f"\n[COLDSTART] {equip_name}: Attempt {attempt}/{self.max_coldstart_attempts}", equipment=equip_name, attempt=attempt, max_attempts=self.max_coldstart_attempts)
@@ -736,8 +738,9 @@ class SQLBatchRunner:
                 else:
                     Console.info(f"[COLDSTART] {equip_name}: Making progress, continuing...", equipment=equip_name)
                     # Advance window for next coldstart attempt
-                    coldstart_start = coldstart_end
-                    coldstart_end = coldstart_start + timedelta(minutes=self.tick_minutes)
+                    # Add 1 second back to move to start of next day, then subtract 1 second for the end bound
+                    coldstart_start = coldstart_end + timedelta(seconds=1)
+                    coldstart_end = coldstart_start + timedelta(minutes=self.tick_minutes) - timedelta(seconds=1)
                     if coldstart_end > max_ts:
                         coldstart_end = max_ts
         
@@ -809,13 +812,14 @@ class SQLBatchRunner:
         batch_num = 0
         while current_ts < max_ts:
             batch_num += 1
-            next_ts = current_ts + timedelta(minutes=self.tick_minutes)
+            # SP uses <= for end time, so subtract 1 second to get [start, end] inclusive of full last period
+            next_ts = current_ts + timedelta(minutes=self.tick_minutes) - timedelta(seconds=1)
             
             # Don't go beyond available data
             if next_ts > max_ts:
                 next_ts = max_ts
             
-            Console.info(f"\n[BATCH] {equip_name}: Batch {batch_num}/{total_batches} - [{current_ts} to {next_ts})", equipment=equip_name, batch=batch_num, total=total_batches)
+            Console.info(f"\n[BATCH] {equip_name}: Batch {batch_num}/{total_batches} - [{current_ts} to {next_ts}]", equipment=equip_name, batch=batch_num, total=total_batches)
             
             # Run ACM (it will automatically use the current batch window from SQL)
             # Pass batches_completed (total count including previous runs) for frequency control
@@ -843,8 +847,8 @@ class SQLBatchRunner:
                 Console.info(f"[BATCH] Reached max-batches cap ({self.max_batches}); stopping early", max_batches=self.max_batches)
                 break
 
-            # Move to next window
-            current_ts = next_ts
+            # Move to next window (add 1 second to move past the end of the current window)
+            current_ts = next_ts + timedelta(seconds=1)
         
         Console.info(f"\n[BATCH] {equip_name}: Processed {batches_completed} batch(es)", equipment=equip_name, batches_completed=batches_completed)
         return batches_completed

@@ -1007,13 +1007,18 @@ def main() -> None:
                     stage='score'  # Always use 'score' stage for now
                 )
                 
+                # Detect historical replay mode: if start_time was explicitly provided via CLI
+                # then we're replaying historical data and should expand windows forward in time
+                historical_replay = bool(args.start_time)
+                
                 # Attempt data loading with intelligent retry
                 train, score, meta, coldstart_complete = coldstart_manager.load_with_retry(
                     output_manager=output_manager,
                     cfg=cfg,
                     initial_start=win_start,
                     initial_end=win_end,
-                    max_attempts=3
+                    max_attempts=3,
+                    historical_replay=historical_replay
                 )
                 
                 # If coldstart not complete, exit gracefully (will retry next job run)
@@ -4226,57 +4231,9 @@ def main() -> None:
             except Exception as e: # type: ignore
                 Console.warn(f"[RUN] RunStats not recorded: {e}")
 
-        # === WRITE RUN METADATA TO ACM_RUNS ===
-        with T.section("sql.run_metadata"):
-            try:
-                if sql_client and run_id:
-                    # Track completion time
-                    from datetime import datetime
-                    run_completion_time = datetime.now()
-                    
-                    # Extract health metrics from scores
-                    # DET-07: Pass per-regime calibration info
-                    per_regime_enabled = bool(quality_ok and use_per_regime) if 'quality_ok' in locals() and 'use_per_regime' in locals() else False
-                    regime_count = len(set(score_regime_labels)) if score_regime_labels is not None else 0
-                    run_metadata = extract_run_metadata_from_scores(frame, per_regime_enabled=per_regime_enabled, regime_count=regime_count)
-                    
-                    # OM-CSV-03: Extract data quality score (SQL mode: query ACM_DataQuality, file mode: CSV)
-                    data_quality_path = tables_dir / "data_quality.csv" if 'tables_dir' in locals() else None
-                    data_quality_score = extract_data_quality_score(
-                        data_quality_path=data_quality_path,
-                        sql_client=sql_client if SQL_MODE else None,
-                        run_id=run_id,
-                        equip_id=equip_id
-                    )
-                    
-                    # Get kept columns list
-                    kept_cols_str = ",".join(getattr(meta, "kept_cols", []))
-                    
-                    # Write run metadata
-                    write_run_metadata(
-                        sql_client=sql_client,
-                        run_id=run_id,
-                        equip_id=int(equip_id),
-                        equip_name=equip,
-                        started_at=run_start_time,
-                        completed_at=run_completion_time,
-                        config_signature=config_signature,
-                        train_row_count=len(train) if 'train' in locals() and isinstance(train, pd.DataFrame) else 0,
-                        score_row_count=len(frame) if isinstance(frame, pd.DataFrame) else 0,
-                        episode_count=len(episodes) if isinstance(episodes, pd.DataFrame) else 0,
-                        health_status=run_metadata.get("health_status", "UNKNOWN"),
-                        avg_health_index=run_metadata.get("avg_health_index"),
-                        min_health_index=run_metadata.get("min_health_index"),
-                        max_fused_z=run_metadata.get("max_fused_z"),
-                        data_quality_score=data_quality_score,
-                        refit_requested=refit_flag_path.exists() if 'refit_flag_path' in locals() else False,
-                        kept_columns=kept_cols_str,
-                        error_message=None
-                    )
-                    Console.info(f"[RUN_META] Successfully wrote run metadata to ACM_Runs for RunID={run_id}")
-
-            except Exception as e:
-                Console.warn(f"[RUN_META] Failed to write ACM_Runs metadata: {e}")
+        # === ACM_RUNS METADATA NOW WRITTEN IN FINALLY BLOCK ===
+        # This ensures ALL runs (OK, NOOP, FAIL) are tracked in ACM_Runs
+        # The write happens in the finally block below after finalize
 
         # === WRITE EPISODE CULPRITS TO ACM_EpisodeCulprits ===
         with T.section("sql.culprits"):
@@ -4312,37 +4269,7 @@ def main() -> None:
         except Exception:
             err_json = '{"type":"Exception","message":"<serialization failed>"}'
         
-        # Write failed run metadata to ACM_Runs
-        try:
-            if sql_client and run_id:
-                from datetime import datetime
-                run_completion_time = datetime.now()
-                
-                # Write run metadata with error message
-                write_run_metadata(
-                    sql_client=sql_client,
-                    run_id=run_id,
-                    equip_id=int(equip_id) if 'equip_id' in locals() else 0,
-                    equip_name=equip if 'equip' in locals() else "UNKNOWN",
-                    started_at=run_start_time,
-                    completed_at=run_completion_time,
-                    config_signature=config_signature if 'config_signature' in locals() else "UNKNOWN",
-                    train_row_count=len(train) if 'train' in locals() and isinstance(train, pd.DataFrame) else 0,
-                    score_row_count=rows_read,
-                    episode_count=0,
-                    health_status="ERROR",
-                    avg_health_index=None,
-                    min_health_index=None,
-                    max_fused_z=None,
-                    data_quality_score=0.0,
-                    refit_requested=False,
-                    kept_columns="",
-                    error_message=str(e)[:4000]  # Truncate to fit nvarchar field
-                )
-                Console.info(f"[RUN_META] Wrote failed run metadata to ACM_Runs for RunID={run_id}")
-        except Exception as meta_err:
-            Console.warn(f"[RUN_META] Failed to write error run metadata: {meta_err}")
-        
+        # ACM_Runs metadata will be written in finally block (includes error_message)
         Console.error(f"[RUN] Exception: {e}")
         # re-raise to keep stderr useful for orchestrators
         raise
@@ -4355,6 +4282,59 @@ def main() -> None:
             except Exception:
                 pass
             sql_log_sink = None
+        
+        # === WRITE RUN METADATA TO ACM_RUNS (ALWAYS, EVEN FOR NOOP) ===
+        # This must happen for ALL runs (OK, NOOP, FAIL) for proper audit trail
+        if SQL_MODE and sql_client and run_id: # type: ignore
+            try:
+                from datetime import datetime
+                run_completion_time = datetime.now()
+                
+                # Extract health metrics from scores if available
+                if 'frame' in locals() and isinstance(frame, pd.DataFrame) and len(frame) > 0:
+                    per_regime_enabled = bool(quality_ok and use_per_regime) if 'quality_ok' in locals() and 'use_per_regime' in locals() else False
+                    regime_count = len(set(score_regime_labels)) if 'score_regime_labels' in locals() and score_regime_labels is not None else 0
+                    run_metadata = extract_run_metadata_from_scores(frame, per_regime_enabled=per_regime_enabled, regime_count=regime_count)
+                    data_quality_path = tables_dir / "data_quality.csv" if 'tables_dir' in locals() else None
+                    data_quality_score = extract_data_quality_score(
+                        data_quality_path=data_quality_path,
+                        sql_client=sql_client if SQL_MODE else None,
+                        run_id=run_id,
+                        equip_id=equip_id if 'equip_id' in locals() else 0
+                    )
+                else:
+                    # NOOP or failed run - use defaults
+                    run_metadata = {"health_status": "UNKNOWN", "avg_health_index": None, "min_health_index": None, "max_fused_z": None}
+                    data_quality_score = 0.0
+                
+                # Get kept columns list
+                kept_cols_str = ",".join(getattr(meta, "kept_cols", [])) if 'meta' in locals() else ""
+                
+                # Write run metadata
+                write_run_metadata(
+                    sql_client=sql_client,
+                    run_id=run_id,
+                    equip_id=int(equip_id) if 'equip_id' in locals() else 0,
+                    equip_name=equip if 'equip' in locals() else "UNKNOWN",
+                    started_at=run_start_time,
+                    completed_at=run_completion_time,
+                    config_signature=config_signature if 'config_signature' in locals() else "UNKNOWN",
+                    train_row_count=len(train) if 'train' in locals() and isinstance(train, pd.DataFrame) else 0,
+                    score_row_count=len(frame) if 'frame' in locals() and isinstance(frame, pd.DataFrame) else (len(score) if 'score' in locals() and isinstance(score, pd.DataFrame) else rows_read),
+                    episode_count=len(episodes) if 'episodes' in locals() and isinstance(episodes, pd.DataFrame) else 0,
+                    health_status=run_metadata.get("health_status", "UNKNOWN"),
+                    avg_health_index=run_metadata.get("avg_health_index"),
+                    min_health_index=run_metadata.get("min_health_index"),
+                    max_fused_z=run_metadata.get("max_fused_z"),
+                    data_quality_score=data_quality_score,
+                    refit_requested=refit_flag_path.exists() if 'refit_flag_path' in locals() else False,
+                    kept_columns=kept_cols_str,
+                    error_message=err_json if outcome == "FAIL" and 'err_json' in locals() else None
+                )
+                Console.info(f"[RUN_META] Wrote run metadata to ACM_Runs for RunID={run_id} (outcome={outcome})")
+            except Exception as meta_err:
+                Console.warn(f"[RUN_META] Failed to write ACM_Runs metadata: {meta_err}")
+        
         # Always finalize and close SQL in SQL mode
         if SQL_MODE and sql_client and run_id: # type: ignore
             try:

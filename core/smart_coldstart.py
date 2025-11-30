@@ -258,7 +258,8 @@ class SmartColdstart:
                        cfg: Dict[str, Any],
                        initial_start: datetime,
                        initial_end: datetime,
-                       max_attempts: int = 3) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[Any], bool]:
+                       max_attempts: int = 3,
+                       historical_replay: bool = False) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[Any], bool]:
         """
         Attempt to load data with intelligent retry and window expansion.
         
@@ -268,6 +269,7 @@ class SmartColdstart:
             initial_start: Initial window start time
             initial_end: Initial window end time
             max_attempts: Maximum retry attempts per job run
+            historical_replay: If True, expand window forward in time instead of backward
             
         Returns:
             Tuple of (train_df, score_df, meta, coldstart_complete)
@@ -341,7 +343,12 @@ class SmartColdstart:
                         # Exponential expansion: double the window
                         window_size = (attempt_end - attempt_start).total_seconds() / 60
                         new_window_size = window_size * 2
-                        attempt_start = attempt_end - timedelta(minutes=new_window_size)
+                        if historical_replay:
+                            # Historical replay: expand forward in time
+                            attempt_end = attempt_start + timedelta(minutes=new_window_size)
+                        else:
+                            # Live mode: expand backward in time
+                            attempt_start = attempt_end - timedelta(minutes=new_window_size)
                         Console.info(f"[COLDSTART] Expanding window to {new_window_size:.0f} minutes ({new_window_size/60:.1f} hours) for retry")
                 
             except ValueError as e:
@@ -360,7 +367,12 @@ class SmartColdstart:
                 if attempt < max_attempts:
                     window_size = (attempt_end - attempt_start).total_seconds() / 60
                     new_window_size = window_size * 2
-                    attempt_start = attempt_end - timedelta(minutes=new_window_size)
+                    if historical_replay:
+                        # Historical replay: expand forward in time
+                        attempt_end = attempt_start + timedelta(minutes=new_window_size)
+                    else:
+                        # Live mode: expand backward in time
+                        attempt_start = attempt_end - timedelta(minutes=new_window_size)
                 
             except Exception as e:
                 # Unexpected error

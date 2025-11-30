@@ -361,7 +361,6 @@ def _health_index(fused_z):
 @dataclass
 class OutputBatch:
     """Represents a batch of outputs to be written together."""
-    csv_files: Dict[Path, pd.DataFrame] = field(default_factory=dict)
     json_files: Dict[Path, Dict[str, Any]] = field(default_factory=dict)
     sql_operations: List[Tuple[str, pd.DataFrame, Dict[str, Any]]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -1120,25 +1119,6 @@ class OutputManager:
 
         return out
     
-    def _write_csv_optimized(self, df: pd.DataFrame, path: Path, **kwargs) -> None:
-        """Optimized CSV writing with consistent parameters."""
-        # Ensure directory exists
-        path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # CHART-04: Use optimized parameters for performance and consistency
-        # Default date_format ensures uniform timestamp format across all CSVs
-        default_kwargs = {
-            'index': False,
-            'float_format': '%.6g',
-            'lineterminator': '\n',
-            'encoding': 'utf-8',
-            'date_format': '%Y-%m-%d %H:%M:%S'  # OUT-13: Uniform timestamp format
-        }
-        default_kwargs.update(kwargs)
-        
-        df.to_csv(path, **default_kwargs)
-        self.stats['files_written'] += 1
-        self.stats['total_rows'] += len(df)
     
     def _should_auto_flush(self) -> bool:
         """OUT-18: Check if batch should be automatically flushed based on triggers."""
@@ -2033,43 +2013,6 @@ class OutputManager:
         
         return result
     
-    def batch_write_csvs(self, csv_data: Dict[Path, pd.DataFrame]) -> Dict[Path, Dict[str, Any]]:
-        """
-        Write multiple CSVs efficiently using threading for I/O parallelization.
-        
-        Args:
-            csv_data: Dictionary mapping file paths to DataFrames
-            
-        Returns:
-            Dictionary mapping paths to write results
-        """
-        if not csv_data:
-            return {}
-        
-        results = {}
-        
-        if not self.enable_batching or len(csv_data) == 1:
-            # Sequential writes for small batches or when batching disabled
-            for path, df in csv_data.items():
-                results[path] = self.write_dataframe(df, path)
-        else:
-            # Parallel writes for better I/O performance
-            import os
-            with ThreadPoolExecutor(max_workers=min(self.max_io_workers, len(csv_data), (os.cpu_count() or 1))) as executor:
-                future_to_path = {
-                    executor.submit(self.write_dataframe, df, path): path
-                    for path, df in csv_data.items()
-                }
-                
-                for future in as_completed(future_to_path):
-                    path = future_to_path[future]
-                    try:
-                        results[path] = future.result()
-                    except Exception as e:
-                        Console.error(f"[OUTPUT] Batch write failed for {path}: {e}")
-                        results[path] = {'error': str(e), 'file_written': False, 'sql_written': False}
-        
-        return results
     
     def get_stats(self) -> Dict[str, Any]:
         """Get performance statistics."""
