@@ -915,10 +915,328 @@ def compute_failure_distribution(
 
 
 # ============================================================================
-# TODO: Core RUL Engine (RUL-REF-18, RUL-REF-19)
+# Core RUL Engine (RUL-REF-18, RUL-REF-19)
 # ============================================================================
-# - compute_rul function
-# - compute_rul_multipath
+
+
+def compute_rul(
+    health_df: pd.DataFrame,
+    cfg: RULConfig,
+    learning_state: LearningState,
+    data_quality_flag: str,
+    current_time: Optional[pd.Timestamp] = None,
+) -> Dict[str, Any]:
+    """
+    Core RUL computation engine.
+    
+    Args:
+        health_df: Health timeline DataFrame (Timestamp, HealthIndex)
+        cfg: Configuration
+        learning_state: Current learning state
+        data_quality_flag: Data quality assessment (OK/SPARSE/GAPPY/FLAT/MISSING)
+        current_time: Current time (defaults to last timestamp in health_df)
+    
+    Returns:
+        Dict with keys:
+        - health_forecast: DataFrame (Timestamp, HealthIndex, CI_Lower, CI_Upper)
+        - failure_curve: DataFrame (Timestamp, FailureProb)
+        - rul_multipath: Dict (trajectory/hazard/energy RUL estimates)
+        - model_diagnostics: Dict (weights, fit_status, per_model_forecasts)
+        - data_quality: str flag
+        - current_time: Timestamp
+    """
+    Console.info("[RUL] Starting RUL computation...")
+    
+    # Validate input
+    if health_df is None or health_df.empty:
+        Console.warn("[RUL] Empty health timeline, returning default forecast")
+        return _default_rul_result(cfg, data_quality_flag, current_time)
+    
+    # Ensure Timestamp column exists
+    if "Timestamp" not in health_df.columns:
+        Console.error("[RUL] Health DataFrame missing 'Timestamp' column")
+        return _default_rul_result(cfg, data_quality_flag, current_time)
+    
+    # Sort and deduplicate
+    health_df = health_df.sort_values("Timestamp").drop_duplicates(subset=["Timestamp"])
+    
+    # Set current time
+    if current_time is None:
+        current_time = health_df["Timestamp"].iloc[-1]
+    
+    # Convert to DatetimeIndex
+    health_df = health_df.set_index("Timestamp")
+    timestamps = health_df.index
+    health_values = health_df["HealthIndex"].values
+    
+    # Check for sufficient data
+    if len(health_values) < cfg.min_points:
+        Console.warn(f"[RUL] Insufficient data points: {len(health_values)} < {cfg.min_points}")
+        return _default_rul_result(cfg, data_quality_flag, current_time)
+    
+    # Detect sampling interval
+    deltas = np.diff(timestamps.values.astype("int64")) / 1e9 / 3600.0  # hours
+    sampling_interval_hours = float(np.median(deltas))
+    Console.info(f"[RUL] Detected sampling interval: {sampling_interval_hours:.2f} hours")
+    
+    # Build future time index
+    n_future_steps = int(cfg.max_forecast_hours / sampling_interval_hours)
+    n_future_steps = max(n_future_steps, 10)  # At least 10 steps
+    
+    future_timestamps = pd.date_range(
+        start=current_time,
+        periods=n_future_steps + 1,
+        freq=f"{sampling_interval_hours}H"
+    )[1:]  # Exclude current time
+    
+    Console.info(f"[RUL] Forecasting {n_future_steps} steps ({cfg.max_forecast_hours:.1f} hours)")
+    
+    # Instantiate and fit ensemble model
+    rul_model = RULModel(cfg, learning_state)
+    fit_status = rul_model.fit(timestamps, health_values)
+    
+    if not any(fit_status.values()):
+        Console.warn("[RUL] All models failed to fit")
+        return _default_rul_result(cfg, data_quality_flag, current_time)
+    
+    # Generate ensemble forecast
+    forecast_result = rul_model.forecast(future_timestamps)
+    
+    # Build health forecast DataFrame
+    health_forecast_df = pd.DataFrame({
+        "Timestamp": future_timestamps,
+        "ForecastHealth": forecast_result["mean"],
+        "CI_Lower": forecast_result["mean"] - 1.96 * forecast_result["std"],
+        "CI_Upper": forecast_result["mean"] + 1.96 * forecast_result["std"],
+    })
+    
+    # Compute failure distribution
+    failure_probs = compute_failure_distribution(
+        t_future=np.arange(len(future_timestamps)),
+        health_mean=forecast_result["mean"],
+        health_std=forecast_result["std"],
+        threshold=cfg.health_threshold,
+    )
+    
+    failure_curve_df = pd.DataFrame({
+        "Timestamp": future_timestamps,
+        "FailureProb": failure_probs,
+        "ThresholdUsed": cfg.health_threshold,
+    })
+    
+    # Compute multipath RUL
+    rul_multipath = compute_rul_multipath(
+        health_forecast=health_forecast_df,
+        failure_curve=failure_curve_df,
+        current_time=current_time,
+        cfg=cfg,
+    )
+    
+    # Package model diagnostics
+    model_diagnostics = {
+        "weights": forecast_result["weights"],
+        "fit_status": forecast_result["fit_status"],
+        "per_model": forecast_result["per_model"],
+        "sampling_interval_hours": sampling_interval_hours,
+    }
+    
+    Console.info(f"[RUL] Computation complete. RUL={rul_multipath['rul_final_hours']:.1f}h")
+    
+    return {
+        "health_forecast": health_forecast_df,
+        "failure_curve": failure_curve_df,
+        "rul_multipath": rul_multipath,
+        "model_diagnostics": model_diagnostics,
+        "data_quality": data_quality_flag,
+        "current_time": current_time,
+    }
+
+
+def compute_rul_multipath(
+    health_forecast: pd.DataFrame,
+    failure_curve: pd.DataFrame,
+    current_time: pd.Timestamp,
+    cfg: RULConfig,
+) -> Dict[str, Any]:
+    """
+    Compute RUL via three independent paths and select dominant.
+    
+    Path 1 (Trajectory): Mean health forecast crosses failure threshold
+    Path 2 (Hazard): Failure probability exceeds threshold (e.g., 50%)
+    Path 3 (Energy): Reserved for future anomaly energy integration
+    
+    Args:
+        health_forecast: DataFrame with [Timestamp, ForecastHealth, CI_Lower, CI_Upper]
+        failure_curve: DataFrame with [Timestamp, FailureProb, ThresholdUsed]
+        current_time: Current timestamp
+        cfg: Configuration
+    
+    Returns:
+        Dict with:
+        - rul_trajectory_hours: RUL from trajectory path (or None)
+        - rul_hazard_hours: RUL from hazard path (or None)
+        - rul_energy_hours: RUL from energy path (or None)
+        - rul_final_hours: Selected RUL
+        - lower_bound_hours: Lower confidence bound
+        - upper_bound_hours: Upper confidence bound
+        - dominant_path: Which path was used ("trajectory", "hazard", or "energy")
+    """
+    Console.info("[RUL-Multipath] Computing RUL via multiple paths...")
+    
+    # Path 1: Trajectory crossing (mean forecast < threshold)
+    rul_trajectory = None
+    if health_forecast is not None and not health_forecast.empty:
+        trajectory_crossing = health_forecast[
+            health_forecast["ForecastHealth"] <= cfg.health_threshold
+        ]
+        if not trajectory_crossing.empty:
+            t1 = trajectory_crossing.iloc[0]["Timestamp"]
+            rul_trajectory = (t1 - current_time).total_seconds() / 3600
+            Console.info(f"[RUL-Multipath] Trajectory crossing at {t1}, RUL={rul_trajectory:.1f}h")
+        else:
+            Console.info("[RUL-Multipath] No trajectory crossing within forecast horizon")
+    
+    # Path 2: Hazard accumulation (failure probability >= 50%)
+    rul_hazard = None
+    hazard_prob_threshold = 0.5  # 50% probability
+    if failure_curve is not None and not failure_curve.empty:
+        hazard_crossing = failure_curve[failure_curve["FailureProb"] >= hazard_prob_threshold]
+        if not hazard_crossing.empty:
+            t2 = hazard_crossing.iloc[0]["Timestamp"]
+            rul_hazard = (t2 - current_time).total_seconds() / 3600
+            Console.info(f"[RUL-Multipath] Hazard crossing at {t2}, RUL={rul_hazard:.1f}h")
+        else:
+            Console.info("[RUL-Multipath] No hazard crossing within forecast horizon")
+    
+    # Path 3: Energy (reserved for future integration)
+    rul_energy = None
+    # TODO: Integrate anomaly energy if available
+    
+    # Select dominant RUL (minimum of available paths)
+    available_ruls = [r for r in [rul_trajectory, rul_hazard, rul_energy] if r is not None]
+    
+    if available_ruls:
+        rul_final = min(available_ruls)
+        
+        # Determine dominant path
+        if rul_final == rul_trajectory:
+            dominant_path = "trajectory"
+        elif rul_final == rul_hazard:
+            dominant_path = "hazard"
+        else:
+            dominant_path = "energy"
+    else:
+        # No crossing detected, use max forecast horizon
+        rul_final = cfg.max_forecast_hours
+        dominant_path = "none"
+        Console.info(f"[RUL-Multipath] No crossing detected, using max horizon: {rul_final:.1f}h")
+    
+    # Compute confidence bounds from CI crossings
+    lower_bound = None
+    upper_bound = None
+    
+    if health_forecast is not None and not health_forecast.empty:
+        # Lower bound: CI_Lower crosses threshold
+        ci_lower_crossing = health_forecast[
+            health_forecast["CI_Lower"] <= cfg.health_threshold
+        ]
+        if not ci_lower_crossing.empty:
+            t_lower = ci_lower_crossing.iloc[0]["Timestamp"]
+            lower_bound = (t_lower - current_time).total_seconds() / 3600
+        
+        # Upper bound: CI_Upper crosses threshold
+        ci_upper_crossing = health_forecast[
+            health_forecast["CI_Upper"] <= cfg.health_threshold
+        ]
+        if not ci_upper_crossing.empty:
+            t_upper = ci_upper_crossing.iloc[0]["Timestamp"]
+            upper_bound = (t_upper - current_time).total_seconds() / 3600
+    
+    # If bounds not available, use ±30% of RUL
+    if lower_bound is None:
+        lower_bound = max(0.0, rul_final * 0.7)
+    if upper_bound is None:
+        upper_bound = rul_final * 1.3
+    
+    result = {
+        "rul_trajectory_hours": rul_trajectory,
+        "rul_hazard_hours": rul_hazard,
+        "rul_energy_hours": rul_energy,
+        "rul_final_hours": float(rul_final),
+        "lower_bound_hours": float(lower_bound),
+        "upper_bound_hours": float(upper_bound),
+        "dominant_path": dominant_path,
+    }
+    
+    Console.info(
+        f"[RUL-Multipath] Final RUL={rul_final:.1f}h "
+        f"(trajectory={rul_trajectory}, hazard={rul_hazard}, dominant={dominant_path})"
+    )
+    
+    return result
+
+
+def _default_rul_result(
+    cfg: RULConfig,
+    data_quality_flag: str,
+    current_time: Optional[pd.Timestamp],
+) -> Dict[str, Any]:
+    """
+    Return default RUL result when computation fails.
+    
+    Used when:
+    - Empty health timeline
+    - Insufficient data points
+    - All models fail to fit
+    """
+    if current_time is None:
+        current_time = pd.Timestamp.now()
+    
+    # Generate empty forecast
+    future_timestamps = pd.date_range(
+        start=current_time,
+        periods=2,
+        freq="1H"
+    )[1:]
+    
+    health_forecast_df = pd.DataFrame({
+        "Timestamp": future_timestamps,
+        "ForecastHealth": [cfg.health_threshold] * len(future_timestamps),
+        "CI_Lower": [cfg.health_threshold - 10] * len(future_timestamps),
+        "CI_Upper": [cfg.health_threshold + 10] * len(future_timestamps),
+    })
+    
+    failure_curve_df = pd.DataFrame({
+        "Timestamp": future_timestamps,
+        "FailureProb": [0.0] * len(future_timestamps),
+        "ThresholdUsed": [cfg.health_threshold] * len(future_timestamps),
+    })
+    
+    rul_multipath = {
+        "rul_trajectory_hours": None,
+        "rul_hazard_hours": None,
+        "rul_energy_hours": None,
+        "rul_final_hours": cfg.max_forecast_hours,
+        "lower_bound_hours": cfg.max_forecast_hours * 0.7,
+        "upper_bound_hours": cfg.max_forecast_hours * 1.3,
+        "dominant_path": "default",
+    }
+    
+    model_diagnostics = {
+        "weights": {},
+        "fit_status": {},
+        "per_model": {},
+        "sampling_interval_hours": 1.0,
+    }
+    
+    return {
+        "health_forecast": health_forecast_df,
+        "failure_curve": failure_curve_df,
+        "rul_multipath": rul_multipath,
+        "model_diagnostics": model_diagnostics,
+        "data_quality": data_quality_flag,
+        "current_time": current_time,
+    }
 
 
 # ============================================================================
