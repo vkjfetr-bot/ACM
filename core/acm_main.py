@@ -2663,7 +2663,7 @@ def main() -> None:
                                         json.dump(tuning_diagnostics, f, indent=2)
                                     Console.info(f"[TUNE] Saved tuning diagnostics -> {tune_path}")
                                 
-                                # FUSE-12: Export fusion metrics to CSV for QA regression testing
+                                # ACM-CSV-04: Export fusion metrics (file-mode: CSV, SQL-mode: ACM_RunMetrics)
                                 metrics_rows = []
                                 for detector_name, weight in fusion_weights_used.items():
                                     det_metrics = tuning_diagnostics.get("detector_metrics", {}).get(detector_name, {})
@@ -2677,11 +2677,58 @@ def main() -> None:
                                     })
                                 
                                 if metrics_rows:
-                                    metrics_df = pd.DataFrame(metrics_rows)
-                                    metrics_path = tables_dir / "fusion_metrics.csv"
+                                    # File mode: CSV export
                                     if not SQL_MODE:
+                                        metrics_df = pd.DataFrame(metrics_rows)
+                                        metrics_path = tables_dir / "fusion_metrics.csv"
                                         metrics_df.to_csv(metrics_path, index=False)
                                         Console.info(f"[TUNE] Saved fusion metrics -> {metrics_path}")
+                                    
+                                    # SQL mode: ACM_RunMetrics bulk insert
+                                    elif sql_client and SQL_MODE:
+                                        timestamp_now = pd.Timestamp.now()
+                                        insert_records = [
+                                            (
+                                                run_id,
+                                                int(equip_id),
+                                                f"fusion.weight.{row['detector_name']}",
+                                                float(row['weight']),
+                                                timestamp_now
+                                            )
+                                            for row in metrics_rows
+                                        ] + [
+                                            (
+                                                run_id,
+                                                int(equip_id),
+                                                f"fusion.quality.{row['detector_name']}",
+                                                float(row['quality_score']),
+                                                timestamp_now
+                                            )
+                                            for row in metrics_rows
+                                        ] + [
+                                            (
+                                                run_id,
+                                                int(equip_id),
+                                                f"fusion.n_samples.{row['detector_name']}",
+                                                float(row['n_samples']),
+                                                timestamp_now
+                                            )
+                                            for row in metrics_rows
+                                        ]
+                                        
+                                        insert_sql = """
+                                            INSERT INTO dbo.ACM_RunMetrics 
+                                            (RunID, EquipID, MetricName, MetricValue, Timestamp)
+                                            VALUES (?, ?, ?, ?, ?)
+                                        """
+                                        try:
+                                            with sql_client.cursor() as cur:
+                                                cur.fast_executemany = True
+                                                cur.executemany(insert_sql, insert_records)
+                                            sql_client.conn.commit()
+                                            Console.info(f"[TUNE] Saved fusion metrics -> SQL:ACM_RunMetrics ({len(insert_records)} records)")
+                                        except Exception as sql_e:
+                                            Console.warn(f"[TUNE] Failed to write fusion metrics to SQL: {sql_e}")
                             except Exception as save_e:
                                 Console.warn(f"[TUNE] Failed to save diagnostics: {save_e}")
                 except Exception as tune_e:
