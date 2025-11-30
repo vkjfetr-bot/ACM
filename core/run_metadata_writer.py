@@ -288,11 +288,11 @@ def extract_data_quality_score(data_quality_path=None, sql_client=None, run_id=N
                 
                 return float(quality_score)
             else:
-            Console.warn(
-                "[RUN_META] Missing 'null_rate' column in data_quality.csv. "
-                "Defaulting to quality score 100.0 (optimistic fallback)."
-            )
-            return 100.0
+                Console.warn(
+                    "[RUN_META] Missing 'null_rate' column in data_quality.csv. "
+                    "Defaulting to quality score 100.0 (optimistic fallback)."
+                )
+                return 100.0
         
     except Exception as e:
         Console.warn(f"[RUN_META] Failed to extract data quality score: {e}")
