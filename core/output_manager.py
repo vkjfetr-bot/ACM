@@ -2078,7 +2078,8 @@ class OutputManager:
     def flush(self) -> None:
         """OUT-18: Flush current batch without finalizing (for auto-flush triggers)."""
         with self._batch_lock:
-            if self._current_batch.csv_files:
+            # OM-CSV-02: Skip CSV writes in SQL-only mode
+            if self._current_batch.csv_files and not self.sql_only_mode:
                 self.batch_write_csvs(self._current_batch.csv_files)
                 self._current_batch.csv_files.clear()
             
