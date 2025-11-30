@@ -13,8 +13,8 @@ GO
 CREATE PROCEDURE dbo.usp_ACM_StartRun
     @EquipID     int,
     @ConfigHash  nvarchar(64)  = NULL,
-    @WindowStartEntryDateTime datetime2(3)  = NULL,
-    @WindowEndEntryDateTime   datetime2(3)  = NULL,
+    @WindowStartEntryDateTime datetime2(3)  = NULL OUTPUT,
+    @WindowEndEntryDateTime   datetime2(3)  = NULL OUTPUT,
     @Stage       nvarchar(32) = N'started',
     @Version     nvarchar(32) = NULL,
     @TriggerReason nvarchar(64) = NULL,

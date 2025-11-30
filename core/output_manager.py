@@ -871,10 +871,11 @@ class OutputManager:
         hb = Heartbeat("Calling usp_ACM_GetHistorianData_TEMP", next_hint="parse results", eta_hint=5).start()
         try:
             cur = self.sql_client.cursor()
-            # Pass both EquipID (preferred) and EquipmentName (fallback) to stored procedure
+            # Pass EquipID to stored procedure (SP will resolve EquipmentName internally)
+            # Use named parameters to avoid positional mismatch with optional @TagNames parameter
             cur.execute(
-                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipID=?, @EquipmentName=?",
-                (start_utc, end_utc, equip_id, equipment_name)
+                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipID=?",
+                (start_utc, end_utc, equip_id)
             )
             
             # Fetch all rows
