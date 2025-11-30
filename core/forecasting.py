@@ -309,23 +309,34 @@ def merge_forecast_horizons(
     w_prev = np.exp(-dt_hours / blend_tau_hours)
     
     # FOR-PERF-02: Vectorized blending for all forecast columns
-    # Pre-fill NaNs with zeros for blending calculation (vectorized across all columns)
+    # FOR-MERGE-01: Preserve NaN masks, prefer non-null values over treating missing as zero
     col_names = ["ForecastHealth", "CI_Lower", "CI_Upper"]
     new_cols = [f"{col}_new" for col in col_names]
     prev_cols = [f"{col}_prev" for col in col_names]
     
-    # Vectorized fillna for all columns at once
-    merged[new_cols] = merged[new_cols].fillna(0)
-    merged[prev_cols] = merged[prev_cols].fillna(0)
+    # Preserve original NaN masks before blending
+    new_nan_masks = {col: merged[col].isna() for col in new_cols}
+    prev_nan_masks = {col: merged[col].isna() for col in prev_cols}
     
-    # Weighted average (vectorized across all columns)
+    # Weighted average for points where BOTH prev and new are non-null (vectorized)
     for col, col_new, col_prev in zip(col_names, new_cols, prev_cols):
-        merged[col] = merged[col_new].values * w_new + merged[col_prev].values * w_prev
+        both_valid = ~new_nan_masks[col_new] & ~prev_nan_masks[col_prev]
         
-        # If one side is NaN in original data, use the non-NaN value
-        # Note: This uses original column checks before fillna, preserved via separate mask
-        merged.loc[merged[col_new] == 0, col] = merged.loc[merged[col_new] == 0, col_prev]
-        merged.loc[merged[col_prev] == 0, col] = merged.loc[merged[col_prev] == 0, col_new]
+        # Where both valid: weighted blend
+        merged.loc[both_valid, col] = (
+            merged.loc[both_valid, col_new].values * w_new[both_valid] +
+            merged.loc[both_valid, col_prev].values * w_prev[both_valid]
+        )
+        
+        # Where only new is valid: use new value (prefer non-null over missing)
+        only_new_valid = ~new_nan_masks[col_new] & prev_nan_masks[col_prev]
+        merged.loc[only_new_valid, col] = merged.loc[only_new_valid, col_new]
+        
+        # Where only prev is valid: forward-fill from previous forecast
+        only_prev_valid = new_nan_masks[col_new] & ~prev_nan_masks[col_prev]
+        merged.loc[only_prev_valid, col] = merged.loc[only_prev_valid, col_prev]
+        
+        # Where both NaN: leave as NaN (don't treat missing as zero health)
     
     return merged[["Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper"]]
 
