@@ -215,6 +215,26 @@ CREATE TABLE dbo.ACM_EpisodeCulprits (
 );
 GO
 
+-- Episode QC (Run-Level Summary)
+-- SCHEMA-FIX: Separate table for run-level episode quality summary
+-- Previously conflicted with individual episodes in ACM_Episodes
+IF OBJECT_ID('dbo.ACM_EpisodesQC', 'U') IS NOT NULL DROP TABLE dbo.ACM_EpisodesQC;
+CREATE TABLE dbo.ACM_EpisodesQC (
+    RunID UNIQUEIDENTIFIER NOT NULL,
+    EquipID INT NOT NULL,
+    EpisodeCount INT NULL,
+    MedianDurationMinutes FLOAT NULL,
+    CoveragePct FLOAT NULL,
+    TimeInAlertPct FLOAT NULL,
+    MaxFusedZ FLOAT NULL,
+    AvgFusedZ FLOAT NULL,
+    CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    
+    CONSTRAINT PK_ACM_EpisodesQC PRIMARY KEY CLUSTERED (RunID, EquipID),
+    INDEX IX_ACM_EpisodesQC_Equip NONCLUSTERED (EquipID, RunID)
+);
+GO
+
 -- ============================================================================
 -- EVENT TABLES
 -- ============================================================================

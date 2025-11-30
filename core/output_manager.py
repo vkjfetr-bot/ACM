@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover
 
 # whitelist of SQL tables we will write to (defined early so class methods can use it)
 ALLOWED_TABLES = {
-    'ACM_Scores_Wide','ACM_Episodes',
+    'ACM_Scores_Wide','ACM_Episodes','ACM_EpisodesQC',
     'ACM_HealthTimeline','ACM_RegimeTimeline',
     'ACM_ContributionCurrent','ACM_ContributionTimeline',
     'ACM_DriftSeries','ACM_ThresholdCrossings',
@@ -2650,8 +2650,9 @@ class OutputManager:
                     # 25c. Episodes QC (run-level quality summary)
                     try:
                         episodes_qc_df = self._generate_episodes_qc(scores_df, episodes_df)
+                        # SCHEMA-FIX: Write to ACM_EpisodesQC (run-level summary), not ACM_Episodes (individual episodes)
                         result = self.write_dataframe(episodes_qc_df, tables_dir / "episodes_qc.csv",
-                                             sql_table="ACM_Episodes",  # This is the summary table
+                                             sql_table="ACM_EpisodesQC" if force_sql else None,
                                              add_created_at=False)
                         table_count += 1
                         if result.get('sql_written'): sql_count += 1
