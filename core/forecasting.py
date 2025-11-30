@@ -30,6 +30,8 @@ import pandas as pd
 from utils.logger import Console  # type: ignore
 # FOR-DQ-02: Use centralized timestamp normalization
 from utils.timestamp_utils import normalize_timestamps, normalize_index
+# FOR-CODE-04: Use SqlClient protocol for type safety
+from core.sql_protocol import SqlClient
 from core import rul_estimator  # type: ignore
 from core import enhanced_rul_estimator  # type: ignore
 from core.model_persistence import ForecastState, save_forecast_state, load_forecast_state  # type: ignore
@@ -93,7 +95,7 @@ def compute_data_hash(df: pd.DataFrame) -> str:
 
 def should_retrain(
     prev_state: Optional[ForecastState],
-    sql_client: Any,
+    sql_client: SqlClient,
     equip_id: int,
     current_data_hash: str,
     config: Dict[str, Any]
@@ -181,7 +183,7 @@ def should_retrain(
 
 def compute_forecast_quality(
     prev_state: Optional[ForecastState],
-    sql_client: Any,
+    sql_client: SqlClient,
     equip_id: int,
     current_batch_time: datetime
 ) -> Dict[str, float]:
@@ -706,7 +708,7 @@ def _to_naive(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
 
 
 def run_enhanced_forecasting_sql(
-    sql_client: Any,
+    sql_client: SqlClient,
     equip_id: Optional[int],
     run_id: Optional[str],
     config: Dict[str, Any],
@@ -1232,7 +1234,7 @@ def run_enhanced_forecasting_sql(
 
 
 def run_and_persist_enhanced_forecasting(
-    sql_client: Any,
+    sql_client: SqlClient,
     equip_id: Optional[int],
     run_id: Optional[str],
     config: Dict[str, Any],
