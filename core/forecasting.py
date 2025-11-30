@@ -688,7 +688,8 @@ class AR1Detector:
             if nan_fraction > 0.2:
                 Console.warn(f"[AR1] Column '{c}': {nan_fraction*100:.1f}% NaN - imputing to mu (high imputation rate)")
             
-            ph, mu = self.phimap.get(c, (0.0, float(np.nanmean(series))))
+            # FOR-CODE-03: Renamed ph -> phi for clarity (autoregressive coefficient)
+            phi, mu = self.phimap.get(c, (0.0, float(np.nanmean(series))))
             if not np.isfinite(mu):
                 mu = 0.0
             
@@ -706,7 +707,7 @@ class AR1Detector:
             first_obs = series_finite[0] if series_finite.size else mu
             pred[0] = first_obs if np.isfinite(first_obs) else mu
             if n > 1:
-                pred[1:] = (series_finite[:-1] - mu) * ph + mu
+                pred[1:] = (series_finite[:-1] - mu) * phi + mu
             
             resid = series - pred  # Keep NaNs where original series had NaNs
             z = np.abs(resid) / sd_train
@@ -937,14 +938,16 @@ def run_enhanced_forecasting_sql(
         ts = pd.to_datetime(df_health["Timestamp"], errors="coerce")
         if ts.dt.tz is not None:
             ts = ts.dt.tz_localize(None)
-        hi = pd.Series(df_health["HealthIndex"].astype(float).to_numpy(), index=ts)
-        hi = hi.sort_index()
+        # FOR-CODE-03: Renamed hi -> health_series for clarity
+        health_series = pd.Series(df_health["HealthIndex"].astype(float).to_numpy(), index=ts)
+        health_series = health_series.sort_index()
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] Failed to prepare health series: {e}")
         return {"tables": {}, "metrics": {}}
 
-    if hi.size < MIN_FORECAST_SAMPLES:
-        Console.warn(f"[ENHANCED_FORECAST] Insufficient health history ({hi.size} points); skipping")
+    # FOR-CODE-03: health_series instead of hi
+    if health_series.size < MIN_FORECAST_SAMPLES:
+        Console.warn(f"[ENHANCED_FORECAST] Insufficient health history ({health_series.size} points); skipping")
         return {"tables": {}, "metrics": {}}
 
     # --- Load detector scores from ACM_Scores_Wide ---
@@ -1027,8 +1030,9 @@ def run_enhanced_forecasting_sql(
     # --- Core enhanced forecasting logic (mirrors EnhancedForecastingEngine.run) ---
     try:
         import traceback
+        # FOR-CODE-03: health_series instead of hi
         forecast_result = engine.forecaster.forecast(
-            health_history=hi,
+            health_history=health_series,
             horizons=engine.forecast_config.forecast_horizons,
         )
     except Exception as e:
@@ -1055,8 +1059,9 @@ def run_enhanced_forecasting_sql(
         return {"tables": {}, "metrics": {}}
 
     try:
+        # FOR-CODE-03: health_series instead of hi
         predicted_failure_time = engine._get_failure_time(  # type: ignore[attr-defined]
-            hi.index[-1],
+            health_series.index[-1],
             rul_hours,
         )
     except Exception as e:
@@ -1085,14 +1090,16 @@ def run_enhanced_forecasting_sql(
 
     tables: Dict[str, pd.DataFrame] = {}
 
-    now_ts = hi.index[-1]
+    # FOR-CODE-03: health_series instead of hi
+    now_ts = health_series.index[-1]
 
     if not failure_probs_df.empty:
-        fp_df = failure_probs_df.copy()
-        fp_df.insert(0, "Timestamp", now_ts)
-        fp_df.insert(0, "EquipID", equip_id)  # FOR-COR-02: Already validated as int
-        fp_df.insert(0, "RunID", run_id)  # FOR-COR-02: Already validated as str
-        tables["failure_probability_ts"] = fp_df
+        # FOR-CODE-03: Renamed fp_df -> failure_prob_df for clarity
+        failure_prob_df = failure_probs_df.copy()
+        failure_prob_df.insert(0, "Timestamp", now_ts)
+        failure_prob_df.insert(0, "EquipID", equip_id)  # FOR-COR-02: Already validated as int
+        failure_prob_df.insert(0, "RunID", run_id)  # FOR-COR-02: Already validated as str
+        tables["failure_probability_ts"] = failure_prob_df
 
     if causation_df is not None and not causation_df.empty and maintenance_rec is not None:
         fc_df = causation_df.copy()
@@ -1175,7 +1182,8 @@ def run_enhanced_forecasting_sql(
             
             if len(forecasts) > 0 and len(horizons_hours) > 0:
                 # Build timestamps from horizons (hours from last health point)
-                timestamps = [hi.index[-1] + pd.Timedelta(hours=int(h)) for h in horizons_hours]
+                # FOR-CODE-03: health_series instead of hi
+                timestamps = [health_series.index[-1] + pd.Timedelta(hours=int(h)) for h in horizons_hours]
                 # CI bounds: forecast ± 1.96*uncertainty (95% CI)
                 ci_lower = [f - 1.96*u for f, u in zip(forecasts, uncertainties)]
                 ci_upper = [f + 1.96*u for f, u in zip(forecasts, uncertainties)]
