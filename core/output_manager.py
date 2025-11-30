@@ -179,21 +179,6 @@ def _future_cutoff_ts(cfg: Dict[str, Any]) -> pd.Timestamp:
     minutes = max(0, minutes)
     return pd.Timestamp.now() + pd.Timedelta(minutes=minutes)
 
-# Safe datetime cast helpers - local time policy
-def normalize_timestamp_scalar(ts) -> Optional[pd.Timestamp]:
-    """
-    DEPRECATED: Use utils.timestamp_utils.normalize_timestamp_scalar instead.
-    Maintained for backward compatibility.
-    """
-    return normalize_timestamp_scalar(ts)
-
-def normalize_timestamp_series(idx_or_series: Union[pd.Index, pd.Series]) -> pd.Series:
-    """
-    DEPRECATED: Use utils.timestamp_utils.normalize_timestamp_series instead.
-    Maintained for backward compatibility.
-    """
-    return normalize_timestamp_series(idx_or_series)
-
 # ==================== DATA LOADING SUPPORT ====================
 @dataclass
 class DataMeta:
