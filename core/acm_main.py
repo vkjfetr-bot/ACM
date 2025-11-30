@@ -1088,17 +1088,58 @@ def main() -> None:
         score_numeric = score.copy()
 
         # ===== Adaptive Rolling Baseline (cold-start helper) =====
-        # Task 6 & 7: Skip CSV baseline.seed and baseline_buffer.csv in SQL mode
-        # In SQL mode, SmartColdstart provides all baseline data from ACM_BaselineBuffer
-        if not SQL_MODE:
-            with T.section("baseline.seed"):
-                try:
-                    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-                    min_points = int(baseline_cfg.get("min_points", 300))
-                    buffer_path = stable_models_dir / "baseline_buffer.csv"
-                    train_rows = len(train_numeric) if isinstance(train_numeric, pd.DataFrame) else 0
-                    if train_rows < min_points:
-                        used: Optional[str] = None
+        # ACM-CSV-01: Migrate baseline buffer to SQL
+        with T.section("baseline.seed"):
+            try:
+                baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+                min_points = int(baseline_cfg.get("min_points", 300))
+                train_rows = len(train_numeric) if isinstance(train_numeric, pd.DataFrame) else 0
+                
+                if train_rows < min_points:
+                    used: Optional[str] = None
+                    
+                    if SQL_MODE and sql_client:
+                        # ACM-CSV-01: Load baseline from SQL ACM_BaselineBuffer
+                        try:
+                            window_hours = float(baseline_cfg.get("window_hours", 72))
+                            with sql_client.cursor() as cur:
+                                cur.execute("""
+                                    SELECT Timestamp, SensorName, SensorValue
+                                    FROM dbo.ACM_BaselineBuffer
+                                    WHERE EquipID = ? AND Timestamp >= DATEADD(HOUR, -?, GETDATE())
+                                    ORDER BY Timestamp
+                                """, (int(equip_id), int(window_hours)))
+                                rows = cur.fetchall()
+                            
+                            if rows:
+                                # Transform long format (sensor-timestamp pairs) to wide format (timestamp × sensors)
+                                baseline_data = {}
+                                for row in rows:
+                                    ts = pd.Timestamp(row.Timestamp)
+                                    sensor = str(row.SensorName)
+                                    value = float(row.SensorValue)
+                                    if ts not in baseline_data:
+                                        baseline_data[ts] = {}
+                                    baseline_data[ts][sensor] = value
+                                
+                                buf = pd.DataFrame.from_dict(baseline_data, orient='index').sort_index()
+                                buf.index = pd.to_datetime(buf.index).tz_localize(None)  # Ensure naive timestamps
+                                
+                                # Align SQL baseline to current SCORE columns
+                                if isinstance(score_numeric, pd.DataFrame) and hasattr(buf, "columns"):
+                                    common_cols = [c for c in buf.columns if c in score_numeric.columns]
+                                    if len(common_cols) > 0:
+                                        buf = buf[common_cols]
+                                
+                                train = buf.copy()
+                                train_numeric = train.copy()
+                                used = f"ACM_BaselineBuffer ({len(train)} rows)"
+                        except Exception as sql_err:
+                            Console.warn(f"[BASELINE] Failed to load from SQL ACM_BaselineBuffer: {sql_err}")
+                    
+                    elif not SQL_MODE:
+                        # File mode: load from CSV baseline_buffer.csv
+                        buffer_path = stable_models_dir / "baseline_buffer.csv"
                         if buffer_path.exists():
                             buf = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
                             buf = _ensure_local_index(buf)
@@ -1110,19 +1151,19 @@ def main() -> None:
                             train = buf.copy()
                             train_numeric = train.copy()
                             used = f"baseline_buffer.csv ({len(train)} rows)"
-                        else:
-                            # Seed TRAIN from the leading portion of SCORE
-                            if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
-                                seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
-                                train = score_numeric.iloc[:seed_n].copy()
-                                train_numeric = train.copy()
-                                used = f"score head ({seed_n} rows)"
-                        if used:
-                            Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
-                except Exception as be:
-                    Console.warn(f"[BASELINE] Cold-start baseline setup failed: {be}")
-        else:
-            Console.info("[BASELINE] SQL mode: skipping CSV baseline.seed, using SmartColdstart data")
+                    
+                    # Fallback: seed TRAIN from leading portion of SCORE
+                    if used is None:
+                        if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
+                            seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
+                            train = score_numeric.iloc[:seed_n].copy()
+                            train_numeric = train.copy()
+                            used = f"score head ({seed_n} rows)"
+                    
+                    if used:
+                        Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
+            except Exception as be:
+                Console.warn(f"[BASELINE] Cold-start baseline setup failed: {be}")
 
         # ===== Data quality guardrails (High #4) =====
         with T.section("data.guardrails"):
@@ -3215,20 +3256,24 @@ def main() -> None:
         episodes["regime"] = episodes["regime"].astype(str)
 
         # ===== Rolling Baseline Buffer: Update with latest raw SCORE =====
-        # Task 7: Skip baseline_buffer.csv writes in SQL mode
-        if not SQL_MODE:
-            try:
-                baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-                buffer_path = stable_models_dir / "baseline_buffer.csv"
-                if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
-                    to_append = score_numeric.copy()
-                    # Normalize index to local naive timestamps for stable CSV format
-                    try:
-                        idx_local = pd.DatetimeIndex(to_append.index).tz_localize(None)
-                    except Exception:
-                        idx_local = pd.DatetimeIndex(to_append.index)
-                    to_append.index = idx_local
-
+        # ACM-CSV-01: Separate file-mode and SQL-mode baseline writes
+        try:
+            baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+            window_hours = float(baseline_cfg.get("window_hours", 72))
+            max_points = int(baseline_cfg.get("max_points", 100000))
+            
+            if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
+                to_append = score_numeric.copy()
+                # Normalize index to local naive timestamps
+                try:
+                    idx_local = pd.DatetimeIndex(to_append.index).tz_localize(None)
+                except Exception:
+                    idx_local = pd.DatetimeIndex(to_append.index)
+                to_append.index = idx_local
+                
+                if not SQL_MODE:
+                    # ACM-CSV-01: File mode - write to baseline_buffer.csv
+                    buffer_path = stable_models_dir / "baseline_buffer.csv"
                     if buffer_path.exists():
                         try:
                             prev = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
@@ -3243,7 +3288,7 @@ def main() -> None:
                     else:
                         combined = to_append
 
-                    # Normalize index to local-naive consistently, drop dups, sort
+                    # Normalize index, drop dups, sort
                     try:
                         norm_idx = pd.to_datetime(combined.index, errors="coerce")
                     except Exception:
@@ -3251,9 +3296,7 @@ def main() -> None:
                     combined.index = norm_idx
                     combined = combined[~combined.index.duplicated(keep="last")].sort_index()
 
-                    # Retention: window_hours and/or max_points
-                    window_hours = float(baseline_cfg.get("window_hours", 72))
-                    max_points = int(baseline_cfg.get("max_points", 100000))
+                    # Apply retention policy
                     if len(combined):
                         last_ts = pd.to_datetime(combined.index.max())
                         if window_hours and window_hours > 0:
@@ -3262,55 +3305,53 @@ def main() -> None:
                         if max_points and max_points > 0 and len(combined) > max_points:
                             combined = combined.iloc[-max_points:]
 
-                    # CHART-04: Use uniform timestamp format without 'T' or 'Z' suffixes (file-mode only)
-                    if not SQL_MODE:
-                        combined.to_csv(buffer_path, index=True, date_format="%Y-%m-%d %H:%M:%S")
-                        Console.info(f"[BASELINE] Updated rolling baseline buffer -> {buffer_path} rows={len(combined)} cols={len(combined.columns)}")
+                    combined.to_csv(buffer_path, index=True, date_format="%Y-%m-%d %H:%M:%S")
+                    Console.info(f"[BASELINE] Updated baseline_buffer.csv: rows={len(combined)} cols={len(combined.columns)}")
+                
+                elif sql_client and SQL_MODE:
+                    # ACM-CSV-01: SQL mode - write to ACM_BaselineBuffer
+                    try:
+                        # Transform wide format to long format (rows per sensor-timestamp)
+                        baseline_records = []
+                        for ts_idx, row in to_append.iterrows():
+                            for sensor_name, sensor_value in row.items():
+                                if pd.notna(sensor_value):
+                                    baseline_records.append((
+                                        int(equip_id),
+                                        pd.Timestamp(ts_idx).to_pydatetime().replace(tzinfo=None),
+                                        str(sensor_name),
+                                        float(sensor_value),
+                                        None  # DataQuality (future enhancement)
+                                    ))
                     
-                    # Write to SQL ACM_BaselineBuffer table if in SQL mode
-                    if sql_client and SQL_MODE:
-                        try:
-                            # Transform wide format (timestamp × sensors) to long format (rows per sensor-timestamp)
-                            baseline_records = []
-                            for ts_idx, row in combined.iterrows():
-                                for sensor_name, sensor_value in row.items():
-                                    if pd.notna(sensor_value):
-                                        baseline_records.append((
-                                            int(equip_id),
-                                            pd.Timestamp(ts_idx).to_pydatetime().replace(tzinfo=None),
-                                            str(sensor_name),
-                                            float(sensor_value),
-                                            None  # DataQuality (future enhancement)
-                                        ))
+                        if baseline_records:
+                            # Bulk insert with fast_executemany
+                            insert_sql = """
+                            INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
+                            VALUES (?, ?, ?, ?, ?)
+                            """
+                            with sql_client.cursor() as cur:
+                                cur.fast_executemany = True
+                                cur.executemany(insert_sql, baseline_records)
+                            sql_client.conn.commit()
+                            Console.info(f"[BASELINE] Wrote {len(baseline_records)} records to ACM_BaselineBuffer")
                         
-                            if baseline_records:
-                                # Bulk insert with fast_executemany
-                                insert_sql = """
-                                INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
-                                VALUES (?, ?, ?, ?, ?)
-                                """
-                                with sql_client.cursor() as cur:
-                                    cur.fast_executemany = True
-                                    cur.executemany(insert_sql, baseline_records)
-                                sql_client.conn.commit()
-                                Console.info(f"[BASELINE] Wrote {len(baseline_records)} records to ACM_BaselineBuffer")
-                            
-                                # Run cleanup procedure to maintain retention policy
-                                try:
-                                    with sql_client.cursor() as cur:
-                                        cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
-                                                  (int(equip_id), int(window_hours), max_points))
-                                    sql_client.conn.commit()
-                                except Exception as cleanup_err:
-                                    Console.warn(f"[BASELINE] Cleanup procedure failed: {cleanup_err}")
-                        except Exception as sql_err:
-                            Console.warn(f"[BASELINE] SQL write to ACM_BaselineBuffer failed: {sql_err}")
+                            # Run cleanup procedure to maintain retention policy
                             try:
-                                sql_client.conn.rollback()
-                            except:
-                                pass
-            except Exception as be:
-                Console.warn(f"[BASELINE] Update failed: {be}")
+                                with sql_client.cursor() as cur:
+                                    cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
+                                              (int(equip_id), int(window_hours), max_points))
+                                sql_client.conn.commit()
+                            except Exception as cleanup_err:
+                                Console.warn(f"[BASELINE] Cleanup procedure failed: {cleanup_err}")
+                    except Exception as sql_err:
+                        Console.warn(f"[BASELINE] SQL write to ACM_BaselineBuffer failed: {sql_err}")
+                        try:
+                            sql_client.conn.rollback()
+                        except:
+                            pass
+        except Exception as be:
+            Console.warn(f"[BASELINE] Baseline buffer update failed: {be}")
 
         sensor_context: Optional[Dict[str, Any]] = None
         with T.section("sensor.context"):
