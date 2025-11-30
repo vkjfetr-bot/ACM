@@ -891,11 +891,10 @@ def main() -> None:
     if SQL_MODE:
         try:
             sql_client = _sql_connect(cfg)
-            # Prefer EquipCode from config if set; else use CLI --equip
-            equip_codes = cfg.get("runtime", {}).get("equip_codes") or [equip]
-            Console.info(f"[DEBUG] equip_codes type={type(equip_codes)}, value={equip_codes}")
-            equip_code = str(equip_codes[0] if isinstance(equip_codes, list) else equip)
-            Console.info(f"[DEBUG] Final equip_code={equip_code}")
+            # ALWAYS use CLI --equip argument (not config equip_codes)
+            # This ensures the correct equipment is used regardless of config defaults
+            equip_code = equip
+            Console.info(f"[RUN] Using equipment from CLI argument: {equip_code}")
             run_id, win_start, win_end, equip_id = _sql_start_run(sql_client, cfg, equip_code)
             
             # Override window if CLI args provided (e.g. for batch backfill)
