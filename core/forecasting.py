@@ -54,15 +54,6 @@ from core.model_persistence import ForecastState, save_forecast_state, load_fore
 from datetime import datetime, timedelta
 import hashlib
 
-# Temporary import for file-based enhanced forecasting until fully migrated
-try:
-    from core import enhanced_forecasting_deprecated as _enhanced_forecasting
-    # Alias for backward compatibility
-    EnhancedForecastingEngine = _enhanced_forecasting.EnhancedForecastingEngine
-except ImportError:
-    Console.warn("[FORECASTING] enhanced_forecasting_deprecated not found; file-mode forecasting unavailable")
-    EnhancedForecastingEngine = None  # type: ignore
-
 
 # ============================================================================
 # Module-Level Constants (FOR-CODE-01)
@@ -771,18 +762,13 @@ def run_enhanced_forecasting_sql(
     if config is None or not isinstance(config, dict):
         raise ValueError(f"[ENHANCED_FORECAST] Invalid config: must be a dictionary.")
 
-    # FOR-CODE-02: Configuration issue - warn and skip gracefully
-    if EnhancedForecastingEngine is None:
-        Console.warn("[ENHANCED_FORECAST] EnhancedForecastingEngine not available; skipping")
-        return {"tables": {}, "metrics": {}}
-
-    engine = EnhancedForecastingEngine(config)
-    if not engine.forecast_config.enabled:
+    # Check if forecasting is enabled in config
+    forecast_cfg = config.get("forecasting", {})
+    if not forecast_cfg.get("enabled", True):
         Console.info("[ENHANCED_FORECAST] Module disabled via config.forecasting.enabled")
         return {"tables": {}, "metrics": {}}
     
     # FORECAST-STATE-02: Load previous state for continuity
-    forecast_cfg = config.get("forecasting", {})
     enable_continuous = forecast_cfg.get("enable_continuous", True)  # Default enabled
     
     prev_state = None
