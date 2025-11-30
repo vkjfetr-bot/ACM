@@ -701,13 +701,19 @@ def run_enhanced_forecasting_sql(
           "forecast_state": ForecastState  # Updated state for persistence
         }
     """
+    # FOR-DQ-01: Input validation
     if sql_client is None:
         Console.warn("[ENHANCED_FORECAST] SQL client not provided; skipping enhanced forecasting")
         return {"tables": {}, "metrics": {}}
 
-    if equip_id is None or not run_id:
-        Console.warn("[ENHANCED_FORECAST] Missing EquipID/RunID; skipping enhanced forecasting")
-        return {"tables": {}, "metrics": {}}
+    if equip_id is None or equip_id < 0:
+        raise ValueError(f"[ENHANCED_FORECAST] Invalid equip_id: {equip_id}. Must be a positive integer.")
+    
+    if not run_id or not isinstance(run_id, str) or len(run_id.strip()) == 0:
+        raise ValueError(f"[ENHANCED_FORECAST] Invalid run_id: {run_id}. Must be a non-empty string.")
+    
+    if config is None or not isinstance(config, dict):
+        raise ValueError(f"[ENHANCED_FORECAST] Invalid config: must be a dictionary.")
 
     if EnhancedForecastingEngine is None:
         Console.warn("[ENHANCED_FORECAST] EnhancedForecastingEngine not available; skipping")
