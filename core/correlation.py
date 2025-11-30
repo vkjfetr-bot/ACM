@@ -37,6 +37,19 @@ class MahalanobisDetector:
     def fit(self, X: pd.DataFrame) -> "MahalanobisDetector":
         Xn = X.to_numpy(dtype=np.float64, copy=False)
         
+        # COR-01: Guard against insufficient samples for covariance estimation
+        # Covariance matrix requires at least 2 samples to be well-defined
+        if Xn.shape[0] < 2:
+            Console.warn(
+                f"[MHAL] Insufficient samples for covariance estimation (n={Xn.shape[0]}). "
+                f"Falling back to identity covariance (Mahalanobis = Euclidean distance)."
+            )
+            # Fallback: use mean (or zeros if no data) and identity covariance
+            self.mu = Xn.mean(axis=0) if Xn.shape[0] > 0 else np.zeros(Xn.shape[1], dtype=np.float64)
+            self.S_inv = np.eye(Xn.shape[1], dtype=np.float64)
+            self.cond_num = 1.0  # Identity matrix is perfectly conditioned
+            return self
+        
         # ANA-07: Audit NaN during TRAIN phase
         nan_count = int(np.sum(~np.isfinite(Xn)))
         total_elements = Xn.size
@@ -155,6 +168,18 @@ class PCASubspaceDetector:
         df = df.fillna(self.col_medians).clip(lower=-1e6, upper=1e6)
 
         self.keep_cols = list(df.columns)
+        
+        # COR-02: Guard against insufficient samples for PCA after feature filtering
+        # PCA requires at least 2 samples to compute meaningful components
+        if df.shape[0] < 2:
+            Console.warn(
+                f"[PCA] Insufficient samples after feature filtering (n={df.shape[0]}). "
+                f"Skipping PCA fit - score() will return zeros."
+            )
+            # Set PCA to None to signal fallback mode
+            self.pca = None
+            self.keep_cols = []
+            return self
 
         # Scale
         Xs = self.scaler.fit_transform(df.values.astype(np.float64, copy=False))
