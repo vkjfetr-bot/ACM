@@ -49,7 +49,7 @@ The sections below list the still-open themes from the merged backlogs. Each bul
 - **SQL-20/21/22/23**  Save/load detectors to ModelRegistry and wire them into the training pipeline.
 
 ### 2. Forecast & RUL
-- **FCST-15**  Remove the `scores.csv` dependency so forecasting works in SQL-only runs.
+- ~~**FCST-15**  Remove the `scores.csv` dependency so forecasting works in SQL-only runs.~~ Completed via artifact cache support; remaining work is to remove the legacy forecast module path (see CORE-BA-02).
 - **FCST-16**  Publish per-sensor/regime forecasts into `ACM_SensorForecast_TS` with diagnostics.
 - **RUL-01**  Make `rul_estimator.py` consume SQL health timelines instead of CSVs.
 - **RUL-02**  Add probabilistic RUL bands and maintenance telemetry to the SQL outputs.
@@ -79,6 +79,14 @@ Use the following mapping when opening/triaging GitHub issues. Strike through en
 | DEBT-07/14/15 | Tech Debt | Planned | Create issues for structured error handling and test hooks. |
 
 All other historical tasks were either completed (already struck through in previous versions) or removed because they duplicated the finished logging/chart work. If you discover a missing item while working through the code, open an issue instead of reintroducing a markdown TODO.
+
+---
+
+### New Audit Findings (2025-11-29)
+
+- **CORE-BA-01 (Bug)**: Import missing for `log_auto_tune_changes` in `core/acm_main.py` auto-tune block. Outcome: runtime `NameError` when SQL auto-tune tries to log config changes. Action: import from `core.config_history_writer` in that section.
+- **CORE-BA-02 (Cleanup)**: `core/acm_main.py` still calls `core/forecast_deprecated.py` despite consolidation into `core/forecasting.py`; remove the deprecated call or replace with a thin shim, then delete `forecast_deprecated.py` and `enhanced_forecasting_deprecated.py`.
+- **CORE-BA-03 (Bloat)**: Unused files inflating `core/`: `episode_culprits_writer.py`, `simplified_output_manager.py`, `sql_performance.py`, and `otherscripts.zip` (legacy scripts). Action: delete or archive outside `core/`.
 
 ---
 

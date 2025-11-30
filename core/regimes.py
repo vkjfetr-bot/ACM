@@ -5,6 +5,10 @@ from collections import deque, Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import json
+try:
+    import orjson  # type: ignore
+except Exception:
+    orjson = None  # type: ignore
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -33,6 +37,11 @@ except Exception:  # pragma: no cover - scipy optional in some deployments
     _median_filter = None
 
 REGIME_MODEL_VERSION = "2.0"
+
+
+class ModelVersionMismatch(Exception):
+    """Raised when a cached regime model version differs from the expected version."""
+
 
 _HEALTH_PRIORITY = {
     "healthy": 0,
@@ -66,10 +75,21 @@ def _cfg_get(cfg: Dict[str, Any], path: str, default: Any) -> Any:
         if not isinstance(cur, dict) or part not in cur:
             return default
         cur = cur[part]
-    return cur
+    val = cur
+    if default is not None:
+        expected_type = type(default)
+        if expected_type in (int, float, bool, str) and not isinstance(val, expected_type):
+            try:
+                val = expected_type(val)
+            except Exception:
+                return default
+    return val
 
 def _as_f32(X) -> np.ndarray:
-    return np.asarray(X, dtype=np.float32, order="C")
+    arr = np.asarray(X)
+    if arr.dtype == np.float32 and arr.flags["C_CONTIGUOUS"]:
+        return arr
+    return np.asarray(arr, dtype=np.float32, order="C")
 
 
 class _IdentityScaler:
@@ -863,6 +883,14 @@ def _to_datetime_mixed(s):
         return pd.to_datetime(s, errors="coerce")
 
 def _read_episodes_csv(p: Path) -> pd.DataFrame:
+    safe_base = Path.cwd()
+    try:
+        resolved = p.resolve()
+        if not resolved.is_relative_to(safe_base):
+            Console.warn(f"[REGIME] Episode path outside workspace: {resolved}")
+            return pd.DataFrame(columns=["start_ts", "end_ts"])
+    except Exception:
+        pass
     if not p.exists():
         return pd.DataFrame(columns=["start_ts", "end_ts"])
     df = pd.read_csv(p, dtype={"start_ts": "string", "end_ts": "string"})
@@ -871,6 +899,14 @@ def _read_episodes_csv(p: Path) -> pd.DataFrame:
     return df
 
 def _read_scores_csv(p: Path) -> pd.DataFrame:
+    safe_base = Path.cwd()
+    try:
+        resolved = p.resolve()
+        if not resolved.is_relative_to(safe_base):
+            Console.warn(f"[REGIME] Scores path outside workspace: {resolved}")
+            return pd.DataFrame()
+    except Exception:
+        pass
     if not p.exists():
         return pd.DataFrame()
     df = pd.read_csv(p, dtype={"timestamp": "string"})
@@ -994,7 +1030,7 @@ def regime_model_to_state(
     from core.model_persistence import RegimeState
     import json
     from datetime import datetime, timezone
-    
+
     # Extract cluster centers
     cluster_centers = np.asarray(model.kmeans.cluster_centers_, dtype=float)
     cluster_centers_json = json.dumps(cluster_centers.tolist())
@@ -1020,6 +1056,12 @@ def regime_model_to_state(
     silhouette = float(model.meta.get("fit_score", 0.0))
     quality_ok = bool(model.meta.get("quality_ok", False))
     
+    meta_payload = _regime_metadata_dict(model)
+    try:
+        meta_json = orjson.dumps(meta_payload) if orjson else json.dumps(meta_payload)
+    except Exception:
+        meta_json = json.dumps(meta_payload)
+
     state = RegimeState(
         equip_id=equip_id,
         state_version=state_version,
@@ -1034,7 +1076,8 @@ def regime_model_to_state(
         quality_ok=quality_ok,
         last_trained_time=datetime.now(timezone.utc).isoformat(),
         config_hash=config_hash,
-        regime_basis_hash=regime_basis_hash
+        regime_basis_hash=regime_basis_hash,
+        meta_json=meta_json,
     )
     
     return state
@@ -1245,14 +1288,14 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
             timestamps=basis_train.index if isinstance(basis_train.index, pd.DatetimeIndex) else None,
             min_dwell_samples=min_dwell_samples,
             min_dwell_seconds=min_dwell_seconds,
-            health_map=regime_model.health_labels,
+            health_map=None,  # compute health after smoothing to avoid stale map
         )
         score_labels = smooth_transitions(
             score_labels,
             timestamps=basis_score.index if isinstance(basis_score.index, pd.DatetimeIndex) else None,
             min_dwell_samples=min_dwell_samples,
             min_dwell_seconds=min_dwell_seconds,
-            health_map=regime_model.health_labels,
+            health_map=None,  # compute health after smoothing to avoid stale map
         )
         quality_ok = bool(regime_model.meta.get("quality_ok", True))
 
@@ -1284,7 +1327,10 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
             out["frame"] = frame
         return out
 
-    return _legacy_label(score_df, ctx, out, cfg)
+    if bool(_cfg_get(cfg, "regimes.allow_legacy_label", False)):
+        Console.warn("[REGIME] Falling back to legacy labeling path (allow_legacy_label=True)")
+        return _legacy_label(score_df, ctx, out, cfg)
+    raise RuntimeError("[REGIME] Regime model unavailable and legacy path disabled (regimes.allow_legacy_label=False)")
 
 
 def _legacy_label(score_df, ctx: Dict[str, Any], out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1625,24 +1671,13 @@ def save_regime_model(model: RegimeModel, models_dir: Path) -> None:
     model.meta.setdefault("model_version", REGIME_MODEL_VERSION)
     model.meta.setdefault("sklearn_version", sklearn.__version__)
 
-    metadata = {
-        "feature_columns": model.feature_columns,
-        "raw_tags": model.raw_tags,
-        "n_pca_components": model.n_pca_components,
-        "train_hash": model.train_hash,
-        "health_labels": {str(k): str(v) for k, v in (model.health_labels or {}).items()},
-        "stats": {
-            str(k): {
-                kk: (float(vv) if isinstance(vv, (int, float, np.floating)) else str(vv))
-                for kk, vv in stat.items()
-            }
-            for k, stat in (model.stats or {}).items()
-        },
-        "meta": model.meta,
-    }
+    metadata = _regime_metadata_dict(model)
     try:
-        with json_path.open("w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        if orjson:
+            json_path.write_bytes(orjson.dumps(metadata, option=orjson.OPT_INDENT_2))
+        else:
+            with json_path.open("w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
         Console.info(f"[REGIME] Saved regime metadata -> {json_path}")
     except Exception as e:
         Console.warn(f"[REGIME] Failed to save regime metadata: {e}")
@@ -1692,10 +1727,9 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
         meta = metadata.get("meta", {})
         version = meta.get("model_version")
         if version and version != REGIME_MODEL_VERSION:
-            Console.warn(
-                f"[REGIME] Cached model version {version} mismatches expected {REGIME_MODEL_VERSION}; skipping load."
+            raise ModelVersionMismatch(
+                f"Cached model version {version} mismatches expected {REGIME_MODEL_VERSION}"
             )
-            return None
         model = RegimeModel(
             scaler=scaler,
             kmeans=kmeans,
@@ -1781,48 +1815,31 @@ def detect_transient_states(
         diffs = np.diff(regime_labels.astype(int), prepend=regime_labels[0])
         regime_changes = diffs != 0
 
-    class _StateMachine:
-        def __init__(self, lag: int, history: int):
-            self.lag = max(0, int(lag))
-            self.history = max(2, int(history))
-            self.roc_history: deque[float] = deque(maxlen=self.history)
-            self.transient_timer = 0
+    roc_values = aggregate_roc_smooth.to_numpy(dtype=float)
+    trend_window = max(roc_window, 5)
+    trend = pd.Series(roc_values).diff().rolling(window=trend_window, min_periods=1).mean().to_numpy()
 
-        def update(self, roc_value: float, changed: bool) -> str:
-            self.roc_history.append(float(roc_value))
-            trend = 0.0
-            if len(self.roc_history) >= 2:
-                y = np.array(self.roc_history, dtype=float)
-                x = np.arange(len(y), dtype=float)
-                try:
-                    trend = float(np.polyfit(x, y, 1)[0])
-                except Exception:
-                    trend = y[-1] - y[0]
+    trip_mask = roc_values >= roc_threshold_trip
+    high_mask = (roc_values >= roc_threshold_high) & ~trip_mask
 
-            if roc_value >= roc_threshold_trip:
-                self.transient_timer = self.lag
-                return "trip"
+    def _dilate(mask: np.ndarray, width: int) -> np.ndarray:
+        if width <= 0:
+            return mask
+        kernel = np.ones(2 * width + 1, dtype=int)
+        return np.convolve(mask.astype(int), kernel, mode="same") > 0
 
-            if roc_value >= roc_threshold_high:
-                self.transient_timer = self.lag
-                return "startup" if trend >= 0 else "shutdown"
+    base_transient = regime_changes | high_mask | trip_mask
+    transient_mask = _dilate(base_transient, transition_lag)
+    trip_mask = _dilate(trip_mask, transition_lag)
+    high_mask = _dilate(high_mask, transition_lag)
 
-            if self.transient_timer > 0:
-                self.transient_timer -= 1
-                return "transient"
-
-            if changed:
-                self.transient_timer = max(self.lag - 1, 0)
-                return "transient"
-
-            return "steady"
-
-    machine = _StateMachine(lag=transition_lag, history=max(roc_window, 5))
-    states = np.empty(n_samples, dtype=object)
-
-    for idx in range(n_samples):
-        state = machine.update(aggregate_roc_smooth.iloc[idx], bool(regime_changes[idx]))
-        states[idx] = state
+    states = np.full(n_samples, "steady", dtype=object)
+    states[transient_mask] = "transient"
+    startup_mask = high_mask & (trend >= 0)
+    shutdown_mask = high_mask & ~startup_mask
+    states[startup_mask] = "startup"
+    states[shutdown_mask] = "shutdown"
+    states[trip_mask] = "trip"
 
     state_counts = pd.Series(states).value_counts().to_dict()
     Console.info(f"[TRANSIENT] State distribution: {state_counts}")

@@ -569,6 +569,7 @@ class ModelVersionManager:
                     v_num = int(v_dir.name[1:])  # Extract number from "v123"
                     versions.append(v_num)
                 except ValueError:
+                    Console.warn(f"[MODEL] Ignoring malformed model directory: {v_dir.name}")
                     continue
         
         return max(versions) if versions else None
@@ -1177,6 +1178,7 @@ class ModelVersionManager:
             try:
                 v_num = int(v_dir.name[1:])
             except ValueError:
+                Console.warn(f"[MODEL] Skipping malformed model directory: {v_dir.name}")
                 continue
             
             manifest_path = v_dir / "manifest.json"
