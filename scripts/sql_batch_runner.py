@@ -692,6 +692,18 @@ class SQLBatchRunner:
         Console.info(f"[COLDSTART] Starting coldstart for {equip_name}", equipment=equip_name)
         Console.info(f"{'='*60}")
         
+        # Get earliest data timestamp for historical replay
+        min_ts, max_ts = self._get_data_range(equip_name)
+        if not min_ts or not max_ts:
+            Console.error(f"[COLDSTART] {equip_name}: No data available in historian", equipment=equip_name)
+            return False
+        
+        Console.info(f"[COLDSTART] {equip_name}: Historical data range: {min_ts} to {max_ts}", equipment=equip_name, min_ts=min_ts, max_ts=max_ts)
+        
+        # Start coldstart from earliest timestamp
+        coldstart_start = min_ts
+        coldstart_end = min_ts + timedelta(minutes=self.tick_minutes)
+        
         for attempt in range(1, self.max_coldstart_attempts + 1):
             Console.info(f"\n[COLDSTART] {equip_name}: Attempt {attempt}/{self.max_coldstart_attempts}", equipment=equip_name, attempt=attempt, max_attempts=self.max_coldstart_attempts)
             
@@ -702,9 +714,10 @@ class SQLBatchRunner:
                 return True
             
             Console.info(f"[COLDSTART] {equip_name}: Status - {accum_rows}/{req_rows} rows accumulated", equipment=equip_name, accumulated=accum_rows, required=req_rows)
+            Console.info(f"[COLDSTART] {equip_name}: Processing window [{coldstart_start} to {coldstart_end})", equipment=equip_name, start=coldstart_start, end=coldstart_end)
             
-            # Run ACM batch
-            success, outcome = self._run_acm_batch(equip_name, dry_run=dry_run)
+            # Run ACM batch with historical time window
+            success, outcome = self._run_acm_batch(equip_name, start_time=coldstart_start, end_time=coldstart_end, dry_run=dry_run)
             
             if not success and outcome == "FAIL":
                 Console.error(f"[COLDSTART] {equip_name}: Attempt {attempt} FAILED (error)", equipment=equip_name, attempt=attempt)
@@ -722,6 +735,11 @@ class SQLBatchRunner:
                     return True
                 else:
                     Console.info(f"[COLDSTART] {equip_name}: Making progress, continuing...", equipment=equip_name)
+                    # Advance window for next coldstart attempt
+                    coldstart_start = coldstart_end
+                    coldstart_end = coldstart_start + timedelta(minutes=self.tick_minutes)
+                    if coldstart_end > max_ts:
+                        coldstart_end = max_ts
         
         Console.warn(f"[COLDSTART] {equip_name}: Max attempts ({self.max_coldstart_attempts}) reached without completion", equipment=equip_name, max_attempts=self.max_coldstart_attempts)
         return False
