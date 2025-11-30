@@ -70,7 +70,9 @@ ALLOWED_TABLES = {
     'ACM_HealthDistributionOverTime','ACM_ChartGenerationLog',
     'ACM_FusionMetrics',
     # Continuous forecasting enhancements
-    'ACM_HealthForecast_Continuous','ACM_FailureHazard_TS'
+    'ACM_HealthForecast_Continuous','ACM_FailureHazard_TS',
+    # Adaptive threshold metadata
+    'ACM_ThresholdMetadata'
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
@@ -869,10 +871,11 @@ class OutputManager:
         hb = Heartbeat("Calling usp_ACM_GetHistorianData_TEMP", next_hint="parse results", eta_hint=5).start()
         try:
             cur = self.sql_client.cursor()
-            # Pass both EquipID (preferred) and EquipmentName (fallback) to stored procedure
+            # Pass EquipID to stored procedure (SP will resolve EquipmentName internally)
+            # Use named parameters to avoid positional mismatch with optional @TagNames parameter
             cur.execute(
-                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipID=?, @EquipmentName=?",
-                (start_utc, end_utc, equip_id, equipment_name)
+                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipID=?",
+                (start_utc, end_utc, equip_id)
             )
             
             # Fetch all rows
@@ -5297,6 +5300,217 @@ class OutputManager:
             'OMR_Z': omr_series.round(4).to_list(),
             'OMR_Weight': [omr_weight] * len(ts_values)
         })
+
+    def write_threshold_metadata(
+        self,
+        equip_id: int,
+        threshold_type: str,
+        threshold_value: Union[float, Dict[int, float]],
+        calculation_method: str,
+        sample_count: Optional[int] = None,
+        train_start: Optional[datetime] = None,
+        train_end: Optional[datetime] = None,
+        config_signature: Optional[str] = None,
+        notes: Optional[str] = None
+    ) -> None:
+        """
+        Persist adaptive threshold metadata to ACM_ThresholdMetadata table.
+        
+        Args:
+            equip_id: Equipment identifier
+            threshold_type: Type of threshold ('fused_alert_z', 'fused_warn_z', etc.)
+            threshold_value: Threshold value (float for global, dict for per-regime)
+            calculation_method: Method used ('quantile_99.7', 'mad_3sigma', 'hybrid', etc.)
+            sample_count: Number of training samples used
+            train_start: Training data start time
+            train_end: Training data end time
+            config_signature: Config hash for invalidation
+            notes: Optional explanation
+            
+        Example:
+            # Global threshold
+            output_manager.write_threshold_metadata(
+                equip_id=1,
+                threshold_type='fused_alert_z',
+                threshold_value=3.2,
+                calculation_method='quantile_99.7',
+                sample_count=5000
+            )
+            
+            # Per-regime thresholds
+            output_manager.write_threshold_metadata(
+                equip_id=1,
+                threshold_type='fused_alert_z',
+                threshold_value={0: 2.8, 1: 3.5, 2: 2.3},
+                calculation_method='mad_3sigma',
+                sample_count=5000
+            )
+        """
+        if self.sql_client is None:
+            Console.warn("SQL client not available - skipping threshold metadata write")
+            return
+            
+        try:
+            # Mark old thresholds as inactive for this equipment/threshold_type
+            with self.sql_client.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ACM_ThresholdMetadata 
+                    SET IsActive = 0 
+                    WHERE EquipID = ? AND ThresholdType = ?
+                    """,
+                    (equip_id, threshold_type)
+                )
+            
+            # Prepare rows to insert
+            rows = []
+            if isinstance(threshold_value, dict):
+                # Per-regime thresholds
+                for regime_id, thresh_val in threshold_value.items():
+                    rows.append({
+                        'EquipID': equip_id,
+                        'RegimeID': regime_id if regime_id >= 0 else None,
+                        'ThresholdType': threshold_type,
+                        'ThresholdValue': float(thresh_val),
+                        'CalculationMethod': calculation_method,
+                        'SampleCount': sample_count,
+                        'TrainStartTime': train_start,
+                        'TrainEndTime': train_end,
+                        'ConfigSignature': config_signature,
+                        'IsActive': 1,
+                        'Notes': notes
+                    })
+            else:
+                # Global threshold
+                rows.append({
+                    'EquipID': equip_id,
+                    'RegimeID': None,
+                    'ThresholdType': threshold_type,
+                    'ThresholdValue': float(threshold_value),
+                    'CalculationMethod': calculation_method,
+                    'SampleCount': sample_count,
+                    'TrainStartTime': train_start,
+                    'TrainEndTime': train_end,
+                    'ConfigSignature': config_signature,
+                    'IsActive': 1,
+                    'Notes': notes
+                })
+            
+            # Insert new thresholds directly via cursor for reliability
+            # Ensure CreatedAt and RunID present
+            created_at = pd.Timestamp.now().tz_localize(None)
+            for r in rows:
+                r['CreatedAt'] = created_at
+                # Ensure EquipID set
+                r['EquipID'] = equip_id
+            
+            insert_sql = (
+                "INSERT INTO ACM_ThresholdMetadata (EquipID, RegimeID, ThresholdType, ThresholdValue, "
+                "CalculationMethod, SampleCount, TrainStartTime, TrainEndTime, CreatedAt, ConfigSignature, "
+                "IsActive, Notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            params = [
+                (
+                    r.get('EquipID'),
+                    r.get('RegimeID'),
+                    r.get('ThresholdType'),
+                    r.get('ThresholdValue'),
+                    r.get('CalculationMethod'),
+                    r.get('SampleCount'),
+                    r.get('TrainStartTime'),
+                    r.get('TrainEndTime'),
+                    r.get('CreatedAt'),
+                    r.get('ConfigSignature'),
+                    r.get('IsActive'),
+                    r.get('Notes')
+                ) for r in rows
+            ]
+            with self.sql_client.cursor() as cur:
+                cur.executemany(insert_sql, params)
+            
+            Console.info(
+                f"Threshold metadata written: {threshold_type} = "
+                f"{threshold_value if not isinstance(threshold_value, dict) else f'{len(threshold_value)} regimes'} "
+                f"({calculation_method})"
+            )
+            
+        except Exception as e:
+            Console.error(f"Failed to write threshold metadata: {e}")
+    
+    def read_threshold_metadata(
+        self,
+        equip_id: int,
+        threshold_type: str,
+        regime_id: Optional[int] = None
+    ) -> Optional[float]:
+        """
+        Read latest active threshold from ACM_ThresholdMetadata.
+        
+        Args:
+            equip_id: Equipment identifier
+            threshold_type: Type of threshold ('fused_alert_z', 'fused_warn_z', etc.)
+            regime_id: Optional regime ID (None for global threshold)
+            
+        Returns:
+            Threshold value if found, None otherwise
+            
+        Example:
+            # Read global threshold
+            threshold = output_manager.read_threshold_metadata(
+                equip_id=1,
+                threshold_type='fused_alert_z'
+            )
+            
+            # Read regime-specific threshold
+            threshold = output_manager.read_threshold_metadata(
+                equip_id=1,
+                threshold_type='fused_alert_z',
+                regime_id=2
+            )
+        """
+        if self.sql_client is None:
+            Console.warn("SQL client not available - cannot read threshold metadata")
+            return None
+            
+        try:
+            with self.sql_client.get_cursor() as cur:
+                if regime_id is not None:
+                    # Regime-specific lookup
+                    cur.execute(
+                        """
+                        SELECT TOP 1 ThresholdValue
+                        FROM ACM_ThresholdMetadata
+                        WHERE EquipID = ? 
+                          AND ThresholdType = ?
+                          AND RegimeID = ?
+                          AND IsActive = 1
+                        ORDER BY CreatedAt DESC
+                        """,
+                        (equip_id, threshold_type, regime_id)
+                    )
+                else:
+                    # Global lookup (RegimeID IS NULL)
+                    cur.execute(
+                        """
+                        SELECT TOP 1 ThresholdValue
+                        FROM ACM_ThresholdMetadata
+                        WHERE EquipID = ? 
+                          AND ThresholdType = ?
+                          AND RegimeID IS NULL
+                          AND IsActive = 1
+                        ORDER BY CreatedAt DESC
+                        """,
+                        (equip_id, threshold_type)
+                    )
+                
+                row = cur.fetchone()
+                if row:
+                    return float(row[0])
+                return None
+                
+        except Exception as e:
+            Console.error(f"Failed to read threshold metadata: {e}")
+            return None
 
 def create_output_manager(sql_client=None, run_id: str = None, equip_id: int = None, **kwargs) -> OutputManager:
     """Factory function for creating OutputManager instances."""

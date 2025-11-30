@@ -1,10 +1,14 @@
 ﻿# core/regimes.py
 # Fast + memory-safe regime labeling with auto-k.
 from __future__ import annotations
-from collections import deque
+from collections import deque, Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import json
+try:
+    import orjson  # type: ignore
+except Exception:
+    orjson = None  # type: ignore
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -25,6 +29,7 @@ except Exception:
 import matplotlib.pyplot as plt
 
 from utils.logger import Console
+import hashlib
 
 try:
     from scipy.ndimage import median_filter as _median_filter
@@ -32,6 +37,11 @@ except Exception:  # pragma: no cover - scipy optional in some deployments
     _median_filter = None
 
 REGIME_MODEL_VERSION = "2.0"
+
+
+class ModelVersionMismatch(Exception):
+    """Raised when a cached regime model version differs from the expected version."""
+
 
 _HEALTH_PRIORITY = {
     "healthy": 0,
@@ -44,8 +54,16 @@ _HEALTH_PRIORITY = {
 _REGIME_CONFIG_SCHEMA = {
     "regimes.auto_k.k_min": (int, 2, 20, "Minimum clusters"),
     "regimes.auto_k.k_max": (int, 2, 40, "Maximum clusters"),
+    "regimes.auto_k.max_models": (int, 1, 50, "Maximum candidate models to evaluate"),
     "regimes.quality.silhouette_min": (float, 0.0, 1.0, "Minimum silhouette score"),
     "regimes.auto_k.max_eval_samples": (int, 100, 20000, "Max samples for auto-k evaluation"),
+    "regimes.smoothing.passes": (int, 0, 5, "Number of label smoothing passes"),
+    "regimes.smoothing.window": (int, 0, 25, "Smoothing window size"),
+    "regimes.transient_detection.roc_window": (int, 2, 500, "Transient ROC window"),
+    "regimes.transient_detection.roc_threshold_high": (float, 0.0, 100.0, "Transient high ROC threshold"),
+    "regimes.transient_detection.roc_threshold_trip": (float, 0.0, 100.0, "Transient trip ROC threshold"),
+    "regimes.health.fused_warn_z": (float, 0.0, 10.0, "Fused Z warn threshold"),
+    "regimes.health.fused_alert_z": (float, 0.0, 10.0, "Fused Z alert threshold"),
 }
 
 # ----------------------------
@@ -57,10 +75,49 @@ def _cfg_get(cfg: Dict[str, Any], path: str, default: Any) -> Any:
         if not isinstance(cur, dict) or part not in cur:
             return default
         cur = cur[part]
-    return cur
+    val = cur
+    if default is not None:
+        expected_type = type(default)
+        if expected_type in (int, float, bool, str) and not isinstance(val, expected_type):
+            try:
+                val = expected_type(val)
+            except Exception:
+                return default
+    return val
 
 def _as_f32(X) -> np.ndarray:
-    return np.asarray(X, dtype=np.float32, order="C")
+    arr = np.asarray(X)
+    if arr.dtype == np.float32 and arr.flags["C_CONTIGUOUS"]:
+        return arr
+    return np.asarray(arr, dtype=np.float32, order="C")
+
+
+class _IdentityScaler:
+    """No-op scaler used when basis is already normalized."""
+
+    mean_: np.ndarray
+    scale_: np.ndarray
+
+    def __init__(self):
+        self.mean_ = np.array([], dtype=np.float64)
+        self.scale_ = np.array([], dtype=np.float64)
+
+    def fit(self, X):
+        return self
+
+    def transform(self, X):
+        return np.asarray(X, dtype=np.float64, order="C")
+
+    def fit_transform(self, X):
+        return self.transform(X)
+
+
+def _stable_int_hash(arr: np.ndarray) -> int:
+    """Deterministic hash for arrays to replace non-deterministic builtin hash()."""
+    buf = np.ascontiguousarray(arr, dtype=np.float64).tobytes()
+    digest = hashlib.md5(buf).digest()
+    return int.from_bytes(digest[:8], byteorder="little", signed=False)
+
 
 def _finite_impute_inplace(X: np.ndarray) -> np.ndarray:
     X = _as_f32(X)
@@ -112,7 +169,7 @@ def _compute_sample_durations(index: pd.Index) -> np.ndarray:
         valid = diffs[np.isfinite(diffs) & (diffs > 0)]
         fallback = float(np.median(valid)) if valid.size else 0.0
         durations[:-1] = np.where(np.isfinite(diffs) & (diffs >= 0), diffs, fallback)
-        durations[-1] = fallback if fallback > 0 else (diffs[-1] if diffs.size else 0.0)
+        durations[-1] = fallback if (fallback > 0 and np.isfinite(fallback)) else 0.0
         # If no positive spacing detected, fall back to unit durations
         if not np.isfinite(durations).any() or np.allclose(durations, 0.0):
             durations = np.ones(n, dtype=float)
@@ -132,7 +189,11 @@ def _validate_regime_inputs(df: pd.DataFrame, name: str = "train_basis") -> List
         missing_cols = numeric.columns[numeric.isna().any()].tolist()
         issues.append(f"{name} contains NaNs in columns: {missing_cols}")
     variances = numeric.var(axis=0)
-    low_var_cols = variances[variances <= 1e-6].index.tolist()
+    median_var = float(np.median(variances)) if len(variances) else 0.0
+    low_var_cols = [
+        col for col, var in variances.items()
+        if var <= 1e-6 or (median_var > 0 and var / median_var < 0.01)
+    ]
     if low_var_cols:
         issues.append(f"{name} has near-zero variance columns: {low_var_cols}")
     if numeric.shape[0] < 10:
@@ -231,31 +292,29 @@ def build_feature_basis(
     train_basis = train_basis.ffill().bfill().fillna(0.0)
     score_basis = score_basis.ffill().bfill().fillna(0.0)
 
-    basis_scaler = StandardScaler()
-    basis_scaler.fit(train_basis.values)
-    train_basis = pd.DataFrame(
-        basis_scaler.transform(train_basis.values),
-        index=train_basis.index,
-        columns=train_basis.columns,
-    )
-    score_basis = pd.DataFrame(
-        basis_scaler.transform(score_basis.values),
-        index=score_basis.index,
-        columns=score_basis.columns,
-    )
+    pca_cols = [col for col in train_basis.columns if col.startswith("PCA_")]
+    scale_cols = [col for col in train_basis.columns if col not in pca_cols]
+    basis_scaler: Optional[StandardScaler] = None
+    if scale_cols:
+        basis_scaler = StandardScaler()
+        basis_scaler.fit(train_basis[scale_cols].values)
+        train_basis.loc[:, scale_cols] = basis_scaler.transform(train_basis[scale_cols].values)
+        score_basis.loc[:, scale_cols] = basis_scaler.transform(score_basis[scale_cols].values)
 
     meta = {
         "n_pca": n_pca_used,
         "raw_tags": used_raw_tags,
         "fallback_cols": list(train_basis.columns),
-        "basis_normalized": True,
+        "basis_normalized": bool(scale_cols),
     }
-    mean_vec = getattr(basis_scaler, "mean_", None)
-    var_vec = getattr(basis_scaler, "var_", None)
-    if mean_vec is not None:
-        meta["basis_scaler_mean"] = [float(x) for x in mean_vec]
-    if var_vec is not None:
-        meta["basis_scaler_var"] = [float(x) for x in var_vec]
+    if basis_scaler is not None:
+        mean_vec = getattr(basis_scaler, "mean_", None)
+        var_vec = getattr(basis_scaler, "var_", None)
+        meta["basis_scaler_cols"] = scale_cols
+        if mean_vec is not None:
+            meta["basis_scaler_mean"] = [float(x) for x in mean_vec]
+        if var_vec is not None:
+            meta["basis_scaler_var"] = [float(x) for x in var_vec]
     if pca_variance_ratio is not None:
         meta["pca_variance_ratio"] = pca_variance_ratio
         meta["pca_variance_vector"] = pca_variance_vector
@@ -271,21 +330,30 @@ def build_feature_basis(
 def _fit_kmeans_scaled(
     X: np.ndarray,
     cfg: Dict[str, Any],
+    *,
+    pre_scaled: bool = False,
 ) -> Tuple[StandardScaler, MiniBatchKMeans, int, float, str, List[Tuple[int, float]], bool]:
     """Fit KMeans with auto-k selection using silhouette scoring without k=1 fallback."""
 
     X = _finite_impute_inplace(X)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    if pre_scaled:
+        scaler = _IdentityScaler()
+        X_scaled = scaler.transform(X)
+    else:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
 
     n_samples = X_scaled.shape[0]
     if n_samples == 0:
         raise ValueError("Cannot fit regime model on an empty dataset")
+    if n_samples < 2:
+        raise ValueError(f"Cannot fit regime model with fewer than 2 samples (got {n_samples})")
 
     k_min = int(_cfg_get(cfg, "regimes.auto_k.k_min", 2))
     k_max = int(_cfg_get(cfg, "regimes.auto_k.k_max", 6))
     sil_sample = int(_cfg_get(cfg, "regimes.auto_k.sil_sample", 4000))
     max_eval_samples = int(_cfg_get(cfg, "regimes.auto_k.max_eval_samples", 5000))
+    max_models = int(_cfg_get(cfg, "regimes.auto_k.max_models", 20))
     random_state = int(_cfg_get(cfg, "regimes.auto_k.random_state", 17))
     sil_threshold = float(_cfg_get(cfg, "regimes.quality.silhouette_min", 0.2))
 
@@ -293,12 +361,41 @@ def _fit_kmeans_scaled(
         k_min = max(2, n_samples) if n_samples >= 2 else 1
     if k_max < k_min:
         k_max = k_min
+    if max_models > 0:
+        allowed_max = k_min + max_models - 1
+        if k_max > allowed_max:
+            Console.warn(f"[REGIME] Limiting auto-k sweep to {max_models} models (k_max {k_max}->{allowed_max}) for budget")
+            k_max = allowed_max
 
     # Sample for evaluation but always refit the final model on full data.
     if n_samples > max_eval_samples:
         rng = np.random.default_rng(random_state)
-        eval_idx = rng.choice(n_samples, size=max_eval_samples, replace=False)
-        X_eval = X_scaled[eval_idx]
+        try:
+            prelim_k = max(2, min(8, k_max))
+            prelim = MiniBatchKMeans(
+                n_clusters=prelim_k,
+                batch_size=max(32, min(1024, n_samples // 8 or 1)),
+                n_init=3,
+                random_state=random_state,
+            )
+            prelim.fit(X_scaled)
+            prelim_labels = prelim.labels_
+            eval_indices: List[int] = []
+            unique_labels = np.unique(prelim_labels)
+            per_cluster = max(1, int(np.ceil(max_eval_samples / max(1, len(unique_labels)))))
+            for lbl in unique_labels:
+                cluster_idx = np.nonzero(prelim_labels == lbl)[0]
+                take = min(len(cluster_idx), per_cluster)
+                if take > 0:
+                    choose = rng.choice(cluster_idx, size=take, replace=False)
+                    eval_indices.extend(choose.tolist())
+            if len(eval_indices) > max_eval_samples:
+                rng.shuffle(eval_indices)
+                eval_indices = eval_indices[:max_eval_samples]
+            X_eval = X_scaled[eval_indices]
+        except Exception:
+            eval_idx = rng.choice(n_samples, size=max_eval_samples, replace=False)
+            X_eval = X_scaled[eval_idx]
     else:
         X_eval = X_scaled
 
@@ -342,7 +439,7 @@ def _fit_kmeans_scaled(
 
     if best_model_eval is None:
         # Degenerate case: fallback to minimal feasible clusters but flag quality
-        fallback_k = max(1, min(k_min, n_samples))
+        fallback_k = min(max(2, k_min), n_samples)
         Console.warn(
             f"[REGIME] Unable to evaluate silhouette for candidate k; defaulting to k={fallback_k}."
         )
@@ -404,7 +501,17 @@ def fit_regime_model(
         best_metric,
         quality_sweep,
         low_quality,
-    ) = _fit_kmeans_scaled(train_basis.to_numpy(dtype=float, copy=False), cfg)
+    ) = _fit_kmeans_scaled(
+        train_basis.to_numpy(dtype=float, copy=False),
+        cfg,
+        pre_scaled=bool(basis_meta.get("basis_normalized", False)),
+    )
+    # Store convergence diagnostics
+    try:
+        basis_meta["kmeans_inertia"] = float(kmeans.inertia_)
+        basis_meta["kmeans_n_iter"] = int(getattr(kmeans, "n_iter_", 0))
+    except Exception:
+        pass
     quality_cfg = _cfg_get(cfg, "regimes.quality", {})
     sil_min = float(quality_cfg.get("silhouette_min", 0.2))
     calinski_min = float(quality_cfg.get("calinski_min", 50.0))
@@ -432,7 +539,28 @@ def fit_regime_model(
         "model_version": REGIME_MODEL_VERSION,
         "sklearn_version": sklearn.__version__,
     }
+    if "kmeans_inertia" in basis_meta:
+        meta["kmeans_inertia"] = basis_meta["kmeans_inertia"]
+    if "kmeans_n_iter" in basis_meta:
+        meta["kmeans_n_iter"] = basis_meta["kmeans_n_iter"]
     meta.update({k: v for k, v in basis_meta.items() if k not in meta})
+    # Aggregate quality score (0-100) for observability
+    quality_score = 0.0
+    if np.isfinite(best_score):
+        if best_metric == "silhouette":
+            quality_score = float(np.clip(best_score, 0.0, 1.0) * 100.0)
+        elif best_metric == "calinski_harabasz":
+            cal_ref = max(calinski_min, 1.0)
+            quality_score = float(np.clip(best_score / (2 * cal_ref), 0.0, 1.0) * 100.0)
+    if not quality_ok:
+        quality_score = min(quality_score, 50.0)
+    meta["regime_quality_score"] = quality_score
+    if train_hash is None:
+        try:
+            meta_hash = _stable_int_hash(train_basis.to_numpy(dtype=float, copy=False))
+            train_hash = meta_hash
+        except Exception:
+            pass
     model = RegimeModel(
         scaler=scaler,
         kmeans=kmeans,
@@ -485,7 +613,7 @@ def update_health_labels(
         segments.append((current, start, labels_arr.size))
 
     per_label_segments: Dict[int, Dict[str, Any]] = {}
-    transition_counts: Dict[str, int] = {}
+    transition_keys: List[str] = []
     for seg_idx, (label_value, start_idx, end_idx) in enumerate(segments):
         info = per_label_segments.setdefault(
             int(label_value),
@@ -500,7 +628,7 @@ def update_health_labels(
         if seg_idx > 0:
             prev_label, _, _ = segments[seg_idx - 1]
             key = f"{int(prev_label)}->{int(label_value)}"
-            transition_counts[key] = transition_counts.get(key, 0) + 1
+            transition_keys.append(key)
             per_label_segments[int(label_value)]["transitions_in"] += 1
             per_label_segments[int(prev_label)]["transitions_out"] += 1
 
@@ -546,8 +674,9 @@ def update_health_labels(
         }
         model.health_labels[int(label)] = state
     model.stats = stats
-    if transition_counts:
-        model.meta["transition_counts"] = {k: int(v) for k, v in transition_counts.items()}
+    if transition_keys:
+        counts = Counter(transition_keys)
+        model.meta["transition_counts"] = {k: int(v) for k, v in counts.items()}
     if np.isfinite(total_duration_sec):
         model.meta["total_duration_seconds"] = float(total_duration_sec)
     model.meta["total_samples"] = int(len(labels_arr))
@@ -646,17 +775,19 @@ def smooth_labels(labels: np.ndarray, passes: int = 1, window: Optional[int] = N
         except Exception:
             Console.warn("[REGIME] SciPy median_filter failed; falling back to manual smoothing")
 
+    # Fallback: vectorized rolling mode using stride tricks (no SciPy)
+    half = max(1, win // 2)
     iterations = max(1, passes)
     for _ in range(iterations):
-        changed = False
-        for i in range(1, len(smoothed) - 1):
-            prev_label = smoothed[i - 1]
-            next_label = smoothed[i + 1]
-            if smoothed[i] != prev_label and prev_label == next_label:
-                smoothed[i] = prev_label
-                changed = True
-        if not changed:
-            break
+        padded = np.pad(smoothed, pad_width=half, mode="edge")
+        shape = (smoothed.size, win)
+        strides = (padded.strides[0], padded.strides[0])
+        windows = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
+        modes = np.empty(smoothed.size, dtype=int)
+        for idx, row in enumerate(windows):
+            vals, counts = np.unique(row, return_counts=True)
+            modes[idx] = vals[np.argmax(counts)]
+        smoothed = modes
     return smoothed
 
 def smooth_transitions(
@@ -713,7 +844,7 @@ def smooth_transitions(
         while idx < n and result[idx] == label:
             run += 1
             idx += 1
-        return (health_rank, -run)
+        return (-run, health_rank)
 
     start = 0
     while start < n:
@@ -752,6 +883,14 @@ def _to_datetime_mixed(s):
         return pd.to_datetime(s, errors="coerce")
 
 def _read_episodes_csv(p: Path) -> pd.DataFrame:
+    safe_base = Path.cwd()
+    try:
+        resolved = p.resolve()
+        if not resolved.is_relative_to(safe_base):
+            Console.warn(f"[REGIME] Episode path outside workspace: {resolved}")
+            return pd.DataFrame(columns=["start_ts", "end_ts"])
+    except Exception:
+        pass
     if not p.exists():
         return pd.DataFrame(columns=["start_ts", "end_ts"])
     df = pd.read_csv(p, dtype={"start_ts": "string", "end_ts": "string"})
@@ -760,12 +899,24 @@ def _read_episodes_csv(p: Path) -> pd.DataFrame:
     return df
 
 def _read_scores_csv(p: Path) -> pd.DataFrame:
+    safe_base = Path.cwd()
+    try:
+        resolved = p.resolve()
+        if not resolved.is_relative_to(safe_base):
+            Console.warn(f"[REGIME] Scores path outside workspace: {resolved}")
+            return pd.DataFrame()
+    except Exception:
+        pass
     if not p.exists():
         return pd.DataFrame()
     df = pd.read_csv(p, dtype={"timestamp": "string"})
     df["timestamp"] = _to_datetime_mixed(df["timestamp"])
     df = df.set_index("timestamp")
-    return df[~df.index.isna()]
+    df_clean = df[~df.index.isna()]
+    dropped = len(df) - len(df_clean)
+    if dropped > 0:
+        Console.warn(f"[REGIME] Dropped {dropped} rows with invalid timestamps from scores.csv")
+    return df_clean
 
 # -----------------------------------
 # Core: fit auto-k with safe heuristics
@@ -879,7 +1030,7 @@ def regime_model_to_state(
     from core.model_persistence import RegimeState
     import json
     from datetime import datetime, timezone
-    
+
     # Extract cluster centers
     cluster_centers = np.asarray(model.kmeans.cluster_centers_, dtype=float)
     cluster_centers_json = json.dumps(cluster_centers.tolist())
@@ -905,6 +1056,12 @@ def regime_model_to_state(
     silhouette = float(model.meta.get("fit_score", 0.0))
     quality_ok = bool(model.meta.get("quality_ok", False))
     
+    meta_payload = _regime_metadata_dict(model)
+    try:
+        meta_json = orjson.dumps(meta_payload) if orjson else json.dumps(meta_payload)
+    except Exception:
+        meta_json = json.dumps(meta_payload)
+
     state = RegimeState(
         equip_id=equip_id,
         state_version=state_version,
@@ -919,7 +1076,8 @@ def regime_model_to_state(
         quality_ok=quality_ok,
         last_trained_time=datetime.now(timezone.utc).isoformat(),
         config_hash=config_hash,
-        regime_basis_hash=regime_basis_hash
+        regime_basis_hash=regime_basis_hash,
+        meta_json=meta_json,
     )
     
     return state
@@ -1018,10 +1176,18 @@ def align_regime_labels(
     # Extract cluster centers
     new_centers = np.asarray(new_model.kmeans.cluster_centers_, dtype=float)
     prev_centers = np.asarray(prev_model.kmeans.cluster_centers_, dtype=float)
-    
+
     # Handle dimension mismatch (different k or feature space)
     if new_centers.shape[1] != prev_centers.shape[1]:
-        Console.warn(f"[REGIME_ALIGN] Feature dimension mismatch: new={new_centers.shape[1]}, prev={prev_centers.shape[1]}. Skipping alignment.")
+        if new_model.meta.get("alignment_skip_reason") != "feature_dim_mismatch":
+            Console.warn(
+                f"[REGIME_ALIGN] Feature dimension mismatch: new={new_centers.shape[1]}, prev={prev_centers.shape[1]}. Skipping alignment."
+            )
+        new_model.meta["alignment_skip_reason"] = "feature_dim_mismatch"
+        new_model.meta["alignment_skip_dims"] = {
+            "new_dim": int(new_centers.shape[1]),
+            "prev_dim": int(prev_centers.shape[1]),
+        }
         return new_model
     
     # Handle different number of clusters
@@ -1122,14 +1288,14 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
             timestamps=basis_train.index if isinstance(basis_train.index, pd.DatetimeIndex) else None,
             min_dwell_samples=min_dwell_samples,
             min_dwell_seconds=min_dwell_seconds,
-            health_map=regime_model.health_labels,
+            health_map=None,  # compute health after smoothing to avoid stale map
         )
         score_labels = smooth_transitions(
             score_labels,
             timestamps=basis_score.index if isinstance(basis_score.index, pd.DatetimeIndex) else None,
             min_dwell_samples=min_dwell_samples,
             min_dwell_seconds=min_dwell_seconds,
-            health_map=regime_model.health_labels,
+            health_map=None,  # compute health after smoothing to avoid stale map
         )
         quality_ok = bool(regime_model.meta.get("quality_ok", True))
 
@@ -1161,7 +1327,10 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
             out["frame"] = frame
         return out
 
-    return _legacy_label(score_df, ctx, out, cfg)
+    if bool(_cfg_get(cfg, "regimes.allow_legacy_label", False)):
+        Console.warn("[REGIME] Falling back to legacy labeling path (allow_legacy_label=True)")
+        return _legacy_label(score_df, ctx, out, cfg)
+    raise RuntimeError("[REGIME] Regime model unavailable and legacy path disabled (regimes.allow_legacy_label=False)")
 
 
 def _legacy_label(score_df, ctx: Dict[str, Any], out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1494,6 +1663,7 @@ def save_regime_model(model: RegimeModel, models_dir: Path) -> None:
         Console.info(f"[REGIME] Saved regime models (KMeans+Scaler) -> {joblib_path}")
     except Exception as e:
         Console.warn(f"[REGIME] Failed to save regime joblib: {e}")
+        _persist_regime_error(e, models_dir)
         raise
     
     # Save metadata as JSON
@@ -1501,27 +1671,17 @@ def save_regime_model(model: RegimeModel, models_dir: Path) -> None:
     model.meta.setdefault("model_version", REGIME_MODEL_VERSION)
     model.meta.setdefault("sklearn_version", sklearn.__version__)
 
-    metadata = {
-        "feature_columns": model.feature_columns,
-        "raw_tags": model.raw_tags,
-        "n_pca_components": model.n_pca_components,
-        "train_hash": model.train_hash,
-        "health_labels": {str(k): str(v) for k, v in (model.health_labels or {}).items()},
-        "stats": {
-            str(k): {
-                kk: (float(vv) if isinstance(vv, (int, float, np.floating)) else str(vv))
-                for kk, vv in stat.items()
-            }
-            for k, stat in (model.stats or {}).items()
-        },
-        "meta": model.meta,
-    }
+    metadata = _regime_metadata_dict(model)
     try:
-        with json_path.open("w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        if orjson:
+            json_path.write_bytes(orjson.dumps(metadata, option=orjson.OPT_INDENT_2))
+        else:
+            with json_path.open("w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
         Console.info(f"[REGIME] Saved regime metadata -> {json_path}")
     except Exception as e:
         Console.warn(f"[REGIME] Failed to save regime metadata: {e}")
+        _persist_regime_error(e, models_dir)
         raise
 
 
@@ -1567,10 +1727,9 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
         meta = metadata.get("meta", {})
         version = meta.get("model_version")
         if version and version != REGIME_MODEL_VERSION:
-            Console.warn(
-                f"[REGIME] Cached model version {version} mismatches expected {REGIME_MODEL_VERSION}; skipping load."
+            raise ModelVersionMismatch(
+                f"Cached model version {version} mismatches expected {REGIME_MODEL_VERSION}"
             )
-            return None
         model = RegimeModel(
             scaler=scaler,
             kmeans=kmeans,
@@ -1656,48 +1815,31 @@ def detect_transient_states(
         diffs = np.diff(regime_labels.astype(int), prepend=regime_labels[0])
         regime_changes = diffs != 0
 
-    class _StateMachine:
-        def __init__(self, lag: int, history: int):
-            self.lag = max(0, int(lag))
-            self.history = max(2, int(history))
-            self.roc_history: deque[float] = deque(maxlen=self.history)
-            self.transient_timer = 0
+    roc_values = aggregate_roc_smooth.to_numpy(dtype=float)
+    trend_window = max(roc_window, 5)
+    trend = pd.Series(roc_values).diff().rolling(window=trend_window, min_periods=1).mean().to_numpy()
 
-        def update(self, roc_value: float, changed: bool) -> str:
-            self.roc_history.append(float(roc_value))
-            trend = 0.0
-            if len(self.roc_history) >= 2:
-                y = np.array(self.roc_history, dtype=float)
-                x = np.arange(len(y), dtype=float)
-                try:
-                    trend = float(np.polyfit(x, y, 1)[0])
-                except Exception:
-                    trend = y[-1] - y[0]
+    trip_mask = roc_values >= roc_threshold_trip
+    high_mask = (roc_values >= roc_threshold_high) & ~trip_mask
 
-            if roc_value >= roc_threshold_trip:
-                self.transient_timer = self.lag
-                return "trip"
+    def _dilate(mask: np.ndarray, width: int) -> np.ndarray:
+        if width <= 0:
+            return mask
+        kernel = np.ones(2 * width + 1, dtype=int)
+        return np.convolve(mask.astype(int), kernel, mode="same") > 0
 
-            if roc_value >= roc_threshold_high:
-                self.transient_timer = self.lag
-                return "startup" if trend >= 0 else "shutdown"
+    base_transient = regime_changes | high_mask | trip_mask
+    transient_mask = _dilate(base_transient, transition_lag)
+    trip_mask = _dilate(trip_mask, transition_lag)
+    high_mask = _dilate(high_mask, transition_lag)
 
-            if self.transient_timer > 0:
-                self.transient_timer -= 1
-                return "transient"
-
-            if changed:
-                self.transient_timer = max(self.lag - 1, 0)
-                return "transient"
-
-            return "steady"
-
-    machine = _StateMachine(lag=transition_lag, history=max(roc_window, 5))
-    states = np.empty(n_samples, dtype=object)
-
-    for idx in range(n_samples):
-        state = machine.update(aggregate_roc_smooth.iloc[idx], bool(regime_changes[idx]))
-        states[idx] = state
+    states = np.full(n_samples, "steady", dtype=object)
+    states[transient_mask] = "transient"
+    startup_mask = high_mask & (trend >= 0)
+    shutdown_mask = high_mask & ~startup_mask
+    states[startup_mask] = "startup"
+    states[shutdown_mask] = "shutdown"
+    states[trip_mask] = "trip"
 
     state_counts = pd.Series(states).value_counts().to_dict()
     Console.info(f"[TRANSIENT] State distribution: {state_counts}")

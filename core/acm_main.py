@@ -488,8 +488,23 @@ def _ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
 # SQL helpers (local)
 # =======================
 def _sql_mode(cfg: Dict[str, Any]) -> bool:
-    """SQL-only mode: always use SQL backend, ignore file-based storage."""
+    """SQL-only mode: use SQL backend unless ACM_FORCE_FILE_MODE env var is set."""
+    force_file_mode = os.getenv("ACM_FORCE_FILE_MODE", "0") == "1"
+    if force_file_mode:
+        return False
     return True
+
+def _batch_mode() -> bool:
+    """Detect if running under sql_batch_runner (continuous learning mode)."""
+    return bool(os.getenv("ACM_BATCH_MODE", "0") == "1")
+
+def _continuous_learning_enabled(cfg: Dict[str, Any], batch_mode: bool) -> bool:
+    """Check if continuous learning is enabled for this run."""
+    # In batch mode, default to continuous learning unless explicitly disabled
+    if batch_mode:
+        return cfg.get("continuous_learning", {}).get("enabled", True)
+    # In single-run mode, default to disabled
+    return cfg.get("continuous_learning", {}).get("enabled", False)
 
 def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
     if not SQLClient:
@@ -507,6 +522,129 @@ def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
         cli.connect()
         return cli
 
+def _calculate_adaptive_thresholds(
+    fused_scores: np.ndarray,
+    cfg: Dict[str, Any],
+    equip_id: int,
+    output_manager: Optional[Any],
+    train_index: Optional[pd.Index] = None,
+    regime_labels: Optional[np.ndarray] = None,
+    regime_quality_ok: bool = False
+) -> Dict[str, Any]:
+    """
+    Calculate adaptive thresholds from fused z-scores.
+    
+    This is a standalone function that can be called independently of the auto-tune section.
+    It supports both global and per-regime thresholds based on configuration.
+    
+    Args:
+        fused_scores: Array of fused z-scores to calculate thresholds from
+        cfg: Configuration dictionary
+        equip_id: Equipment ID for SQL persistence
+        output_manager: OutputManager instance for writing to SQL
+        train_index: Optional datetime index for train data (for metadata)
+        regime_labels: Optional regime labels for per-regime thresholds
+        regime_quality_ok: Whether regime clustering quality is acceptable
+    
+    Returns:
+        Dictionary with threshold results including 'fused_alert_z', 'fused_warn_z', 'method', 'confidence'
+    """
+    try:
+        from core.adaptive_thresholds import calculate_thresholds_from_config
+        
+        threshold_cfg = cfg.get("thresholds", {}).get("adaptive", {})
+        if not threshold_cfg.get("enabled", True):
+            Console.info("[THRESHOLD] Adaptive thresholds disabled - using static config values")
+            return {}
+        
+        Console.info(f"[THRESHOLD] Calculating adaptive thresholds from {len(fused_scores)} samples...")
+        
+        # Get regime labels if per_regime enabled and quality OK
+        use_regime_labels = None
+        if threshold_cfg.get("per_regime", False) and regime_quality_ok and regime_labels is not None:
+            use_regime_labels = regime_labels
+        
+        # Calculate thresholds
+        threshold_results = calculate_thresholds_from_config(
+            train_fused_z=fused_scores,
+            cfg=cfg,
+            regime_labels=use_regime_labels
+        )
+        
+        # Store in SQL via OutputManager if available
+        if output_manager is not None and output_manager.sql_client is not None:
+            Console.info(
+                f"[THRESHOLD] Persisting to SQL: equip_id={equip_id} | samples={len(fused_scores)} | "
+                f"method={threshold_results.get('method')} | conf={threshold_results.get('confidence')}"
+            )
+            import hashlib
+            config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
+            
+            output_manager.write_threshold_metadata(
+                equip_id=equip_id,
+                threshold_type='fused_alert_z',
+                threshold_value=threshold_results['fused_alert_z'],
+                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                sample_count=len(fused_scores),
+                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
+                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
+                config_signature=config_sig,
+                notes=f"Auto-calculated from {len(fused_scores)} accumulated samples"
+            )
+            Console.info("[THRESHOLD] SQL write completed for fused_alert_z")
+            
+            output_manager.write_threshold_metadata(
+                equip_id=equip_id,
+                threshold_type='fused_warn_z',
+                threshold_value=threshold_results['fused_warn_z'],
+                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                sample_count=len(fused_scores),
+                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
+                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
+                config_signature=config_sig,
+                notes=f"Auto-calculated warning threshold (50% of alert)"
+            )
+            Console.info("[THRESHOLD] SQL write completed for fused_warn_z")
+            
+            # Update cfg to use adaptive thresholds in downstream modules
+            if isinstance(threshold_results['fused_alert_z'], dict):
+                Console.info(f"[THRESHOLD] Per-regime thresholds: {threshold_results['fused_alert_z']}")
+                # Store in cfg for regimes.update_health_labels() to use
+                if "regimes" not in cfg:
+                    cfg["regimes"] = {}
+                if "health" not in cfg["regimes"]:
+                    cfg["regimes"]["health"] = {}
+                cfg["regimes"]["health"]["fused_alert_z_per_regime"] = threshold_results['fused_alert_z']
+                cfg["regimes"]["health"]["fused_warn_z_per_regime"] = threshold_results['fused_warn_z']
+            else:
+                Console.info(
+                    f"[THRESHOLD] Global thresholds: "
+                    f"alert={threshold_results['fused_alert_z']:.3f}, "
+                    f"warn={threshold_results['fused_warn_z']:.3f} "
+                    f"(method={threshold_results['method']}, conf={threshold_results['confidence']})"
+                )
+                # Override static config values with adaptive ones
+                if "regimes" not in cfg:
+                    cfg["regimes"] = {}
+                if "health" not in cfg["regimes"]:
+                    cfg["regimes"]["health"] = {}
+                cfg["regimes"]["health"]["fused_alert_z"] = threshold_results['fused_alert_z']
+                cfg["regimes"]["health"]["fused_warn_z"] = threshold_results['fused_warn_z']
+        else:
+            Console.warn("[THRESHOLD] SQL client not available - thresholds not persisted")
+            Console.warn(f"[THRESHOLD] Debug: output_manager is {'set' if output_manager is not None else 'None'} | "
+                         f"sql_client is {'set' if (getattr(output_manager, 'sql_client', None) is not None) else 'None'} | "
+                         f"SQL_MODE={cfg.get('runtime', {}).get('storage_backend', 'unknown')}")
+        
+        return threshold_results
+        
+    except Exception as threshold_e:
+        Console.error(f"[THRESHOLD] Adaptive threshold calculation failed: {threshold_e}")
+        import traceback
+        Console.warn(f"[THRESHOLD] Traceback: {traceback.format_exc()}")
+        Console.warn("[THRESHOLD] Falling back to static config values")
+        return {}
+
 def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str, pd.Timestamp, pd.Timestamp, int]:
     """
     Calls dbo.usp_ACM_StartRun using the current stored-proc signature.
@@ -523,7 +661,6 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
     tsql = """
     DECLARE @RunID UNIQUEIDENTIFIER, @WS DATETIME2(3), @WE DATETIME2(3), @EID INT;
     EXEC dbo.usp_ACM_StartRun
-        @EquipCode = NULL,
         @EquipID = ?,
         @Stage = ?,
         @TickMinutes = ?,
@@ -642,10 +779,45 @@ def main() -> None:
 
     # Inline Option A adapter (no extra file): derive SQL_MODE
     SQL_MODE = _sql_mode(cfg)
+    
+    # Detect batch mode (running under sql_batch_runner)
+    BATCH_MODE = _batch_mode()
+    
+    # Check if continuous learning is enabled
+    CONTINUOUS_LEARNING = _continuous_learning_enabled(cfg, BATCH_MODE)
+    
+    # Get continuous learning settings
+    cl_cfg = cfg.get("continuous_learning", {})
+    model_update_interval = int(cl_cfg.get("model_update_interval", 1))  # Default: update every batch
+    threshold_update_interval = int(cl_cfg.get("threshold_update_interval", 1))  # Default: update every batch
+    force_retraining = BATCH_MODE and CONTINUOUS_LEARNING  # Force retraining in continuous learning mode
+    
+    # Validate interval settings for production deployment
+    if model_update_interval <= 0:
+        Console.warn(f"[CFG] Invalid model_update_interval={model_update_interval}, defaulting to 1")
+        model_update_interval = 1
+    if threshold_update_interval <= 0:
+        Console.warn(f"[CFG] Invalid threshold_update_interval={threshold_update_interval}, defaulting to 1")
+        threshold_update_interval = 1
+    
+    # Production-ready: Works with infinite batch processing (no max_batches dependency)
+    # Batch numbering uses absolute count from progress file, not loop counter
+    # Frequency control: batch_num % interval == 0 works indefinitely
+    
+    # Get batch number from environment (set by sql_batch_runner)
+    batch_num = int(os.getenv("ACM_BATCH_NUM", "0"))
+    
+    # Store batch number in config for access throughout pipeline
+    if "runtime" not in cfg:
+        cfg["runtime"] = {}
+    cfg["runtime"]["batch_num"] = batch_num
 
     Console.info(f"[ACM] Inside Main Now")
     Console.info(f"--- Starting ACM V5 for {equip} ---")
     Console.info(f"[CFG] storage_backend={'sql' if SQL_MODE else 'file'}  |  artifacts={art_root}")
+    Console.info(f"[CFG] batch_mode={BATCH_MODE}  |  continuous_learning={CONTINUOUS_LEARNING}")
+    if CONTINUOUS_LEARNING:
+        Console.info(f"[CFG] model_update_interval={model_update_interval}  |  threshold_update_interval={threshold_update_interval}")
     sql_log_sink = None
 
     # CRITICAL FIX: ALWAYS enforce artifacts/{EQUIP}/run_{timestamp}/ structure
@@ -666,7 +838,8 @@ def main() -> None:
     # Heartbeat gating
     heartbeat_on = bool(cfg.get("runtime", {}).get("heartbeat", True))
 
-    reuse_models = bool(cfg.get("runtime", {}).get("reuse_model_fit", False))
+    # SQL MODE: disable legacy joblib cache reuse to avoid dual caching
+    reuse_models = bool(cfg.get("runtime", {}).get("reuse_model_fit", False)) and (not SQL_MODE)
     # CRITICAL FIX: Stable cache must match equipment root (artifacts/{EQUIP}/models/)
     stable_models_dir = equip_root / "models"
     if not SQL_MODE:
@@ -717,11 +890,10 @@ def main() -> None:
     if SQL_MODE:
         try:
             sql_client = _sql_connect(cfg)
-            # Prefer EquipCode from config if set; else use CLI --equip
-            equip_codes = cfg.get("runtime", {}).get("equip_codes") or [equip]
-            Console.info(f"[DEBUG] equip_codes type={type(equip_codes)}, value={equip_codes}")
-            equip_code = str(equip_codes[0] if isinstance(equip_codes, list) else equip)
-            Console.info(f"[DEBUG] Final equip_code={equip_code}")
+            # ALWAYS use CLI --equip argument (not config equip_codes)
+            # This ensures the correct equipment is used regardless of config defaults
+            equip_code = equip
+            Console.info(f"[RUN] Using equipment from CLI argument: {equip_code}")
             run_id, win_start, win_end, equip_id = _sql_start_run(sql_client, cfg, equip_code)
             
             # Override window if CLI args provided (e.g. for batch backfill)
@@ -774,6 +946,17 @@ def main() -> None:
         equip_id=equip_id,
         sql_only_mode=SQL_MODE
     )
+    # Diagnostic: verify SQL client attached and healthy
+    if output_manager.sql_client is None:
+        Console.warn("[OUTPUT] Diagnostic: OutputManager.sql_client is None (SQL writes disabled)")
+    else:
+        try:
+            _cur = output_manager.sql_client.cursor()
+            _cur.execute("SELECT 1")
+            _ = _cur.fetchone()
+            Console.info("[OUTPUT] Diagnostic: SQL client attached and health check passed")
+        except Exception as _e:
+            Console.error(f"[OUTPUT] Diagnostic: SQL client attached but health check failed: {_e}")
 
     # ---------- Robust finalize context ----------
     outcome = "OK"
@@ -852,6 +1035,7 @@ def main() -> None:
             else:
                 # File mode: Load from CSV files
                 train, score, meta = output_manager.load_data(cfg)
+                coldstart_complete = True  # File mode always has complete data
                 
             train = _ensure_local_index(train)
             score = _ensure_local_index(score)
@@ -904,38 +1088,41 @@ def main() -> None:
         score_numeric = score.copy()
 
         # ===== Adaptive Rolling Baseline (cold-start helper) =====
-        # If TRAIN is missing or too small, bootstrap it from a persisted rolling buffer
-        # or, as a fallback, from the head of SCORE data.
-        with T.section("baseline.seed"):
-            try:
-                baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-                min_points = int(baseline_cfg.get("min_points", 300))
-                buffer_path = stable_models_dir / "baseline_buffer.csv"
-                train_rows = len(train_numeric) if isinstance(train_numeric, pd.DataFrame) else 0
-                if train_rows < min_points:
-                    used: Optional[str] = None
-                    if buffer_path.exists():
-                        buf = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
-                        buf = _ensure_local_index(buf)
-                        # Align TRAIN buffer to current SCORE columns to avoid drift
-                        if isinstance(score_numeric, pd.DataFrame) and hasattr(buf, "columns"):
-                            common_cols = [c for c in buf.columns if c in score_numeric.columns]
-                            if len(common_cols) > 0:
-                                buf = buf[common_cols]
-                        train = buf.copy()
-                        train_numeric = train.copy()
-                        used = f"baseline_buffer.csv ({len(train)} rows)"
-                    else:
-                        # Seed TRAIN from the leading portion of SCORE
-                        if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
-                            seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
-                            train = score_numeric.iloc[:seed_n].copy()
+        # Task 6 & 7: Skip CSV baseline.seed and baseline_buffer.csv in SQL mode
+        # In SQL mode, SmartColdstart provides all baseline data from ACM_BaselineBuffer
+        if not SQL_MODE:
+            with T.section("baseline.seed"):
+                try:
+                    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+                    min_points = int(baseline_cfg.get("min_points", 300))
+                    buffer_path = stable_models_dir / "baseline_buffer.csv"
+                    train_rows = len(train_numeric) if isinstance(train_numeric, pd.DataFrame) else 0
+                    if train_rows < min_points:
+                        used: Optional[str] = None
+                        if buffer_path.exists():
+                            buf = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
+                            buf = _ensure_local_index(buf)
+                            # Align TRAIN buffer to current SCORE columns to avoid drift
+                            if isinstance(score_numeric, pd.DataFrame) and hasattr(buf, "columns"):
+                                common_cols = [c for c in buf.columns if c in score_numeric.columns]
+                                if len(common_cols) > 0:
+                                    buf = buf[common_cols]
+                            train = buf.copy()
                             train_numeric = train.copy()
-                            used = f"score head ({seed_n} rows)"
-                    if used:
-                        Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
-            except Exception as be:
-                Console.warn(f"[BASELINE] Cold-start baseline setup failed: {be}")
+                            used = f"baseline_buffer.csv ({len(train)} rows)"
+                        else:
+                            # Seed TRAIN from the leading portion of SCORE
+                            if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
+                                seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
+                                train = score_numeric.iloc[:seed_n].copy()
+                                train_numeric = train.copy()
+                                used = f"score head ({seed_n} rows)"
+                        if used:
+                            Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
+                except Exception as be:
+                    Console.warn(f"[BASELINE] Cold-start baseline setup failed: {be}")
+        else:
+            Console.info("[BASELINE] SQL mode: skipping CSV baseline.seed, using SmartColdstart data")
 
         # ===== Data quality guardrails (High #4) =====
         with T.section("data.guardrails"):
@@ -1266,19 +1453,45 @@ def main() -> None:
                 Console.warn(f"[HASH] Hash computation failed: {e}")
                 train_feature_hash = None
 
-        # Respect refit-request flag: bypass cache once and clear the flag
+        # Respect refit-request: file flag or SQL table entries
         refit_requested = False
         with T.section("models.refit_flag"):
             try:
-                if refit_flag_path.exists():
+                # File-mode flag
+                if not SQL_MODE and refit_flag_path.exists():
                     refit_requested = True
                     Console.warn(f"[MODEL] Refit requested by quality policy; bypassing cache this run")
                     try:
                         refit_flag_path.unlink()
                     except Exception:
                         pass
-            except Exception:
-                pass
+
+                # SQL-mode: check ACM_RefitRequests (Acknowledged=0)
+                if SQL_MODE and sql_client:
+                    with sql_client.cursor() as cur:
+                        cur.execute(
+                            """
+                            IF OBJECT_ID(N'[dbo].[ACM_RefitRequests]', N'U') IS NOT NULL
+                            BEGIN
+                                SELECT TOP 1 RequestID, RequestedAt, Reason
+                                FROM [dbo].[ACM_RefitRequests]
+                                WHERE EquipID = ? AND Acknowledged = 0
+                                ORDER BY RequestedAt DESC
+                            END
+                            """,
+                            (int(equip_id),),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            refit_requested = True
+                            Console.warn(f"[MODEL] SQL refit request found: id={row[0]} at {row[1]}")
+                            # Acknowledge refit so it is not re-used next run
+                            cur.execute(
+                                "UPDATE [dbo].[ACM_RefitRequests] SET Acknowledged = 1, AcknowledgedAt = SYSUTCDATETIME() WHERE RequestID = ?",
+                                (int(row[0]),),
+                            )
+            except Exception as rf_err:
+                Console.warn(f"[MODEL] Refit check failed: {rf_err}")
 
         if reuse_models and model_cache_path.exists() and not refit_requested:
             with T.section("models.cache_local"):
@@ -1339,7 +1552,11 @@ def main() -> None:
         cached_models = None
         cached_manifest = None
         # Skip persisted caches whenever a refit was requested to force fresh training
-        use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested
+        # CONTINUOUS LEARNING: Disable caching when continuous learning is enabled to force retraining
+        use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested and not force_retraining
+        
+        if force_retraining:
+            Console.info("[MODEL] Continuous learning enabled - models will retrain on accumulated data")
         
         if use_cache and detector_cache is None:
             with T.section("models.persistence.load"):
@@ -1368,10 +1585,22 @@ def main() -> None:
                             )
                         
                         if is_valid:
-                            Console.info(f"[MODEL] Using cached models from v{cached_manifest['version']}")
+                            # Task 10: Enhanced logging for cached model acceptance
+                            Console.info(f"[MODEL] ✓ Using cached models from v{cached_manifest['version']}")
                             Console.info(f"[MODEL] Cache created: {cached_manifest.get('created_at', 'unknown')}")
+                            Console.info(f"[MODEL] Config signature: {current_config_sig[:16]}... (unchanged)")
+                            Console.info(f"[MODEL] Sensor count: {len(current_sensors)} (matching cached)")
+                            if 'created_at' in cached_manifest:
+                                from datetime import datetime
+                                try:
+                                    created_at = datetime.fromisoformat(cached_manifest['created_at'])
+                                    age_hours = (datetime.now() - created_at).total_seconds() / 3600
+                                    Console.info(f"[MODEL] Model age: {age_hours:.1f}h ({age_hours/24:.1f}d)")
+                                except Exception:
+                                    pass
                         else:
-                            Console.warn(f"[MODEL] Cached models invalid, retraining required:")
+                            # Task 10: Enhanced logging for retrain trigger reasons
+                            Console.warn(f"[MODEL] ✗ Cached models invalid, retraining required:")
                             for reason in invalid_reasons:
                                 Console.warn(f"[MODEL]   - {reason}")
                             cached_models = None
@@ -1897,10 +2126,46 @@ def main() -> None:
                         current_sig = cfg.get("_signature", "unknown")
                         config_changed = (cached_sig != current_sig)
                     
+                    # Get auto_retrain config for SQL mode data-driven triggers
+                    auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+                    if isinstance(auto_retrain_cfg, bool):
+                        auto_retrain_cfg = {}  # Convert legacy boolean to dict
+                    
+                    # Check model age (SQL mode temporal validation)
+                    model_age_trigger = False
+                    if SQL_MODE and cached_manifest:
+                        created_at_str = cached_manifest.get("created_at")
+                        if created_at_str:
+                            try:
+                                from datetime import datetime
+                                created_at = datetime.fromisoformat(created_at_str)
+                                model_age_hours = (datetime.now() - created_at).total_seconds() / 3600
+                                max_age_hours = auto_retrain_cfg.get("max_model_age_hours", 720)  # 30 days default
+                                
+                                if model_age_hours > max_age_hours:
+                                    Console.warn(f"[MODEL] Model age {model_age_hours:.1f}h exceeds limit {max_age_hours}h - forcing retraining")
+                                    model_age_trigger = True
+                            except Exception as age_e:
+                                Console.warn(f"[MODEL] Failed to check model age: {age_e}")
+                    
+                    # Check regime quality (SQL mode data-driven trigger)
+                    regime_quality_trigger = False
+                    if SQL_MODE:
+                        min_silhouette = auto_retrain_cfg.get("min_regime_quality", 0.3)
+                        current_silhouette = regime_quality_metrics.get("silhouette", 0.0)
+                        if not regime_quality_ok or current_silhouette < min_silhouette:
+                            Console.warn(f"[MODEL] Regime quality degraded (silhouette={current_silhouette:.3f} < {min_silhouette}) - forcing retraining")
+                            regime_quality_trigger = True
+                    
+                    # Aggregate triggers
                     if config_changed:
                         Console.warn(f"[MODEL] Config changed - forcing retraining")
                         force_retrain = True
-                        # Invalidate cached models
+                    elif model_age_trigger or regime_quality_trigger:
+                        force_retrain = True
+                    
+                    # Invalidate cached models if retraining required
+                    if force_retrain:
                         cached_models = None
                         ar1_detector = pca_detector = mhal_detector = iforest_detector = gmm_detector = None
                         
@@ -1908,8 +2173,9 @@ def main() -> None:
                     Console.warn(f"[MODEL] Quality assessment failed: {e}")
 
         # ===== Model Persistence: Save trained models with versioning =====
-        # Save if we trained new models (not loaded from cache)
-        models_were_trained = (not cached_models and detector_cache is None) or force_retrain
+        # Task 8: Improved semantics - detectors_fitted_this_run tracks actual fitting
+        detectors_fitted_this_run = (not cached_models and detector_cache is None) or force_retrain
+        models_were_trained = detectors_fitted_this_run  # Clearer: save only if fitted this run
         if models_were_trained:
             with T.section("models.persistence.save"):
                 try:
@@ -2318,11 +2584,148 @@ def main() -> None:
                 except Exception as tune_e:
                     Console.warn(f"[TUNE] Weight auto-tuning failed: {tune_e}")
             
+            # Calculate fusion on TRAIN data for threshold calculation later
+            # Build present dict for train data
+            train_present = {}
+            for detector_name in present.keys():
+                # Map score column names to train_frame columns
+                if detector_name in train_frame.columns:
+                    train_present[detector_name] = train_frame[detector_name].to_numpy(copy=False)
+            
+            # Calculate fusion on train data (for threshold baseline)
+            if train_present and not train.empty:
+                try:
+                    train_fused, _ = fuse.combine(train_present, weights, cfg, original_features=train)
+                    train_fused_np = np.asarray(train_fused, dtype=np.float32).reshape(-1)
+                    train_frame["fused"] = train_fused_np
+                except Exception as train_fuse_e:
+                    Console.warn(f"[FUSE] Failed to calculate train fusion: {train_fuse_e}")
+                    train_frame["fused"] = np.zeros(len(train))
+            
             fused, episodes = fuse.combine(present, weights, cfg, original_features=score)
             fused_np = np.asarray(fused, dtype=np.float32).reshape(-1)
             if fused_np.shape[0] != len(frame.index):
                 raise RuntimeError(f"[FUSE] Fused length {fused_np.shape[0]} != frame length {len(frame.index)}")
             frame["fused"] = fused_np
+            
+            # ===== CONTINUOUS LEARNING: Calculate adaptive thresholds on accumulated data =====
+            # This runs AFTER fusion, using combined train+score data (or just train if not continuous learning)
+            # Frequency control: Only recalculate if update interval reached or first run
+            with T.section("thresholds.adaptive"):
+                # Determine if we should recalculate thresholds this batch
+                should_update_thresholds = False
+                
+                # Check if this is the first run (coldstart complete but no previous thresholds)
+                is_first_threshold_calc = coldstart_complete and not hasattr(cfg, '_thresholds_calculated')
+                
+                # Check if update interval reached (for batch mode)
+                batch_num = cfg.get("runtime", {}).get("batch_num", 0)
+                interval_reached = (batch_num % threshold_update_interval == 0) if threshold_update_interval > 0 else True
+                
+                # Update conditions:
+                # 1. First calculation after coldstart
+                # 2. Continuous learning enabled AND interval reached
+                # 3. NOT in continuous learning but coldstart just completed (single calculation)
+                if is_first_threshold_calc:
+                    should_update_thresholds = True
+                    Console.info("[THRESHOLD] First threshold calculation after coldstart")
+                elif CONTINUOUS_LEARNING and interval_reached:
+                    should_update_thresholds = True
+                    Console.info(f"[THRESHOLD] Update interval reached (batch {batch_num}, interval={threshold_update_interval})")
+                elif not CONTINUOUS_LEARNING and not hasattr(cfg, '_thresholds_calculated'):
+                    should_update_thresholds = True
+                    Console.info("[THRESHOLD] Single threshold calculation (non-continuous mode)")
+                
+                if should_update_thresholds:
+                    # Prepare data for threshold calculation
+                    # In continuous learning: use accumulated data (train + score combined)
+                    # Otherwise: use just train data
+                    if CONTINUOUS_LEARNING and not train.empty and not score.empty:
+                        Console.info("[THRESHOLD] Calculating thresholds on accumulated data (train + score)")
+                        # Combine train and score for accumulated dataset
+                        accumulated_data = pd.concat([train, score], axis=0)
+                        
+                        # Build detector scores dict for accumulated data
+                        accumulated_present = {}
+                        for detector_name in present.keys():
+                            if detector_name in train_frame.columns and detector_name in frame.columns:
+                                # Concatenate train and score detector scores
+                                train_scores = train_frame[detector_name].to_numpy(copy=False)
+                                score_scores = frame[detector_name].to_numpy(copy=False)
+                                accumulated_present[detector_name] = np.concatenate([train_scores, score_scores])
+                            elif detector_name in frame.columns:
+                                # Only available in score data
+                                accumulated_present[detector_name] = frame[detector_name].to_numpy(copy=False)
+                        
+                        # Calculate fusion on accumulated data
+                        if accumulated_present:
+                            try:
+                                accumulated_fused, _ = fuse.combine(
+                                    accumulated_present, 
+                                    weights, 
+                                    cfg, 
+                                    original_features=accumulated_data
+                                )
+                                accumulated_fused_np = np.asarray(accumulated_fused, dtype=np.float32).reshape(-1)
+                                
+                                # Get regime labels if available
+                                accumulated_regime_labels = None
+                                if regime_quality_ok:
+                                    if "regime_label" in train.columns and "regime_label" in score.columns:
+                                        train_regimes = train["regime_label"].to_numpy(copy=False)
+                                        score_regimes = frame.get("regime_label")
+                                        if score_regimes is not None:
+                                            score_regimes = score_regimes.to_numpy(copy=False)
+                                            accumulated_regime_labels = np.concatenate([train_regimes, score_regimes])
+                                
+                                # Calculate thresholds using standalone function
+                                _calculate_adaptive_thresholds(
+                                    fused_scores=accumulated_fused_np,
+                                    cfg=cfg,
+                                    equip_id=equip_id,
+                                    output_manager=output_manager,
+                                    train_index=accumulated_data.index,
+                                    regime_labels=accumulated_regime_labels,
+                                    regime_quality_ok=regime_quality_ok
+                                )
+                                cfg._thresholds_calculated = True
+                            except Exception as acc_e:
+                                Console.warn(f"[THRESHOLD] Failed to calculate on accumulated data: {acc_e}")
+                                Console.warn("[THRESHOLD] Falling back to train-only calculation")
+                                # Fallback to train-only
+                                if not train.empty and "fused" in train_frame.columns:
+                                    train_fused_np = train_frame["fused"].to_numpy(copy=False)
+                                    train_regime_labels = train["regime_label"].to_numpy(copy=False) if "regime_label" in train.columns else None
+                                    _calculate_adaptive_thresholds(
+                                        fused_scores=train_fused_np,
+                                        cfg=cfg,
+                                        equip_id=equip_id,
+                                        output_manager=output_manager,
+                                        train_index=train.index,
+                                        regime_labels=train_regime_labels,
+                                        regime_quality_ok=regime_quality_ok
+                                    )
+                                    cfg._thresholds_calculated = True
+                    else:
+                        # Non-continuous mode or train-only: calculate on train data
+                        Console.info("[THRESHOLD] Calculating thresholds on training data only")
+                        if not train.empty and "fused" in train_frame.columns:
+                            train_fused_np = train_frame["fused"].to_numpy(copy=False)
+                            train_regime_labels = train["regime_label"].to_numpy(copy=False) if "regime_label" in train.columns else None
+                            _calculate_adaptive_thresholds(
+                                fused_scores=train_fused_np,
+                                cfg=cfg,
+                                equip_id=equip_id,
+                                output_manager=output_manager,
+                                train_index=train.index,
+                                regime_labels=train_regime_labels,
+                                regime_quality_ok=regime_quality_ok
+                            )
+                            cfg._thresholds_calculated = True
+                        else:
+                            Console.warn("[THRESHOLD] No train data available for threshold calculation")
+                else:
+                    Console.info(f"[THRESHOLD] Skipping threshold update (batch {batch_num}, next update at batch {(batch_num // threshold_update_interval + 1) * threshold_update_interval})")
 
         regime_stats: Dict[int, Dict[str, float]] = {}
         if not regime_quality_ok and "regime_label" in frame.columns:
@@ -2369,7 +2772,9 @@ def main() -> None:
             Console.warn("[REGIME] Clustering quality below threshold; per-regime thresholds disabled.")
 
         # ===== Autonomous Parameter Tuning: Update config based on quality =====
-        if cfg.get("models", {}).get("auto_tune", True) and not SQL_MODE:
+        # Task 2: Wire assess_model_quality results into retrain decisions
+        # Now supports SQL mode with proper retrain triggering
+        if cfg.get("models", {}).get("auto_tune", True):
             try:
                 from core.model_evaluation import assess_model_quality
                 
@@ -2388,7 +2793,38 @@ def main() -> None:
                     cached_manifest=cached_manifest if 'cached_manifest' in locals() else None
                 )
                 
-                if should_retrain:
+                # Task 1: Extract metrics for additional retrain triggers
+                auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+                if isinstance(auto_retrain_cfg, bool):
+                    auto_retrain_cfg = {}
+                
+                # Check anomaly rate trigger
+                anomaly_rate_trigger = False
+                anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
+                current_anomaly_rate = anomaly_metrics.get("anomaly_rate", 0.0)
+                max_anomaly_rate = auto_retrain_cfg.get("max_anomaly_rate", 0.25)
+                if current_anomaly_rate > max_anomaly_rate:
+                    anomaly_rate_trigger = True
+                    if not should_retrain:
+                        reasons = []
+                    reasons.append(f"anomaly_rate={current_anomaly_rate:.2%} > {max_anomaly_rate:.2%}")
+                    Console.warn(f"[RETRAIN-TRIGGER] Anomaly rate {current_anomaly_rate:.2%} exceeds threshold {max_anomaly_rate:.2%}")
+                
+                # Check drift score trigger
+                drift_score_trigger = False
+                drift_score = quality_report.get("metrics", {}).get("drift_score", 0.0)
+                max_drift_score = auto_retrain_cfg.get("max_drift_score", 2.0)
+                if drift_score > max_drift_score:
+                    drift_score_trigger = True
+                    if not should_retrain and not anomaly_rate_trigger:
+                        reasons = []
+                    reasons.append(f"drift_score={drift_score:.2f} > {max_drift_score:.2f}")
+                    Console.warn(f"[RETRAIN-TRIGGER] Drift score {drift_score:.2f} exceeds threshold {max_drift_score:.2f}")
+                
+                # Aggregate all retrain triggers
+                needs_retraining = should_retrain or anomaly_rate_trigger or drift_score_trigger
+                
+                if needs_retraining:
                     Console.warn(f"[AUTO-TUNE] Quality degradation detected: {', '.join(reasons)}")
                     
                     # Auto-tune parameters based on specific issues
@@ -2477,34 +2913,92 @@ def main() -> None:
                         Console.info(f"[AUTO-TUNE] Retraining required on next run to apply changes")
                         
                         # Log config changes to ACM_ConfigHistory
+                        # Task 9: Check if auto_retrain.on_tuning_change is enabled to trigger refit
                         try:
                             if sql_client and run_id:
+                                auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+                                trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False)
+                                
                                 log_auto_tune_changes(
                                     sql_client=sql_client,
                                     equip_id=int(equip_id),
                                     tuning_actions=tuning_actions,
-                                    run_id=run_id
+                                    run_id=run_id,
+                                    trigger_refit=trigger_refit_on_tune
                                 )
+                                
+                                if trigger_refit_on_tune:
+                                    Console.info("[AUTO-TUNE] on_tuning_change=True: refit request created to apply config changes")
                         except Exception as log_err:
                             Console.warn(f"[CONFIG_HIST] Failed to log auto-tune changes: {log_err}")
                     else:
                         Console.info(f"[AUTO-TUNE] No automatic parameter adjustments available")
 
-                    # Persist a refit marker so next run bypasses cache even if params unchanged
+                    # Persist refit marker/request for next run
+                    # SQL mode: write to ACM_RefitRequests; File mode: write flag file
                     try:
-                        # Atomic write: create temp then replace
+                        # File mode: atomic write to refit flag
                         if not SQL_MODE:
                             tmp_path = refit_flag_path.with_suffix(".pending")
                             with tmp_path.open("w", encoding="utf-8") as rf:
                                 rf.write(f"requested_at={pd.Timestamp.now().isoformat()}\n")
                                 rf.write(f"reasons={'; '.join(reasons)}\n")
+                                if anomaly_rate_trigger:
+                                    rf.write(f"anomaly_rate={current_anomaly_rate:.2%}\n")
+                                if drift_score_trigger:
+                                    rf.write(f"drift_score={drift_score:.2f}\n")
                             try:
-                                import os
                                 os.replace(tmp_path, refit_flag_path)
                             except Exception:
                                 # Fallback to rename on platforms without os.replace edge cases
                                 tmp_path.rename(refit_flag_path)
                             Console.info(f"[MODEL] Refit flag written atomically -> {refit_flag_path}")
+                        else:
+                            # SQL mode: write to ACM_RefitRequests
+                            try:
+                                if sql_client:
+                                    with sql_client.cursor() as cur:
+                                        cur.execute(
+                                            """
+                                            IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
+                                            BEGIN
+                                                CREATE TABLE [dbo].[ACM_RefitRequests] (
+                                                    [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                                                    [EquipID] INT NOT NULL,
+                                                    [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                                                    [Reason] NVARCHAR(MAX) NULL,
+                                                    [AnomalyRate] FLOAT NULL,
+                                                    [DriftScore] FLOAT NULL,
+                                                    [ModelAgeHours] FLOAT NULL,
+                                                    [RegimeQuality] FLOAT NULL,
+                                                    [Acknowledged] BIT NOT NULL DEFAULT 0,
+                                                    [AcknowledgedAt] DATETIME2 NULL
+                                                );
+                                                CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
+                                            END
+                                            """
+                                        )
+                                        cur.execute(
+                                            """
+                                            INSERT INTO [dbo].[ACM_RefitRequests]
+                                                (EquipID, Reason, AnomalyRate, DriftScore, ModelAgeHours, RegimeQuality)
+                                            VALUES
+                                                (?, ?, ?, ?, ?, ?)
+                                            """,
+                                            (
+                                                int(equip_id),
+                                                "; ".join(reasons),
+                                                float(current_anomaly_rate) if anomaly_rate_trigger else None,
+                                                float(drift_score) if drift_score_trigger else None,
+                                                float(model_age_hours) if 'model_age_hours' in locals() else None,
+                                                float(regime_metrics.get("silhouette", 0.0)) if 'regime_metrics' in locals() else None,
+                                            ),
+                                        )
+                                    Console.info("[MODEL] SQL refit request recorded in ACM_RefitRequests")
+                                else:
+                                    Console.warn("[MODEL] SQL client unavailable; cannot write refit request")
+                            except Exception as sql_re:
+                                Console.warn(f"[MODEL] Failed to write SQL refit request: {sql_re}")
                     except Exception as re:
                         Console.warn(f"[MODEL] Failed to write refit flag: {re}")
                 
@@ -2721,100 +3215,102 @@ def main() -> None:
         episodes["regime"] = episodes["regime"].astype(str)
 
         # ===== Rolling Baseline Buffer: Update with latest raw SCORE =====
-        try:
-            baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-            buffer_path = stable_models_dir / "baseline_buffer.csv"
-            if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
-                to_append = score_numeric.copy()
-                # Normalize index to local naive timestamps for stable CSV format
-                try:
-                    idx_local = pd.DatetimeIndex(to_append.index).tz_localize(None)
-                except Exception:
-                    idx_local = pd.DatetimeIndex(to_append.index)
-                to_append.index = idx_local
-
-                if buffer_path.exists():
+        # Task 7: Skip baseline_buffer.csv writes in SQL mode
+        if not SQL_MODE:
+            try:
+                baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+                buffer_path = stable_models_dir / "baseline_buffer.csv"
+                if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
+                    to_append = score_numeric.copy()
+                    # Normalize index to local naive timestamps for stable CSV format
                     try:
-                        prev = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
+                        idx_local = pd.DatetimeIndex(to_append.index).tz_localize(None)
                     except Exception:
-                        prev = pd.DataFrame()
-                    # Keep only common columns to avoid drift issues
-                    common = [c for c in prev.columns if c in to_append.columns]
-                    if common:
-                        prev = prev[common]
-                        to_append = to_append[common]
-                    combined = pd.concat([prev, to_append], axis=0)
-                else:
-                    combined = to_append
+                        idx_local = pd.DatetimeIndex(to_append.index)
+                    to_append.index = idx_local
 
-                # Normalize index to local-naive consistently, drop dups, sort
-                try:
-                    norm_idx = pd.to_datetime(combined.index, errors="coerce")
-                except Exception:
-                    norm_idx = pd.DatetimeIndex(combined.index)
-                combined.index = norm_idx
-                combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-
-                # Retention: window_hours and/or max_points
-                window_hours = float(baseline_cfg.get("window_hours", 72))
-                max_points = int(baseline_cfg.get("max_points", 100000))
-                if len(combined):
-                    last_ts = pd.to_datetime(combined.index.max())
-                    if window_hours and window_hours > 0:
-                        cutoff = last_ts - pd.Timedelta(hours=window_hours)
-                        combined = combined[combined.index >= cutoff]
-                    if max_points and max_points > 0 and len(combined) > max_points:
-                        combined = combined.iloc[-max_points:]
-
-                # CHART-04: Use uniform timestamp format without 'T' or 'Z' suffixes (file-mode only)
-                if not SQL_MODE:
-                    combined.to_csv(buffer_path, index=True, date_format="%Y-%m-%d %H:%M:%S")
-                    Console.info(f"[BASELINE] Updated rolling baseline buffer -> {buffer_path} rows={len(combined)} cols={len(combined.columns)}")
-                
-                # Write to SQL ACM_BaselineBuffer table if in SQL mode
-                if sql_client and SQL_MODE:
-                    try:
-                        # Transform wide format (timestamp × sensors) to long format (rows per sensor-timestamp)
-                        baseline_records = []
-                        for ts_idx, row in combined.iterrows():
-                            for sensor_name, sensor_value in row.items():
-                                if pd.notna(sensor_value):
-                                    baseline_records.append((
-                                        int(equip_id),
-                                        pd.Timestamp(ts_idx).to_pydatetime().replace(tzinfo=None),
-                                        str(sensor_name),
-                                        float(sensor_value),
-                                        None  # DataQuality (future enhancement)
-                                    ))
-                    
-                        if baseline_records:
-                            # Bulk insert with fast_executemany
-                            insert_sql = """
-                            INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
-                            VALUES (?, ?, ?, ?, ?)
-                            """
-                            with sql_client.cursor() as cur:
-                                cur.fast_executemany = True
-                                cur.executemany(insert_sql, baseline_records)
-                            sql_client.conn.commit()
-                            Console.info(f"[BASELINE] Wrote {len(baseline_records)} records to ACM_BaselineBuffer")
-                        
-                            # Run cleanup procedure to maintain retention policy
-                            try:
-                                with sql_client.cursor() as cur:
-                                    cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
-                                              (int(equip_id), int(window_hours), max_points))
-                                sql_client.conn.commit()
-                            except Exception as cleanup_err:
-                                Console.warn(f"[BASELINE] Cleanup procedure failed: {cleanup_err}")
-                    except Exception as sql_err:
-                        Console.warn(f"[BASELINE] SQL write to ACM_BaselineBuffer failed: {sql_err}")
+                    if buffer_path.exists():
                         try:
-                            sql_client.conn.rollback()
-                        except:
-                            pass
-        except Exception as be:
-            Console.warn(f"[BASELINE] Update failed: {be}")
+                            prev = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
+                        except Exception:
+                            prev = pd.DataFrame()
+                        # Keep only common columns to avoid drift issues
+                        common = [c for c in prev.columns if c in to_append.columns]
+                        if common:
+                            prev = prev[common]
+                            to_append = to_append[common]
+                        combined = pd.concat([prev, to_append], axis=0)
+                    else:
+                        combined = to_append
+
+                    # Normalize index to local-naive consistently, drop dups, sort
+                    try:
+                        norm_idx = pd.to_datetime(combined.index, errors="coerce")
+                    except Exception:
+                        norm_idx = pd.DatetimeIndex(combined.index)
+                    combined.index = norm_idx
+                    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+
+                    # Retention: window_hours and/or max_points
+                    window_hours = float(baseline_cfg.get("window_hours", 72))
+                    max_points = int(baseline_cfg.get("max_points", 100000))
+                    if len(combined):
+                        last_ts = pd.to_datetime(combined.index.max())
+                        if window_hours and window_hours > 0:
+                            cutoff = last_ts - pd.Timedelta(hours=window_hours)
+                            combined = combined[combined.index >= cutoff]
+                        if max_points and max_points > 0 and len(combined) > max_points:
+                            combined = combined.iloc[-max_points:]
+
+                    # CHART-04: Use uniform timestamp format without 'T' or 'Z' suffixes (file-mode only)
+                    if not SQL_MODE:
+                        combined.to_csv(buffer_path, index=True, date_format="%Y-%m-%d %H:%M:%S")
+                        Console.info(f"[BASELINE] Updated rolling baseline buffer -> {buffer_path} rows={len(combined)} cols={len(combined.columns)}")
+                    
+                    # Write to SQL ACM_BaselineBuffer table if in SQL mode
+                    if sql_client and SQL_MODE:
+                        try:
+                            # Transform wide format (timestamp × sensors) to long format (rows per sensor-timestamp)
+                            baseline_records = []
+                            for ts_idx, row in combined.iterrows():
+                                for sensor_name, sensor_value in row.items():
+                                    if pd.notna(sensor_value):
+                                        baseline_records.append((
+                                            int(equip_id),
+                                            pd.Timestamp(ts_idx).to_pydatetime().replace(tzinfo=None),
+                                            str(sensor_name),
+                                            float(sensor_value),
+                                            None  # DataQuality (future enhancement)
+                                        ))
+                        
+                            if baseline_records:
+                                # Bulk insert with fast_executemany
+                                insert_sql = """
+                                INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
+                                VALUES (?, ?, ?, ?, ?)
+                                """
+                                with sql_client.cursor() as cur:
+                                    cur.fast_executemany = True
+                                    cur.executemany(insert_sql, baseline_records)
+                                sql_client.conn.commit()
+                                Console.info(f"[BASELINE] Wrote {len(baseline_records)} records to ACM_BaselineBuffer")
+                            
+                                # Run cleanup procedure to maintain retention policy
+                                try:
+                                    with sql_client.cursor() as cur:
+                                        cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
+                                                  (int(equip_id), int(window_hours), max_points))
+                                    sql_client.conn.commit()
+                                except Exception as cleanup_err:
+                                    Console.warn(f"[BASELINE] Cleanup procedure failed: {cleanup_err}")
+                        except Exception as sql_err:
+                            Console.warn(f"[BASELINE] SQL write to ACM_BaselineBuffer failed: {sql_err}")
+                            try:
+                                sql_client.conn.rollback()
+                            except:
+                                pass
+            except Exception as be:
+                Console.warn(f"[BASELINE] Update failed: {be}")
 
         sensor_context: Optional[Dict[str, Any]] = None
         with T.section("sensor.context"):

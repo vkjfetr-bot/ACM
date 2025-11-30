@@ -1,0 +1,5 @@
+Changed database context to 'ACM'.
+Msg 156, Level 15, State 1, Server B19cl3pc\B19CL3PCQLSERVER, Line 168
+Incorrect syntax near the keyword 'RowCount'.
+Msg 156, Level 15, State 1, Server B19cl3pc\B19CL3PCQLSERVER, Line 211
+Incorrect syntax near the keyword 'RowCount'.

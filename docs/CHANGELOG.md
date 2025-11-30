@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Continuous Learning Architecture** (2025-11-29):
+  - **Purpose**: Enable ACM to continuously learn from accumulated data in batch mode, updating models and thresholds every batch
+  - **Implementation**:
+    - Added `_batch_mode()` and `_continuous_learning_enabled()` helper functions to detect batch runner context
+    - Added `_calculate_adaptive_thresholds()` standalone function for threshold calculation independent of auto-tune section
+    - Modified model cache logic to disable caching when continuous learning is enabled (`force_retraining = True`)
+    - Moved threshold calculation from auto-tune section (only runs during coldstart) to post-fusion section (runs every batch)
+    - Implemented threshold update frequency control via `threshold_update_interval` config option
+    - Added batch number tracking via `ACM_BATCH_NUM` environment variable set by sql_batch_runner
+    - Thresholds now calculated on accumulated data (train + score combined) in continuous learning mode
+    - Added logging for threshold update decisions and frequency control
+  - **Config Schema**:
+    - `continuous_learning.enabled`: Enable/disable continuous learning (default: True in batch mode)
+    - `continuous_learning.model_update_interval`: Batches between model retraining (default: 1)
+    - `continuous_learning.threshold_update_interval`: Batches between threshold updates (default: 1)
+  - **Impact**:
+    - ✅ Models retrain on accumulated data every batch (or at configurable intervals)
+    - ✅ Thresholds recalculate on growing dataset every batch (or at configurable intervals)
+    - ✅ Fixes empty ACM_ThresholdMetadata table issue (thresholds only calculated during coldstart before)
+    - ✅ Enables true online learning architecture where models and thresholds evolve with data
+    - ✅ Grafana dashboard panels now show threshold evolution over time
+    - ✅ Each batch = validate current data + retrain models + update thresholds + move forward
+  - **Architecture Change**: Paradigm shift from "train once, score many" to "continuous learning on sliding window"
+  - **Performance**: Increased computation per batch due to model retraining, controlled via update intervals
+
 - **FCST-15 & RUL-01: Artifact Cache for SQL-Only Mode** (2025-11-15):
   - **Purpose**: Enable forecast and RUL modules to work in SQL-only mode without file system dependencies
   - **Implementation**: 

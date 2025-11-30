@@ -569,6 +569,7 @@ class ModelVersionManager:
                     v_num = int(v_dir.name[1:])  # Extract number from "v123"
                     versions.append(v_num)
                 except ValueError:
+                    Console.warn(f"[MODEL] Ignoring malformed model directory: {v_dir.name}")
                     continue
         
         return max(versions) if versions else None
@@ -1124,6 +1125,7 @@ class ModelVersionManager:
     ) -> Tuple[bool, List[str]]:
         """
         Check if cached models are valid for current run.
+        Task 5: Extended with temporal validation (model age threshold).
         
         Args:
             manifest: Loaded manifest dictionary
@@ -1145,6 +1147,19 @@ class ModelVersionManager:
         if set(cached_sensors) != set(current_sensors):
             reasons.append(f"Sensor list changed (cached: {len(cached_sensors)}, current: {len(current_sensors)})")
         
+        # Task 5: Temporal validation - reject models exceeding max_model_age_days
+        from datetime import datetime, timedelta
+        created_at_str = manifest.get("created_at")
+        if created_at_str:
+            try:
+                created_at = datetime.fromisoformat(created_at_str)
+                age_days = (datetime.now() - created_at).total_seconds() / 86400
+                max_age_days = manifest.get("max_model_age_days", 30)  # Default 30 days
+                if age_days > max_age_days:
+                    reasons.append(f"Model too old: {age_days:.1f}d > {max_age_days}d threshold")
+            except Exception:
+                pass
+        
         is_valid = len(reasons) == 0
         return is_valid, reasons
     
@@ -1163,6 +1178,7 @@ class ModelVersionManager:
             try:
                 v_num = int(v_dir.name[1:])
             except ValueError:
+                Console.warn(f"[MODEL] Skipping malformed model directory: {v_dir.name}")
                 continue
             
             manifest_path = v_dir / "manifest.json"
@@ -1187,6 +1203,7 @@ def create_model_metadata(
 ) -> Dict[str, Any]:
     """
     Create enhanced metadata dictionary for model manifest.
+    Task 5: Extended with temporal fields (train_start, train_end, train_hash).
     
     Args:
         config_signature: Config signature hash
@@ -1198,6 +1215,8 @@ def create_model_metadata(
     Returns:
         Enhanced metadata dictionary with training duration, quality metrics, and data stats
     """
+    import hashlib
+    
     # Base metadata
     metadata = {
         "config_signature": config_signature,
@@ -1205,6 +1224,22 @@ def create_model_metadata(
         "train_sensors": train_data.columns.tolist() if hasattr(train_data, 'columns') else [],
         "models": {}
     }
+    
+    # Task 5: Add temporal fields for drift/age validation
+    if hasattr(train_data, 'index') and len(train_data):
+        try:
+            metadata["train_start"] = str(train_data.index.min())
+            metadata["train_end"] = str(train_data.index.max())
+        except Exception:
+            pass
+    
+    # Task 5: Add train_hash for data fingerprint validation
+    if hasattr(train_data, 'values'):
+        try:
+            data_bytes = train_data.values.tobytes()
+            metadata["train_hash"] = hashlib.sha256(data_bytes).hexdigest()[:16]
+        except Exception:
+            pass
     
     # Training duration
     if training_duration_s is not None:

@@ -31,3 +31,8 @@ configs/sql_connection.ini
 **/artifacts/
 ACM_V6_BACKUP_*/
 
+
+# Temporary audit and analysis documents
+*.html
+Comprehensive Audit of Regime Identifi.md
+Master ACM Backlog – Analytics & Forec.md
