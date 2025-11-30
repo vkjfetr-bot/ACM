@@ -889,6 +889,14 @@ def run_enhanced_forecasting_sql(
         df_scores["Timestamp"] = df_scores["Timestamp"].dt.tz_localize(None)
         
     df_scores = df_scores.dropna(subset=["Timestamp"]).sort_values("Timestamp")
+    
+    # FOR-COR-04: Remove duplicate timestamps before setting index
+    initial_count = len(df_scores)
+    df_scores = df_scores.drop_duplicates(subset=["Timestamp"], keep="last")
+    dupe_count = initial_count - len(df_scores)
+    if dupe_count > 0:
+        Console.warn(f"[ENHANCED_FORECAST] Removed {dupe_count} duplicate timestamps (kept last occurrence)")
+    
     df_scores = df_scores.set_index("Timestamp")
 
     if df_scores.empty:
