@@ -1085,6 +1085,15 @@ def run_enhanced_forecasting_sql(
                     prev_hazard, fp_series, dt_hours=1.0, alpha=alpha
                 )
                 
+                # FOR-DQ-03: Assert hazard/forecast length match to prevent data corruption
+                if not hazard_df.empty and len(hazard_df) != len(fp_series):
+                    Console.error(
+                        f"[FORECAST] Hazard/forecast length mismatch: hazard={len(hazard_df)}, "
+                        f"forecast={len(fp_series)}. Truncating to minimum length."
+                    )
+                    min_len = min(len(hazard_df), len(fp_series))
+                    hazard_df = hazard_df.iloc[:min_len].copy()
+                
                 if not hazard_df.empty:
                     # Use real future timestamps anchored to current batch time instead of epoch-based ints
                     hazard_df["Timestamp"] = pd.to_datetime([current_batch_time + pd.Timedelta(hours=i) for i in range(len(hazard_df))])
