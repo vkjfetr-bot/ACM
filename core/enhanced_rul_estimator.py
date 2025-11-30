@@ -2,6 +2,26 @@
 Enhanced RUL Estimator with Adaptive Learning
 ==============================================
 
+⚠️ DEPRECATED - DO NOT USE ⚠️
+This module has been replaced by core.rul_engine, which consolidates all RUL
+estimation functionality into a single unified SQL-only engine.
+
+Please migrate to:
+    from core.rul_engine import run_rul
+
+The new engine provides all the features of this module plus:
+- Unified SQL-only architecture (no CSV/JSON fallbacks)
+- Cleaner separation of concerns (models, I/O, output builders)
+- SQL-backed learning state persistence (ACM_RUL_LearningState table)
+- Improved multipath RUL computation
+- Better error handling and logging
+
+This module is kept for backward compatibility only and will be removed in a future release.
+
+---
+
+OLD DOCUMENTATION (for reference only):
+
 Improvements:
 - Ensemble of degradation models (AR, exponential, Weibull-inspired)
 - Online learning from prediction errors
@@ -16,6 +36,8 @@ All timestamps are treated as timezone-naive local time.
 
 from __future__ import annotations
 
+import warnings
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
@@ -29,6 +51,14 @@ from scipy.stats import norm, weibull_min
 
 from utils.logger import Console
 from core.rul_common import norm_cdf, RULConfig
+
+# Emit deprecation warning when module is imported
+warnings.warn(
+    "core.enhanced_rul_estimator is deprecated and will be removed in a future release. "
+    "Please use core.rul_engine.run_rul() instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 @dataclass

@@ -2,6 +2,25 @@
 RUL and failure-forecast estimator
 ==================================
 
+⚠️ DEPRECATED - DO NOT USE ⚠️
+This module has been replaced by core.rul_engine, which provides a unified
+SQL-only RUL estimation engine with ensemble models and multipath forecasting.
+
+Please migrate to:
+    from core.rul_engine import run_rul
+
+The new engine provides:
+- Unified SQL-only architecture (no CSV/JSON fallbacks)
+- Ensemble models: AR1 + Exponential + Weibull with adaptive weighting
+- Multipath RUL: trajectory + hazard + energy paths
+- SQL-backed learning state persistence
+
+This module is kept for backward compatibility only and will be removed in a future release.
+
+---
+
+OLD DOCUMENTATION (for reference only):
+
 Consumes health timeline and forecast outputs and produces:
 - Health forecast time series suitable for SQL (`ACM_HealthForecast_TS`)
 - Failure probability over time (`ACM_FailureForecast_TS`)
@@ -19,6 +38,8 @@ All timestamps are treated as timezone-naive local time.
 
 from __future__ import annotations
 
+import warnings
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
@@ -27,149 +48,24 @@ import numpy as np
 import pandas as pd
 
 from utils.logger import Console
-from core.rul_common import norm_cdf, RULConfig
+# RUL-COR-01: Import shared functions from rul_common to eliminate duplication
+from core.rul_common import (
+    norm_cdf,
+    RULConfig,
+    load_health_timeline,
+    apply_health_timeline_row_limit,
+)
 
+# Emit deprecation warning when module is imported
+warnings.warn(
+    "core.rul_estimator is deprecated and will be removed in a future release. "
+    "Please use core.rul_engine.run_rul() instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
-def _apply_health_timeline_row_limit(
-    df: pd.DataFrame, config: Optional[Any] = None
-) -> pd.DataFrame:
-    """
-    FOR-PERF-04: Guard against unbounded health timeline size.
-    If row count exceeds max_health_timeline_rows config, downsample using
-    health_downsample_freq (default: 1min resample with mean aggregation).
-    Returns original or downsampled DataFrame.
-    """
-    if df is None or len(df) == 0:
-        return df
-    
-    # Default conservative limits
-    max_rows = 100000
-    downsample_freq = "1min"
-    
-    if config is not None:
-        max_rows = config.get("forecasting", {}).get("max_health_timeline_rows", max_rows)
-        downsample_freq = config.get("forecasting", {}).get("health_downsample_freq", downsample_freq)
-    
-    if len(df) <= max_rows:
-        return df
-    
-    # Downsample: resample to frequency with mean aggregation
-    Console.warn(
-        f"[RUL] Health timeline has {len(df)} rows (max={max_rows}). "
-        f"Downsampling to {downsample_freq} frequency."
-    )
-    
-    # Ensure Timestamp is index for resample
-    df_resampled = df.set_index("Timestamp").resample(downsample_freq).mean()
-    df_resampled = df_resampled.dropna().reset_index()
-    
-    Console.info(f"[RUL] Downsampled to {len(df_resampled)} rows")
-    return df_resampled
-
-
-def _load_health_timeline(
-    tables_dir: Path,
-    sql_client: Optional[Any] = None,
-    equip_id: Optional[int] = None,
-    run_id: Optional[str] = None,
-    output_manager: Optional[Any] = None,
-    config: Optional[Any] = None,
-) -> Optional[pd.DataFrame]:
-    """
-    Load health timeline for RUL estimation.
-
-    RUL-01: Now supports artifact cache for SQL-only mode.
-    FOR-PERF-04: Applies row limit guard to prevent unbounded memory usage.
-    
-    Priority:
-    1. Try artifact cache (output_manager) if available - SQL-only mode
-    2. If sql_client and identifiers are available, read from ACM_HealthTimeline
-    3. Fallback to health_timeline.csv in tables_dir (legacy file mode)
-    
-    If loaded data exceeds max_health_timeline_rows config, downsamples to health_downsample_freq.
-    """
-    # RUL-01: First try artifact cache (SQL-only mode support)
-    if output_manager is not None:
-        df = output_manager.get_cached_table("health_timeline.csv")
-        if df is not None:
-            Console.info(f"[RUL] Using cached health_timeline.csv from OutputManager ({len(df)} rows)")
-            # Normalize column names
-            if "Timestamp" in df.columns:
-                ts_col = "Timestamp"
-            elif "timestamp" in df.columns:
-                ts_col = "timestamp"
-            else:
-                ts_col = df.columns[0]
-            # TIME-01: Ensure naive timestamps
-            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
-            if df[ts_col].dt.tz is not None:
-                df[ts_col] = df[ts_col].dt.tz_localize(None)
-            
-            df = df.dropna(subset=[ts_col]).sort_values(ts_col)
-            df = df.rename(columns={ts_col: "Timestamp"})
-            # FOR-PERF-04: Apply max row guard
-            df = _apply_health_timeline_row_limit(df, config)
-            return df
-    
-    # Try SQL when possible (SQL-only mode without cache)
-    if sql_client is not None and equip_id is not None and run_id:
-        try:
-            cur = sql_client.cursor()
-            cur.execute(
-                """
-                SELECT Timestamp, HealthIndex
-                FROM dbo.ACM_HealthTimeline
-                WHERE EquipID = ? AND RunID = ?
-                ORDER BY Timestamp
-                """,
-                (equip_id, run_id),
-            )
-            rows = cur.fetchall()
-            cur.close()
-            if rows:
-                df = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex"])
-                # TIME-01: Ensure naive timestamps
-                df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
-                if df["Timestamp"].dt.tz is not None:
-                    df["Timestamp"] = df["Timestamp"].dt.tz_localize(None)
-                
-                df = df.dropna(subset=["Timestamp"]).sort_values("Timestamp")
-                Console.info(
-                    f"[RUL] Loaded {len(df)} health points from SQL for EquipID={equip_id}, RunID={run_id}"
-                )
-                # FOR-PERF-04: Apply max row guard
-                df = _apply_health_timeline_row_limit(df, config)
-                return df
-            else:
-                Console.warn(
-                    f"[RUL] No rows in ACM_HealthTimeline for EquipID={equip_id}, RunID={run_id}"
-                )
-        except Exception as e:
-            Console.warn(f"[RUL] Failed to load health timeline from SQL: {e}")
-
-    # Fallback: legacy CSV path (file mode)
-    p = tables_dir / "health_timeline.csv"
-    if not p.exists():
-        Console.warn(f"[RUL] health_timeline.csv not found in {tables_dir} (no cache, no SQL, no file)")
-        return None
-    df = pd.read_csv(p)
-    Console.info(f"[RUL] Loaded health_timeline.csv from file ({len(df)} rows)")
-    if "Timestamp" in df.columns:
-        ts_col = "Timestamp"
-    elif "timestamp" in df.columns:
-        ts_col = "timestamp"
-    else:
-        ts_col = df.columns[0]
-    # TIME-01: Ensure naive timestamps
-    df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
-    if df[ts_col].dt.tz is not None:
-        df[ts_col] = df[ts_col].dt.tz_localize(None)
-        
-    df = df.sort_values(ts_col).dropna(subset=[ts_col])
-    df = df.rename(columns={ts_col: "Timestamp"})
-    # FOR-PERF-04: Apply max row guard
-    df = _apply_health_timeline_row_limit(df, config)
-    return df
+# RUL-COR-01: Removed _apply_health_timeline_row_limit - now using shared version from rul_common
+# RUL-COR-01: Removed _load_health_timeline - now using shared version from rul_common
 
 
 def _simple_ar1_forecast(
