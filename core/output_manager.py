@@ -50,6 +50,7 @@ except Exception:  # pragma: no cover
 ALLOWED_TABLES = {
     'ACM_Scores_Wide','ACM_Episodes','ACM_EpisodesQC',
     'ACM_HealthTimeline','ACM_RegimeTimeline',
+    'ACM_RegimeSummary','ACM_RegimeFeatureImportance','ACM_RegimeTransitions',
     'ACM_ContributionCurrent','ACM_ContributionTimeline',
     'ACM_DriftSeries','ACM_ThresholdCrossings',
     'ACM_AlertAge','ACM_SensorRanking','ACM_RegimeOccupancy',

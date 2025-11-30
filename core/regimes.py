@@ -1585,9 +1585,9 @@ def run(ctx: Any) -> Dict[str, Any]:
     tables: List[Dict[str, Any]] = []
     t_eps = ctx.tables_dir / "regime_episodes.csv"
     try:
-        # REG-CSV-01: run_id and equip_id already extracted above
+        # REG-CSV-02: Pass sql_client to OutputManager for SQL support
         if OutputManager is not None:
-            om = OutputManager(sql_client=None, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+            om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
             om.write_dataframe(eps, t_eps)
         else:
             df_out = eps.copy()
@@ -1624,7 +1624,19 @@ def run(ctx: Any) -> Dict[str, Any]:
         summary_df = build_summary_dataframe(regime_model)
         if not summary_df.empty:
             summary_path = ctx.tables_dir / "regime_summary.csv"
-            summary_df.to_csv(summary_path, index=False)
+            # REG-CSV-02: Write to ACM_RegimeSummary SQL table
+            if OutputManager is not None:
+                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+                sql_cols = {
+                    "regime": "Regime", "state": "State", 
+                    "dwell_seconds": "DwellSeconds", "dwell_fraction": "DwellFraction",
+                    "avg_dwell_seconds": "AvgDwellSeconds", "transition_count": "TransitionCount",
+                    "stability_score": "StabilityScore", "median_fused": "MedianFused",
+                    "p95_abs_fused": "P95AbsFused", "count": "Count"
+                }
+                om.write_dataframe(summary_df, summary_path, sql_table="ACM_RegimeSummary" if sql_client else None, sql_columns=sql_cols)
+            else:
+                summary_df.to_csv(summary_path, index=False)
             tables.append({"name":"regime_summary","path":str(summary_path)})
 
         feature_map = regime_model.meta.get("feature_importance") or {}
@@ -1637,7 +1649,13 @@ def run(ctx: Any) -> Dict[str, Any]:
                 .reset_index(drop=True)
             )
             fi_path = ctx.tables_dir / "regime_feature_importance.csv"
-            feature_importance_df.to_csv(fi_path, index=False)
+            # REG-CSV-02: Write to ACM_RegimeFeatureImportance SQL table
+            if OutputManager is not None:
+                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+                sql_cols = {"feature": "Feature", "importance": "Importance"}
+                om.write_dataframe(feature_importance_df, fi_path, sql_table="ACM_RegimeFeatureImportance" if sql_client else None, sql_columns=sql_cols)
+            else:
+                feature_importance_df.to_csv(fi_path, index=False)
             tables.append({"name":"regime_feature_importance","path":str(fi_path)})
 
         transitions_map = regime_model.meta.get("transition_counts") or {}
@@ -1659,7 +1677,13 @@ def run(ctx: Any) -> Dict[str, Any]:
                 transition_rows.append({"from_regime": src, "to_regime": dst, "count": int(count)})
             transitions_df = pd.DataFrame(transition_rows)
             trans_path = ctx.tables_dir / "regime_transitions.csv"
-            transitions_df.to_csv(trans_path, index=False)
+            # REG-CSV-02: Write to ACM_RegimeTransitions SQL table
+            if OutputManager is not None:
+                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+                sql_cols = {"from_regime": "FromRegime", "to_regime": "ToRegime", "count": "Count"}
+                om.write_dataframe(transitions_df, trans_path, sql_table="ACM_RegimeTransitions" if sql_client else None, sql_columns=sql_cols)
+            else:
+                transitions_df.to_csv(trans_path, index=False)
             tables.append({"name":"regime_transitions","path":str(trans_path)})
 
         meta = regime_model.meta or {}

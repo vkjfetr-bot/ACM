@@ -116,6 +116,60 @@ CREATE TABLE dbo.ACM_RegimeTimeline (
 );
 GO
 
+-- REG-CSV-02: Regime Summary (Per-Run Regime Statistics)
+IF OBJECT_ID('dbo.ACM_RegimeSummary', 'U') IS NOT NULL DROP TABLE dbo.ACM_RegimeSummary;
+CREATE TABLE dbo.ACM_RegimeSummary (
+    ID BIGINT IDENTITY(1,1) NOT NULL,
+    RunID UNIQUEIDENTIFIER NOT NULL,
+    EquipID INT NOT NULL,
+    Regime INT NOT NULL,
+    State VARCHAR(50) NULL,
+    DwellSeconds FLOAT NULL,
+    DwellFraction FLOAT NULL,
+    AvgDwellSeconds FLOAT NULL,
+    TransitionCount INT NULL,
+    StabilityScore FLOAT NULL,
+    MedianFused FLOAT NULL,
+    P95AbsFused FLOAT NULL,
+    Count INT NULL,
+    CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    
+    CONSTRAINT PK_ACM_RegimeSummary PRIMARY KEY CLUSTERED (RunID, EquipID, Regime),
+    INDEX IX_ACM_RegimeSummary_Equip NONCLUSTERED (EquipID, RunID)
+);
+GO
+
+-- REG-CSV-02: Regime Feature Importance
+IF OBJECT_ID('dbo.ACM_RegimeFeatureImportance', 'U') IS NOT NULL DROP TABLE dbo.ACM_RegimeFeatureImportance;
+CREATE TABLE dbo.ACM_RegimeFeatureImportance (
+    ID BIGINT IDENTITY(1,1) NOT NULL,
+    RunID UNIQUEIDENTIFIER NOT NULL,
+    EquipID INT NOT NULL,
+    Feature NVARCHAR(200) NOT NULL,
+    Importance FLOAT NOT NULL,
+    CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    
+    CONSTRAINT PK_ACM_RegimeFeatureImportance PRIMARY KEY CLUSTERED (ID),
+    INDEX IX_ACM_RegimeFeatureImportance_Run NONCLUSTERED (RunID, EquipID, Importance DESC)
+);
+GO
+
+-- REG-CSV-02: Regime Transitions
+IF OBJECT_ID('dbo.ACM_RegimeTransitions', 'U') IS NOT NULL DROP TABLE dbo.ACM_RegimeTransitions;
+CREATE TABLE dbo.ACM_RegimeTransitions (
+    ID BIGINT IDENTITY(1,1) NOT NULL,
+    RunID UNIQUEIDENTIFIER NOT NULL,
+    EquipID INT NOT NULL,
+    FromRegime INT NOT NULL,
+    ToRegime INT NOT NULL,
+    Count INT NOT NULL,
+    CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    
+    CONSTRAINT PK_ACM_RegimeTransitions PRIMARY KEY CLUSTERED (ID),
+    INDEX IX_ACM_RegimeTransitions_Run NONCLUSTERED (RunID, EquipID, Count DESC)
+);
+GO
+
 -- Detector Contributions Timeline (Long Format - Normalized)
 IF OBJECT_ID('dbo.ACM_ContributionTimeline', 'U') IS NOT NULL DROP TABLE dbo.ACM_ContributionTimeline;
 CREATE TABLE dbo.ACM_ContributionTimeline (
