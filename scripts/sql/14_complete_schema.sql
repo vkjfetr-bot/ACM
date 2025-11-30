@@ -648,6 +648,56 @@ CREATE TABLE dbo.ACM_RegimeSummary (
 GO
 
 -- ============================================================================
+-- RUL LEARNING STATE (NEW - Unified RUL Engine)
+-- ============================================================================
+
+-- RUL Learning State (replaces JSON file persistence)
+IF OBJECT_ID('dbo.ACM_RUL_LearningState', 'U') IS NOT NULL DROP TABLE dbo.ACM_RUL_LearningState;
+CREATE TABLE dbo.ACM_RUL_LearningState (
+    EquipID INT NOT NULL,
+    
+    -- AR1 Model Metrics
+    AR1_MAE FLOAT DEFAULT 0.0,
+    AR1_RMSE FLOAT DEFAULT 0.0,
+    AR1_Bias FLOAT DEFAULT 0.0,
+    AR1_RecentErrors NVARCHAR(MAX),  -- JSON array: [e1, e2, ...]
+    AR1_Weight FLOAT DEFAULT 1.0,
+    
+    -- Exponential Model Metrics
+    Exp_MAE FLOAT DEFAULT 0.0,
+    Exp_RMSE FLOAT DEFAULT 0.0,
+    Exp_Bias FLOAT DEFAULT 0.0,
+    Exp_RecentErrors NVARCHAR(MAX),  -- JSON array
+    Exp_Weight FLOAT DEFAULT 1.0,
+    
+    -- Weibull Model Metrics
+    Weibull_MAE FLOAT DEFAULT 0.0,
+    Weibull_RMSE FLOAT DEFAULT 0.0,
+    Weibull_Bias FLOAT DEFAULT 0.0,
+    Weibull_RecentErrors NVARCHAR(MAX),  -- JSON array
+    Weibull_Weight FLOAT DEFAULT 1.0,
+    
+    -- Overall Metrics
+    CalibrationFactor FLOAT DEFAULT 1.0,
+    PredictionHistory NVARCHAR(MAX),  -- JSON array of recent predictions
+    
+    -- Metadata
+    LastUpdated DATETIME2 NULL,
+    CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
+    
+    -- Constraints
+    CONSTRAINT PK_ACM_RUL_LearningState PRIMARY KEY CLUSTERED (EquipID),
+    CONSTRAINT CK_LearningState_WeightsPositive CHECK (
+        AR1_Weight >= 0 AND Exp_Weight >= 0 AND Weibull_Weight >= 0
+    ),
+    CONSTRAINT CK_LearningState_CalibrationRange CHECK (
+        CalibrationFactor BETWEEN 0.1 AND 10.0
+    ),
+    INDEX IX_ACM_RUL_LearningState_LastUpdated NONCLUSTERED (LastUpdated)
+);
+GO
+
+-- ============================================================================
 -- WIDE FORMAT TABLES (Keep for backward compatibility and quick queries)
 -- ============================================================================
 
@@ -675,10 +725,10 @@ CREATE TABLE dbo.ACM_Scores_Wide (
 );
 GO
 
-PRINT 'ACM Schema created successfully - 26 tables covering all outputs';
+PRINT 'ACM Schema created successfully - 27 tables covering all outputs';
 PRINT 'Tables: Runs, DataQuality, HealthTimeline, RegimeTimeline, ContributionTimeline, DriftSeries, DefectTimeline,';
 PRINT '        Episodes, EpisodeCulprits, ThresholdCrossings, DriftEvents, ContributionCurrent, SensorRanking,';
 PRINT '        StateDuration, AlertAge, DefectSummary, SensorDefects, RegimeOccupancy, RegimeTransitions,';
 PRINT '        RegimeDwellStats, RegimeStability, DetectorCorrelation, CalibrationSummary, HealthHistogram,';
-PRINT '        HealthZoneByPeriod, SensorAnomalyByPeriod, EpisodeMetrics, RegimeSummary, Scores_Wide';
+PRINT '        HealthZoneByPeriod, SensorAnomalyByPeriod, EpisodeMetrics, RegimeSummary, RUL_LearningState, Scores_Wide';
 GO
