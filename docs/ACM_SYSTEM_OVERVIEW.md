@@ -99,8 +99,8 @@ Key paths (ParamPath) and reasoning:
 - **Outliers (`core/outliers.py`):**
   - `IsolationForestDetector`: fits/uses scikit IF, stores columns, optional quantile threshold when contamination numeric.
   - `GMMDetector`: BIC-driven component selection, variance guards, scaling; returns neg log-likelihood style scores.
-- **OMR (`core/omr.py` and `core/omr_new.py`):**
-  - Multivariate reconstruction error via PLS/linear ensemble/PCA. `omr_new` adds auto model selection, diagnostics, per-sensor contribution extraction, z clipping, min sample guards.
+- **OMR (`core/omr.py`):**
+  - Multivariate reconstruction error via PLS/linear ensemble/PCA. Features auto model selection, diagnostics, per-sensor contribution extraction, z clipping, min sample guards.
 - **Forecasting/RUL (`core/forecasting.py`, `core/rul_estimator.py`, `core/enhanced_rul_estimator.py`):**
   - AR1 per-sensor residual detector, data hash for retrain decisions, SQL/file dual persistence of forecast state.
   - Enhanced RUL: multiple degradation models (AR1, exponential, Weibull-inspired, linear), learning state, attribution, maintenance recommendations, hazard smoothing.
@@ -207,7 +207,7 @@ python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2 --
 - **core/fast_features.py:** rolling_* funcs, `compute_basic_features`, Polars fast-path helpers.
 - **core/correlation.py:** `MahalanobisDetector.fit/score`, `PCASubspaceDetector.fit/score`.
 - **core/outliers.py:** `IsolationForestDetector.fit/score/predict`, `GMMDetector.fit/score`.
-- **core/omr.py / omr_new.py:** `OMRDetector.fit/score/get_top_contributors/get_diagnostics`, `OMRModel.to_dict`.
+- **core/omr.py:** `OMRDetector.fit/score/get_top_contributors/get_diagnostics`, `OMRModel.to_dict`.
 - **core/fuse.py:** `Fuser.fuse/detect_episodes`, `ScoreCalibrator.fit/transform`, `tune_detector_weights`.
 - **core/regimes.py:** `build_feature_basis`, `build_regime_model`, `apply_regime_labels`, `detect_transient_states`, `save_regime_model`, `load_regime_model`.
 - **core/drift.py:** `CUSUMDetector.fit/score`, `compute`, `run`.
