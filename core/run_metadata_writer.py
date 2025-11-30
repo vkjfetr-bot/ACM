@@ -212,6 +212,9 @@ def extract_data_quality_score(data_quality_path) -> float:
     """
     Extract overall data quality score from data_quality.csv.
     
+    RM-COR-01: Validates expected schema columns and logs missing fields
+    to help diagnose schema drift or incomplete data quality metrics.
+    
     Args:
         data_quality_path: Path to data_quality.csv file
     
@@ -227,14 +230,40 @@ def extract_data_quality_score(data_quality_path) -> float:
         
         df = pd.read_csv(data_quality_path)
         
+        # RM-COR-01: Schema validation - check for expected columns
+        expected_columns = {"sensor_name", "null_rate", "constant_rate", "outlier_rate"}
+        actual_columns = set(df.columns)
+        missing_columns = expected_columns - actual_columns
+        
+        if missing_columns:
+            Console.warn(
+                f"[RUN_META] Data quality schema incomplete: missing columns {sorted(missing_columns)}. "
+                f"Quality score coverage may be reduced."
+            )
+        
         # Calculate quality score based on null rates
         if "null_rate" in df.columns:
             # 100 - (average null rate across sensors)
             avg_null_rate = df["null_rate"].mean()
             quality_score = 100.0 * (1.0 - avg_null_rate / 100.0)
+            
+            # Log additional quality metrics if available
+            if "constant_rate" in df.columns and "outlier_rate" in df.columns:
+                avg_constant = df["constant_rate"].mean()
+                avg_outlier = df["outlier_rate"].mean()
+                Console.debug(
+                    f"[RUN_META] Data quality metrics: null={avg_null_rate:.2f}%, "
+                    f"constant={avg_constant:.2f}%, outlier={avg_outlier:.2f}%"
+                )
+            
             return float(quality_score)
+        else:
+            Console.warn(
+                "[RUN_META] Missing 'null_rate' column in data_quality.csv. "
+                "Defaulting to quality score 100.0 (optimistic fallback)."
+            )
+            return 100.0
         
-        return 100.0
     except Exception as e:
         Console.warn(f"[RUN_META] Failed to extract data quality score: {e}")
         return 100.0
