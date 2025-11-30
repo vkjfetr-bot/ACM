@@ -1284,15 +1284,52 @@ def main() -> None:
                                 "sampling_secs": sampling_secs,
                                 "notes": ",".join(note_bits)
                             })
+                        # OM-CSV-03: Write data quality summary (file-mode: CSV, SQL-mode: ACM_DataQuality)
                         if records:
                             dq = pd.DataFrame(records)
-                            # Use OutputManager for efficient writing
                             output_mgr = output_manager
-                            output_mgr.write_dataframe(dq, tables_dir / "data_quality.csv")
-                            try:
-                                Console.info(f"[DATA] Wrote data quality summary -> {tables_dir / 'data_quality.csv'} ({len(records)} sensors)")
-                            except UnicodeEncodeError:
-                                Console.info(f"[DATA] Wrote data quality summary (path: {tables_dir / 'data_quality.csv'})")
+                            
+                            # File mode: CSV write
+                            if not SQL_MODE:
+                                output_mgr.write_dataframe(dq, tables_dir / "data_quality.csv")
+                                try:
+                                    Console.info(f"[DATA] Wrote data quality summary -> {tables_dir / 'data_quality.csv'} ({len(records)} sensors)")
+                                except UnicodeEncodeError:
+                                    Console.info(f"[DATA] Wrote data quality summary (path: {tables_dir / 'data_quality.csv'})")
+                            
+                            # SQL mode: ACM_DataQuality bulk insert
+                            elif sql_client and SQL_MODE:
+                                timestamp_now = pd.Timestamp.now()
+                                insert_records = [
+                                    (
+                                        run_id,
+                                        int(equip_id),
+                                        "data_quality",
+                                        rec["sensor_name"],
+                                        rec.get("train_count", 0),
+                                        rec.get("train_nulls", 0),
+                                        rec.get("train_null_pct", 0.0),
+                                        rec.get("score_count", 0),
+                                        rec.get("score_nulls", 0),
+                                        rec.get("score_null_pct", 0.0),
+                                        timestamp_now
+                                    )
+                                    for rec in records
+                                ]
+                                insert_sql = """
+                                    INSERT INTO dbo.ACM_DataQuality 
+                                    (RunID, EquipID, CheckName, sensor, train_count, train_nulls, train_null_pct, 
+                                     score_count, score_nulls, score_null_pct, Timestamp)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """
+                                try:
+                                    with sql_client.cursor() as cur:
+                                        cur.fast_executemany = True
+                                        cur.executemany(insert_sql, insert_records)
+                                    sql_client.conn.commit()
+                                    Console.info(f"[DATA] Wrote data quality summary -> SQL:ACM_DataQuality ({len(records)} sensors)")
+                                except Exception as sql_e:
+                                    Console.warn(f"[DATA] Failed to write data quality to SQL: {sql_e}")
 
                         counters_records = [
                             {"metric": "tz_stripped_total", "value": int(getattr(meta, "tz_stripped", 0))},
@@ -4214,9 +4251,14 @@ def main() -> None:
                     regime_count = len(set(score_regime_labels)) if score_regime_labels is not None else 0
                     run_metadata = extract_run_metadata_from_scores(frame, per_regime_enabled=per_regime_enabled, regime_count=regime_count)
                     
-                    # Extract data quality score
+                    # OM-CSV-03: Extract data quality score (SQL mode: query ACM_DataQuality, file mode: CSV)
                     data_quality_path = tables_dir / "data_quality.csv" if 'tables_dir' in locals() else None
-                    data_quality_score = extract_data_quality_score(data_quality_path) if data_quality_path else 100.0
+                    data_quality_score = extract_data_quality_score(
+                        data_quality_path=data_quality_path,
+                        sql_client=sql_client if SQL_MODE else None,
+                        run_id=run_id,
+                        equip_id=equip_id
+                    )
                     
                     # Get kept columns list
                     kept_cols_str = ",".join(getattr(meta, "kept_cols", []))

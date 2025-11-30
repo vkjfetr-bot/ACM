@@ -208,56 +208,86 @@ def extract_run_metadata_from_scores(scores: pd.DataFrame, per_regime_enabled: b
     return metadata
 
 
-def extract_data_quality_score(data_quality_path) -> float:
+def extract_data_quality_score(data_quality_path=None, sql_client=None, run_id=None, equip_id=None) -> float:
     """
-    Extract overall data quality score from data_quality.csv.
+    Extract overall data quality score from data_quality.csv or ACM_DataQuality SQL table.
+    
+    OM-CSV-03: Updated to support SQL mode - queries ACM_DataQuality if sql_client provided,
+    falls back to CSV if data_quality_path exists.
     
     RM-COR-01: Validates expected schema columns and logs missing fields
     to help diagnose schema drift or incomplete data quality metrics.
     
     Args:
-        data_quality_path: Path to data_quality.csv file
+        data_quality_path: Path to data_quality.csv file (file mode)
+        sql_client: SQL client for database queries (SQL mode)
+        run_id: RunID to query from SQL (SQL mode)
+        equip_id: EquipID to query from SQL (SQL mode)
     
     Returns:
-        float: Quality score (0-100), or 100.0 if file not found
+        float: Quality score (0-100), or 100.0 if no data found
     """
     try:
         import pandas as pd
         from pathlib import Path
         
-        if not Path(data_quality_path).exists():
-            return 100.0
+        # OM-CSV-03: SQL mode - query ACM_DataQuality
+        if sql_client and run_id:
+            try:
+                query = """
+                    SELECT sensor, train_null_pct, score_null_pct
+                    FROM dbo.ACM_DataQuality
+                    WHERE RunID = ? AND EquipID = ? AND CheckName = 'data_quality'
+                """
+                with sql_client.cursor() as cur:
+                    cur.execute(query, (run_id, int(equip_id or 0)))
+                    rows = cur.fetchall()
+                
+                if rows:
+                    df = pd.DataFrame(rows, columns=["sensor", "train_null_pct", "score_null_pct"])
+                    # Average null rate across train and score
+                    avg_null_pct = (df["train_null_pct"].mean() + df["score_null_pct"].mean()) / 2.0
+                    quality_score = 100.0 * (1.0 - avg_null_pct / 100.0)
+                    Console.debug(f"[RUN_META] Data quality from SQL: avg_null={avg_null_pct:.2f}%, score={quality_score:.1f}")
+                    return float(quality_score)
+                else:
+                    Console.debug("[RUN_META] No data quality records found in SQL, defaulting to 100.0")
+                    return 100.0
+            except Exception as e:
+                Console.warn(f"[RUN_META] Failed to query ACM_DataQuality: {e}, falling back to CSV")
         
-        df = pd.read_csv(data_quality_path)
-        
-        # RM-COR-01: Schema validation - check for expected columns
-        expected_columns = {"sensor_name", "null_rate", "constant_rate", "outlier_rate"}
-        actual_columns = set(df.columns)
-        missing_columns = expected_columns - actual_columns
-        
-        if missing_columns:
-            Console.warn(
-                f"[RUN_META] Data quality schema incomplete: missing columns {sorted(missing_columns)}. "
-                f"Quality score coverage may be reduced."
-            )
-        
-        # Calculate quality score based on null rates
-        if "null_rate" in df.columns:
-            # 100 - (average null rate across sensors)
-            avg_null_rate = df["null_rate"].mean()
-            quality_score = 100.0 * (1.0 - avg_null_rate / 100.0)
+        # File mode: read from CSV
+        if data_quality_path and Path(data_quality_path).exists():
+            df = pd.read_csv(data_quality_path)
             
-            # Log additional quality metrics if available
-            if "constant_rate" in df.columns and "outlier_rate" in df.columns:
-                avg_constant = df["constant_rate"].mean()
-                avg_outlier = df["outlier_rate"].mean()
-                Console.debug(
-                    f"[RUN_META] Data quality metrics: null={avg_null_rate:.2f}%, "
-                    f"constant={avg_constant:.2f}%, outlier={avg_outlier:.2f}%"
+            # RM-COR-01: Schema validation - check for expected columns
+            expected_columns = {"sensor_name", "null_rate", "constant_rate", "outlier_rate"}
+            actual_columns = set(df.columns)
+            missing_columns = expected_columns - actual_columns
+            
+            if missing_columns:
+                Console.warn(
+                    f"[RUN_META] Data quality schema incomplete: missing columns {sorted(missing_columns)}. "
+                    f"Quality score coverage may be reduced."
                 )
             
-            return float(quality_score)
-        else:
+            # Calculate quality score based on null rates
+            if "null_rate" in df.columns:
+                # 100 - (average null rate across sensors)
+                avg_null_rate = df["null_rate"].mean()
+                quality_score = 100.0 * (1.0 - avg_null_rate / 100.0)
+                
+                # Log additional quality metrics if available
+                if "constant_rate" in df.columns and "outlier_rate" in df.columns:
+                    avg_constant = df["constant_rate"].mean()
+                    avg_outlier = df["outlier_rate"].mean()
+                    Console.debug(
+                        f"[RUN_META] Data quality metrics: null={avg_null_rate:.2f}%, "
+                        f"constant={avg_constant:.2f}%, outlier={avg_outlier:.2f}%"
+                    )
+                
+                return float(quality_score)
+            else:
             Console.warn(
                 "[RUN_META] Missing 'null_rate' column in data_quality.csv. "
                 "Defaulting to quality score 100.0 (optimistic fallback)."
