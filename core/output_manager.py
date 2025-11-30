@@ -41,7 +41,9 @@ from utils.logger import Console, Heartbeat
 
 # Optional import for reusing AR(1) forecast helper in per-sensor forecasting
 try:  # pragma: no cover - defensive import
-    from core.rul_estimator import RULConfig, _simple_ar1_forecast  # type: ignore
+    from core.rul_engine import RULConfig  # type: ignore
+    # Note: _simple_ar1_forecast was a helper from old rul_estimator - can be refactored later
+    _simple_ar1_forecast = None  # type: ignore  # TODO: migrate to new rul_engine if needed
 except Exception:  # pragma: no cover
     RULConfig = None  # type: ignore
     _simple_ar1_forecast = None  # type: ignore

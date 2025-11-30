@@ -49,8 +49,7 @@ from utils.logger import Console  # type: ignore
 from utils.timestamp_utils import normalize_timestamps, normalize_index
 # FOR-CODE-04: Use SqlClient protocol for type safety
 from core.sql_protocol import SqlClient
-from core import rul_estimator  # type: ignore
-from core import enhanced_rul_estimator  # type: ignore
+from core import rul_engine  # Unified RUL estimation engine
 from core.model_persistence import ForecastState, save_forecast_state, load_forecast_state  # type: ignore
 from datetime import datetime, timedelta
 import hashlib
@@ -488,62 +487,14 @@ def estimate_rul(
     """
     forecast_section = config.get("forecasting") or {}
     rul_section = config.get("rul") or {}
-    # FOR-COR-01: Define legacy_forecast_section (was undefined, causing NameError)
-    legacy_forecast_section = config.get("forecast") or {}  # Legacy config key
-
-    default_rul_cfg = rul_estimator.RULConfig()
-
-    def _coerce_float(value: Any, fallback: float) -> float:
-        try:
-            if value is None:
-                return fallback
-            return float(value)
-        except Exception:
-            return fallback
-
-    def _coerce_int(value: Any, fallback: int) -> int:
-        try:
-            if value is None:
-                return fallback
-            return int(value)
-        except Exception:
-            return fallback
-
-    health_threshold = _coerce_float(
-        forecast_section.get("failure_threshold")
-        or rul_section.get("target_health"),
-        default_rul_cfg.health_threshold,
-    )
-
-    min_points = _coerce_int(
-        rul_section.get("min_points"),
-        default_rul_cfg.min_points,
-    )
-
-    max_forecast_hours = _coerce_float(
-        forecast_section.get("max_forecast_hours")
-        or legacy_forecast_section.get("max_forecast_hours")
-        or rul_section.get("max_forecast_hours"),
-        default_rul_cfg.max_forecast_hours,
-    )
-
-    # Safety: do not allow non-positive horizons
-    if max_forecast_hours <= 0:
-        max_forecast_hours = default_rul_cfg.max_forecast_hours
-
-    rul_cfg = enhanced_rul_estimator.RULConfig(
-        health_threshold=health_threshold,
-        min_points=min_points,
-        max_forecast_hours=max_forecast_hours,
-    )
+    Console.info("[RUL] Using unified RUL engine")
     
-    Console.info("[RUL] Using ENHANCED RUL estimator (default)")
-    return enhanced_rul_estimator.estimate_rul_and_failure(
-        tables_dir=tables_dir,
+    # Call the new unified RUL engine
+    # It reads config internally from the provided config dict and manages all output tables
+    return rul_engine.run_rul(
         equip_id=equip_id,
         run_id=run_id,
-        health_threshold=health_threshold,
-        cfg=rul_cfg,
+        config=config,
         sql_client=sql_client,
         output_manager=output_manager
     )
@@ -923,15 +874,14 @@ def run_enhanced_forecasting_sql(
     else:
         # Fallback to single-run load for backward compatibility
         try:
-            df_health = rul_estimator._load_health_timeline(  # type: ignore[attr-defined]
-                Path("."),
+            df_health = rul_engine.load_health_timeline(
                 sql_client=sql_client,
                 equip_id=equip_id,
                 run_id=run_id,  # FOR-COR-02: Already validated as str
                 config=cfg,
             )
         except Exception as e:
-            Console.warn(f"[ENHANCED_FORECAST] Failed to load health timeline via rul_estimator: {e}")
+            Console.warn(f"[ENHANCED_FORECAST] Failed to load health timeline via rul_engine: {e}")
             df_health = None
 
     if df_health is None:
