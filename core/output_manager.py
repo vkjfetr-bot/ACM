@@ -2647,18 +2647,6 @@ class OutputManager:
                     except Exception as e:
                         Console.warn(f"[ANALYTICS] Failed to write data_quality to SQL: {e}")
                 
-                # OUT-20: Generate schema descriptor JSON after all tables are written
-                if not self.sql_only_mode:
-                    try:
-                        schema_descriptor = self._generate_schema_descriptor(tables_dir)
-                        schema_path = tables_dir / "schema_descriptor.json"
-                        with open(schema_path, 'w') as f:
-                            import json
-                            json.dump(schema_descriptor, f, indent=2)
-                        Console.info(f"[ANALYTICS] Generated schema descriptor: {schema_path}")
-                    except Exception as e:
-                        Console.warn(f"[ANALYTICS] Failed to generate schema descriptor: {e}")
-                    
                 Console.info(f"[ANALYTICS] Generated {table_count} comprehensive analytics tables")
                 Console.info(f"[ANALYTICS] Written {sql_count} tables to SQL database")
                 return {"csv_tables": table_count, "sql_tables": sql_count}
@@ -2715,64 +2703,6 @@ class OutputManager:
         except (AttributeError, ValueError, TypeError):
             return str(timestamp)
     
-    def _generate_schema_descriptor(self, tables_dir: Path) -> Dict[str, Any]:
-        """
-        Generate schema descriptor JSON for all CSV tables.
-        
-        OUT-20: Provides schema metadata for downstream consumers to validate
-        column names, types, formats, and nullability.
-        
-        Returns:
-            Dict with table_name -> schema info mapping
-        """
-        schema = {
-            "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "tables": {}
-        }
-        
-        # Scan all CSV files in tables directory
-        csv_files = sorted(tables_dir.glob("*.csv"))
-        
-        for csv_path in csv_files:
-            table_name = csv_path.stem
-            try:
-                # Read CSV and infer schema
-                df = pd.read_csv(csv_path, nrows=100)  # Sample first 100 rows for efficiency
-                
-                # Build column info
-                columns = []
-                dtypes = {}
-                nullable = []
-                
-                for col in df.columns:
-                    col_type = str(df[col].dtype)
-                    has_nulls = df[col].isna().any()
-                    
-                    columns.append(col)
-                    dtypes[col] = col_type
-                    nullable.append(col if has_nulls else None)
-                
-                # Remove None values from nullable list
-                nullable = [col for col in nullable if col is not None]
-                
-                # Detect datetime format if Timestamp column exists
-                datetime_format = None
-                if 'Timestamp' in columns or 'timestamp' in columns:
-                    datetime_format = '%Y-%m-%d %H:%M:%S'
-                
-                schema["tables"][table_name] = {
-                    "columns": columns,
-                    "dtypes": dtypes,
-                    "datetime_format": datetime_format,
-                    "nullable_columns": nullable,
-                    "row_count_sampled": len(df)
-                }
-                
-            except Exception as e:
-                Console.warn(f"[SCHEMA] Failed to read schema for {table_name}: {e}")
-                schema["tables"][table_name] = {"error": str(e)}
-        
-        return schema
     
     def _generate_episode_severity_mapping(self, episodes_df: pd.DataFrame) -> Dict[str, Any]:
         """
