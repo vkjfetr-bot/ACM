@@ -3771,48 +3771,11 @@ def main() -> None:
                 Console.info(f"[OUTPUTS] Generated {table_count} analytics tables via OutputManager")
                 Console.info(f"[OUTPUTS] Tables: {tables_dir}")
                 
-                # === FORECAST GENERATION (enabled by default; opt-out via output.enable_forecast=False) ===
-                output_cfg = (cfg.get("output", {}) or {})
-                forecast_enabled = bool(output_cfg.get("enable_forecast", True))
-                # FCST-15: Now works in SQL-only mode via artifact cache
-                if forecast_enabled:
-                    Console.info("[FORECAST] Generating forecast with uncertainty bands...")
-                    try:
-                        with T.section("outputs.forecast"):
-                            charts_dir = run_dir / "charts"
-                            if not SQL_MODE:
-                                charts_dir.mkdir(exist_ok=True)
-
-                            forecast_ctx = {
-                                "run_dir": run_dir,
-                                "plots_dir": charts_dir,
-                                "tables_dir": tables_dir,
-                                "config": cfg,
-                                "run_id": run_id,
-                                "equip_id": int(equip_id) if 'equip_id' in locals() else None,
-                                "output_manager": output_manager,  # FCST-15: Pass output_manager for artifact cache
-                            }
-                            # Import deprecated forecast module for legacy forecast.run() function
-                            from core import forecast_deprecated as forecast
-                            forecast_result = forecast.run(forecast_ctx)
-                            if "error" not in forecast_result:
-                                Console.info(
-                                    f"[FORECAST] Generated {len(forecast_result.get('tables', []))} "
-                                    f"forecast tables and {len(forecast_result.get('plots', []))} plots"
-                                )
-                                if forecast_result.get("metrics"):
-                                    metrics = forecast_result["metrics"]
-                                    Console.info(
-                                        "[FORECAST] "
-                                        f"Series: {metrics.get('series_used', 'N/A')}, "
-                                        f"phi={metrics.get('ar1_phi', 0):.3f}, "
-                                        f"Horizon: {metrics.get('horizon', 0)} "
-                                        f"({metrics.get('horizon_hours', 24)}h)"
-                                    )
-                            else:
-                                Console.warn(f"[FORECAST] {forecast_result['error']['message']}")
-                    except Exception as fe:
-                        Console.warn(f"[FORECAST] Forecast generation failed: {fe}")
+                # === FORECAST GENERATION ===
+                # FOR-CSV-01: Retired forecast_deprecated.run() in favor of comprehensive
+                # enhanced forecasting (RUL + failure hazard) later in pipeline.
+                # The legacy quick-forecast is replaced by the full enhanced forecasting
+                # module which runs after analytics generation and provides richer outputs.
 
                 # === RUL + SQL surfacing of forecast ===
                 try:
