@@ -1969,9 +1969,9 @@ class OutputManager:
         # Prepare episodes for output
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
         
-        # Individual episodes go to CSV only (not SQL)
-        # Summary data goes to ACM_Episodes via episodes_qc.csv
-        sql_table = None  # Changed from "ACM_Episodes"
+        # REG-CSV-01: Individual episodes now written to ACM_Episodes in SQL mode
+        # This enables SQL-based episode readers in regimes.py for regime analysis
+        sql_table = "ACM_Episodes" if enable_sql else None
         episode_columns = {
             'start_ts': 'StartTs', 
             'end_ts': 'EndTs',

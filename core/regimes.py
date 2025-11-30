@@ -882,11 +882,71 @@ def _to_datetime_mixed(s):
     except TypeError:
         return pd.to_datetime(s, errors="coerce")
 
-def _read_episodes_csv(p: Path) -> pd.DataFrame:
+def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None, run_id: Optional[str] = None) -> pd.DataFrame:
+    """
+    Read episodes from SQL (preferred) or CSV fallback.
+    
+    REG-CSV-01: SQL-backed episode reader for regime analysis.
+    Queries ACM_Episodes by EquipID and RunID when sql_client provided.
+    Falls back to CSV for file-mode/dev.
+    
+    Args:
+        p: Path to episodes.csv (used only if SQL unavailable)
+        sql_client: SQL client for querying ACM_Episodes (optional)
+        equip_id: Equipment ID for SQL query (optional)
+        run_id: Run ID for SQL query (optional)
+        
+    Returns:
+        DataFrame with columns: start_ts, end_ts (and other episode fields from SQL)
+    """
+    # REG-CSV-01: Try SQL first if client provided
+    if sql_client is not None and equip_id is not None and run_id is not None:
+        try:
+            query = """
+                SELECT StartTs, EndTs, DurationSeconds, DurationHours, 
+                       PeakFusedZ, AvgFusedZ, MinHealthIndex, PeakTimestamp,
+                       MaxRegimeLabel, Culprits, AlertMode, Severity, Status
+                FROM dbo.ACM_Episodes
+                WHERE EquipID = ? AND RunID = ?
+                ORDER BY StartTs ASC
+            """
+            cursor = sql_client.cursor()
+            cursor.execute(query, (int(equip_id), run_id))
+            rows = cursor.fetchall()
+            cursor.close()
+            
+            if rows:
+                # Build DataFrame from SQL results
+                df = pd.DataFrame([{
+                    'start_ts': _to_datetime_mixed(row[0]),
+                    'end_ts': _to_datetime_mixed(row[1]),
+                    'duration_s': row[2],
+                    'duration_hours': row[3],
+                    'peak_fused_z': row[4],
+                    'avg_fused_z': row[5],
+                    'min_health_index': row[6],
+                    'peak_timestamp': _to_datetime_mixed(row[7]),
+                    'regime': row[8],  # MaxRegimeLabel
+                    'culprits': row[9],
+                    'alert_mode': row[10],
+                    'severity': row[11],
+                    'status': row[12]
+                } for row in rows])
+                return df
+            else:
+                # No episodes found in SQL, return empty with correct schema
+                return pd.DataFrame(columns=["start_ts", "end_ts"])
+        except Exception as e:
+            # SQL query failed, fall back to CSV
+            from utils.logger import Console
+            Console.warn(f"[REGIME] SQL episode read failed, falling back to CSV: {e}")
+    
+    # REG-CSV-01: Fallback to CSV for file-mode/dev or if SQL unavailable
     safe_base = Path.cwd()
     try:
         resolved = p.resolve()
         if not resolved.is_relative_to(safe_base):
+            from utils.logger import Console
             Console.warn(f"[REGIME] Episode path outside workspace: {resolved}")
             return pd.DataFrame(columns=["start_ts", "end_ts"])
     except Exception:
@@ -898,7 +958,81 @@ def _read_episodes_csv(p: Path) -> pd.DataFrame:
     df["end_ts"]   = _to_datetime_mixed(df["end_ts"])
     return df
 
-def _read_scores_csv(p: Path) -> pd.DataFrame:
+def _read_scores_csv(p: Path, sql_client=None, equip_id: Optional[int] = None, run_id: Optional[str] = None, 
+                    start_ts: Optional[pd.Timestamp] = None, end_ts: Optional[pd.Timestamp] = None) -> pd.DataFrame:
+    """
+    Read scores from SQL (preferred) or CSV fallback.
+    
+    REG-CSV-01: SQL-backed scores reader for regime analysis.
+    Queries ACM_Scores_Wide by EquipID, RunID, and optional time range when sql_client provided.
+    Falls back to CSV for file-mode/dev.
+    
+    Args:
+        p: Path to scores.csv (used only if SQL unavailable)
+        sql_client: SQL client for querying ACM_Scores_Wide (optional)
+        equip_id: Equipment ID for SQL query (optional)
+        run_id: Run ID for SQL query (optional)
+        start_ts: Start timestamp for SQL query (optional, filters >= start_ts)
+        end_ts: End timestamp for SQL query (optional, filters <= end_ts)
+        
+    Returns:
+        DataFrame with timestamp index and score columns
+    """
+    # REG-CSV-01: Try SQL first if client provided
+    if sql_client is not None and equip_id is not None and run_id is not None:
+        try:
+            # Build query with optional time range filtering
+            query_parts = [
+                "SELECT * FROM dbo.ACM_Scores_Wide",
+                "WHERE EquipID = ? AND RunID = ?"
+            ]
+            params = [int(equip_id), run_id]
+            
+            if start_ts is not None:
+                query_parts.append("AND Timestamp >= ?")
+                params.append(start_ts)
+            if end_ts is not None:
+                query_parts.append("AND Timestamp <= ?")
+                params.append(end_ts)
+            
+            query_parts.append("ORDER BY Timestamp ASC")
+            query = " ".join(query_parts)
+            
+            cursor = sql_client.cursor()
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            cols = [desc[0] for desc in cursor.description]
+            cursor.close()
+            
+            if rows:
+                # Build DataFrame from SQL results
+                df = pd.DataFrame(rows, columns=cols)
+                
+                # Set timestamp as index
+                if 'Timestamp' in df.columns:
+                    df['Timestamp'] = _to_datetime_mixed(df['Timestamp'])
+                    df = df.set_index('Timestamp')
+                    
+                    # Drop RunID, EquipID columns (not needed for analysis)
+                    df = df.drop(columns=['RunID', 'EquipID'], errors='ignore')
+                    
+                    # Clean NaN timestamps
+                    df_clean = df[~df.index.isna()]
+                    dropped = len(df) - len(df_clean)
+                    if dropped > 0:
+                        Console.warn(f"[REGIME] Dropped {dropped} rows with invalid timestamps from SQL scores")
+                    return df_clean
+                else:
+                    Console.warn("[REGIME] SQL scores missing Timestamp column")
+                    return pd.DataFrame()
+            else:
+                # No scores found in SQL, return empty
+                return pd.DataFrame()
+        except Exception as e:
+            # SQL query failed, fall back to CSV
+            Console.warn(f"[REGIME] SQL scores read failed, falling back to CSV: {e}")
+    
+    # REG-CSV-01: Fallback to CSV for file-mode/dev or if SQL unavailable
     safe_base = Path.cwd()
     try:
         resolved = p.resolve()
@@ -1436,16 +1570,22 @@ def run(ctx: Any) -> Dict[str, Any]:
     """
     ep_path = ctx.run_dir / "episodes.csv"
     sc_path = ctx.run_dir / "scores.csv"
-    if not ep_path.exists():
+    
+    # REG-CSV-01: Extract SQL parameters from ctx if available
+    sql_client = getattr(ctx, "sql_client", None)
+    run_id = getattr(ctx, "run_id", None)
+    equip_id = getattr(ctx, "equip_id", None)
+    
+    # REG-CSV-01: Try SQL first, fall back to CSV
+    eps = _read_episodes_csv(ep_path, sql_client=sql_client, equip_id=equip_id, run_id=run_id)
+    
+    if eps.empty and not ep_path.exists():
         return {"module":"regime","tables":[], "plots":[], "metrics":{},
-                "error":{"type":"MissingFile","message":"episodes.csv not found"}}
-
-    eps = _read_episodes_csv(ep_path)
+                "error":{"type":"MissingFile","message":"episodes not found in SQL or CSV"}}
     tables: List[Dict[str, Any]] = []
     t_eps = ctx.tables_dir / "regime_episodes.csv"
     try:
-        run_id = getattr(ctx, "run_id", None)
-        equip_id = getattr(ctx, "equip_id", None)
+        # REG-CSV-01: run_id and equip_id already extracted above
         if OutputManager is not None:
             om = OutputManager(sql_client=None, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
             om.write_dataframe(eps, t_eps)
@@ -1597,8 +1737,9 @@ def run(ctx: Any) -> Dict[str, Any]:
             tables.append({"name":"regime_summary","path":str(summary_path)})
 
     plots = []
-    if sc_path.exists():
-        sc = _read_scores_csv(sc_path)
+    # REG-CSV-01: Try SQL scores first, fall back to CSV, allow plotting if data available
+    sc = _read_scores_csv(sc_path, sql_client=sql_client, equip_id=equip_id, run_id=run_id)
+    if not sc.empty:
         if "fused" in sc.columns and len(sc) > 0 and len(eps) > 0:
             fig = plt.figure(figsize=(12,4)); ax = plt.gca()
             sc["fused"].plot(ax=ax, linewidth=1)
