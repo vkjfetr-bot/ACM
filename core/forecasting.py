@@ -397,6 +397,8 @@ def estimate_rul(
     """
     forecast_section = config.get("forecasting") or {}
     rul_section = config.get("rul") or {}
+    # FOR-COR-01: Define legacy_forecast_section (was undefined, causing NameError)
+    legacy_forecast_section = config.get("forecast") or {}  # Legacy config key
 
     default_rul_cfg = rul_estimator.RULConfig()
 
