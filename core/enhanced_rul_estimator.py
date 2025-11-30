@@ -530,7 +530,7 @@ def estimate_rul_and_failure(
 
     # Load health timeline
     health_df = _load_health_timeline(
-        tables_dir, sql_client=sql_client, equip_id=equip_id, run_id=run_id, output_manager=output_manager
+        tables_dir, sql_client=sql_client, equip_id=equip_id, run_id=run_id, output_manager=output_manager, config=cfg
     )
 
     if health_df is None or "HealthIndex" not in health_df.columns:
@@ -757,16 +757,56 @@ def estimate_rul_and_failure(
     }
 
 
+def _apply_health_timeline_row_limit(
+    df: pd.DataFrame, config: Optional[Any] = None
+) -> pd.DataFrame:
+    """
+    FOR-PERF-04: Guard against unbounded health timeline size.
+    If row count exceeds max_health_timeline_rows config, downsample using
+    health_downsample_freq (default: 1min resample with mean aggregation).
+    Returns original or downsampled DataFrame.
+    """
+    if df is None or len(df) == 0:
+        return df
+    
+    # Default conservative limits
+    max_rows = 100000
+    downsample_freq = "1min"
+    
+    if config is not None:
+        max_rows = config.get("forecasting", {}).get("max_health_timeline_rows", max_rows)
+        downsample_freq = config.get("forecasting", {}).get("health_downsample_freq", downsample_freq)
+    
+    if len(df) <= max_rows:
+        return df
+    
+    # Downsample: resample to frequency with mean aggregation
+    Console.warn(
+        f"[RUL] Health timeline has {len(df)} rows (max={max_rows}). "
+        f"Downsampling to {downsample_freq} frequency."
+    )
+    
+    # Ensure Timestamp is index for resample
+    df_resampled = df.set_index("Timestamp").resample(downsample_freq).mean()
+    df_resampled = df_resampled.dropna().reset_index()
+    
+    Console.info(f"[RUL] Downsampled to {len(df_resampled)} rows")
+    return df_resampled
+
+
 def _load_health_timeline(
     tables_dir: Path,
     sql_client: Optional[Any] = None,
     equip_id: Optional[int] = None,
     run_id: Optional[str] = None,
     output_manager: Optional[Any] = None,
+    config: Optional[Any] = None,
 ) -> Optional[pd.DataFrame]:
     """
     Load health timeline for RUL estimation.
     Priority: artifact cache > SQL > CSV file.
+    Applies row limit guard: if loaded data exceeds max_health_timeline_rows,
+    downsamples to health_downsample_freq to prevent unbounded memory usage.
     """
     # Try artifact cache first (SQL-only mode)
     if output_manager is not None:
@@ -786,6 +826,8 @@ def _load_health_timeline(
             
             df = df.dropna(subset=[ts_col]).sort_values(ts_col)
             df = df.rename(columns={ts_col: "Timestamp"})
+            # FOR-PERF-04: Apply max row guard
+            df = _apply_health_timeline_row_limit(df, config)
             return df
 
     # Try SQL
@@ -812,6 +854,8 @@ def _load_health_timeline(
                 
                 df = df.dropna(subset=["Timestamp"]).sort_values("Timestamp")
                 Console.info(f"[RUL] Loaded {len(df)} health points from SQL")
+                # FOR-PERF-04: Apply max row guard
+                df = _apply_health_timeline_row_limit(df, config)
                 return df
         except Exception as e:
             Console.warn(f"[RUL] Failed to load from SQL: {e}")
@@ -837,6 +881,10 @@ def _load_health_timeline(
         
     df = df.sort_values(ts_col).dropna(subset=[ts_col])
     df = df.rename(columns={ts_col: "Timestamp"})
+    
+    # FOR-PERF-04: Apply max row guard with downsampling if needed
+    df = _apply_health_timeline_row_limit(df, config)
+    
     return df
 
 

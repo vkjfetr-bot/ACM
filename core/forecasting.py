@@ -863,6 +863,7 @@ def run_enhanced_forecasting_sql(
                 sql_client=sql_client,
                 equip_id=equip_id,
                 run_id=str(run_id),
+                config=cfg,
             )
         except Exception as e:
             Console.warn(f"[ENHANCED_FORECAST] Failed to load health timeline via rul_estimator: {e}")

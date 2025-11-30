@@ -216,6 +216,8 @@ EquipID,Category,ParamPath,ParamValue,ValueType,LastUpdated,UpdatedBy,ChangeReas
 0,forecasting,forecast_error_threshold,2.0,float,2025-11-20 00:00:00,SYSTEM,Relative forecast error threshold to trigger retrain,
 0,forecasting,hazard_failure_prob,0.6,float,2025-11-20 00:00:00,SYSTEM,Failure probability level defining projected failure time,
 0,forecasting,energy_fail_threshold,100.0,float,2025-11-20 00:00:00,SYSTEM,Cumulative anomaly energy threshold for failure path,
+0,forecasting,max_health_timeline_rows,100000,int,2025-12-01 00:00:00,SYSTEM,Maximum rows for health timeline; downsample if exceeded,
+0,forecasting,health_downsample_freq,1min,string,2025-12-01 00:00:00,SYSTEM,Resample frequency when health timeline exceeds max rows,
 0,maintenance,urgency_threshold,50.0,float,2025-11-15 00:00:00,SYSTEM,Urgency score threshold for required maintenance,
 0,maintenance,buffer_hours,24,int,2025-11-15 00:00:00,SYSTEM,Safety buffer for maintenance window,
 0,causation,min_detector_contribution,10.0,float,2025-11-15 00:00:00,SYSTEM,Minimum detector contribution % to report,
