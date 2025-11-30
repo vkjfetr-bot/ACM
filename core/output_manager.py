@@ -29,6 +29,14 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
+# FOR-DQ-02: Use centralized timestamp normalization
+from utils.timestamp_utils import (
+    normalize_timestamp_scalar,
+    normalize_timestamp_series,
+    normalize_timestamps,
+    normalize_index
+)
+
 from utils.logger import Console, Heartbeat
 
 # Optional import for reusing AR(1) forecast helper in per-sensor forecasting
@@ -178,43 +186,18 @@ def _future_cutoff_ts(cfg: Dict[str, Any]) -> pd.Timestamp:
 
 # Safe datetime cast helpers - local time policy
 def _to_naive(ts) -> Optional[pd.Timestamp]:
-    """Convert to timezone-naive local timestamp or None."""
-    if ts is None or (isinstance(ts, float) and pd.isna(ts)):
-        return None
-    try:
-        result = pd.to_datetime(ts, errors='coerce')
-        # Strip timezone info if present
-        if hasattr(result, 'tz') and result.tz is not None:
-            return result.tz_localize(None)
-        return result
-    except Exception:
-        return None
+    """
+    DEPRECATED: Use utils.timestamp_utils.normalize_timestamp_scalar instead.
+    Maintained for backward compatibility.
+    """
+    return normalize_timestamp_scalar(ts)
 
 def _to_naive_series(idx_or_series: Union[pd.Index, pd.Series]) -> pd.Series:
-    """Return a Series of tz-naive local timestamps from an index/series.
-    Always returns a Series indexed by the original labels (usually timestamps).
     """
-    s = pd.to_datetime(idx_or_series, errors='coerce')
-    if isinstance(s, pd.Series):
-        # Strip timezone if present
-        try:
-            if hasattr(s.dt, 'tz') and s.dt.tz is not None:
-                s2 = s.dt.tz_localize(None)
-            else:
-                s2 = s
-        except Exception:
-            s2 = s
-        return s2
-    else:
-        # DatetimeIndex → tz-naive and wrap as Series
-        try:
-            if hasattr(s, 'tz') and s.tz is not None:
-                idx = s.tz_localize(None)
-            else:
-                idx = s
-        except Exception:
-            idx = s
-        return pd.Series(idx, index=idx)
+    DEPRECATED: Use utils.timestamp_utils.normalize_timestamp_series instead.
+    Maintained for backward compatibility.
+    """
+    return normalize_timestamp_series(idx_or_series)
 
 # ==================== DATA LOADING SUPPORT ====================
 @dataclass

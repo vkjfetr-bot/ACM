@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 
 from utils.logger import Console  # type: ignore
+# FOR-DQ-02: Use centralized timestamp normalization
+from utils.timestamp_utils import normalize_timestamps, normalize_index
 from core import rul_estimator  # type: ignore
 from core import enhanced_rul_estimator  # type: ignore
 from core.model_persistence import ForecastState, save_forecast_state, load_forecast_state  # type: ignore
@@ -696,17 +698,11 @@ class AR1Detector:
 
 
 def _to_naive(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    df_out = df.copy()
-    for col in cols:
-        if col in df_out.columns:
-            df_out[col] = pd.to_datetime(df_out[col], errors="coerce")
-            try:
-                if df_out[col].dt.tz is not None:
-                    df_out[col] = df_out[col].dt.tz_localize(None)
-            except Exception:
-                # Some columns already naive or not datetime; ignore
-                pass
-    return df_out
+    """
+    DEPRECATED: Use utils.timestamp_utils.normalize_timestamps instead.
+    Maintained for backward compatibility.
+    """
+    return normalize_timestamps(df, cols=cols, inplace=False)
 
 
 def run_enhanced_forecasting_sql(
