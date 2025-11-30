@@ -1761,21 +1761,25 @@ def run(ctx: Any) -> Dict[str, Any]:
             tables.append({"name":"regime_summary","path":str(summary_path)})
 
     plots = []
-    # REG-CSV-01: Try SQL scores first, fall back to CSV, allow plotting if data available
-    sc = _read_scores_csv(sc_path, sql_client=sql_client, equip_id=equip_id, run_id=run_id)
-    if not sc.empty:
-        if "fused" in sc.columns and len(sc) > 0 and len(eps) > 0:
-            fig = plt.figure(figsize=(12,4)); ax = plt.gca()
-            sc["fused"].plot(ax=ax, linewidth=1)
-            for _, r in eps.iterrows():
-                if pd.notna(r["start_ts"]) and pd.notna(r["end_ts"]):
-                    ax.axvspan(r["start_ts"], r["end_ts"], alpha=0.15, color="red")
-            ax.set_title("Fused score with episode windows")
-            ax.set_xlabel("")
-            plt.tight_layout()
-            p = ctx.plots_dir / "regime_overlay.png"
-            fig.savefig(p, dpi=144, bbox_inches="tight"); plt.close(fig)
-            plots.append({"title":"Episodes overlay","path":str(p),"caption":"Shaded = episodes"})
+    # REG-CSV-03: Skip plotting in SQL-only production mode (for dev/debug only)
+    # Plotting now uses SQL-backed _read_scores_csv (from REG-CSV-01)
+    plots_dir = getattr(ctx, "plots_dir", None)
+    if plots_dir is not None:
+        # REG-CSV-01: Try SQL scores first, fall back to CSV, allow plotting if data available
+        sc = _read_scores_csv(sc_path, sql_client=sql_client, equip_id=equip_id, run_id=run_id)
+        if not sc.empty:
+            if "fused" in sc.columns and len(sc) > 0 and len(eps) > 0:
+                fig = plt.figure(figsize=(12,4)); ax = plt.gca()
+                sc["fused"].plot(ax=ax, linewidth=1)
+                for _, r in eps.iterrows():
+                    if pd.notna(r["start_ts"]) and pd.notna(r["end_ts"]):
+                        ax.axvspan(r["start_ts"], r["end_ts"], alpha=0.15, color="red")
+                ax.set_title("Fused score with episode windows")
+                ax.set_xlabel("")
+                plt.tight_layout()
+                p = plots_dir / "regime_overlay.png"
+                fig.savefig(p, dpi=144, bbox_inches="tight"); plt.close(fig)
+                plots.append({"title":"Episodes overlay","path":str(p),"caption":"Shaded = episodes"})
 
     # simple regime stability via episode durations
     eps = eps.sort_values(["start_ts","end_ts"])
