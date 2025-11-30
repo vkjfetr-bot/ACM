@@ -599,6 +599,19 @@ class AR1Detector:
         
         for c in X.columns:
             series = X[c].to_numpy(copy=False, dtype=np.float32)
+            
+            # Data quality check: skip columns with >50% NaN
+            nan_count = np.isnan(series).sum()
+            nan_fraction = nan_count / len(series) if len(series) > 0 else 0.0
+            
+            if nan_fraction > 0.5:
+                Console.warn(f"[AR1] Column '{c}': {nan_fraction*100:.1f}% NaN (>{50}%) - skipping column")
+                continue
+            
+            # Log high imputation rates for visibility
+            if nan_fraction > 0.2:
+                Console.warn(f"[AR1] Column '{c}': {nan_fraction*100:.1f}% NaN - imputing to mu (high imputation rate)")
+            
             ph, mu = self.phimap.get(c, (0.0, float(np.nanmean(series))))
             if not np.isfinite(mu):
                 mu = 0.0
