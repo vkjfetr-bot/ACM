@@ -9,6 +9,6 @@ $EquipArg = $Equip
 $ConfigArg = (Resolve-Path $Config).Path
 
 $reportFlag = ""
-if ($EnableReport) { $reportFlag = "--enable-report" }
+# --enable-report flag removed (no longer needed)
 
 python -m core.acm_main --equip $EquipArg --config $ConfigArg $reportFlag

@@ -1,21 +1,31 @@
 # ACM V8 Unified Backlog & Issue Tracker
 
-**Last Updated:** 2025-11-19  
-**Scope:** SQL Mode rollout, Forecast/RUL roadmap, charting/documentation polish, and technical debt items carried over from the prior To-Do documents.
+**Last Updated:** 2025-11-30  
+**Scope:** SQL Mode rollout, Forecast/RUL roadmap, charting/documentation polish, and technical debt items.
 
 ---
 
-## Recent Completions (2025-11-19)
+## Recent Completions (2025-11-30)
+
+### ✅ CONSOLIDATED: Unified RUL Engine (Commits: ea427f4, c2f061a, 8a6ea0d, af58fbb, ca2d39b, f759295, afab7cf, e6fe739, 1909e8a)
+- **Problem**: Two separate RUL estimator modules (rul_estimator.py, enhanced_rul_estimator.py) with ~80% code duplication, CSV/JSON fallbacks, inconsistent behavior
+- **Solution**: Unified into single SQL-only `core/rul_engine.py` module (~1,800 lines)
+- **Changes**:
+  - Created unified RUL engine with ensemble models (AR1 + Exponential + Weibull)
+  - SQL-only architecture: no CSV/JSON fallbacks, all I/O through SQL client
+  - Multipath RUL: trajectory + hazard + energy paths
+  - SQL-backed learning state: `ACM_RUL_LearningState` table replaces JSON files
+  - Public API: `run_rul()` single entry point
+  - Updated forecasting.py and output_manager.py to use new engine
+  - Deleted deprecated modules: rul_estimator.py, enhanced_rul_estimator.py, enhanced_forecasting_deprecated.py, forecast_deprecated.py
+  - Created validation script: scripts/validate_rul_engine.py
+- **Benefits**: Single source of truth, eliminated ~1,900 lines of duplicated code, consistent behavior, multi-instance safe
+- **Status**: ✅ COMPLETE - All structural tests passing
 
 ### ✅ CONSOLIDATED: Forecasting Module Consolidation (Commits: a7edfff, b1aacb1)
-- **Problem**: Three separate forecasting modules (forecast.py, enhanced_forecasting.py, enhanced_forecasting_sql.py) caused confusion
+- **Problem**: Three separate forecasting modules caused confusion
 - **Solution**: Unified into single `core/forecasting.py` module
-- **Changes**:
-  - Added AR1Detector class to forecasting.py
-  - Updated all imports in acm_main.py to use `from core import forecasting`
-  - Renamed old modules to `*_deprecated.py` for reference
-  - Created FORECASTING_CONSOLIDATION.md with migration guide
-- **Benefits**: Single import, clear entrypoint, reduced complexity (2410 lines → 528 lines active)
+- **Benefits**: Single import, clear entrypoint, reduced complexity
 - **Status**: ✅ COMPLETE - SQL-mode tested and working
 
 ---

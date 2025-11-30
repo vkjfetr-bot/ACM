@@ -2,6 +2,8 @@
 
 ACM V8 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, and flexible outputs so that engineers can understand what is changing, when it started, and which sensors or regimes are responsible.
 
+For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
+
 ## What ACM is
 
 ACM watches every asset through several analytical "heads" instead of a single anomaly score. Each head covers a different signal property - temporal self-consistency, covariance structure, clustering shifts, rare local patterns, and model residuals - so ACM can characterize oscillations, fouling, regime changes, sensor jumps, and broken cross-variable couplings. Drift tracking, adaptive tuning, and episode culprits make the outcomes actionable.
@@ -25,7 +27,8 @@ ACM watches every asset through several analytical "heads" instead of a single a
 3. **Run the pipeline**
    - `python -m core.acm_main --equip PROD_LINE_A`
    - Add `--train-csv data/baseline.csv` and `--score-csv data/batch.csv` to override the defaults defined in the config table.
-   - Artifacts land in `artifacts/PROD_LINE_A/run_<timestamp>/`. Cached detector bundles go into `models/` beneath that directory to speed up future scores.
+   - Artifacts written to SQL tables. Cached detector bundles in SQL (`ACM_ModelRegistry`) or `artifacts/{equip}/models/` for reuse.
+   - SQL mode is on by default; set env `ACM_FORCE_FILE_MODE=1` to force file mode.
 
 ## Batch mode details
 
@@ -45,8 +48,7 @@ The same command-line options work for both file and SQL batch runs because ACM 
 - `--train-csv` / `--baseline-csv`: path to historical data used for model fitting.
 - `--score-csv` / `--batch-csv`: path to the current window of observations to evaluate.
 - `--clear-cache`: delete any cached model for this equipment to force retraining.
-- `--log-level`, `--log-format`, `--log-module-level`, `--log-file`: control logging verbosity, formatter (`text` or `json`), per-module overrides, and log destination.
-- `--disable-sql-logging`: stop writing to the SQL run-log sink even if SQL mode is active.
+- Logging: `--log-level`, `--log-format`, `--log-module-level`, `--log-file`, `--disable-sql-logging`.
 
 ACM decides between file and SQL mode based on the configuration (see `core/sql_logger.py` and the `storage_backend` entry). SQL mode wraps data ingestion/output with `core.sql_client.SQLClient` and calls stored procedures instead of writing to CSV files.
 
@@ -58,6 +60,14 @@ ACM decides between file and SQL mode based on the configuration (see `core/sql_
 - **SQL-first and CSV-ready outputs:** `core.output_manager` writes CSVs, PNGs, SQL sink logs, run metadata, episode culprits, detector score bundles, and correlates results with Grafana dashboards in `grafana_dashboards/`.
 - **Operator-friendly diagnostics:** Episode culprits, drift-aware hysteresis, and `core.run_metadata_writer` provide health indices, fault signatures, and explanation cues for downstream visualization.
 - **Automation & testing helpers:** SQL scripts (`scripts/sql/*.sql`), population helpers (`scripts/sql/populate_acm_config.py`), and regression tests under `scripts/sql/test_*` cover dual-write and mode-loading scenarios.
+
+## Operator quick links
+
+- System handbook (full architecture, modules, configs, ops): `docs/ACM_SYSTEM_OVERVIEW.md`
+- SQL batch runner for historian-backed continuous mode: `scripts/sql_batch_runner.py`
+- Data/config sources: `configs/config_table.csv`, `configs/sql_connection.ini`
+- Artifacts and caches: `artifacts/{EQUIP}/run_<ts>/`, `artifacts/{EQUIP}/models/`
+- Grafana/dashboard assets: `grafana_dashboards/`
 
 ## Supporting directories
 

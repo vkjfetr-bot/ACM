@@ -1,6 +1,6 @@
 # ACM V8 Copilot Guide
 - **Mission focus**: autonomous condition monitoring pipeline that ingests CSV/SQL data, self-tunes detectors, and emits charts/tables under `artifacts/{EQUIP}/run_*`.
-- **Primary entrypoint**: `python -m core.acm_main --equip FD_FAN --enable-report` (see README §Development Workflow); most flows go through `run_pipeline()` in `core/acm_main.py`.
+- **Primary entrypoint**: `python -m core.acm_main --equip FD_FAN` (see README §Development Workflow); most flows go through `run_pipeline()` in `core/acm_main.py`.
 - **Modes**: file-mode reads `data/*.csv`; SQL-mode requires `configs/sql_connection.ini` and `core/sql_client.SQLClient`. Keep file-mode working before touching SQL paths.
 
 - NEVER EVER EVER USE EMOJIS IN COMMENTS OR IN CODE OR ANYWHERE EVER. THIS INCLUDES ALL THE TEST THAT YOU GENERATE.
@@ -17,7 +17,7 @@
 - **Rust bridge**: optional acceleration in `rust_bridge/`. Python must remain primary path (no hard dependency on Rust).
 
 - **Developer workflows**:
-	- Rapid run: `python -m core.acm_main --equip GAS_TURBINE --enable-report --artifact-root artifacts`.
+	- Rapid run: `python -m core.acm_main --equip GAS_TURBINE`.
 	- SQL smoke test: `python scripts/sql/verify_acm_connection.py` (requires local SQL Server, credentials via env vars or ini).
 	- Batch harness: `python scripts/analyze_latest_run.py --equip FD_FAN`; docs/BATCH_PROCESSING.md outline batch+replay procedures.
 	- PowerShell shortcut: `scripts/run_file_mode.ps1` wraps the baseline run (defaults to file mode).

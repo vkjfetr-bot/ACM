@@ -31,7 +31,7 @@ EquipID,Category,ParamPath,ParamValue,ValueType
 
 **Run ACM pipeline:**
 ```bash
-python -m core.acm_main --equip FD_FAN --enable-report
+python -m core.acm_main --equip FD_FAN
 ```
 
 The enhanced forecasting will run automatically after standard forecasting and RUL estimation.

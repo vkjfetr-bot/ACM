@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Unified RUL Engine** (2025-11-30):
+  - **Purpose**: Consolidate duplicated RUL estimation logic into single SQL-only module
+  - **Implementation**:
+    - Created `core/rul_engine.py` (~1,800 lines) replacing `rul_estimator.py` and `enhanced_rul_estimator.py`
+    - SQL-only architecture: no CSV/JSON fallbacks, all I/O through SQL client
+    - Ensemble models: AR1 + Exponential + Weibull with adaptive weighting
+    - Multipath RUL: trajectory + hazard + energy paths
+    - SQL-backed learning state: `ACM_RUL_LearningState` table replaces JSON files
+    - Public API: `run_rul()` single entry point for all RUL estimation
+    - Output builders for 6 SQL tables: HealthForecast_TS, FailureForecast_TS, RUL_TS, RUL_Summary, RUL_Attribution, MaintenanceRecommendation
+    - Updated `forecasting.py` and `output_manager.py` to use new engine
+    - Validation script: `scripts/validate_rul_engine.py` for structural testing
+  - **Removed**:
+    - `core/rul_estimator.py` (720 lines)
+    - `core/enhanced_rul_estimator.py` (1,175 lines)
+    - `core/enhanced_forecasting_deprecated.py`
+    - `core/forecast_deprecated.py`
+  - **Impact**:
+    - ✅ Eliminated ~1,900 lines of duplicated code
+    - ✅ Single source of truth for RUL estimation
+    - ✅ Consistent behavior across all equipment types
+    - ✅ Multi-instance safe (SQL-backed state instead of JSON files)
+    - ✅ Improved maintainability and testability
+
+### Added
 - **Continuous Learning Architecture** (2025-11-29):
   - **Purpose**: Enable ACM to continuously learn from accumulated data in batch mode, updating models and thresholds every batch
   - **Implementation**:
@@ -127,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     :r scripts/sql/patches/2025-11-19_migrate_runlog_runid_to_uniqueidentifier.sql
     :r scripts/sql/20_stored_procs.sql   -- (optional redeploy to ensure latest SP signature)
     ```
-    Then rerun: `python -m core.acm_main --equip FD_FAN --enable-report`.
+    Then rerun: `python -m core.acm_main --equip FD_FAN`.
   - **Impact**: Start-run succeeds; RunID values become stable GUIDs across related tables; resolves coldstart blocking error.
   - **Data Safety**: Legacy bigint RunIDs preserved in `RunID_bigint_backup` column for audit; can be dropped later (backlog item SQL-60).
   - **Follow-up**: Add runtime schema check to log actionable warning when detected mismatch instead of hard failure (BACKLOG: SQL-61).
