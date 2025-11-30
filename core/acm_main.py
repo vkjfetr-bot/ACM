@@ -661,7 +661,6 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
     tsql = """
     DECLARE @RunID UNIQUEIDENTIFIER, @WS DATETIME2(3), @WE DATETIME2(3), @EID INT;
     EXEC dbo.usp_ACM_StartRun
-        @EquipCode = NULL,
         @EquipID = ?,
         @Stage = ?,
         @TickMinutes = ?,
