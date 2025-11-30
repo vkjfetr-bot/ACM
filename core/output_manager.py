@@ -39,15 +39,6 @@ from utils.timestamp_utils import (
 
 from utils.logger import Console, Heartbeat
 
-# Optional import for reusing AR(1) forecast helper in per-sensor forecasting
-try:  # pragma: no cover - defensive import
-    from core.rul_engine import RULConfig  # type: ignore
-    # Note: _simple_ar1_forecast was a helper from old rul_estimator - can be refactored later
-    _simple_ar1_forecast = None  # type: ignore  # TODO: migrate to new rul_engine if needed
-except Exception:  # pragma: no cover
-    RULConfig = None  # type: ignore
-    _simple_ar1_forecast = None  # type: ignore
-
 # whitelist of SQL tables we will write to (defined early so class methods can use it)
 ALLOWED_TABLES = {
     'ACM_Scores_Wide','ACM_Episodes','ACM_EpisodesQC',
@@ -189,14 +180,14 @@ def _future_cutoff_ts(cfg: Dict[str, Any]) -> pd.Timestamp:
     return pd.Timestamp.now() + pd.Timedelta(minutes=minutes)
 
 # Safe datetime cast helpers - local time policy
-def _to_naive(ts) -> Optional[pd.Timestamp]:
+def normalize_timestamp_scalar(ts) -> Optional[pd.Timestamp]:
     """
     DEPRECATED: Use utils.timestamp_utils.normalize_timestamp_scalar instead.
     Maintained for backward compatibility.
     """
     return normalize_timestamp_scalar(ts)
 
-def _to_naive_series(idx_or_series: Union[pd.Index, pd.Series]) -> pd.Series:
+def normalize_timestamp_series(idx_or_series: Union[pd.Index, pd.Series]) -> pd.Series:
     """
     DEPRECATED: Use utils.timestamp_utils.normalize_timestamp_series instead.
     Maintained for backward compatibility.
@@ -361,7 +352,6 @@ def _health_index(fused_z):
 @dataclass
 class OutputBatch:
     """Represents a batch of outputs to be written together."""
-    json_files: Dict[Path, Dict[str, Any]] = field(default_factory=dict)
     sql_operations: List[Tuple[str, pd.DataFrame, Dict[str, Any]]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     # OUT-18: Batch tracking for flush triggers
@@ -1482,33 +1472,6 @@ class OutputManager:
         Console.info(f"[OUTPUT] SQL insert to {table_name}: {inserted} rows")
         return inserted
 
-    def write_json(self, data: Dict[str, Any], file_path: Path) -> None:
-        """Write JSON data to file."""
-        if self.sql_only_mode:
-            Console.info(f"[OUTPUT] SQL-only mode: Skipping JSON write for {file_path}")
-            return
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with file_path.open('w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        
-        self.stats['files_written'] += 1
-        Console.info(f"[OUTPUT] JSON written: {file_path}")
-    
-    def write_jsonl(self, records: List[Dict[str, Any]], file_path: Path) -> None:
-        """Write JSON Lines format."""
-        if self.sql_only_mode:
-            Console.info(f"[OUTPUT] SQL-only mode: Skipping JSONL write for {file_path}")
-            return
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with file_path.open('w', encoding='utf-8') as f:
-            for record in records:
-                f.write(json.dumps(record, ensure_ascii=False) + '\n')
-        
-        self.stats['files_written'] += 1
-        self.stats['total_rows'] += len(records)
-        Console.info(f"[OUTPUT] JSONL written: {file_path} ({len(records)} records)")
     
     # ==================== ARTIFACT CACHE METHODS (FCST-15) ====================
     
@@ -1820,9 +1783,9 @@ class OutputManager:
             row = dict(stats_data)
             # Normalize key variants
             if 'StartTime' not in row and 'WindowStartEntryDateTime' in row:
-                row['StartTime'] = _to_naive(row.get('WindowStartEntryDateTime'))
+                row['StartTime'] = normalize_timestamp_scalar(row.get('WindowStartEntryDateTime'))
             if 'EndTime' not in row and 'WindowEndEntryDateTime' in row:
-                row['EndTime'] = _to_naive(row.get('WindowEndEntryDateTime'))
+                row['EndTime'] = normalize_timestamp_scalar(row.get('WindowEndEntryDateTime'))
             row.setdefault('RunID', self.run_id)
             row.setdefault('EquipID', self.equip_id or 0)
             sql_df = pd.DataFrame([row])
@@ -2025,16 +1988,6 @@ class OutputManager:
     def flush(self) -> None:
         """OUT-18: Flush current batch without finalizing (for auto-flush triggers)."""
         with self._batch_lock:
-            # OM-CSV-02: Skip CSV writes in SQL-only mode
-            if self._current_batch.csv_files and not self.sql_only_mode:
-                self.batch_write_csvs(self._current_batch.csv_files)
-                self._current_batch.csv_files.clear()
-            
-            if self._current_batch.json_files and not self.sql_only_mode:
-                for path, data in self._current_batch.json_files.items():
-                    self.write_json(data, path)
-                self._current_batch.json_files.clear()
-            
             # Reset batch for next accumulation
             self._current_batch = OutputBatch()
     
@@ -2753,7 +2706,7 @@ class OutputManager:
             bins=[0, AnalyticsConstants.HEALTH_ALERT_THRESHOLD, AnalyticsConstants.HEALTH_WATCH_THRESHOLD, 100],
             labels=['ALERT', 'WATCH', 'GOOD']
         )
-        ts_values = _to_naive_series(scores_df.index).to_list()
+        ts_values = normalize_timestamp_series(scores_df.index).to_list()
         return pd.DataFrame({
             'Timestamp': ts_values,
             'HealthIndex': health_index.round(2).to_list(),
@@ -2764,7 +2717,7 @@ class OutputManager:
     def _generate_regime_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Generate regime timeline with confidence."""
         regimes = pd.to_numeric(scores_df['regime_label'], errors='coerce').astype('Int64')
-        ts_values = _to_naive_series(scores_df.index).to_list()
+        ts_values = normalize_timestamp_series(scores_df.index).to_list()
         return pd.DataFrame({
             'Timestamp': ts_values,
             'RegimeLabel': regimes.to_list(),
@@ -2810,7 +2763,7 @@ class OutputManager:
         idx_col = tmp.columns[0]
         long_df = tmp.melt(id_vars=idx_col, var_name='DetectorType', value_name='ContributionPct')
         long_df.rename(columns={idx_col: 'Timestamp'}, inplace=True)
-        long_df['Timestamp'] = _to_naive_series(long_df['Timestamp'])
+        long_df['Timestamp'] = normalize_timestamp_series(long_df['Timestamp'])
         long_df['ContributionPct'] = long_df['ContributionPct'].round(2)
         return long_df[['Timestamp', 'DetectorType', 'ContributionPct']]
     
@@ -2880,7 +2833,7 @@ class OutputManager:
                 from_zone = 'START'
 
             # Use tz-naive UTC datetime for SQL compatibility
-            ts_naive = _to_naive(idx)
+            ts_naive = normalize_timestamp_scalar(idx)
             to_zone = str(zones.loc[idx])
             # FusedZ at this timestamp if available
             fused_val = None
@@ -3162,8 +3115,8 @@ class OutputManager:
 
             records.append({
                 'SensorName': sensor,
-                'MaxTimestamp': _to_naive(max_idx),
-                'LatestTimestamp': _to_naive(latest_ts),
+                'MaxTimestamp': normalize_timestamp_scalar(max_idx),
+                'LatestTimestamp': normalize_timestamp_scalar(latest_ts),
                 'MaxAbsZ': round(max_abs, 4),
                 'MaxSignedZ': round(max_signed, 4),
                 'LatestAbsZ': round(latest_abs, 4),
@@ -3219,7 +3172,7 @@ class OutputManager:
                         value = sensor_values[sensor].reindex([ts]).iloc[-1]
                 level = 'ALERT' if abs_val >= alert_z else 'WARN'
                 records.append({
-                    'Timestamp': _to_naive(ts),
+                    'Timestamp': normalize_timestamp_scalar(ts),
                     'SensorName': sensor,
                     'Rank': rank,
                     'AbsZ': round(float(abs_val), 4),
@@ -3378,10 +3331,10 @@ class OutputManager:
                     in_segment = True
                 elif not is_peak and in_segment:
                     peak_events.append({
-                        'Timestamp': _to_naive(idx),
+                        'Timestamp': normalize_timestamp_scalar(idx),
                         'Value': round(drift_values.loc[segment_start:idx].max(), 4),
-                        'SegmentStart': _to_naive(segment_start),
-                        'SegmentEnd': _to_naive(idx)
+                        'SegmentStart': normalize_timestamp_scalar(segment_start),
+                        'SegmentEnd': normalize_timestamp_scalar(idx)
                     })
                     in_segment = False
             
@@ -3389,10 +3342,10 @@ class OutputManager:
             if in_segment:
                 final_idx = scores_df.index[-1]
                 peak_events.append({
-                    'Timestamp': _to_naive(final_idx),
+                    'Timestamp': normalize_timestamp_scalar(final_idx),
                     'Value': round(drift_values.loc[segment_start:final_idx].max(), 4),
-                    'SegmentStart': _to_naive(segment_start),
-                    'SegmentEnd': _to_naive(final_idx)
+                    'SegmentStart': normalize_timestamp_scalar(segment_start),
+                    'SegmentEnd': normalize_timestamp_scalar(final_idx)
                 })
         
         return pd.DataFrame(peak_events)
@@ -3402,7 +3355,7 @@ class OutputManager:
         drift_col = 'cusum_z' if 'cusum_z' in scores_df.columns else 'drift_z'
         if drift_col not in scores_df.columns:
             return pd.DataFrame({'Timestamp': [], 'DriftValue': []})
-        ts_values = _to_naive_series(scores_df.index).to_list()
+        ts_values = normalize_timestamp_series(scores_df.index).to_list()
         drift_values = scores_df[drift_col].round(4).to_list()
         return pd.DataFrame({
             'Timestamp': ts_values,
@@ -3420,7 +3373,7 @@ class OutputManager:
         
         for idx in scores_df[crossing_points].index:
             crossings.append({
-                'Timestamp': _to_naive(idx),
+                'Timestamp': normalize_timestamp_scalar(idx),
                 'DetectorType': 'fused',
                 'Threshold': threshold,
                 'ZScore': round(scores_df.loc[idx, 'fused'], 4),
@@ -3440,7 +3393,7 @@ class OutputManager:
                 'EquipID': [int(self.equip_id) if self.equip_id else 0],
                 'AlertZone': ['ALERT'],
                 'DurationHours': [round(duration_hours, 2)],
-                'StartTimestamp': [_to_naive(first_alert)],
+                'StartTimestamp': [normalize_timestamp_scalar(first_alert)],
                 'RecordCount': [len(scores_df[scores_df['fused'] > 2.0])]
             })
         else:
@@ -3579,7 +3532,7 @@ class OutputManager:
     def _generate_alert_age(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Generate alert age tracking using segmented zones."""
         # Build a tz-naive Python datetime list aligned to rows for robust math and ODBC
-        ts_series = _to_naive_series(scores_df.index)
+        ts_series = normalize_timestamp_series(scores_df.index)
         # Convert to Python datetime objects (fix pandas FutureWarning)
         ts_values = [ts.to_pydatetime() for ts in ts_series]
         hi = _health_index(scores_df['fused'])
@@ -4027,7 +3980,7 @@ class OutputManager:
         else:
             long['OMR_Z'] = np.nan
         # Normalize timestamp to naive string for CSV
-        long['Timestamp'] = _to_naive_series(long['Timestamp']).astype(str)
+        long['Timestamp'] = normalize_timestamp_series(long['Timestamp']).astype(str)
         long['ContributionScore'] = pd.to_numeric(long['ContributionScore'], errors='coerce').fillna(0.0)
         long['ContributionPct'] = pd.to_numeric(long['ContributionPct'], errors='coerce').fillna(0.0).clip(0.0, 100.0)
         return long[['Timestamp', 'Sensor', 'ContributionScore', 'ContributionPct', 'OMR_Z']]
@@ -4172,12 +4125,12 @@ class OutputManager:
             })
         out = pd.DataFrame(rows)
         if not out.empty:
-            out['BucketStart'] = _to_naive_series(out['BucketStart'])
+            out['BucketStart'] = normalize_timestamp_series(out['BucketStart'])
         return out
 
     def _generate_omr_timeline(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
         """Generate OMR timeline with weight annotation when available."""
-        ts_values = _to_naive_series(scores_df.index).to_list()
+        ts_values = normalize_timestamp_series(scores_df.index).to_list()
         omr_series = pd.to_numeric(scores_df.get('omr_z'), errors='coerce') if 'omr_z' in scores_df.columns else pd.Series(dtype=float)
         try:
             weights = (cfg.get('fusion', {}) or {}).get('weights', {})
