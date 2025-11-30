@@ -1437,26 +1437,28 @@ def main() -> None:
                         train = train.drop(columns=cols_to_drop)
                         score = score.drop(columns=cols_to_drop)
                         
-                        # FEAT-03: Log feature drops to feature_drop_log.csv (file-mode only)
-                        if not SQL_MODE:
-                            with T.section("features.log_drops"):
-                                try:
-                                    tables_dir = (run_dir / "tables")
-                                    tables_dir.mkdir(parents=True, exist_ok=True)
-                                    drop_records = []
-                                    for col in cols_to_drop:
-                                        reason = "all_NaN" if col in all_nan_cols else "low_variance"
-                                        med_val = col_meds.get(col)
-                                        std_val = feat_stds.get(col)
-                                        drop_records.append({
-                                            "feature": str(col),
-                                            "reason": reason,
-                                            "train_median": str(med_val) if not pd.isna(med_val) else "NaN",
-                                            "train_std": f"{std_val:.6f}" if not pd.isna(std_val) else "NaN",
-                                            "timestamp": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')  # CHART-04: Standard format
-                                        })
-                                    if drop_records:
+                        # ACM-CSV-02: Log feature drops (file-mode: CSV, SQL-mode: ACM_FeatureDropLog)
+                        with T.section("features.log_drops"):
+                            try:
+                                drop_records = []
+                                for col in cols_to_drop:
+                                    reason = "all_NaN" if col in all_nan_cols else "low_variance"
+                                    med_val = col_meds.get(col)
+                                    std_val = feat_stds.get(col)
+                                    drop_records.append({
+                                        "feature": str(col),
+                                        "reason": reason,
+                                        "train_median": str(med_val) if not pd.isna(med_val) else "NaN",
+                                        "train_std": f"{std_val:.6f}" if not pd.isna(std_val) else "NaN",
+                                    })
+                                
+                                if drop_records:
+                                    # File mode: CSV append
+                                    if not SQL_MODE:
+                                        tables_dir = (run_dir / "tables")
+                                        tables_dir.mkdir(parents=True, exist_ok=True)
                                         drop_df = pd.DataFrame(drop_records)
+                                        drop_df["timestamp"] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
                                         drop_log_path = tables_dir / "feature_drop_log.csv"
                                         # Append mode to preserve history across runs
                                         if drop_log_path.exists():
@@ -1464,8 +1466,34 @@ def main() -> None:
                                         else:
                                             drop_df.to_csv(drop_log_path, mode='w', header=True, index=False)
                                         Console.info(f"[FEAT] Logged {len(drop_records)} dropped features -> {drop_log_path}")
-                                except Exception as drop_e:
-                                    Console.warn(f"[FEAT] Feature drop logging failed: {drop_e}")
+                                    
+                                    # SQL mode: ACM_FeatureDropLog bulk insert
+                                    elif sql_client and SQL_MODE:
+                                        timestamp_now = pd.Timestamp.now()
+                                        insert_records = [
+                                            (
+                                                run_id,
+                                                int(equip_id),
+                                                rec["feature"],
+                                                rec["reason"],
+                                                rec["train_median"],
+                                                rec["train_std"],
+                                                timestamp_now
+                                            )
+                                            for rec in drop_records
+                                        ]
+                                        insert_sql = """
+                                            INSERT INTO dbo.ACM_FeatureDropLog 
+                                            (RunID, EquipID, FeatureName, Reason, TrainMedian, TrainStd, Timestamp)
+                                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                        """
+                                        with sql_client.cursor() as cur:
+                                            cur.fast_executemany = True
+                                            cur.executemany(insert_sql, insert_records)
+                                        sql_client.conn.commit()
+                                        Console.info(f"[FEAT] Logged {len(drop_records)} dropped features -> SQL:ACM_FeatureDropLog")
+                            except Exception as drop_e:
+                                Console.warn(f"[FEAT] Feature drop logging failed: {drop_e}")
                     
                     # Final guard: ensure we have at least one usable feature
                     if train.shape[1] == 0:
