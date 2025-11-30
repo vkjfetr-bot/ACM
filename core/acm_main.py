@@ -1942,64 +1942,98 @@ def main() -> None:
                 Console.warn(f"[ADAPTIVE] Mahalanobis producing {nan_rate:.1%} NaNs - model instability detected")
                 # Already flagged by condition number, just log
         
-        # 3. Write parameter adjustments to config if needed
+        # ACM-CSV-03: Write parameter adjustments (file-mode: CSV, SQL-mode: ACM_ConfigHistory)
         if param_adjustments:
             Console.info(f"[ADAPTIVE] Writing {len(param_adjustments)} parameter adjustment(s) to config...")
-            config_table_path = Path("configs/config_table.csv")
             
-            if config_table_path.exists():
-                try:
-                    df_config = pd.read_csv(config_table_path)
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    for adj in param_adjustments:
-                        param_parts = adj['param'].split('.')
-                        category = param_parts[0]
-                        param_path = '.'.join(param_parts[1:])
+            # File mode: Update config_table.csv
+            if not SQL_MODE:
+                config_table_path = Path("configs/config_table.csv")
+                
+                if config_table_path.exists():
+                    try:
+                        df_config = pd.read_csv(config_table_path)
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
-                        # Try to parse EquipID from equip string
-                        try:
-                            equip_id = int(equip)
-                        except ValueError:
-                            equip_id = 0
+                        for adj in param_adjustments:
+                            param_parts = adj['param'].split('.')
+                            category = param_parts[0]
+                            param_path = '.'.join(param_parts[1:])
+                            
+                            # Try to parse EquipID from equip string
+                            try:
+                                equip_id_int = int(equip)
+                            except ValueError:
+                                equip_id_int = 0
+                            
+                            # Check if row exists
+                            mask = (df_config["EquipID"] == equip_id_int) & \
+                                   (df_config["Category"] == category) & \
+                                   (df_config["ParamPath"] == param_path)
+                            
+                            if mask.any():
+                                # Update existing
+                                df_config.loc[mask, "ParamValue"] = adj['new']
+                                df_config.loc[mask, "UpdatedDateTime"] = timestamp
+                                df_config.loc[mask, "UpdatedBy"] = "ADAPTIVE_TUNING"
+                                df_config.loc[mask, "ChangeReason"] = adj['reason']
+                                Console.info(f"  Updated {adj['param']}: {adj['old']} -> {adj['new']}")
+                            else:
+                                # Insert new
+                                new_row = {
+                                    "EquipID": equip_id_int,
+                                    "Category": category,
+                                    "ParamPath": param_path,
+                                    "ParamValue": adj['new'],
+                                    "ValueType": "float",
+                                    "UpdatedDateTime": timestamp,
+                                    "UpdatedBy": "ADAPTIVE_TUNING",
+                                    "ChangeReason": adj['reason']
+                                }
+                                df_config = pd.concat([df_config, pd.DataFrame([new_row])], ignore_index=True)
+                                Console.info(f"  Inserted {adj['param']}: {adj['new']}")
                         
-                        # Check if row exists
-                        mask = (df_config["EquipID"] == equip_id) & \
-                               (df_config["Category"] == category) & \
-                               (df_config["ParamPath"] == param_path)
-                        
-                        if mask.any():
-                            # Update existing
-                            df_config.loc[mask, "ParamValue"] = adj['new']
-                            df_config.loc[mask, "UpdatedDateTime"] = timestamp
-                            df_config.loc[mask, "UpdatedBy"] = "ADAPTIVE_TUNING"
-                            df_config.loc[mask, "ChangeReason"] = adj['reason']
-                            Console.info(f" Updated {adj['param']}: {adj['old']} -> {adj['new']}")
-                        else:
-                            # Insert new
-                            new_row = {
-                                "EquipID": equip_id,
-                                "Category": category,
-                                "ParamPath": param_path,
-                                "ParamValue": adj['new'],
-                                "ValueType": "float",
-                                "UpdatedDateTime": timestamp,
-                                "UpdatedBy": "ADAPTIVE_TUNING",
-                                "ChangeReason": adj['reason']
-                            }
-                            df_config = pd.concat([df_config, pd.DataFrame([new_row])], ignore_index=True)
-                            Console.info(f"  Inserted {adj['param']}: {adj['new']}")
-                    
-                    # Save config (file-mode only)
-                    if not SQL_MODE:
                         df_config.to_csv(config_table_path, index=False)
                         Console.info(f"[ADAPTIVE] Config updated: {config_table_path}")
                         Console.info(f"[ADAPTIVE] Rerun ACM to apply new parameters (current run continues with old params)")
+                        
+                    except Exception as e:
+                        Console.error(f"[ADAPTIVE] Failed to update config CSV: {e}")
+                else:
+                    Console.warn(f"[ADAPTIVE] Config table not found at {config_table_path}, skipping parameter updates")
+            
+            # SQL mode: Write to ACM_ConfigHistory via config_history_writer
+            elif sql_client and SQL_MODE:
+                try:
+                    from core.config_history_writer import write_config_changes_bulk
                     
+                    # Transform param_adjustments to config_history format
+                    changes = [
+                        {
+                            "parameter_path": adj['param'],
+                            "old_value": adj['old'],
+                            "new_value": adj['new'],
+                            "change_reason": adj['reason']
+                        }
+                        for adj in param_adjustments
+                    ]
+                    
+                    success = write_config_changes_bulk(
+                        sql_client=sql_client,
+                        equip_id=int(equip_id),
+                        changes=changes,
+                        changed_by="ADAPTIVE_TUNING",
+                        run_id=run_id
+                    )
+                    
+                    if success:
+                        Console.info(f"[ADAPTIVE] Config changes written to SQL:ACM_ConfigHistory")
+                        Console.info(f"[ADAPTIVE] Rerun ACM to apply new parameters (current run continues with old params)")
+                    else:
+                        Console.warn(f"[ADAPTIVE] Failed to write config changes to SQL")
+                        
                 except Exception as e:
-                    Console.error(f"[ADAPTIVE] Failed to update config: {e}")
-            else:
-                Console.warn(f"[ADAPTIVE] Config table not found at {config_table_path}, skipping parameter updates")
+                    Console.error(f"[ADAPTIVE] Failed to update config SQL: {e}")
         else:
             Console.info("[ADAPTIVE] All model parameters within healthy ranges")
 
