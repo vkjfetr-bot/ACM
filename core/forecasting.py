@@ -71,10 +71,20 @@ DEFAULT_HAZARD_SMOOTHING_ALPHA = 0.3
 # ============================================================================
 
 def compute_data_hash(df: pd.DataFrame) -> str:
-    """Compute SHA256 hash of DataFrame for change detection."""
+    """
+    Compute SHA256 hash of DataFrame for change detection using binary serialization.
+    
+    More efficient than CSV serialization; maintains same semantics (hash changes when data changes).
+    """
     try:
-        data_str = df.to_csv(index=False)
-        return hashlib.sha256(data_str.encode()).hexdigest()[:16]
+        # Sort columns for determinism
+        sorted_cols = sorted(df.columns)
+        vals = df[sorted_cols].to_numpy(copy=False).tobytes()
+        
+        # Include schema to detect column type changes
+        schema = str(list(zip(sorted_cols, [str(dt) for dt in df[sorted_cols].dtypes]))).encode()
+        
+        return hashlib.sha256(vals + schema).hexdigest()[:16]
     except Exception:
         return ""
 
