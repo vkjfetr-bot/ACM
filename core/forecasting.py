@@ -71,6 +71,36 @@ DEFAULT_HAZARD_SMOOTHING_ALPHA = 0.3
 
 
 # ============================================================================
+# Type Consistency Helpers (FOR-COR-02)
+# ============================================================================
+
+def ensure_runid_str(run_id: Any) -> str:
+    """
+    FOR-COR-02: Ensure RunID is always a string.
+    Canonical type: RunID as string/UUID.
+    """
+    if run_id is None:
+        raise ValueError("RunID cannot be None")
+    return str(run_id)
+
+
+def ensure_equipid_int(equip_id: Any) -> int:
+    """
+    FOR-COR-02: Ensure EquipID is always an int.
+    Canonical type: EquipID as positive integer.
+    """
+    if equip_id is None:
+        raise ValueError("EquipID cannot be None")
+    try:
+        eid = int(equip_id)
+        if eid < 0:
+            raise ValueError(f"EquipID must be non-negative, got {eid}")
+        return eid
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid EquipID: {equip_id}") from e
+
+
+# ============================================================================
 # Continuous Forecasting Helpers (FORECAST-STATE-02, 03)
 # ============================================================================
 
@@ -746,11 +776,15 @@ def run_enhanced_forecasting_sql(
         Console.warn("[ENHANCED_FORECAST] SQL client not provided; skipping enhanced forecasting")
         return {"tables": {}, "metrics": {}}
 
-    if equip_id is None or equip_id < 0:
-        raise ValueError(f"[ENHANCED_FORECAST] Invalid equip_id: {equip_id}. Must be a positive integer.")
+    # FOR-COR-02: Ensure type consistency
+    try:
+        equip_id = ensure_equipid_int(equip_id)
+        run_id = ensure_runid_str(run_id)
+    except ValueError as e:
+        raise ValueError(f"[ENHANCED_FORECAST] Type validation failed: {e}") from e
     
-    if not run_id or not isinstance(run_id, str) or len(run_id.strip()) == 0:
-        raise ValueError(f"[ENHANCED_FORECAST] Invalid run_id: {run_id}. Must be a non-empty string.")
+    if len(run_id.strip()) == 0:
+        raise ValueError(f"[ENHANCED_FORECAST] run_id cannot be empty string")
     
     if config is None or not isinstance(config, dict):
         raise ValueError(f"[ENHANCED_FORECAST] Invalid config: must be a dictionary.")
@@ -860,7 +894,7 @@ def run_enhanced_forecasting_sql(
                 Path("."),
                 sql_client=sql_client,
                 equip_id=equip_id,
-                run_id=str(run_id),
+                run_id=run_id,  # FOR-COR-02: Already validated as str
                 config=cfg,
             )
         except Exception as e:
@@ -1032,16 +1066,16 @@ def run_enhanced_forecasting_sql(
     if not failure_probs_df.empty:
         fp_df = failure_probs_df.copy()
         fp_df.insert(0, "Timestamp", now_ts)
-        fp_df.insert(0, "EquipID", int(equip_id))
-        fp_df.insert(0, "RunID", str(run_id))
+        fp_df.insert(0, "EquipID", equip_id)  # FOR-COR-02: Already validated as int
+        fp_df.insert(0, "RunID", run_id)  # FOR-COR-02: Already validated as str
         tables["failure_probability_ts"] = fp_df
 
     if causation_df is not None and not causation_df.empty and maintenance_rec is not None:
         fc_df = causation_df.copy()
         fc_df.insert(0, "PredictedFailureTime", predicted_failure_time)
         fc_df.insert(1, "FailurePattern", ",".join(maintenance_rec.get("failure_patterns", [])))
-        fc_df.insert(0, "EquipID", int(equip_id))
-        fc_df.insert(0, "RunID", str(run_id))
+        fc_df.insert(0, "EquipID", equip_id)  # FOR-COR-02: Already validated as int
+        fc_df.insert(0, "RunID", run_id)  # FOR-COR-02: Already validated as str
         tables["failure_causation"] = fc_df
 
     if maintenance_rec is not None:
@@ -1064,15 +1098,15 @@ def run_enhanced_forecasting_sql(
                 }
             ]
         )
-        maint_df.insert(0, "EquipID", int(equip_id))
-        maint_df.insert(0, "RunID", str(run_id))
+        maint_df.insert(0, "EquipID", equip_id)  # FOR-COR-02: Already validated as int
+        maint_df.insert(0, "RunID", run_id)  # FOR-COR-02: Already validated as str
         tables["enhanced_maintenance_recommendation"] = maint_df
 
         actions = maintenance_rec.get("recommended_actions", [])
         if actions:
             actions_df = pd.DataFrame(actions)
-            actions_df.insert(0, "EquipID", int(equip_id))
-            actions_df.insert(0, "RunID", str(run_id))
+            actions_df.insert(0, "EquipID", equip_id)  # FOR-COR-02: Already validated as int
+            actions_df.insert(0, "RunID", run_id)  # FOR-COR-02: Already validated as str
             tables["recommended_actions"] = actions_df
 
         metrics = {
@@ -1142,9 +1176,9 @@ def run_enhanced_forecasting_sql(
             # Add to tables for persistence
             if not merged_horizon.empty:
                 merged_horizon_output = merged_horizon.copy()
-                # RunID is a UUID string; keep as text for SQL (avoid int() casting error)
-                merged_horizon_output["SourceRunID"] = str(run_id)
-                merged_horizon_output["EquipID"] = int(equip_id)
+                # FOR-COR-02: Types already validated at entry
+                merged_horizon_output["SourceRunID"] = run_id  # Already str
+                merged_horizon_output["EquipID"] = equip_id  # Already int
                 merged_horizon_output["MergeWeight"] = 1.0  # Can refine per-row
                 tables["health_forecast_continuous"] = merged_horizon_output
                 Console.info(f"[FORECAST] Merged forecast horizon: {len(merged_horizon)} points")
@@ -1174,9 +1208,9 @@ def run_enhanced_forecasting_sql(
                 if not hazard_df.empty:
                     # Use real future timestamps anchored to current batch time instead of epoch-based ints
                     hazard_df["Timestamp"] = pd.to_datetime([current_batch_time + pd.Timedelta(hours=i) for i in range(len(hazard_df))])
-                    # Add metadata columns with proper types
-                    hazard_df["RunID"] = str(run_id)  # Full UUID string
-                    hazard_df["EquipID"] = pd.Series([int(equip_id)] * len(hazard_df), dtype='int64')
+                    # FOR-COR-02: Add metadata columns with validated types
+                    hazard_df["RunID"] = run_id  # Already str
+                    hazard_df["EquipID"] = pd.Series([equip_id] * len(hazard_df), dtype='int64')  # Already int
                     # Pre-add CreatedAt so write_dataframe doesn't re-add it
                     hazard_df["CreatedAt"] = pd.Timestamp.now().tz_localize(None)
                     # Reorder columns to match SQL table schema
@@ -1202,7 +1236,7 @@ def run_enhanced_forecasting_sql(
             
             # Create updated ForecastState
             new_state = ForecastState(
-                equip_id=int(equip_id),
+                equip_id=equip_id,  # FOR-COR-02: Already validated as int
                 state_version=(prev_state.state_version + 1) if prev_state else 1,
                 model_type="AR1",  # Or extract from engine
                 model_params={},  # DEPRECATED: kept for schema compatibility, not used
