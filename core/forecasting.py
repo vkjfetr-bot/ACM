@@ -1232,6 +1232,29 @@ def run_enhanced_forecasting_sql(
             # Save updated state
             save_forecast_state(new_state, artifact_root, equip, sql_client)
             
+            # FORECAST-QUALITY: Write quality metrics to SQL
+            if forecast_quality and sql_client:
+                try:
+                    quality_df = pd.DataFrame([{
+                        "RunID": run_id,
+                        "EquipID": equip_id,
+                        "RMSE": forecast_quality.get("rmse", 0.0),
+                        "MAE": forecast_quality.get("mae", 0.0),
+                        "MAPE": forecast_quality.get("mape", 0.0),
+                        "R2Score": None,  # Not computed yet
+                        "DataHash": current_data_hash,
+                        "ModelVersion": new_state.state_version,
+                        "RetrainTriggered": 1 if retrain_needed else 0,
+                        "RetrainReason": retrain_reason if retrain_needed else None,
+                        "ForecastHorizonHours": lookback_hours,
+                        "SampleCount": len(df_health) if 'df_health' in locals() else None,
+                        "ComputeTimestamp": current_batch_time,
+                    }])
+                    tables["forecast_quality_metrics"] = quality_df
+                    Console.info(f"[FORECAST_QUALITY] RMSE={forecast_quality.get('rmse', 0):.2f}, MAE={forecast_quality.get('mae', 0):.2f}, MAPE={forecast_quality.get('mape', 0):.1f}%")
+                except Exception as qe:
+                    Console.warn(f"[FORECAST_QUALITY] Failed to write metrics: {qe}")
+            
             # Add state to return dict for caller
             metrics["forecast_state_version"] = new_state.state_version
             metrics["retrain_needed"] = retrain_needed
@@ -1284,6 +1307,7 @@ def run_and_persist_enhanced_forecasting(
         "failure_causation": "ACM_FailureCausation",
         "enhanced_maintenance_recommendation": "ACM_EnhancedMaintenanceRecommendation",
         "recommended_actions": "ACM_RecommendedActions",
+        "forecast_quality_metrics": "ACM_Forecast_QualityMetrics",  # FORECAST-QUALITY integration
     }
     ef_csv_map = {
         "health_forecast_continuous": "health_forecast_continuous.csv",
@@ -1292,6 +1316,7 @@ def run_and_persist_enhanced_forecasting(
         "failure_causation": "failure_causation.csv",
         "enhanced_maintenance_recommendation": "enhanced_maintenance_recommendation.csv",
         "recommended_actions": "recommended_actions.csv",
+        "forecast_quality_metrics": "forecast_quality_metrics.csv",
     }
     timestamp_columns = {
         "health_forecast_continuous": ["Timestamp"],

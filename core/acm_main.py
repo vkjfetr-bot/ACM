@@ -1923,6 +1923,32 @@ def main() -> None:
                 with T.section("fit.omr"):
                     omr_cfg = (cfg.get("models", {}).get("omr", {}) or {})
                     omr_detector = OMRDetector(cfg=omr_cfg).fit(train)
+                    
+                    # OMR-UPGRADE: Capture diagnostics and write to SQL
+                    if omr_detector._is_fitted and sql_client:
+                        try:
+                            omr_diagnostics = omr_detector.get_diagnostics()
+                            if omr_diagnostics.get("fitted"):
+                                diag_df = pd.DataFrame([{
+                                    "RunID": run_id,
+                                    "EquipID": equip_id,
+                                    "ModelType": omr_diagnostics["model_type"],
+                                    "NComponents": omr_diagnostics["n_components"],
+                                    "TrainSamples": omr_diagnostics["n_samples"],
+                                    "TrainFeatures": omr_diagnostics["n_features"],
+                                    "TrainResidualStd": omr_diagnostics["train_residual_std"],
+                                    "CalibrationStatus": "VALID",  # Will be updated after scoring
+                                    "FitTimestamp": pd.Timestamp.now()
+                                }])
+                                output_manager.write_dataframe(
+                                    diag_df,
+                                    run_dir / "tables" / "omr_diagnostics.csv",
+                                    sql_table="ACM_OMR_Diagnostics",
+                                    add_created_at=True
+                                )
+                                Console.info(f"[OMR] Diagnostics written: {omr_diagnostics['model_type'].upper()} model with {omr_diagnostics['n_samples']} samples")
+                        except Exception as e:
+                            Console.warn(f"[OMR] Failed to write diagnostics: {e}")
             hb.stop()
 
         # Validate required detectors are present (skip disabled ones)

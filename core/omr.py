@@ -1,4 +1,4 @@
-# models/omr.py
+# core/omr.py
 """
 Overall Model Residual (OMR) - Multivariate health indicator.
 
@@ -14,8 +14,9 @@ Key features:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple, List, Literal
+from enum import Enum
 
 import numpy as np
 import pandas as pd
@@ -25,16 +26,26 @@ from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
 
+class ModelType(str, Enum):
+    """Supported model types for OMR."""
+    PLS = "pls"
+    LINEAR = "linear"
+    PCA = "pca"
+    AUTO = "auto"
+
+
 @dataclass
 class OMRModel:
     """Container for trained OMR model and metadata."""
     model: Any  # PLSRegression, Ridge, or PCA (None when using stored linear ensemble)
     scaler: StandardScaler
     model_type: str  # "pls", "linear", "pca"
-    feature_names: list[str]
+    feature_names: List[str]
     train_residual_std: float  # For z-score normalization
     n_components: int  # Number of latent components (PLS/PCA)
     linear_models: Optional[List[Dict[str, Any]]] = None  # Stored ridge sub-models for linear mode
+    train_samples: int = 0  # Track training sample count
+    train_features: int = 0  # Track training feature count
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize for persistence."""
@@ -58,6 +69,8 @@ class OMRModel:
             "n_components": self.n_components,
             "model_bytes": model_bytes.read(),
             "scaler_bytes": scaler_bytes.read(),
+            "train_samples": self.train_samples,
+            "train_features": self.train_features,
         }
         if self.linear_models is not None:
             payload["linear_models"] = [
@@ -88,6 +101,13 @@ class OMRDetector:
     - PCA: Best for dimensionality reduction, captures variance
     """
     
+    # Constants
+    MIN_RESIDUAL_STD = 1e-6  # Prevent division by zero
+    MAX_Z_SCORE = 10.0  # Clip extreme z-scores
+    DEFAULT_N_COMPONENTS = 5
+    DEFAULT_ALPHA = 1.0
+    DEFAULT_MIN_SAMPLES = 100
+    
     def __init__(self, cfg: Optional[Dict[str, Any]] = None):
         """
         Initialize OMR detector.
@@ -99,12 +119,15 @@ class OMRDetector:
         omr_cfg = self.cfg.get("omr", {})
         
         # Model selection
-        self.model_type = omr_cfg.get("model_type", "auto")  # "pls", "linear", "pca", "auto"
-        self.n_components = int(omr_cfg.get("n_components", 5))  # Latent components
-        self.alpha = float(omr_cfg.get("alpha", 1.0))  # Ridge regularization
+        self.model_type = omr_cfg.get("model_type", "auto")
+        self.n_components = int(omr_cfg.get("n_components", self.DEFAULT_N_COMPONENTS))
+        self.alpha = float(omr_cfg.get("alpha", self.DEFAULT_ALPHA))
         
         # Minimum samples for training
-        self.min_samples = int(omr_cfg.get("min_samples", 100))
+        self.min_samples = int(omr_cfg.get("min_samples", self.DEFAULT_MIN_SAMPLES))
+        
+        # Z-score clipping (configurable)
+        self.max_z_score = float(omr_cfg.get("max_z_score", self.MAX_Z_SCORE))
         
         self._is_fitted = False
         self.model: Optional[OMRModel] = None
@@ -126,13 +149,126 @@ class OMRDetector:
         # Decision tree for model selection
         if n_features > n_samples:
             # More features than samples - use PCA for dimensionality reduction
-            return "pca"
+            return ModelType.PCA.value
         elif n_samples > 1000 and n_features < 20:
             # Large samples, moderate features - linear is fast
-            return "linear"
+            return ModelType.LINEAR.value
         else:
             # Default: PLS works well for correlated sensor data
-            return "pls"
+            return ModelType.PLS.value
+    
+    def _validate_input(self, X: pd.DataFrame) -> Tuple[bool, Optional[str]]:
+        """
+        Validate input data.
+        
+        Args:
+            X: Input DataFrame
+            
+        Returns:
+            (is_valid, error_message)
+        """
+        if X.empty:
+            return False, "Empty input DataFrame"
+        
+        if X.shape[1] == 0:
+            return False, "No features in input DataFrame"
+        
+        # Check for all-NaN columns
+        all_nan_cols = X.columns[X.isna().all()].tolist()
+        if all_nan_cols:
+            return False, f"All-NaN columns detected: {all_nan_cols}"
+        
+        return True, None
+    
+    def _prepare_data(self, X: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
+        """
+        Prepare data for modeling (handle missing values).
+        
+        Args:
+            X: Input DataFrame
+            
+        Returns:
+            (cleaned_array, feature_names)
+        """
+        # Handle missing values with median imputation
+        X_clean = X.fillna(X.median())
+        
+        # For remaining NaNs (e.g., all-NaN columns), fill with 0
+        X_clean = X_clean.fillna(0)
+        
+        return X_clean.values, list(X.columns)
+    
+    def _compute_optimal_components(
+        self, 
+        n_samples: int, 
+        n_features: int,
+        model_type: str
+    ) -> int:
+        """
+        Compute optimal number of components based on data dimensions.
+        
+        Args:
+            n_samples: Number of samples
+            n_features: Number of features
+            model_type: Selected model type
+            
+        Returns:
+            Optimal number of components
+        """
+        if model_type not in {ModelType.PLS.value, ModelType.PCA.value}:
+            return 0  # Not applicable for linear models
+        
+        # Start with configured components
+        max_components = self.n_components
+        
+        # Constrain by data dimensions
+        max_components = min(max_components, n_features, n_samples - 1)
+        
+        # For PLS/PCA, need at least 2 features
+        if n_features > 1:
+            max_components = min(max_components, n_features - 1)
+        
+        # Ensure at least 1 component
+        return max(1, max_components)
+    
+    def _fit_pls_model(self, X_scaled: np.ndarray, n_components: int) -> Tuple[Any, np.ndarray]:
+        """Fit PLS model and return model + reconstructions."""
+        model = PLSRegression(n_components=n_components, scale=False)
+        model.fit(X_scaled, X_scaled)
+        X_recon = model.predict(X_scaled)
+        return model, X_recon
+    
+    def _fit_linear_model(self, X_scaled: np.ndarray, n_features: int) -> Tuple[None, np.ndarray, List[Dict[str, Any]]]:
+        """Fit linear ensemble model and return reconstructions + metadata."""
+        reconstructions = []
+        linear_models = []
+        col_indices = np.arange(n_features)
+        
+        for target_idx in range(n_features):
+            other_idx = np.delete(col_indices, target_idx)
+            X_others = X_scaled[:, other_idx]
+            y_target = X_scaled[:, target_idx]
+            
+            ridge = Ridge(alpha=self.alpha)
+            ridge.fit(X_others, y_target)
+            y_pred = ridge.predict(X_others)
+            
+            reconstructions.append(y_pred)
+            linear_models.append({
+                "indices": other_idx.astype(np.int32),
+                "coef": ridge.coef_.astype(np.float32),
+                "intercept": float(ridge.intercept_),
+            })
+        
+        X_recon = np.column_stack(reconstructions)
+        return None, X_recon, linear_models
+    
+    def _fit_pca_model(self, X_scaled: np.ndarray, n_components: int) -> Tuple[Any, np.ndarray]:
+        """Fit PCA model and return model + reconstructions."""
+        model = PCA(n_components=n_components, random_state=42)
+        X_latent = model.fit_transform(X_scaled)
+        X_recon = model.inverse_transform(X_latent)
+        return model, X_recon
     
     def fit(self, X: pd.DataFrame, regime_labels: Optional[np.ndarray] = None) -> "OMRDetector":
         """
@@ -145,96 +281,71 @@ class OMRDetector:
         Returns:
             self (fitted)
         """
-        if X.empty:
-            from utils.logger import Console
-            Console.info("[OMR] Empty training frame, skipping fit")
+        from utils.logger import Console
+        
+        # Validate input
+        is_valid, error_msg = self._validate_input(X)
+        if not is_valid:
+            Console.info(f"[OMR] Skipping fit: {error_msg}")
             return self
         
         # Filter to healthy regime if labels provided
         if regime_labels is not None and len(regime_labels) == len(X):
-            # Assume regime 0 or lowest label is "healthy"
             healthy_regime = int(np.min(regime_labels))
             healthy_mask = regime_labels == healthy_regime
-            if np.sum(healthy_mask) >= self.min_samples:
+            n_healthy = int(np.sum(healthy_mask))
+            
+            if n_healthy >= self.min_samples:
                 X = X.iloc[healthy_mask]
-                from utils.logger import Console
-                Console.info(f"[OMR] Filtered to healthy regime {healthy_regime}: {np.sum(healthy_mask)} samples")
+                Console.info(f"[OMR] Filtered to healthy regime {healthy_regime}: {n_healthy} samples")
         
-        # Handle missing values
-        X_clean = X.fillna(X.median()).values
-        feature_names = list(X.columns)
+        # Prepare data
+        X_clean, feature_names = self._prepare_data(X)
         n_samples, n_features = X_clean.shape
-
+        
+        # Check minimum samples
+        min_required = max(20, min(self.min_samples // 2, n_features))
+        if n_samples < min_required:
+            Console.warn(f"[OMR] Insufficient samples ({n_samples}/{min_required}), skipping fit")
+            return self
+        
         if n_samples < self.min_samples:
-            # Allow training when dimensionality is high despite fewer samples, but guard tiny samples
-            if n_samples < max(20, min(self.min_samples // 2, n_features)):
-                from utils.logger import Console
-                Console.warn(f"[OMR] Insufficient samples ({n_samples}/{self.min_samples}), skipping fit")
-                return self
-            from utils.logger import Console
-            Console.info(f"[OMR] Proceeding with reduced sample count ({n_samples} < {self.min_samples}) for high-dimensional data")
+            Console.info(f"[OMR] Proceeding with reduced sample count ({n_samples} < {self.min_samples})")
         
         # Auto-select model type
         selected_model = self._select_model_type(n_samples, n_features)
+        Console.info(f"[OMR] Selected model type: {selected_model.upper()}")
         
         # Fit scaler
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_clean)
         
-        # Adjust n_components to data constraints
-        max_components = min(self.n_components, n_features, n_samples - 1)
-        if selected_model in {"pls", "pca"} and n_features > 1:
-            max_components = min(max_components, n_features - 1)
-        if max_components < 1:
-            max_components = 1
+        # Compute optimal components
+        n_components = self._compute_optimal_components(n_samples, n_features, selected_model)
         
         linear_models: Optional[List[Dict[str, Any]]] = None
-
+        model = None
+        
         try:
-            if selected_model == "pls":
-                # Partial Least Squares - models x = f(x) by finding latent components
-                model = PLSRegression(n_components=max_components, scale=False)
-                model.fit(X_scaled, X_scaled)  # Self-prediction
-                X_recon = model.predict(X_scaled)
+            if selected_model == ModelType.PLS.value:
+                model, X_recon = self._fit_pls_model(X_scaled, n_components)
                 
-            elif selected_model == "linear":
-                # Ridge regression - each sensor predicted from others
-                # Use mean prediction across all leave-one-out models
-                reconstructions = []
-                linear_models = []
-                col_indices = np.arange(n_features)
-                for target_idx in range(n_features):
-                    other_idx = np.delete(col_indices, target_idx)
-                    X_others = X_scaled[:, other_idx]
-                    y_target = X_scaled[:, target_idx]
-                    ridge = Ridge(alpha=self.alpha)
-                    ridge.fit(X_others, y_target)
-                    y_pred = ridge.predict(X_others)
-                    reconstructions.append(y_pred)
-                    linear_models.append({
-                        "indices": other_idx.astype(np.int32),
-                        "coef": ridge.coef_.astype(np.float32),
-                        "intercept": float(ridge.intercept_),
-                    })
-                X_recon = np.column_stack(reconstructions)
-                model = None  # Stored via linear_models metadata
+            elif selected_model == ModelType.LINEAR.value:
+                model, X_recon, linear_models = self._fit_linear_model(X_scaled, n_features)
                 
-            elif selected_model == "pca":
-                # PCA reconstruction - projects to low-dim and back
-                model = PCA(n_components=max_components, random_state=42)
-                X_latent = model.fit_transform(X_scaled)
-                X_recon = model.inverse_transform(X_latent)
+            elif selected_model == ModelType.PCA.value:
+                model, X_recon = self._fit_pca_model(X_scaled, n_components)
                 
             else:
                 raise ValueError(f"Unknown model type: {selected_model}")
             
             # Compute residuals
             residuals = X_scaled - X_recon
-            residual_norm = np.linalg.norm(residuals, axis=1)  # L2 norm per sample
+            residual_norm = np.linalg.norm(residuals, axis=1)
             train_residual_std = float(np.std(residual_norm))
             
-            # OMR-FIX-01: Enforce lower bound to prevent division by zero without muting anomalies
-            train_residual_std = max(train_residual_std, 1e-6)
+            # Enforce lower bound to prevent division by zero
+            train_residual_std = max(train_residual_std, self.MIN_RESIDUAL_STD)
             
             self.model = OMRModel(
                 model=model,
@@ -242,22 +353,61 @@ class OMRDetector:
                 model_type=selected_model,
                 feature_names=feature_names,
                 train_residual_std=train_residual_std,
-                n_components=max_components,
-                linear_models=linear_models if selected_model == "linear" else None
+                n_components=n_components,
+                linear_models=linear_models if selected_model == ModelType.LINEAR.value else None,
+                train_samples=n_samples,
+                train_features=n_features,
             )
             self._is_fitted = True
             
-            from utils.logger import Console
-            Console.info(f"[OMR] Fitted {selected_model.upper()} model: "
-                  f"{n_samples} samples, {n_features} features, "
-                  f"{max_components} components, std={train_residual_std:.3f}")
+            Console.info(
+                f"[OMR] Fitted {selected_model.upper()} model: "
+                f"{n_samples} samples, {n_features} features, "
+                f"{n_components} components, std={train_residual_std:.3f}"
+            )
             
         except Exception as e:
-            from utils.logger import Console
             Console.error(f"[OMR] Model fitting failed: {e}")
+            import traceback
+            Console.error(traceback.format_exc())
             return self
         
         return self
+    
+    def _reconstruct_data(self, X_scaled: np.ndarray) -> np.ndarray:
+        """
+        Reconstruct data using fitted model.
+        
+        Args:
+            X_scaled: Scaled input data
+            
+        Returns:
+            Reconstructed data
+        """
+        if self.model is None:
+            return X_scaled.copy()
+        
+        if self.model.model_type == ModelType.PLS.value:
+            return self.model.model.predict(X_scaled)
+            
+        elif self.model.model_type == ModelType.LINEAR.value:
+            if not self.model.linear_models:
+                return X_scaled.copy()
+            
+            reconstructions = []
+            for model_entry in self.model.linear_models:
+                other_idx = model_entry["indices"]
+                X_others = X_scaled[:, other_idx]
+                y_pred = X_others @ model_entry["coef"] + model_entry["intercept"]
+                reconstructions.append(y_pred)
+            
+            return np.column_stack(reconstructions) if reconstructions else X_scaled.copy()
+            
+        elif self.model.model_type == ModelType.PCA.value:
+            X_latent = self.model.model.transform(X_scaled)
+            return self.model.model.inverse_transform(X_latent)
+        
+        return X_scaled.copy()
     
     def score(
         self, 
@@ -278,45 +428,47 @@ class OMRDetector:
         if not self._is_fitted or self.model is None:
             zeros = np.zeros(len(X), dtype=np.float32)
             if return_contributions:
-                return zeros, pd.DataFrame(index=X.index, columns=X.columns)
+                empty_contrib = pd.DataFrame(
+                    np.zeros((len(X), len(X.columns))),
+                    index=X.index,
+                    columns=X.columns
+                )
+                return zeros, empty_contrib
             return zeros
         
-        # Handle missing values
-        X_clean = X.fillna(X.median()).values
+        # Validate and prepare data
+        is_valid, _ = self._validate_input(X)
+        if not is_valid:
+            zeros = np.zeros(len(X), dtype=np.float32)
+            if return_contributions:
+                empty_contrib = pd.DataFrame(
+                    np.zeros((len(X), len(X.columns))),
+                    index=X.index,
+                    columns=X.columns
+                )
+                return zeros, empty_contrib
+            return zeros
+        
+        X_clean, _ = self._prepare_data(X)
         
         # Scale
         X_scaled = self.model.scaler.transform(X_clean)
         
         # Reconstruct
         try:
-            if self.model.model_type == "pls":
-                X_recon = self.model.model.predict(X_scaled)
-                
-            elif self.model.model_type == "linear":
-                if not self.model.linear_models:
-                    X_recon = X_scaled.copy()
-                else:
-                    recon = []
-                    for model_entry in self.model.linear_models:
-                        other_idx = model_entry["indices"]
-                        X_others = X_scaled[:, other_idx]
-                        y_pred = X_others @ model_entry["coef"] + model_entry["intercept"]
-                        recon.append(y_pred)
-                    X_recon = np.column_stack(recon) if recon else X_scaled.copy()
-                
-            elif self.model.model_type == "pca":
-                X_latent = self.model.model.transform(X_scaled)
-                X_recon = self.model.model.inverse_transform(X_latent)
-                
-            else:
-                X_recon = X_scaled  # Fallback
+            X_recon = self._reconstruct_data(X_scaled)
                 
         except Exception as e:
             from utils.logger import Console
             Console.error(f"[OMR] Reconstruction failed: {e}")
             zeros = np.zeros(len(X), dtype=np.float32)
             if return_contributions:
-                return zeros, pd.DataFrame(index=X.index, columns=X.columns)
+                empty_contrib = pd.DataFrame(
+                    np.zeros((len(X), len(X.columns))),
+                    index=X.index,
+                    columns=X.columns
+                )
+                return zeros, empty_contrib
             return zeros
         
         # Compute residuals
@@ -331,8 +483,8 @@ class OMRDetector:
         # Normalize by training std to get z-score
         omr_z = residual_norm / self.model.train_residual_std
         
-        # OMR-FIX-01: Clip z-scores to ±10 to prevent extreme values in charts
-        omr_z = np.clip(omr_z, -10.0, 10.0)
+        # Clip z-scores to prevent extreme values
+        omr_z = np.clip(omr_z, -self.max_z_score, self.max_z_score)
         omr_z = omr_z.astype(np.float32)
         
         if return_contributions:
@@ -351,7 +503,7 @@ class OMRDetector:
         contributions: pd.DataFrame,
         timestamp: pd.Timestamp,
         top_n: int = 5
-    ) -> list[Tuple[str, float]]:
+    ) -> List[Tuple[str, float]]:
         """
         Get top N sensor contributors for a specific timestamp.
         
@@ -367,10 +519,29 @@ class OMRDetector:
             return []
         
         row = contributions.loc[timestamp]
-        # nlargest works on Series (row is already Series after .loc)
-        top_sensors = row.nlargest(n=top_n)  # type: ignore[call-arg]
+        top_sensors = row.nlargest(n=top_n)
         
         return [(str(sensor), float(value)) for sensor, value in top_sensors.items()]
+    
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """
+        Get diagnostic information about the fitted model.
+        
+        Returns:
+            Dictionary with model diagnostics
+        """
+        if not self._is_fitted or self.model is None:
+            return {"fitted": False}
+        
+        return {
+            "fitted": True,
+            "model_type": self.model.model_type,
+            "n_features": self.model.train_features,
+            "n_samples": self.model.train_samples,
+            "n_components": self.model.n_components,
+            "train_residual_std": self.model.train_residual_std,
+            "feature_names": self.model.feature_names,
+        }
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize for persistence."""
@@ -414,7 +585,9 @@ class OMRDetector:
                 feature_names=model_dict["feature_names"],
                 train_residual_std=model_dict["train_residual_std"],
                 n_components=model_dict["n_components"],
-                linear_models=linear_models
+                linear_models=linear_models,
+                train_samples=model_dict.get("train_samples", 0),
+                train_features=model_dict.get("train_features", 0),
             )
             inst._is_fitted = True
         return inst

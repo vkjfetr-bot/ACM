@@ -78,6 +78,7 @@ ALLOWED_TABLES = {
     'ACM_SensorNormalized_TS',
     'ACM_OMRContributions','ACM_OMRContributionsLong','ACM_FusionQuality','ACM_FusionQualityReport',
     'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
+    'ACM_OMR_Diagnostics','ACM_Forecast_QualityMetrics',
     'ACM_HealthDistributionOverTime','ACM_ChartGenerationLog',
     'ACM_FusionMetrics',
     # Continuous forecasting enhancements

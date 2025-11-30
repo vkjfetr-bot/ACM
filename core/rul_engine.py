@@ -1381,9 +1381,12 @@ def make_rul_summary(
         "Exp_Weight": weights.get("Exponential", 0.0),
         "Weibull_Weight": weights.get("Weibull", 0.0),
         "DataQuality": data_quality,
-        "RUL_Trajectory": rul_multipath.get("rul_trajectory_hours"),
-        "RUL_Hazard": rul_multipath.get("rul_hazard_hours"),
-        "RUL_Energy": rul_multipath.get("rul_energy_hours"),
+        # RUL-MULTIPATH: Match SQL column names from create_continuous_forecast_tables.sql
+        "RUL_Trajectory_Hours": rul_multipath.get("rul_trajectory_hours"),
+        "RUL_Hazard_Hours": rul_multipath.get("rul_hazard_hours"),
+        "RUL_Energy_Hours": rul_multipath.get("rul_energy_hours"),
+        "RUL_Final_Hours": rul_multipath["rul_final_hours"],  # Duplicate for explicit multipath tracking
+        "DominantPath": rul_multipath["dominant_path"],  # Add dominant path indicator
     }
     
     df = pd.DataFrame([summary])
