@@ -662,6 +662,11 @@ class OutputManager:
                 raise ValueError("[DATA] SQL mode requires equipment_name parameter")
             return self._load_data_from_sql(cfg, equipment_name, start_utc, end_utc)
         
+        # OM-CSV-01: Prevent CSV reads when OutputManager is configured for SQL-only mode
+        if self.sql_only_mode and not sql_mode:
+            raise ValueError("[DATA] OutputManager is in sql_only_mode but load_data called with sql_mode=False. "
+                           "CSV reads are not allowed. Use sql_mode=True or configure OutputManager with sql_only_mode=False.")
+        
         # CSV mode: Cold-start mode: If no training data, use first N% of score data for training
         cold_start_mode = False
         if not train_path and score_path:
