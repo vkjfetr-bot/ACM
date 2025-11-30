@@ -69,20 +69,25 @@ class ForecastState:
         equip_id: Equipment ID
         state_version: Incremental version number
         model_type: Forecasting model type (AR1, ARIMA, ETS)
-        model_params: Serializable model parameters (phi, mu, sigma for AR1)
-        residual_variance: Model residual variance for quality tracking
+        model_params: **DEPRECATED** - Kept for schema compatibility, always empty dict {}
+        residual_variance: **DEPRECATED** - Kept for schema compatibility, always 0.0
         last_forecast_horizon_json: JSON string of last forecast DataFrame
         hazard_baseline: EWMA smoothed hazard rate for probability continuity
         last_retrain_time: Timestamp of last full retrain
         training_data_hash: Hash of training window for change detection
         training_window_hours: Length of training window in hours
         forecast_quality: Dict with rmse, mae, mape metrics
+        
+    Note:
+        model_params and residual_variance are retained only for SQL schema compatibility
+        with ACM_ForecastState table. They are not populated or used in runtime logic.
+        Consider removing in future schema migration.
     """
     equip_id: int
     state_version: int
     model_type: str
-    model_params: Dict[str, Any]
-    residual_variance: float
+    model_params: Dict[str, Any]  # DEPRECATED: always {}
+    residual_variance: float  # DEPRECATED: always 0.0
     last_forecast_horizon_json: str  # JSON array of {Timestamp, ForecastHealth, CI_Lower, CI_Upper}
     hazard_baseline: float
     last_retrain_time: str  # ISO format datetime string

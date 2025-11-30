@@ -1119,8 +1119,8 @@ def run_enhanced_forecasting_sql(
                 equip_id=int(equip_id),
                 state_version=(prev_state.state_version + 1) if prev_state else 1,
                 model_type="AR1",  # Or extract from engine
-                model_params={},  # TODO: Extract from engine.forecaster
-                residual_variance=0.0,  # TODO: Compute from residuals
+                model_params={},  # DEPRECATED: kept for schema compatibility, not used
+                residual_variance=0.0,  # DEPRECATED: kept for schema compatibility, not used
                 last_forecast_horizon_json=ForecastState.serialize_forecast_horizon(merged_horizon),
                 hazard_baseline=new_hazard_baseline,
                 last_retrain_time=current_batch_time.isoformat() if retrain_needed else (
