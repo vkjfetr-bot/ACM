@@ -90,10 +90,13 @@ def should_retrain(
     Determine if full model retrain is needed.
     
     Checks:
-    1. Drift: Recent 5-point mean DriftValue > threshold
-    2. Energy spike: Anomaly energy P95 > threshold * median
-    3. Forecast quality: Current RMSE > threshold * baseline RMSE
-    4. Data change: Training data hash mismatch
+    1. State existence: No prior state triggers cold start retrain
+    2. Data change: Training data hash mismatch
+    3. Drift spike: Recent 5-point mean DriftValue > threshold
+    4. Anomaly energy spike: Recent P95 > threshold * median
+    
+    Note: Forecast quality (RMSE) is computed separately via compute_forecast_quality()
+    and should be checked explicitly by the caller if needed.
     
     Returns:
         (retrain_needed, reason)
