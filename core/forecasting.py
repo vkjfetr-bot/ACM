@@ -17,6 +17,23 @@ Timestamp Policy:
 All timestamps are treated as timezone-naive local time, consistent with the rest of the ACM platform.
 Inputs from SQL (ACM_HealthTimeline, ACM_Scores_Wide) are stripped of timezone info if present.
 Outputs are written as naive timestamps.
+
+Error Handling Convention (FOR-CODE-02):
+----------------------------------------
+1. Non-fatal data conditions (missing data, insufficient samples, etc.):
+   - Use Console.warn() to log the issue
+   - Provide safe fallback behavior (skip processing, return default values)
+   - Continue execution to allow partial results
+
+2. Configuration/validation errors (invalid parameters, schema violations):
+   - Use raise ValueError() with descriptive message
+   - Fail fast to prevent silent corruption
+   - Include context in error message for debugging
+
+3. SQL/database failures (connection issues, query errors):
+   - Use Console.error() to log critical issues
+   - Propagate exception to caller (let acm_main handle)
+   - Or mark run as failed if appropriate
 """
 
 from __future__ import annotations
@@ -158,7 +175,7 @@ def should_retrain(
     if prev_state.training_data_hash != current_data_hash:
         return True, f"Training data changed (hash mismatch)"
     
-    # Check drift
+    # Check drift (FOR-CODE-02: Non-fatal SQL query - warn and continue)
     try:
         cur = sql_client.cursor()
         cur.execute("""
@@ -178,9 +195,10 @@ def should_retrain(
             if avg_drift > drift_threshold:
                 return True, f"Drift spike detected (avg={avg_drift:.2f} > {drift_threshold})"
     except Exception as e:
+        # FOR-CODE-02: Non-fatal data condition - log and continue without drift check
         Console.warn(f"[FORECAST] Failed to check drift: {e}")
     
-    # Check anomaly energy spike
+    # Check anomaly energy spike (FOR-CODE-02: Non-fatal SQL query - warn and continue)
     try:
         cur = sql_client.cursor()
         cur.execute("""
@@ -205,6 +223,7 @@ def should_retrain(
             if median > 0 and p95 > energy_threshold * median:
                 return True, f"Anomaly energy spike (P95={p95:.2f} > {energy_threshold}x median)"
     except Exception as e:
+        # FOR-CODE-02: Non-fatal data condition - log and continue without energy check
         Console.warn(f"[FORECAST] Failed to check anomaly energy: {e}")
     
     # All checks passed - incremental update sufficient
@@ -232,6 +251,7 @@ def compute_forecast_quality(
     if prev_state is None or prev_state.last_forecast_horizon_json is None:
         return {"rmse": 0.0, "mae": 0.0, "mape": 0.0}
     
+    # FOR-CODE-02: Non-fatal metric computation - warn and return defaults on failure
     try:
         # Deserialize previous forecast horizon
         prev_horizon = prev_state.get_last_forecast_horizon()
@@ -301,6 +321,7 @@ def compute_forecast_quality(
         return {"rmse": rmse, "mae": mae, "mape": mape}
         
     except Exception as e:
+        # FOR-CODE-02: Non-fatal data condition - log and return safe defaults
         Console.warn(f"[FORECAST_QUALITY] Failed to compute metrics: {e}")
         return {"rmse": 0.0, "mae": 0.0, "mape": 0.0}
 
@@ -771,12 +792,12 @@ def run_enhanced_forecasting_sql(
           "forecast_state": ForecastState  # Updated state for persistence
         }
     """
-    # FOR-DQ-01: Input validation
+    # FOR-DQ-01: Input validation (FOR-CODE-02: Configuration error - log and skip)
     if sql_client is None:
         Console.warn("[ENHANCED_FORECAST] SQL client not provided; skipping enhanced forecasting")
         return {"tables": {}, "metrics": {}}
 
-    # FOR-COR-02: Ensure type consistency
+    # FOR-COR-02: Ensure type consistency (FOR-CODE-02: Configuration error - raise ValueError)
     try:
         equip_id = ensure_equipid_int(equip_id)
         run_id = ensure_runid_str(run_id)
@@ -789,6 +810,7 @@ def run_enhanced_forecasting_sql(
     if config is None or not isinstance(config, dict):
         raise ValueError(f"[ENHANCED_FORECAST] Invalid config: must be a dictionary.")
 
+    # FOR-CODE-02: Configuration issue - warn and skip gracefully
     if EnhancedForecastingEngine is None:
         Console.warn("[ENHANCED_FORECAST] EnhancedForecastingEngine not available; skipping")
         return {"tables": {}, "metrics": {}}
@@ -809,6 +831,7 @@ def run_enhanced_forecasting_sql(
             if prev_state:
                 Console.info(f"[FORECAST] Loaded state v{prev_state.state_version}, last retrain: {prev_state.last_retrain_time}")
         except Exception as e:
+            # FOR-CODE-02: Non-fatal state load failure - log and continue without previous state
             Console.warn(f"[FORECAST] Failed to load previous state: {e}")
     
     # Use provided batch time or fall back to now() (for real-time scenarios)
@@ -855,8 +878,8 @@ def run_enhanced_forecasting_sql(
             sql_client.conn.commit()
         Console.info(f"[ENHANCED_FORECAST] Cleaned old forecast data for EquipID={equip_id} (kept {keep_runs} RunIDs)")
     except Exception as e:
+        # FOR-CODE-02: Non-fatal data condition - log and continue with forecasting
         Console.warn(f"[ENHANCED_FORECAST] Failed to cleanup old forecasts: {e}")
-        # Non-fatal, continue with forecasting
 
     # --- Load health timeline with sliding window (FORECAST-STATE-02) ---
     lookback_hours = int(forecast_cfg.get("training_window_hours", 72))
@@ -996,6 +1019,7 @@ def run_enhanced_forecasting_sql(
             )
             Console.info(f"[FORECAST] Retrain decision: {retrain_needed} - {retrain_reason}")
         except Exception as e:
+            # FOR-CODE-02: Non-fatal check failure - log and default to safe retrain
             Console.warn(f"[FORECAST] Retrain check failed: {e}, defaulting to full retrain")
             retrain_needed = True
             retrain_reason = f"Retrain check error: {e}"
@@ -1197,6 +1221,7 @@ def run_enhanced_forecasting_sql(
                 )
                 
                 # FOR-DQ-03: Assert hazard/forecast length match to prevent data corruption
+                # FOR-CODE-02: Non-fatal data corruption - log error and apply correction
                 if not hazard_df.empty and len(hazard_df) != len(fp_series):
                     Console.error(
                         f"[FORECAST] Hazard/forecast length mismatch: hazard={len(hazard_df)}, "
@@ -1260,6 +1285,7 @@ def run_enhanced_forecasting_sql(
             metrics["retrain_reason"] = retrain_reason
             
         except Exception as e:
+            # FOR-CODE-02: Non-fatal enhancement failure - log and continue with basic results
             Console.warn(f"[FORECAST] Failed to apply continuous forecasting enhancements: {e}")
             import traceback
             Console.debug(f"[FORECAST] Traceback: {traceback.format_exc()}")
