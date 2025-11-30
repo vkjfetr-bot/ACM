@@ -1,32 +1,54 @@
-# ACM V8 Copilot Guide
-- **Mission focus**: autonomous condition monitoring pipeline that ingests CSV/SQL data, self-tunes detectors, and emits charts/tables under `artifacts/{EQUIP}/run_*`.
-- **Primary entrypoint**: `python -m core.acm_main --equip FD_FAN` (see README §Development Workflow); most flows go through `run_pipeline()` in `core/acm_main.py`.
-- **Modes**: file-mode reads `data/*.csv`; SQL-mode requires `configs/sql_connection.ini` and `core/sql_client.SQLClient`. Keep file-mode working before touching SQL paths.
+# ACM Copilot Guardrails (current)
 
-- NEVER EVER EVER USE EMOJIS IN COMMENTS OR IN CODE OR ANYWHERE EVER. THIS INCLUDES ALL THE TEST THAT YOU GENERATE.
+- **Mission**: keep the ACM pipeline healthy (CSV/SQL ingest, detector fusion, analytics outputs under `artifacts/{EQUIP}/run_*`). Primary entrypoint: `python -m core.acm_main --equip FD_FAN` (`run_pipeline()` in `core/acm_main.py`).
+- **Modes**: file-mode reads `data/*.csv`; SQL-mode uses `configs/sql_connection.ini` via `core/sql_client.SQLClient`. File-mode must stay working before SQL-path changes ship.
+- **Batch mode**: use `scripts/run_batch_mode.ps1` (params: `-Equipment`, `-NumBatches`, `-StartBatch`) to run sequential batches; the script sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM` env vars—don’t override in code.
+- **No emojis ever** in code, comments, tests, or generated content.
 
-- **Configuration**: `utils/config_dict.ConfigDict` loads cascading config from `configs/config_table.csv` (global `*` rows overridden by equipment-specific rows). Callers expect dot-path access (e.g., `cfg['fusion']['weights']['omr_z']`). Update docs/CHANGELOG + `Task Backlog.md` when changing schemas.
-- **Adaptive tuning**: `core/analytics.py::AdaptiveTuning` logs changes through `core/config_history_writer.log_auto_tune_changes`. Respect this flow instead of writing directly to CSV/SQL.
-- **Caching**: `core/model_persistence.py` persists models under `artifacts/{equip}/models`. Signatures must include config+schema; use existing helpers rather than new hash logic.
-- **Output contract**: `core/output_manager.OutputManager` governs all CSV/PNG/SQL writes. Route new tables/charts through it; dual-write guardrails expect `ALLOWED_TABLES` and batched transactions.
-- **Local time policy**: timestamps are timezone-naive local. Do not reintroduce UTC conversions; rely on `_to_naive*` helpers in `core/output_manager.py` and `core/acm_main.py`.
+## Core contracts
+- **Config**: `utils/config_dict.ConfigDict` loads cascading `configs/config_table.csv` (global `*` rows overridden by equipment rows). Keep dot-path access intact (e.g., `cfg['fusion']['weights']['omr_z']`).
+- **Output manager**: all CSV/PNG/SQL writes go through `core/output_manager.OutputManager`; respect `ALLOWED_TABLES` and batched transactions.
+- **Time policy**: timestamps are local-naive; do not reintroduce UTC conversions. Use `_to_naive*` helpers in `core/output_manager.py` and `core/acm_main.py`.
+- **Detectors/analytics**: detectors live in `core/` (`omr.py`, `correlation.py`, `outliers.py`, plus PCA/IForest/GMM/AR1). Fusion in `core/fuse.py`; regimes in `core/regimes.py`; drift in `core/drift.py`; episodes via `core/episode_culprits_writer`.
+- **Performance**: `core/fast_features.py` supports pandas + optional Polars; keep API backward compatible and tested (`tests/test_fast_features.py`).
+- **Rust bridge**: optional accelerator in `rust_bridge/`; Python path remains primary.
 
-- **Detectors**: Mahalanobis, PCA, IForest, GMM, AR1, and OMR live under `core/` (`omr.py`, `correlation.py`, `outliers.py`). Fusion happens in `core/fuse.py`; per-regime logic in `core/regimes.py` with GMM clustering. When editing thresholds, ensure fused z-score contracts stay in sync with `docs/Analytics Backbone.md`.
-- **Fast features**: `core/fast_features.py` supports pandas + optional Polars. Tests gate regressions in `tests/test_fast_features.py`; keep API surface backward compatible.
-- **Drift & episodes**: `core/drift.py` provides multi-feature drift with hysteresis; episodes written via `core/episode_culprits_writer`. New alerting must update `docs/COLDSTART_MODE.md` and `docs/OMR_DETECTOR.md` if behavior changes.
-- **Rust bridge**: optional acceleration in `rust_bridge/`. Python must remain primary path (no hard dependency on Rust).
+## Workflows
+- Rapid run: `python -m core.acm_main --equip GAS_TURBINE`.
+- SQL smoke: `python scripts/sql/verify_acm_connection.py` (needs SQL Server creds).
+- File-mode helper: `scripts/run_file_mode.ps1` wraps a baseline local run.
 
-- **Developer workflows**:
-	- Rapid run: `python -m core.acm_main --equip GAS_TURBINE`.
-	- SQL smoke test: `python scripts/sql/verify_acm_connection.py` (requires local SQL Server, credentials via env vars or ini).
-	- Batch harness: `python scripts/analyze_latest_run.py --equip FD_FAN`; docs/BATCH_PROCESSING.md outline batch+replay procedures.
-	- PowerShell shortcut: `scripts/run_file_mode.ps1` wraps the baseline run (defaults to file mode).
+## Testing
+- Targeted suites: `pytest tests/test_fast_features.py`, `pytest tests/test_dual_write.py`, `pytest tests/test_progress_tracking.py`. Respect existing skips/markers (Polars, SQL Server).
 
-- **Testing**: use `pytest tests/test_fast_features.py`, `pytest tests/test_dual_write.py`, and `pytest tests/test_progress_tracking.py`. Some tests skip when optional deps (Polars, SQL Server) absent; respect markers instead of disabling.
-- **Data contracts**: sample CSVs under `data/` expose a datetime index plus sensor columns. Keep naming consistent with `configs/config_table.csv` sensor tags.
-- **Artifacts/backups**: `artifacts/` and `backups/` are gitignored staging directories. Keep derived outputs there; do not add new tracked artifact folders.
-- **Documentation cadence**: README is authoritative. When changing pipeline structure, sync guides in `docs/` (notably `Analytics Backbone.md`, `COLDSTART_MODE.md`, `PROJECT_STRUCTURE.md`).
-- **Coding style**: Python 3.11, 100-char lines, vectorized pandas/NumPy where possible. `ruff`/`mypy` live in `[project.optional-dependencies]`—run them for linting/typing when touching shared modules.
-- **Secrets & config**: never commit credentials. `configs/sql_connection.ini` stays local; reference env-variable fallbacks when documenting new settings.
+## Data & artifacts
+- Sample CSVs under `data/` have datetime index + sensor columns; keep names aligned with `configs/config_table.csv`.
+- `artifacts/` and `backups/` stay gitignored; do not add tracked artifact folders.
 
-Please flag unclear sections so we can refine these instructions.
+## Documentation policy
+- README is authoritative. Do **not** auto-create new docs/changelogs for routine changes; only update docs when explicitly requested.
+
+## Style & safety
+- Python 3.11, ~100-char lines, vectorized pandas/NumPy. Use existing lint/type tooling (`ruff`, `mypy`) when touching shared modules.
+- Never commit credentials; `configs/sql_connection.ini` stays local. Prefer env-var fallbacks when describing new settings.
+
+## Source control hygiene
+- Use branches for all non-trivial work: `feature/<topic>` or `fix/<topic>`; avoid pushing directly to `main`.
+- Keep branches focused and short-lived; prefer small, frequent merges over large drops.
+- Rebase onto `main` before opening/merging PRs to keep history clean and reduce conflicts.
+- Write clear, imperative commits (e.g., “Add batch-mode env guards”); squash noisy fixups before merge.
+- Run relevant tests before merging; do not merge with failing checks.
+- Never commit artifacts/logs/secrets; respect `.gitignore`.
+- Prefer review for all changes; merge only when checks are green and approvals are in. If self-merging is allowed, still require passing checks.
+
+## Discoverability quick-links
+- **System overview**: `docs/ACM_SYSTEM_OVERVIEW.md`; analytics flow: `docs/Analytics Backbone.md`.
+- **Coldstart**: `docs/COLDSTART_MODE.md`; **OMR**: `docs/OMR_DETECTOR.md`; **Batch SQL audit**: `docs/BATCH_MODE_SQL_AUDIT.md`.
+- **Schema reference**: `docs/sql/SQL_SCHEMA_REFERENCE.md`; **Grafana**: `grafana_dashboards/README.md` + dashboards under `grafana_dashboards/*.json`.
+- **Run helpers**: `scripts/run_batch_mode.ps1`, `scripts/run_file_mode.ps1`, `scripts/sql/verify_acm_connection.py`.
+- **Core modules**: entry `core/acm_main.py`; writes `core/output_manager.py`; detectors/fusion/regimes/drift under `core/` (omr.py, correlation.py, outliers.py, fuse.py, regimes.py, drift.py); episodes `core/episode_culprits_writer.py`; run metadata `core/run_metadata_writer.py`; config loader `utils/config_dict.py`.
+- **Search tips**: `rg "ALLOWED_TABLES" core`, `rg "run_pipeline" core`, `rg "ACM_" scripts docs core`, `rg --files -g "*.sql" scripts/sql`.
+
+## Config sync discipline
+- When `configs/config_table.csv` changes, run `python scripts/sql/populate_acm_config.py` to sync `ACM_Config` in SQL.
+- Keep `ConfigDict` dotted-path semantics intact so the populate script remains compatible.

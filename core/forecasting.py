@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Literal, List
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -485,7 +486,7 @@ def estimate_rul(
     return rul_engine.run_rul(
         equip_id=equip_id,
         run_id=run_id,
-        config=config,
+        config_row=config,
         sql_client=sql_client,
         output_manager=output_manager
     )
@@ -759,8 +760,8 @@ def run_enhanced_forecasting_sql(
     if len(run_id.strip()) == 0:
         raise ValueError(f"[ENHANCED_FORECAST] run_id cannot be empty string")
     
-    if config is None or not isinstance(config, dict):
-        raise ValueError(f"[ENHANCED_FORECAST] Invalid config: must be a dictionary.")
+    if config is None or not isinstance(config, Mapping):
+        raise ValueError(f"[ENHANCED_FORECAST] Invalid config: must be a mapping (dict or ConfigDict).")
 
     # Check if forecasting is enabled in config
     forecast_cfg = config.get("forecasting", {})

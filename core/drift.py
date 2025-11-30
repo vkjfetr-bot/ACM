@@ -81,9 +81,13 @@ def compute(score_df: pd.DataFrame, score_out: Dict[str, Any], cfg: Dict[str, An
 
     frame["cusum_raw"] = detector.score(fused_score)
 
-    # Calibrate the CUSUM score to a z-score for fusion/reporting
-    cal_cusum = fuse.ScoreCalibrator(q=0.98).fit(frame["cusum_raw"].to_numpy(copy=False))
-    frame["cusum_z"] = cal_cusum.transform(frame["cusum_raw"].to_numpy(copy=False))
+    # Apply exponential smoothing to reduce stepped appearance
+    smoothing_alpha = float(cusum_cfg.get("smoothing_alpha", 0.3))
+    cusum_smooth = pd.Series(frame["cusum_raw"]).ewm(alpha=smoothing_alpha, adjust=False).mean().to_numpy()
+    
+    # Calibrate the smoothed CUSUM score to a z-score for fusion/reporting
+    cal_cusum = fuse.ScoreCalibrator(q=0.98).fit(cusum_smooth)
+    frame["cusum_z"] = cal_cusum.transform(cusum_smooth)
 
     score_out["frame"] = frame
     return score_out

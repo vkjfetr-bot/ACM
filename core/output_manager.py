@@ -1382,10 +1382,13 @@ class OutputManager:
 
             # Clean NaN/Inf values for SQL Server compatibility (pyodbc cannot handle these)
             import numpy as np
+            import warnings
             df_clean = df[columns].copy()
             
             # Replace 'N/A' strings with NaN (common in CSV data)
-            df_clean = df_clean.replace(['N/A', 'n/a', 'NA', 'na', '#N/A'], np.nan)
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=FutureWarning, message='.*Downcasting.*')
+                df_clean = df_clean.replace(['N/A', 'n/a', 'NA', 'na', '#N/A'], np.nan)
             
             # Convert timestamp columns to datetime objects FIRST
             for col in df_clean.columns:
@@ -1806,7 +1809,7 @@ class OutputManager:
             "ar1_z": "ar1_z", "pca_spe_z": "pca_spe_z", "pca_t2_z": "pca_t2_z",
             "mhal_z": "mhal_z", "iforest_z": "iforest_z", "gmm_z": "gmm_z",
             "cusum_z": "cusum_z", "drift_z": "drift_z", "hst_z": "hst_z", "river_hst_z": "river_hst_z", "fused": "fused",
-            "regime_label": "regime_label"
+            "regime_label": "regime_label", "transient_state": "transient_state"
         }
         
         # CHART-04: Use uniform timestamp format without 'T' or 'Z' suffixes
@@ -1815,7 +1818,7 @@ class OutputManager:
             run_dir / "scores.csv",
             sql_table=sql_table,
             sql_columns=score_columns,
-            non_numeric_cols={"RunID", "EquipID", "Timestamp", "regime_label"},
+            non_numeric_cols={"RunID", "EquipID", "Timestamp", "regime_label", "transient_state"},
             index=False,
             date_format="%Y-%m-%d %H:%M:%S"
         )
@@ -2391,110 +2394,6 @@ class OutputManager:
                     )
                     table_count += 1
                     if result.get('sql_written'): sql_count += 1
-
-                    # Optional: per-sensor forecasting for top sensors (ACM_SensorForecast_TS)
-                    if _simple_ar1_forecast is not None and RULConfig is not None:
-                        try:
-                            # Cleanup old sensor forecast data to prevent RunID overlap in charts
-                            if self.sql_client is not None and self.equip_id is not None:
-                                try:
-                                    import os
-                                    try:
-                                        keep_runs = int(os.getenv("ACM_FORECAST_RUNS_RETAIN", "2"))
-                                    except Exception:
-                                        keep_runs = 2
-                                    keep_runs = max(1, min(int(keep_runs), 50))
-                                    cur = self.sql_client.cursor()
-                                    # Keep only the 2 most recent RunIDs
-                                    cur.execute("""
-                                        WITH RankedRuns AS (
-                                            SELECT DISTINCT RunID, 
-                                                   ROW_NUMBER() OVER (ORDER BY MAX(CreatedAt) DESC) AS rn
-                                            FROM dbo.ACM_SensorForecast_TS
-                                            WHERE EquipID = ?
-                                            GROUP BY RunID
-                                        )
-                                        DELETE FROM dbo.ACM_SensorForecast_TS
-                                        WHERE EquipID = ? 
-                                          AND RunID IN (SELECT RunID FROM RankedRuns WHERE rn > ?)
-                                    """, (self.equip_id, self.equip_id, keep_runs))
-                                    if not self.sql_client.conn.autocommit:
-                                        self.sql_client.conn.commit()
-                                    Console.info(f"[ANALYTICS] Cleaned old sensor forecast data for EquipID={self.equip_id} (kept {keep_runs} RunIDs)")
-                                except Exception as e:
-                                    Console.warn(f"[ANALYTICS] Failed to cleanup old sensor forecasts: {e}")
-                            
-                            # Determine forecast horizon from config (fallback to 24h)
-                            forecast_cfg = (cfg.get('forecast', {}) or {})
-                            horizon_hours = float(forecast_cfg.get('horizon_hours', 24.0) or 24.0)
-                            rul_cfg = RULConfig(max_forecast_hours=horizon_hours)
-
-                            # Rank sensors by max absolute z-score over the window
-                            sensor_abs_z = sensor_zscores.abs()
-                            max_z = sensor_abs_z.max().sort_values(ascending=False)
-                            # Use a modest number of sensors for forecasting to keep load reasonable
-                            top_forecast_n = int((cfg.get('output', {}) or {}).get('sensor_forecast_top_n', 5) or 5)
-                            top_sensors = max_z.index[:top_forecast_n].tolist()
-
-                            forecast_rows: List[Dict[str, Any]] = []
-                            for sensor_name in top_sensors:
-                                series = sensor_values.get(sensor_name)
-                                if series is None:
-                                    continue
-                                # Ensure datetime index
-                                try:
-                                    ts = pd.to_datetime(series.index)
-                                except Exception:
-                                    continue
-                                s = pd.Series(series.values, index=ts).dropna()
-                                if s.size < rul_cfg.min_points:
-                                    continue
-
-                                fc, fc_std, _ = _simple_ar1_forecast(s, rul_cfg)
-                                if fc.empty or fc_std.size == 0:
-                                    continue
-
-                                ci_k = 1.96
-                                ci_low = fc - ci_k * fc_std
-                                ci_up = fc + ci_k * fc_std
-
-                                for t, val, lo, hi, std in zip(fc.index, fc.values, ci_low.values, ci_up.values, fc_std):
-                                    row: Dict[str, Any] = {
-                                        "SensorName": str(sensor_name),
-                                        "Timestamp": t,
-                                        "ForecastValue": float(val),
-                                        "CiLower": float(lo),
-                                        "CiUpper": float(hi),
-                                        "ForecastStd": float(std),
-                                        "Method": "AR1_Sensor",
-                                    }
-                                    # Stamp IDs if available
-                                    if self.run_id:
-                                        row["RunID"] = self.run_id
-                                    if self.equip_id is not None:
-                                        row["EquipID"] = int(self.equip_id)
-                                    forecast_rows.append(row)
-
-                            if forecast_rows:
-                                sensor_forecast_df = pd.DataFrame(forecast_rows)
-                                # Ensure consistent column ordering
-                                cols_order = [
-                                    c for c in ["RunID", "EquipID", "SensorName", "Timestamp",
-                                                "ForecastValue", "CiLower", "CiUpper",
-                                                "ForecastStd", "Method"] if c in sensor_forecast_df.columns
-                                ]
-                                sensor_forecast_df = sensor_forecast_df[cols_order]
-                                result = self.write_dataframe(
-                                    sensor_forecast_df,
-                                    tables_dir / "sensor_forecast_ts.csv",
-                                    sql_table="ACM_SensorForecast_TS" if force_sql else None,
-                                    non_numeric_cols={"SensorName", "Method"},
-                                    add_created_at=True,
-                                )
-                                table_count += 1
-                                if result.get('sql_written'): sql_count += 1
-                        except Exception as e:
-                            Console.warn(f"[ANALYTICS] Sensor forecast generation skipped: {e}")
                 
                 # 18. Already generated: data_quality.csv
                 
@@ -3041,7 +2940,7 @@ class OutputManager:
         out['EpisodeActive'] = out['EpisodeActive'].fillna(0).astype(int)
 
         # Convert timestamps to naive local policy
-        out['Timestamp'] = out['Timestamp'].apply(_to_naive)
+        out['Timestamp'] = out['Timestamp'].apply(normalize_timestamp_scalar)
 
         # Order columns
         out = out[['Timestamp', 'SensorName', 'NormValue', 'ZScore', 'AnomalyLevel', 'EpisodeActive']]

@@ -35,10 +35,13 @@ This handbook is a complete, implementation-level walkthrough of ACM V8 for new 
 **SQL batch automation:** `python scripts/sql_batch_runner.py --equip FD_FAN [--resume --max-workers N --tick-minutes 240]`  
 Uses SQL historian tables and calls `usp_ACM_StartRun`/`usp_ACM_FinalizeRun`. Handles cold-start retries and progress tracking (`.sql_batch_progress.json`).
 
-**File mode helper:** `powershell ./scripts/run/run_file_mode.ps1` (wraps acm_main with CSV defaults).
+**Batch mode (PowerShell helper):** `scripts/run_batch_mode.ps1 -Equipment FD_FAN -NumBatches 5 -StartBatch 1` sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM` for sequential batches.
 
-Mode decision:
-- SQL mode is on by default; force file mode with `ACM_FORCE_FILE_MODE=1`.
+**File mode helper (diagnostics-only):** `powershell ./scripts/run/run_file_mode.ps1` (wraps acm_main with CSV defaults).
+
+Mode decision and migration:
+- SQL mode is the target/default; file mode exists for local diagnostics only.
+- Avoid adding new file/SQL branching; collapse to the SQL-first path where practical.
 - `--equip` selects the config row (SQL `ACM_Config` or `configs/config_table.csv` fallback).
 - `ACM_BATCH_MODE=1` toggles batch-run semantics (continuous learning hooks).
 
@@ -56,7 +59,10 @@ Key paths (ParamPath) and reasoning:
 - `regimes.*`: auto-k bounds, smoothing, transient detection, health thresholds; smaller `k_min/k_max` avoids over-segmentation on short baselines.
 - `drift.*`: CUSUM thresholds and drift aggregation.
 - `runtime.*`: version tag, heartbeat, reuse_model_fit, baseline buffer, phases toggles.
-- `output.*`: dual_mode (file + SQL), enable_forecast, enable_enhanced_forecast, destinations.
+- `output.*`: dual_mode (file + SQL), enable_forecast, enable_enhanced_forecast, destinations. (Strategic direction: SQL-first; retire file-only branches over time.)
+
+**Config sync:** when `configs/config_table.csv` changes, run `python scripts/sql/populate_acm_config.py` to update `ACM_Config` so SQL mode stays authoritative.  
+**Config history:** `ACM_ConfigHistory` tracks changes when enabled.
 
 ### SQL connection
 - `configs/sql_connection.ini` (or `.example.ini`) supplies DSN/user/pass; `SQLClient.from_ini` loads it.
@@ -118,7 +124,7 @@ Key paths (ParamPath) and reasoning:
 - **model_evaluation.py:** quality monitor to decide retrain based on anomaly rates, regime quality, episode quality.
 
 ### I/O & SQL
-- **output_manager.py:** single point for CSV/JSON/PNG + SQL writes. Batched writes with buffering, schema discovery, health index generation, analytics tables (scores_wide/long, drift, episodes, timelines, fusion quality, OMR contributions, calibration summaries, hotspots, etc.). Generates charts and descriptors; coordinates dual mode.
+- **output_manager.py:** single point for CSV/JSON/PNG + SQL writes. Batched writes with buffering, schema discovery, health index generation, analytics tables (scores_wide/long, drift, episodes, timelines, fusion quality, OMR contributions, calibration summaries, hotspots, forecast quality metrics, OMR diagnostics, RUL summaries, etc.). Generates charts and descriptors; coordinates dual mode.
 - **simplified_output_manager.py:** trimmed SQL writer for legacy paths.
 - **sql_client.py / sql_protocol.py:** thin wrappers over pyodbc for safe cursor operations and protocol typing.
 - **sql_logger.py:** SQL sink that mirrors Console logs into ACM_Log.
@@ -134,6 +140,8 @@ Key paths (ParamPath) and reasoning:
 
 ### Scripts (operations)
 - `scripts/sql_batch_runner.py`: continuous SQL processing with ticked windows, resume, cold-start retries, historian coverage checks.
+- `scripts/run_batch_mode.ps1`: sequential batch runner that sets batch env vars.
+- `scripts/sql/populate_acm_config.py`: pushes `config_table.csv` rows into SQL `ACM_Config`.
 - Validation/check scripts: `check_*`, `validate_*`, `monitor_*`, `analyze_*` for dashboards, data gaps, drift, forecast status, table population.
 - `scripts/sql/*`: SQL schema helpers and tests.
 
@@ -142,9 +150,9 @@ Key paths (ParamPath) and reasoning:
 ## 5) Data & Artifact Layout
 
 - **Input data:** `data/` for CSV baselines/batches; SQL mode pulls from historian tables configured per equipment.
-- **Artifacts:** `artifacts/{EQUIP}/run_<timestamp>/` with `scores.csv`, `drift.csv`, `episodes.csv`, `tables/*.csv`, `charts/*.png`, `meta.json` (file mode).
+- **Artifacts (diagnostic/file mode):** `artifacts/{EQUIP}/run_<timestamp>/` with `scores.csv`, `drift.csv`, `episodes.csv`, `tables/*.csv`, `charts/*.png`, `meta.json`.
 - **Models/cache:** `artifacts/{EQUIP}/models/` containing `detectors.joblib`, regime model joblib/json, forecast state, baseline buffer.
-- **Grafana dashboards:** `grafana_dashboards/` holds JSON panels and docs for visualization alignment.
+- **Grafana dashboards:** `grafana_dashboards/` holds JSON panels and docs; operator suite includes `acm_ops_command_center`, `acm_asset_health_deep_dive`, `acm_failure_maintenance_planner`, `acm_sensor_regime_forensics`, `acm_ops_model_observability` (all JSON import-ready).
 
 ---
 
@@ -178,8 +186,8 @@ python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2 --
 ```
 
 6) **Outputs**
-- File mode: check `artifacts/FD_FAN/run_<ts>/tables/` and `charts/`.
-- SQL mode: check ACM_* tables (Scores_Wide/Long, Episodes, Drift_TS, Run_Stats, PCA artifacts, OMR contributions, FusionQualityReport, etc.) and ACM_Runs metadata.
+- File mode (diagnostics): check `artifacts/FD_FAN/run_<ts>/tables/` and `charts/`.
+- SQL mode (primary): check ACM_* tables (Scores_Wide/Long, Episodes, Drift_TS, Run_Stats, PCA artifacts, OMR contributions, FusionQualityReport, OMR diagnostics, forecast quality metrics, RUL summaries, etc.) and ACM_Runs metadata.
 
 ---
 
@@ -197,7 +205,7 @@ python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2 --
 - **Adaptive thresholds & auto-tuned fusion:** adjusts to drift and class imbalance without manual retuning; logged via config_history_writer for auditability.
 - **Caching/persistence:** speeds re-runs and supports continuous learning; config signature guards stale models.
 - **Run metadata & quality checks:** ACM_Runs + data quality score make operational health observable; refit flags trigger retraining pipelines.
-- **SQL/file duality:** same pipeline works for historian-backed production and CSV-based diagnostics.
+- **SQL-first posture:** production runs should use SQL sinks; file mode is only for diagnostics and should not accumulate bespoke branches.
 
 ---
 
@@ -228,11 +236,12 @@ python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2 --
 
 ## 9) Onboarding Checklist
 
-- Install deps and run a file-mode smoke test with sample CSVs.
+- Install deps and run a file-mode smoke test with sample CSVs (diagnostic).
 - Configure SQL credentials and run a single SQL-mode job with `--equip` pointed at a known equipment row; verify ACM_Runs, Scores_Wide, Episodes populate.
+- When `config_table.csv` is edited, run `python scripts/sql/populate_acm_config.py` to sync `ACM_Config`; confirm via a quick select.
 - Inspect `artifacts/{EQUIP}/run_<ts>/meta.json` (file mode) or ACM_Runs (SQL) to confirm health indices and thresholds.
 - Review `config_history.log` to ensure auto-tuning events are recorded.
-- Validate dashboards using `grafana_dashboards/` JSONs and `docs/` quick refs (e.g., `BATCH_MODE_SQL_QUICK_REF.md`, `SQL_MODE_CONFIGURATION.md`).
+- Validate dashboards using `grafana_dashboards/` JSONs (Ops Command Center, Asset Health Deep Dive, Failure & Maintenance Planner, Sensor & Regime Forensics, Ops & Model Observability) and `docs/` quick refs (e.g., `BATCH_MODE_SQL_QUICK_REF.md`, `SQL_MODE_CONFIGURATION.md`).
 
 ---
 
@@ -343,6 +352,9 @@ timeout=30
 - **Data quality:** ACM_DataQuality score; low values imply ingestion or sensor issues.
 - **Drift:** Drift_TS p95 and slope from `_compute_drift_trend`; spikes may warrant refit.
 - **Regimes:** silhouette score, regime_count stability; high volatility can mean process change or bad clustering.
+- **OMR diagnostics:** ACM_OMR_Diagnostics residual std and calibration status; saturation indicates recalibration needed.
+- **Forecast quality:** ACM_Forecast_QualityMetrics RMSE/MAE/MAPE trends; retrain when sustained degradation.
+- **RUL multipath:** ACM_RUL_Summary consensus vs paths; large divergence signals uncertainty.
 - **Actions:**
   - Frequent false alerts: lower fusion weights for noisy heads, enable per-regime thresholds, or raise fused warn/alert thresholds.
   - Flat fused z: baseline too small or stale cache; rerun with `--clear-cache` or expand baseline window.

@@ -112,6 +112,21 @@ class _IdentityScaler:
         return self.transform(X)
 
 
+def _regime_metadata_dict(model: RegimeModel) -> Dict[str, Any]:
+    """Extract metadata dictionary from RegimeModel for JSON serialization."""
+    return {
+        'model_version': model.meta.get('model_version', REGIME_MODEL_VERSION),
+        'sklearn_version': model.meta.get('sklearn_version', sklearn.__version__),
+        'feature_columns': model.feature_columns,
+        'raw_tags': model.raw_tags,
+        'n_pca_components': model.n_pca_components,
+        'train_hash': model.train_hash,
+        'health_labels': model.health_labels,
+        'stats': model.stats,
+        'meta': model.meta,
+    }
+
+
 def _stable_int_hash(arr: np.ndarray) -> int:
     """Deterministic hash for arrays to replace non-deterministic builtin hash()."""
     buf = np.ascontiguousarray(arr, dtype=np.float64).tobytes()
@@ -1211,7 +1226,6 @@ def regime_model_to_state(
         last_trained_time=datetime.now(timezone.utc).isoformat(),
         config_hash=config_hash,
         regime_basis_hash=regime_basis_hash,
-        meta_json=meta_json,
     )
     
     return state

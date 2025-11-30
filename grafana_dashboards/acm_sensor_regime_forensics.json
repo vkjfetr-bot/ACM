@@ -1,0 +1,527 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(20, 184, 166, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "iteration": 1711736565000,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Count of sensors currently above alert thresholds. Source: ACM_SensorHotspots.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#14b8a6",
+                "value": null
+              },
+              {
+                "color": "#f59e0b",
+                "value": 3
+              },
+              {
+                "color": "#f97316",
+                "value": 6
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n  GETUTCDATE() AS time,\n  'Active Hotspots' AS metric,\n  COUNT(*) AS value\nFROM ACM_SensorHotspots\nWHERE EquipID = $equipment\n  AND (AboveAlertCount > 0 OR LatestAbsZ >= 3)",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Hotspots",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Top 15 hotspots with latest and peak z-scores. Source: ACM_SensorHotspots.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#f59e0b",
+                "value": 2
+              },
+              {
+                "color": "#f97316",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "footer": {
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawSql": "SELECT TOP 15\n  SensorName AS [Sensor],\n  MaxTimestamp AS [Peak Time],\n  MaxAbsZ AS [Max |Z|],\n  LatestTimestamp AS [Latest Time],\n  LatestAbsZ AS [Latest |Z|],\n  AboveAlertCount AS [Alert Count]\nFROM ACM_SensorHotspots\nWHERE EquipID = $equipment\nORDER BY MaxAbsZ DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensor Hotspots",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Anomaly rate per detector and period. Source: ACM_SensorAnomalyByPeriod.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "mappings": [],
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 18,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n  PeriodStart AS time,\n  AnomalyRatePct AS value,\n  DetectorType AS metric\nFROM ACM_SensorAnomalyByPeriod\nWHERE EquipID = $equipment\n  AND $__timeFilter(PeriodStart)\nORDER BY PeriodStart",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensor Anomaly Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Threshold crossings (direction and magnitude). Source: ACM_ThresholdCrossings.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "id": 4,
+      "options": {
+        "footer": {
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawSql": "SELECT TOP 50\n  Timestamp,\n  DetectorType,\n  Direction,\n  ZScore,\n  Threshold\nFROM ACM_ThresholdCrossings\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Threshold Crossings",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Detector Z-scores over time (fused plus core detectors). Source: ACM_Scores_Wide.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 2,
+            "spanNulls": true
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT Timestamp AS time, fused AS value, 'fused' AS metric FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, ar1_z, 'ar1_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_spe_z, 'pca_spe_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_t2_z, 'pca_t2_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, gmm_z, 'gmm_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Detector Z-Scores",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Episode culprit history with weighted contribution. Source: ACM_CulpritHistory.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "id": 6,
+      "options": {
+        "footer": {
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawSql": "SELECT TOP 30\n  StartTimestamp,\n  EndTimestamp,\n  PrimaryDetector,\n  WeightedContribution,\n  LeadMeanZ,\n  DuringMeanZ,\n  LagMeanZ\nFROM ACM_CulpritHistory\nWHERE EquipID = $equipment\n  AND $__timeFilter(StartTimestamp)\nORDER BY StartTimestamp DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Culprit History",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Top sensors in latest RUL attribution. Source: ACM_RUL_Attribution.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "id": 7,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawSql": "WITH LatestFail AS (\n  SELECT TOP 1 FailureTime\n  FROM ACM_RUL_Attribution\n  WHERE EquipID = $equipment\n  ORDER BY FailureTime DESC\n)\nSELECT TOP 10\n  SensorName AS metric,\n  FailureContribution AS value\nFROM ACM_RUL_Attribution\nWHERE EquipID = $equipment\n  AND FailureTime = (SELECT FailureTime FROM LatestFail)\nORDER BY FailureContribution DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "RUL Attribution (Latest Failure Time)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "OMR sensor contributions at latest timestamp. Source: ACM_OMRContributionsLong.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 8,
+      "options": {
+        "footer": {
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawSql": "WITH LatestOMR AS (\n  SELECT TOP 1 Timestamp\n  FROM ACM_OMRContributionsLong\n  WHERE EquipID = $equipment\n  ORDER BY Timestamp DESC\n)\nSELECT TOP 15\n  Timestamp,\n  SensorName,\n  ABS(OMR_Z) AS OMR_Z,\n  Value,\n  Rank() OVER (ORDER BY ABS(OMR_Z) DESC) AS RankPos\nFROM ACM_OMRContributionsLong\nWHERE EquipID = $equipment\n  AND Timestamp = (SELECT Timestamp FROM LatestOMR)\nORDER BY ABS(OMR_Z) DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "OMR Contributions (Latest)",
+      "type": "table"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 42,
+  "style": "dark",
+  "tags": [
+    "ACM",
+    "Forensics"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Select MSSQL",
+          "value": ""
+        },
+        "hide": 0,
+        "label": "Data Source",
+        "name": "datasource",
+        "options": [],
+        "query": "mssql",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "Pick equipment",
+          "value": ""
+        },
+        "datasource": {
+          "type": "mssql",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT EquipID AS __value, EquipName AS __text FROM Equipment ORDER BY EquipName",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Equipment",
+        "multi": false,
+        "name": "equipment",
+        "options": [],
+        "query": "SELECT EquipID AS __value, EquipName AS __text FROM Equipment ORDER BY EquipName",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ]
+  },
+  "timezone": "browser",
+  "title": "ACM Sensor & Regime Forensics",
+  "uid": "acm_sensor_regime_forensics",
+  "version": 1,
+  "weekStart": ""
+}
