@@ -447,9 +447,9 @@ class SQLBatchRunner:
                 # Clear coldstart and runs for this equipment
                 cur.execute("SET QUOTED_IDENTIFIER ON;")
                 cur.execute("DELETE FROM dbo.ACM_ColdstartState WHERE EquipID = ?", (equip_id,))
-                cur.execute("DELETE FROM dbo.Runs WHERE EquipID = ?", (equip_id,))
+                cur.execute("DELETE FROM dbo.ACM_Runs WHERE EquipID = ?", (equip_id,))
                 conn.commit()
-                Console.info(f"[RESET] Cleared Runs and Coldstart for EquipID={equip_id}", equip_id=equip_id)
+                Console.info(f"[RESET] Cleared ACM_Runs and Coldstart for EquipID={equip_id}", equip_id=equip_id)
         except Exception as e:
             Console.warn(f"[WARN] Could not reset progress for EquipID={equip_id}: {e}", error=str(e))
     
