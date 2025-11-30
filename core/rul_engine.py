@@ -1240,14 +1240,356 @@ def _default_rul_result(
 
 
 # ============================================================================
-# TODO: Output Builders (RUL-REF-22, RUL-REF-23, RUL-REF-24)
+# Output Builders (RUL-REF-22, RUL-REF-23, RUL-REF-24)
 # ============================================================================
-# - make_health_forecast_df
-# - make_failure_curve_df
-# - make_rul_ts_df
-# - make_rul_summary_df
-# - build_sensor_attribution
-# - build_maintenance_recommendation
+
+
+def make_health_forecast_ts(
+    health_forecast: pd.DataFrame,
+    run_id: str,
+    equip_id: int,
+) -> pd.DataFrame:
+    """
+    Build ACM_HealthForecast_TS compatible DataFrame.
+    
+    Args:
+        health_forecast: DataFrame from compute_rul (Timestamp, ForecastHealth, CI_Lower, CI_Upper)
+        run_id: Run ID
+        equip_id: Equipment ID
+    
+    Returns:
+        DataFrame with columns: RunID, EquipID, Timestamp, HealthIndex, CI_Lower, CI_Upper
+    """
+    df = health_forecast.copy()
+    df["RunID"] = run_id
+    df["EquipID"] = equip_id
+    df["HealthIndex"] = df["ForecastHealth"]
+    
+    # Reorder columns
+    df = df[["RunID", "EquipID", "Timestamp", "HealthIndex", "CI_Lower", "CI_Upper"]]
+    
+    return df
+
+
+def make_failure_forecast_ts(
+    failure_curve: pd.DataFrame,
+    run_id: str,
+    equip_id: int,
+) -> pd.DataFrame:
+    """
+    Build ACM_FailureForecast_TS compatible DataFrame.
+    
+    Args:
+        failure_curve: DataFrame from compute_rul (Timestamp, FailureProb, ThresholdUsed)
+        run_id: Run ID
+        equip_id: Equipment ID
+    
+    Returns:
+        DataFrame with columns: RunID, EquipID, Timestamp, FailureProb, ThresholdUsed
+    """
+    df = failure_curve.copy()
+    df["RunID"] = run_id
+    df["EquipID"] = equip_id
+    
+    # Reorder columns
+    df = df[["RunID", "EquipID", "Timestamp", "FailureProb", "ThresholdUsed"]]
+    
+    return df
+
+
+def make_rul_ts(
+    health_forecast: pd.DataFrame,
+    rul_multipath: Dict[str, Any],
+    current_time: pd.Timestamp,
+    run_id: str,
+    equip_id: int,
+    confidence: float,
+) -> pd.DataFrame:
+    """
+    Build ACM_RUL_TS compatible DataFrame (RUL time series).
+    
+    Args:
+        health_forecast: DataFrame with forecast
+        rul_multipath: Multipath RUL result
+        current_time: Current timestamp
+        run_id: Run ID
+        equip_id: Equipment ID
+        confidence: Confidence score
+    
+    Returns:
+        DataFrame with columns: RunID, EquipID, Timestamp, RUL_Hours, LowerBound, UpperBound, Confidence
+    """
+    # Compute RUL at each forecast step
+    timestamps = health_forecast["Timestamp"].values
+    rul_hours = []
+    
+    rul_final = rul_multipath["rul_final_hours"]
+    lower_bound = rul_multipath["lower_bound_hours"]
+    upper_bound = rul_multipath["upper_bound_hours"]
+    
+    for ts in timestamps:
+        elapsed_hours = (pd.Timestamp(ts) - current_time).total_seconds() / 3600
+        remaining_rul = max(0.0, rul_final - elapsed_hours)
+        rul_hours.append(remaining_rul)
+    
+    df = pd.DataFrame({
+        "RunID": run_id,
+        "EquipID": equip_id,
+        "Timestamp": timestamps,
+        "RUL_Hours": rul_hours,
+        "LowerBound": [max(0.0, lower_bound - (pd.Timestamp(ts) - current_time).total_seconds() / 3600) for ts in timestamps],
+        "UpperBound": [upper_bound - (pd.Timestamp(ts) - current_time).total_seconds() / 3600 for ts in timestamps],
+        "Confidence": confidence,
+    })
+    
+    return df
+
+
+def make_rul_summary(
+    rul_multipath: Dict[str, Any],
+    model_diagnostics: Dict[str, Any],
+    data_quality: str,
+    run_id: str,
+    equip_id: int,
+    confidence: float,
+) -> pd.DataFrame:
+    """
+    Build ACM_RUL_Summary compatible DataFrame (single row summary).
+    
+    Args:
+        rul_multipath: Multipath RUL result
+        model_diagnostics: Model diagnostics from compute_rul
+        data_quality: Data quality flag
+        run_id: Run ID
+        equip_id: Equipment ID
+        confidence: Confidence score
+    
+    Returns:
+        DataFrame with single row containing RUL summary
+    """
+    weights = model_diagnostics.get("weights", {})
+    
+    summary = {
+        "RunID": run_id,
+        "EquipID": equip_id,
+        "RUL_Hours": rul_multipath["rul_final_hours"],
+        "LowerBound": rul_multipath["lower_bound_hours"],
+        "UpperBound": rul_multipath["upper_bound_hours"],
+        "Confidence": confidence,
+        "Method": rul_multipath["dominant_path"],
+        "AR1_Weight": weights.get("AR1", 0.0),
+        "Exp_Weight": weights.get("Exponential", 0.0),
+        "Weibull_Weight": weights.get("Weibull", 0.0),
+        "DataQuality": data_quality,
+        "RUL_Trajectory": rul_multipath.get("rul_trajectory_hours"),
+        "RUL_Hazard": rul_multipath.get("rul_hazard_hours"),
+        "RUL_Energy": rul_multipath.get("rul_energy_hours"),
+    }
+    
+    df = pd.DataFrame([summary])
+    return df
+
+
+def build_sensor_attribution(
+    sensor_hotspots_df: Optional[pd.DataFrame],
+    rul_multipath: Dict[str, Any],
+    current_time: pd.Timestamp,
+    run_id: str,
+    equip_id: int,
+) -> pd.DataFrame:
+    """
+    Build ACM_RUL_Attribution compatible DataFrame from sensor hotspots.
+    
+    Args:
+        sensor_hotspots_df: Sensor hotspots from SQL (or None)
+        rul_multipath: Multipath RUL result
+        current_time: Current timestamp
+        run_id: Run ID
+        equip_id: Equipment ID
+    
+    Returns:
+        DataFrame with columns: RunID, EquipID, FailureTime, SensorName,
+                                FailureContribution, ZScoreAtFailure, AlertCount
+    """
+    if sensor_hotspots_df is None or sensor_hotspots_df.empty:
+        Console.warn("[RUL-Attribution] No sensor hotspots available")
+        return pd.DataFrame(columns=[
+            "RunID", "EquipID", "FailureTime", "SensorName",
+            "FailureContribution", "ZScoreAtFailure", "AlertCount"
+        ])
+    
+    # Compute projected failure time
+    rul_hours = rul_multipath["rul_final_hours"]
+    failure_time = current_time + pd.Timedelta(hours=rul_hours)
+    
+    # Build attribution table
+    df = sensor_hotspots_df.copy()
+    df["RunID"] = run_id
+    df["EquipID"] = equip_id
+    df["FailureTime"] = failure_time
+    
+    # Ensure required columns exist
+    required_cols = ["SensorName", "FailureContribution", "ZScoreAtFailure", "AlertCount"]
+    for col in required_cols:
+        if col not in df.columns:
+            Console.warn(f"[RUL-Attribution] Missing column: {col}, filling with defaults")
+            df[col] = 0.0 if col != "SensorName" else "Unknown"
+    
+    # Reorder columns
+    df = df[["RunID", "EquipID", "FailureTime", "SensorName",
+             "FailureContribution", "ZScoreAtFailure", "AlertCount"]]
+    
+    return df
+
+
+def build_maintenance_recommendation(
+    rul_multipath: Dict[str, Any],
+    data_quality: str,
+    confidence: float,
+    cfg: RULConfig,
+    run_id: str,
+    equip_id: int,
+) -> pd.DataFrame:
+    """
+    Build ACM_MaintenanceRecommendation compatible DataFrame.
+    
+    Generates actionable recommendations based on RUL, confidence, and data quality.
+    
+    Args:
+        rul_multipath: Multipath RUL result
+        data_quality: Data quality flag
+        confidence: Confidence score
+        cfg: Configuration with maintenance bands
+        run_id: Run ID
+        equip_id: Equipment ID
+    
+    Returns:
+        DataFrame with columns: RunID, EquipID, Action, Urgency, RUL_Hours, Confidence, DataQuality
+    """
+    rul_hours = rul_multipath["rul_final_hours"]
+    
+    # Determine base urgency from RUL bands
+    if rul_hours <= cfg.band_urgent:
+        action = "Immediate action required"
+        base_urgency = "URGENT"
+    elif rul_hours <= cfg.band_plan:
+        action = "Schedule maintenance soon"
+        base_urgency = "HIGH"
+    elif rul_hours <= cfg.band_watch:
+        action = "Increase monitoring frequency"
+        base_urgency = "MEDIUM"
+    elif rul_hours <= cfg.band_normal:
+        action = "Continue monitoring"
+        base_urgency = "LOW"
+    else:
+        action = "Normal operation"
+        base_urgency = "NONE"
+    
+    # Adjust urgency based on confidence and data quality
+    urgency = base_urgency
+    
+    if confidence < 0.5:
+        # Low confidence - increase urgency
+        if base_urgency == "LOW":
+            urgency = "MEDIUM"
+        elif base_urgency == "MEDIUM":
+            urgency = "HIGH"
+        action += " (low confidence - verify with additional diagnostics)"
+    
+    if data_quality in ["GAPPY", "SPARSE"]:
+        # Poor data quality - increase urgency
+        if base_urgency == "NONE":
+            urgency = "LOW"
+        elif base_urgency == "LOW":
+            urgency = "MEDIUM"
+        action += " (poor data quality - improve sensor coverage)"
+    
+    recommendation = {
+        "RunID": run_id,
+        "EquipID": equip_id,
+        "Action": action,
+        "Urgency": urgency,
+        "RUL_Hours": rul_hours,
+        "Confidence": confidence,
+        "DataQuality": data_quality,
+    }
+    
+    df = pd.DataFrame([recommendation])
+    return df
+
+
+def compute_confidence(
+    rul_multipath: Dict[str, Any],
+    model_diagnostics: Dict[str, Any],
+    learning_state: LearningState,
+    data_quality: str,
+) -> float:
+    """
+    Compute confidence score for RUL estimate.
+    
+    Factors considered:
+    - CI width (narrower → higher confidence)
+    - Model agreement (all models close → higher confidence)
+    - Calibration stability (stable factor → higher confidence)
+    - Data quality (OK → high, GAPPY → lower)
+    
+    Args:
+        rul_multipath: Multipath RUL result
+        model_diagnostics: Model diagnostics
+        learning_state: Learning state
+        data_quality: Data quality flag
+    
+    Returns:
+        Confidence score in [0.0, 1.0]
+    """
+    confidence = 1.0
+    
+    # Factor 1: CI width (relative to RUL)
+    rul = rul_multipath["rul_final_hours"]
+    lower = rul_multipath["lower_bound_hours"]
+    upper = rul_multipath["upper_bound_hours"]
+    
+    if rul > 0:
+        ci_width_fraction = (upper - lower) / rul
+        ci_confidence = np.clip(1.0 - ci_width_fraction / 2.0, 0.0, 1.0)
+        confidence *= ci_confidence
+    
+    # Factor 2: Model agreement
+    weights = model_diagnostics.get("weights", {})
+    if len(weights) > 1:
+        # If multiple models fitted and weights are similar, confidence is higher
+        weight_values = list(weights.values())
+        weight_std = np.std(weight_values)
+        weight_mean = np.mean(weight_values)
+        if weight_mean > 0:
+            agreement_score = 1.0 - min(weight_std / weight_mean, 1.0)
+            confidence *= 0.7 + 0.3 * agreement_score  # Bounded contribution
+    
+    # Factor 3: Calibration stability
+    cal_factor = learning_state.calibration_factor
+    if 0.8 <= cal_factor <= 1.2:
+        # Well-calibrated
+        calibration_score = 1.0
+    else:
+        # Poorly calibrated
+        calibration_score = 0.7
+    confidence *= calibration_score
+    
+    # Factor 4: Data quality
+    quality_multipliers = {
+        "OK": 1.0,
+        "SPARSE": 0.8,
+        "GAPPY": 0.7,
+        "FLAT": 0.6,
+        "MISSING": 0.5,
+    }
+    quality_mult = quality_multipliers.get(data_quality, 0.8)
+    confidence *= quality_mult
+    
+    # Clamp to [0, 1]
+    confidence = np.clip(confidence, 0.0, 1.0)
+    
+    return float(confidence)
 
 
 # ============================================================================
