@@ -16,8 +16,8 @@ BEGIN
         EquipID INT NOT NULL,
         StateVersion INT NOT NULL,
         ModelType NVARCHAR(50),
-        ModelParamsJson NVARCHAR(MAX),  -- JSON serialized model parameters
-        ResidualVariance FLOAT,
+        ModelParamsJson NVARCHAR(MAX),  -- DEPRECATED: kept for schema compatibility, always empty
+        ResidualVariance FLOAT,  -- DEPRECATED: kept for schema compatibility, always 0.0
         LastForecastHorizonJson NVARCHAR(MAX),  -- JSON array of forecast points
         HazardBaseline FLOAT,  -- EWMA smoothed hazard rate
         LastRetrainTime DATETIME2,
