@@ -268,18 +268,27 @@ def compute_forecast_quality(
         if not timestamps_list:
             return {"rmse": 0.0, "mae": 0.0, "mape": 0.0}
         
-        # Build SQL query with timestamp IN clause
-        placeholders = ",".join("?" * len(timestamps_list))
+        # FOR-PERF-01: Batch large IN clauses to prevent SQL performance issues
+        # Use a maximum of 1000 timestamps per query, loop if needed
+        MAX_IN_CLAUSE = 1000
+        all_rows = []
         cur = sql_client.cursor()
-        query = f"""
-            SELECT Timestamp, HealthIndex
-            FROM dbo.ACM_HealthTimeline
-            WHERE EquipID = ? AND Timestamp IN ({placeholders})
-            ORDER BY Timestamp
-        """
-        cur.execute(query, (equip_id, *timestamps_list))
-        rows = cur.fetchall()
+        
+        for i in range(0, len(timestamps_list), MAX_IN_CLAUSE):
+            batch_timestamps = timestamps_list[i:i+MAX_IN_CLAUSE]
+            placeholders = ",".join("?" * len(batch_timestamps))
+            query = f"""
+                SELECT Timestamp, HealthIndex
+                FROM dbo.ACM_HealthTimeline
+                WHERE EquipID = ? AND Timestamp IN ({placeholders})
+                ORDER BY Timestamp
+            """
+            cur.execute(query, (equip_id, *batch_timestamps))
+            batch_rows = cur.fetchall()
+            all_rows.extend(batch_rows)
+        
         cur.close()
+        rows = all_rows
         
         if not rows:
             return {"rmse": 0.0, "mae": 0.0, "mape": 0.0}
