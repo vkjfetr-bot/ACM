@@ -232,3 +232,4 @@ EquipID,Category,ParamPath,ParamValue,ValueType,LastUpdated,UpdatedBy,ChangeReas
 0,models,auto_retrain.on_tuning_change,False,bool,2025-11-29 00:00:00,COPILOT,Retrain when auto-tune suggests config changes,
 0,models,max_model_age_days,30,int,2025-11-29 00:00:00,COPILOT,Reject cached models older than this many days,
 0,runtime,reuse_model_fit,True,bool,2025-11-29 00:00:00,COPILOT,Enable legacy joblib detector cache (disable in SQL mode),
+2621,runtime,tick_minutes,1440,int,2025-11-30 00:00:00,COPILOT,gas_turbine_hourly_cadence,
