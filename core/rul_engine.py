@@ -446,11 +446,493 @@ def save_learning_state(sql_client: Optional[Any], state: LearningState) -> None
 
 
 # ============================================================================
-# Placeholder for Model Layer (to be continued in next part)
+# Ensemble Models (RUL-REF-11 through RUL-REF-15)
 # ============================================================================
 
-# TODO: Implement ensemble models (AR1, Exponential, Weibull)
-# TODO: Implement RULModel wrapper
-# TODO: Implement compute_rul and multipath logic
-# TODO: Implement output builders
-# TODO: Implement run_rul public API
+
+class DegradationModel:
+    """
+    Base class for health degradation models.
+    
+    All models must implement fit() and predict() methods.
+    fit() returns True if successful, False if insufficient data.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.params = {}
+        self.fit_succeeded = False
+
+    def fit(self, timestamps: pd.DatetimeIndex, health_values: np.ndarray) -> bool:
+        """
+        Fit model to historical data.
+        
+        Args:
+            timestamps: Historical timestamp index
+            health_values: Historical health index values
+            
+        Returns:
+            True if fit succeeded, False otherwise
+        """
+        raise NotImplementedError
+
+    def predict(self, future_timestamps: pd.DatetimeIndex) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Forecast future health values.
+        
+        Args:
+            future_timestamps: Future timestamp index for prediction
+            
+        Returns:
+            Tuple of (forecast_mean, forecast_std)
+        """
+        raise NotImplementedError
+
+
+class AR1Model(DegradationModel):
+    """
+    First-order autoregressive model with drift correction.
+    
+    Models health as: h(t) = μ + φ*(h(t-1) - μ) + drift*t + ε
+    where φ is AR coefficient, μ is mean level, and drift captures systematic trend.
+    """
+
+    def __init__(self):
+        super().__init__("AR1")
+        self.mu = 0.0
+        self.phi = 0.0
+        self.sigma = 1.0
+        self.drift = 0.0
+        self.last_value = 0.0
+        self.last_time = None
+        self.step_sec = 60.0
+
+    def fit(self, timestamps: pd.DatetimeIndex, health_values: np.ndarray) -> bool:
+        y = health_values
+        if len(y) < 10:
+            Console.warn(f"[{self.name}] Insufficient data points: {len(y)} < 10")
+            return False
+
+        # Center data
+        self.mu = float(np.nanmean(y))
+        yc = y - self.mu
+
+        # Check variance
+        var_yc = float(np.var(yc))
+        if var_yc < 1e-8:
+            Console.warn(f"[{self.name}] Insufficient variance: {var_yc}")
+            return False
+
+        # Estimate AR(1) coefficient
+        cov = float(np.dot(yc[1:], yc[:-1]))
+        var = float(np.dot(yc[:-1], yc[:-1]))
+        self.phi = np.clip(cov / (var + 1e-9), -0.99, 0.99)
+
+        # Residual variance
+        y_shift = np.concatenate([[self.mu], y[:-1]])
+        pred = (y_shift - self.mu) * self.phi + self.mu
+        resid = y - pred
+        self.sigma = float(np.std(resid[1:])) if len(resid) > 1 else 1.0
+        self.sigma = max(self.sigma, 0.1)
+
+        # Detect systematic drift (recent trend)
+        recent_window = min(len(y), 30)
+        t = np.arange(recent_window)
+        y_recent = y[-recent_window:]
+        if len(y_recent) > 3:
+            drift = np.polyfit(t, y_recent, 1)[0]
+            self.drift = float(drift)
+        else:
+            self.drift = 0.0
+
+        self.last_value = float(y[-1])
+        self.last_time = timestamps[-1]
+
+        # Infer sampling cadence
+        deltas = np.diff(timestamps.values.astype("int64")) / 1e9
+        self.step_sec = float(np.median(deltas))
+        if self.step_sec <= 0:
+            self.step_sec = 60.0
+
+        self.fit_succeeded = True
+        return True
+
+    def predict(self, future_timestamps: pd.DatetimeIndex) -> Tuple[np.ndarray, np.ndarray]:
+        if not self.fit_succeeded:
+            raise RuntimeError(f"{self.name} not fitted successfully")
+
+        steps = len(future_timestamps)
+        h = np.arange(1, steps + 1)
+
+        # AR(1) forecast component
+        if abs(self.phi) > 1e-9:
+            phi_h = self.phi**h
+            ar_component = phi_h * (self.last_value - self.mu)
+        else:
+            ar_component = np.zeros(steps)
+
+        # Linear drift component
+        drift_component = self.drift * h * (self.step_sec / 3600.0)
+
+        forecast = self.mu + ar_component + drift_component
+
+        # Growing uncertainty over time
+        if abs(self.phi) < 0.999:
+            var_mult = (1 - self.phi ** (2 * h)) / (1 - self.phi**2 + 1e-9)
+        else:
+            var_mult = h
+
+        var_mult = np.clip(var_mult, 1.0, 100.0)
+        forecast_std = self.sigma * np.sqrt(var_mult)
+
+        return forecast, forecast_std
+
+
+class ExponentialDegradationModel(DegradationModel):
+    """
+    Exponential degradation model: h(t) = h0 * exp(-λ*t) + offset
+    
+    Suitable for systems with exponential decay patterns.
+    """
+
+    def __init__(self):
+        super().__init__("Exponential")
+        self.lambda_ = 0.0
+        self.h0 = 0.0
+        self.offset = 0.0
+        self.sigma = 1.0
+        self.last_time = None
+
+    def fit(self, timestamps: pd.DatetimeIndex, health_values: np.ndarray) -> bool:
+        y = health_values
+        if len(y) < 10:
+            Console.warn(f"[{self.name}] Insufficient data points: {len(y)} < 10")
+            return False
+
+        # Time in hours from start
+        t = (timestamps - timestamps[0]).total_seconds().values / 3600.0
+
+        # Fit exponential decay via log-linear regression
+        offset = float(np.min(y)) - 1.0  # Stabilize for log
+        y_shifted = y - offset
+
+        if np.any(y_shifted <= 0):
+            Console.warn(f"[{self.name}] Non-positive shifted values")
+            return False
+
+        log_y = np.log(y_shifted)
+
+        # Linear regression on log scale
+        A = np.vstack([t, np.ones(len(t))]).T
+        try:
+            coeffs, residuals, _, _ = np.linalg.lstsq(A, log_y, rcond=None)
+            self.lambda_ = float(-coeffs[0])  # Decay rate
+            self.h0 = float(np.exp(coeffs[1]))
+            self.offset = offset
+
+            # Residual std in original scale
+            pred_log = A @ coeffs
+            pred = np.exp(pred_log) + offset
+            self.sigma = float(np.std(y - pred))
+            self.sigma = max(self.sigma, 0.1)
+
+            self.last_time = timestamps[-1]
+            self.fit_succeeded = True
+            return True
+        except Exception as e:
+            Console.warn(f"[{self.name}] Fit failed: {e}")
+            return False
+
+    def predict(self, future_timestamps: pd.DatetimeIndex) -> Tuple[np.ndarray, np.ndarray]:
+        if not self.fit_succeeded:
+            raise RuntimeError(f"{self.name} not fitted successfully")
+
+        t = (future_timestamps - self.last_time).total_seconds().values / 3600.0
+
+        # Exponential projection
+        forecast = self.h0 * np.exp(-self.lambda_ * t) + self.offset
+
+        # Uncertainty grows with time
+        forecast_std = self.sigma * np.sqrt(1 + 0.1 * t)
+
+        return forecast, forecast_std
+
+
+class WeibullInspiredModel(DegradationModel):
+    """
+    Weibull-inspired power-law degradation: h(t) = h0 - k * t^β
+    
+    Suitable for non-linear failure acceleration patterns.
+    """
+
+    def __init__(self):
+        super().__init__("Weibull")
+        self.beta = 1.0
+        self.k = 0.0
+        self.h0 = 0.0
+        self.sigma = 1.0
+        self.last_time = None
+        self.t_base = None
+
+    def fit(self, timestamps: pd.DatetimeIndex, health_values: np.ndarray) -> bool:
+        from scipy.optimize import minimize_scalar
+
+        y = health_values
+        if len(y) < 15:
+            Console.warn(f"[{self.name}] Insufficient data points: {len(y)} < 15")
+            return False
+
+        # Time in hours from start
+        t = (timestamps - timestamps[0]).total_seconds().values / 3600.0
+
+        # Fit power-law degradation via shape parameter optimization
+        def objective(beta):
+            if beta <= 0:
+                return 1e10
+            try:
+                t_beta = t**beta
+                A = np.vstack([t_beta, np.ones(len(t))]).T
+                coeffs, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+                pred = A @ coeffs
+                return np.sum((y - pred) ** 2)
+            except Exception:
+                return 1e10
+
+        # Optimize beta (shape parameter)
+        result = minimize_scalar(objective, bounds=(0.5, 3.0), method="bounded")
+
+        if not result.success:
+            Console.warn(f"[{self.name}] Optimization failed")
+            return False
+
+        self.beta = float(result.x)
+        t_beta = t**self.beta
+        A = np.vstack([t_beta, np.ones(len(t))]).T
+        coeffs, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+
+        self.k = float(-coeffs[0])  # Degradation rate (positive)
+        self.h0 = float(coeffs[1])
+
+        pred = A @ coeffs
+        self.sigma = float(np.std(y - pred))
+        self.sigma = max(self.sigma, 0.1)
+
+        self.last_time = timestamps[-1]
+        self.t_base = timestamps[0]
+        self.fit_succeeded = True
+        return True
+
+    def predict(self, future_timestamps: pd.DatetimeIndex) -> Tuple[np.ndarray, np.ndarray]:
+        if not self.fit_succeeded:
+            raise RuntimeError(f"{self.name} not fitted successfully")
+
+        t = (future_timestamps - self.t_base).total_seconds().values / 3600.0
+
+        forecast = self.h0 - self.k * (t**self.beta)
+
+        # Uncertainty grows non-linearly
+        t_rel = (future_timestamps - self.last_time).total_seconds().values / 3600.0
+        forecast_std = self.sigma * np.sqrt(1 + 0.15 * t_rel)
+
+        return forecast, forecast_std
+
+
+class RULModel:
+    """
+    Ensemble wrapper that orchestrates AR1 + Exponential + Weibull models.
+    
+    Combines predictions using learned weights from LearningState.
+    """
+
+    def __init__(self, cfg: RULConfig, learning_state: LearningState):
+        self.cfg = cfg
+        self.learning_state = learning_state
+
+        # Instantiate models
+        self.ar1 = AR1Model()
+        self.exp = ExponentialDegradationModel()
+        self.weibull = WeibullInspiredModel()
+
+        self.models = [self.ar1, self.exp, self.weibull]
+        self.fit_status = {m.name: False for m in self.models}
+
+    def fit(self, timestamps: pd.DatetimeIndex, health_values: np.ndarray) -> Dict[str, bool]:
+        """
+        Fit all ensemble models.
+        
+        Returns:
+            Dict mapping model name to fit success status
+        """
+        Console.info("[RUL-Ensemble] Fitting all models...")
+
+        for model in self.models:
+            try:
+                success = model.fit(timestamps, health_values)
+                self.fit_status[model.name] = success
+                if success:
+                    Console.info(f"[RUL-Ensemble] ✓ {model.name} fitted successfully")
+                else:
+                    Console.warn(f"[RUL-Ensemble] ✗ {model.name} failed to fit")
+            except Exception as e:
+                Console.warn(f"[RUL-Ensemble] ✗ {model.name} exception: {e}")
+                self.fit_status[model.name] = False
+
+        fitted_count = sum(self.fit_status.values())
+        Console.info(f"[RUL-Ensemble] {fitted_count}/{len(self.models)} models fitted successfully")
+
+        return self.fit_status
+
+    def forecast(self, future_timestamps: pd.DatetimeIndex) -> Dict[str, Any]:
+        """
+        Generate ensemble forecast with adaptive weighting.
+        
+        Returns:
+            Dict with keys:
+            - mean: Ensemble mean forecast
+            - std: Ensemble std forecast
+            - per_model: Dict of per-model (mean, std) predictions
+            - weights: Normalized weights used
+            - fit_status: Which models succeeded
+        """
+        # Collect predictions from successfully fitted models
+        predictions = []
+        stds = []
+        model_names = []
+
+        for model in self.models:
+            if not self.fit_status[model.name]:
+                continue
+
+            try:
+                pred, std = model.predict(future_timestamps)
+                predictions.append(pred)
+                stds.append(std)
+                model_names.append(model.name)
+            except Exception as e:
+                Console.warn(f"[RUL-Ensemble] {model.name} prediction failed: {e}")
+
+        if not predictions:
+            Console.warn("[RUL-Ensemble] No models available for prediction")
+            # Return flat forecast
+            n = len(future_timestamps)
+            return {
+                "mean": np.full(n, 70.0),
+                "std": np.full(n, 10.0),
+                "per_model": {},
+                "weights": {},
+                "fit_status": self.fit_status,
+            }
+
+        predictions = np.array(predictions)
+        stds = np.array(stds)
+
+        # Get weights from learning state
+        raw_weights = np.ones(len(model_names))
+        for i, name in enumerate(model_names):
+            model_key = name.lower()
+            if model_key == "ar1":
+                raw_weights[i] = self.learning_state.ar1.weight
+            elif model_key == "exponential":
+                raw_weights[i] = self.learning_state.exp.weight
+            elif model_key == "weibull":
+                raw_weights[i] = self.learning_state.weibull.weight
+
+        # Apply minimum weight floor
+        min_weight = self.cfg.min_model_weight
+        raw_weights = np.maximum(raw_weights, min_weight)
+
+        # Normalize to sum to 1.0
+        weights = raw_weights / (np.sum(raw_weights) + 1e-9)
+
+        # Weighted ensemble
+        ensemble_mean = np.sum(weights[:, None] * predictions, axis=0)
+        
+        # Ensemble variance combines prediction variance + disagreement variance
+        # Prediction variance (weighted)
+        ensemble_var_pred = np.sum(weights[:, None] * (stds**2), axis=0)
+        
+        # Disagreement variance (spread between models)
+        disagreement = predictions - ensemble_mean[None, :]
+        ensemble_var_disagreement = np.sum(weights[:, None] * (disagreement**2), axis=0)
+        
+        # Total ensemble variance
+        ensemble_var = ensemble_var_pred + ensemble_var_disagreement
+        ensemble_std = np.sqrt(ensemble_var)
+
+        # Package per-model predictions
+        per_model = {
+            name: {"mean": predictions[i], "std": stds[i]}
+            for i, name in enumerate(model_names)
+        }
+
+        # Package weights
+        weights_dict = {name: float(weights[i]) for i, name in enumerate(model_names)}
+
+        Console.info(f"[RUL-Ensemble] Weights: {weights_dict}")
+
+        return {
+            "mean": ensemble_mean,
+            "std": ensemble_std,
+            "per_model": per_model,
+            "weights": weights_dict,
+            "fit_status": self.fit_status,
+        }
+
+
+def compute_failure_distribution(
+    t_future: np.ndarray,
+    health_mean: np.ndarray,
+    health_std: np.ndarray,
+    threshold: float = 70.0,
+) -> np.ndarray:
+    """
+    Compute probability of failure at each future time.
+    
+    P(failure at t) = P(health(t) < threshold)
+                    = Φ((threshold - mean(t)) / std(t))
+    
+    where Φ is standard normal CDF.
+    
+    Args:
+        t_future: Future time array (hours from now)
+        health_mean: Forecast mean health values
+        health_std: Forecast std health values
+        threshold: Failure threshold
+        
+    Returns:
+        Array of failure probabilities at each time
+    """
+    # Standardized distance to threshold
+    z = (threshold - health_mean) / (health_std + 1e-9)
+    
+    # Probability that health < threshold
+    failure_prob = norm_cdf(z)
+    
+    # Clip to valid probability range
+    failure_prob = np.clip(failure_prob, 0.0, 1.0)
+    
+    return failure_prob
+
+
+# ============================================================================
+# TODO: Core RUL Engine (RUL-REF-18, RUL-REF-19)
+# ============================================================================
+# - compute_rul function
+# - compute_rul_multipath
+
+
+# ============================================================================
+# TODO: Output Builders (RUL-REF-22, RUL-REF-23, RUL-REF-24)
+# ============================================================================
+# - make_health_forecast_df
+# - make_failure_curve_df
+# - make_rul_ts_df
+# - make_rul_summary_df
+# - build_sensor_attribution
+# - build_maintenance_recommendation
+
+
+# ============================================================================
+# TODO: Public API (RUL-REF-25)
+# ============================================================================
+# - run_rul function (single entry point)
