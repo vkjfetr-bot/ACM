@@ -563,19 +563,31 @@ class ModelVersionManager:
     def get_latest_version(self) -> Optional[int]:
         """
         Get the latest model version number.
+        MP-COR-01: Enhanced logging for malformed directories.
         
         Returns:
             Latest version number, or None if no models exist
         """
+        import re
         versions = []
-        for v_dir in self.models_root.glob("v*"):
-            if v_dir.is_dir():
-                try:
-                    v_num = int(v_dir.name[1:])  # Extract number from "v123"
-                    versions.append(v_num)
-                except ValueError:
-                    Console.warn(f"[MODEL] Ignoring malformed model directory: {v_dir.name}")
-                    continue
+        version_pattern = re.compile(r"^v\d+$")
+        
+        # MP-COR-01: Check all subdirectories and log any that don't match expected pattern
+        for child in self.models_root.iterdir():
+            if not child.is_dir():
+                continue
+            
+            if not version_pattern.match(child.name):
+                Console.debug(f"[MODEL] Ignoring non-version directory: {child.name} (expected format: v<number>)")
+                continue
+            
+            try:
+                v_num = int(child.name[1:])  # Extract number from "v123"
+                versions.append(v_num)
+            except ValueError:
+                # Should not happen given regex check, but keep as safety net
+                Console.warn(f"[MODEL] Unexpected: matched pattern but failed int conversion: {child.name}")
+                continue
         
         return max(versions) if versions else None
     
