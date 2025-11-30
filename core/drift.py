@@ -19,13 +19,8 @@ import matplotlib.pyplot as plt
 
 
 # ---------- timestamp parsing helpers (no parse_dates; UTC-safe) ----------
-def _to_datetime_mixed(s):
-    try:
-        # pandas >= 2.1: fast mixed-parser
-        return pd.to_datetime(s, format="mixed", utc=True, errors="coerce")
-    except TypeError:
-        # Older pandas: fallback
-        return pd.to_datetime(s, utc=True, errors="coerce")
+# REG-COR-01: Import _to_datetime_mixed from regimes to avoid duplication
+from core.regimes import _to_datetime_mixed
 
 def _read_scores_csv(p: Path) -> pd.DataFrame:
     if not p.exists():

@@ -195,11 +195,9 @@ class AR1Detector:
 # ------------------------------------------------
 # Reporting hook: run(ctx)
 # ------------------------------------------------
-def _to_datetime_mixed(s):
-    try:
-        return pd.to_datetime(s, format="mixed", errors="coerce")
-    except TypeError:
-        return pd.to_datetime(s, errors="coerce")
+
+# REG-COR-01: Import _to_datetime_mixed from regimes to avoid duplication
+from core.regimes import _to_datetime_mixed
 
 def _read_scores(p: Path) -> pd.DataFrame:
     df = pd.read_csv(p, dtype={"timestamp": "string"})
