@@ -45,6 +45,28 @@ except ImportError:
 
 
 # ============================================================================
+# Module-Level Constants (FOR-CODE-01)
+# ============================================================================
+
+# Minimum samples required for AR(1) model coefficient estimation
+# Below this threshold, AR(1) reverts to simple mean-based baseline
+MIN_AR1_SAMPLES = 3
+
+# Minimum samples for stable forecast generation
+# Based on empirical testing: fewer samples produce unreliable forecasts
+MIN_FORECAST_SAMPLES = 20
+
+# Exponential blend time constant (hours) for hazard smoothing
+# Controls how quickly hazard probability transitions between forecast updates
+# 12 hours provides smooth transitions without excessive lag
+BLEND_TAU_HOURS = 12.0
+
+# Default exponential smoothing alpha for hazard time series
+# Lower values (0.1-0.3) provide smoother hazard curves with less noise
+DEFAULT_HAZARD_SMOOTHING_ALPHA = 0.3
+
+
+# ============================================================================
 # Continuous Forecasting Helpers (FORECAST-STATE-02, 03)
 # ============================================================================
 
@@ -240,7 +262,7 @@ def merge_forecast_horizons(
     prev_horizon: pd.DataFrame,
     new_horizon: pd.DataFrame,
     current_time: datetime,
-    blend_tau_hours: float = 12.0
+    blend_tau_hours: float = BLEND_TAU_HOURS
 ) -> pd.DataFrame:
     """
     Merge overlapping forecast horizons with exponential temporal blending.
@@ -306,7 +328,7 @@ def smooth_failure_probability_hazard(
     prev_hazard_baseline: float,
     new_probability_series: pd.Series,
     dt_hours: float = 1.0,
-    alpha: float = 0.3
+    alpha: float = DEFAULT_HAZARD_SMOOTHING_ALPHA
 ) -> pd.DataFrame:
     """
     Convert discrete batch failure probabilities to continuous hazard with EWMA smoothing.
@@ -371,7 +393,7 @@ def estimate_rul(
     - forecasting.failure_threshold: Health threshold that counts as failure (default 70.0)
     - forecasting.max_forecast_hours: Maximum forecast horizon in hours (default 168.0)
     - rul.target_health: Legacy health threshold override (fallback)
-    - rul.min_points: Minimum health points needed for RUL logic (default 20)
+    - rul.min_points: Minimum health points needed for RUL logic (default MIN_FORECAST_SAMPLES)
     """
     forecast_section = config.get("forecasting") or {}
     rul_section = config.get("rul") or {}
@@ -497,7 +519,7 @@ class AR1Detector:
             finite = np.isfinite(col)
             x = col[finite]
             
-            if x.size < 3:
+            if x.size < MIN_AR1_SAMPLES:
                 mu = float(np.nanmean(col)) if x.size else 0.0
                 if not np.isfinite(mu):
                     mu = 0.0
@@ -528,7 +550,7 @@ class AR1Detector:
                 phi = float(np.sign(phi) * self._phi_cap)
                 Console.warn(f"[AR1] Column '{c}': phi={original_phi:.3f} clamped to {phi:.3f}")
             
-            if len(x) < 20:
+            if len(x) < MIN_FORECAST_SAMPLES:
                 Console.warn(f"[AR1] Column '{c}': only {len(x)} samples; coefficients may be unstable")
             
             self.phimap[c] = (phi, mu)
@@ -817,7 +839,7 @@ def run_enhanced_forecasting_sql(
         Console.warn(f"[ENHANCED_FORECAST] Failed to prepare health series: {e}")
         return {"tables": {}, "metrics": {}}
 
-    if hi.size < 20:
+    if hi.size < MIN_FORECAST_SAMPLES:
         Console.warn(f"[ENHANCED_FORECAST] Insufficient health history ({hi.size} points); skipping")
         return {"tables": {}, "metrics": {}}
 
@@ -1055,7 +1077,7 @@ def run_enhanced_forecasting_sql(
                 new_forecast_df = pd.DataFrame(columns=["Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper"])
             
             # Merge with previous horizon
-            blend_tau_hours = float(forecast_cfg.get("blend_tau_hours", 12.0))
+            blend_tau_hours = float(forecast_cfg.get("blend_tau_hours", BLEND_TAU_HOURS))
             prev_horizon = prev_state.get_last_forecast_horizon() if prev_state else pd.DataFrame()
             
             merged_horizon = merge_forecast_horizons(
@@ -1075,7 +1097,7 @@ def run_enhanced_forecasting_sql(
             # Hazard smoothing for failure probability
             if not failure_probs_df.empty and "FailureProbability" in failure_probs_df.columns:
                 prev_hazard = prev_state.hazard_baseline if prev_state else 0.0
-                alpha = float(forecast_cfg.get("hazard_smoothing_alpha", 0.3))
+                alpha = float(forecast_cfg.get("hazard_smoothing_alpha", DEFAULT_HAZARD_SMOOTHING_ALPHA))
                 
                 # Create time series from failure probability
                 fp_series = failure_probs_df.set_index("ForecastHorizon")["FailureProbability"] \
