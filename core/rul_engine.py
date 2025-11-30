@@ -1593,6 +1593,209 @@ def compute_confidence(
 
 
 # ============================================================================
-# TODO: Public API (RUL-REF-25)
+# Public API (RUL-REF-25)
 # ============================================================================
-# - run_rul function (single entry point)
+
+
+def run_rul(
+    sql_client: Any,
+    equip_id: int,
+    run_id: str,
+    output_manager: Optional[Any] = None,
+    config_row: Optional[Dict[str, Any]] = None,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Unified RUL estimation entry point.
+    
+    This is the single public API for RUL estimation, replacing both
+    estimate_rul_and_failure() from rul_estimator.py and
+    enhanced_rul_estimator.py.
+    
+    Pipeline:
+    1. Normalize inputs and build config
+    2. Cleanup old forecast runs
+    3. Load health timeline (cache > SQL)
+    4. Load learning state from SQL
+    5. Compute RUL via ensemble models and multipath
+    6. Load sensor hotspots
+    7. Build all output DataFrames
+    8. Write outputs to SQL (if output_manager provided)
+    9. Save updated learning state (future: after learning update)
+    10. Return all tables
+    
+    Args:
+        sql_client: SQL client for data access
+        equip_id: Equipment ID (will be normalized to int)
+        run_id: Run ID (will be normalized to str)
+        output_manager: Optional OutputManager for dual-write
+        config_row: Optional config overrides from config_table.csv
+    
+    Returns:
+        Dict with keys:
+        - ACM_HealthForecast_TS: Health forecast time series
+        - ACM_FailureForecast_TS: Failure probability curve
+        - ACM_RUL_TS: RUL time series
+        - ACM_RUL_Summary: Single-row summary
+        - ACM_RUL_Attribution: Sensor attribution
+        - ACM_MaintenanceRecommendation: Maintenance actions
+    
+    Raises:
+        ValueError: Invalid inputs
+        RuntimeError: SQL connection issues or critical errors
+    """
+    Console.info("=" * 80)
+    Console.info("[RUL] Starting unified RUL estimation")
+    Console.info("=" * 80)
+    
+    # Step 1: Normalize inputs
+    equip_id = ensure_equipid_int(equip_id)
+    run_id = ensure_runid_str(run_id)
+    
+    Console.info(f"[RUL] EquipID={equip_id}, RunID={run_id}")
+    
+    # Step 2: Build configuration
+    if config_row is not None:
+        # Extract RUL-specific config from config_row
+        forecasting_cfg = config_row.get("forecasting", {})
+        cfg = RULConfig(
+            health_threshold=float(forecasting_cfg.get("failure_threshold", 70.0)),
+            min_points=int(forecasting_cfg.get("min_points", 20)),
+            max_forecast_hours=float(forecasting_cfg.get("max_forecast_hours", 168.0)),
+            learning_rate=float(forecasting_cfg.get("learning_rate", 0.1)),
+            min_model_weight=float(forecasting_cfg.get("min_model_weight", 0.1)),
+            enable_online_learning=bool(forecasting_cfg.get("enable_online_learning", False)),
+            calibration_window=int(forecasting_cfg.get("calibration_window", 100)),
+        )
+    else:
+        cfg = RULConfig()
+    
+    Console.info(f"[RUL] Config: threshold={cfg.health_threshold}, max_forecast={cfg.max_forecast_hours}h")
+    
+    # Step 3: Cleanup old forecasts
+    try:
+        cleanup_old_forecasts(sql_client, equip_id, cfg)
+    except Exception as e:
+        Console.warn(f"[RUL] Forecast cleanup failed: {e}")
+    
+    # Step 4: Load health timeline
+    health_df, data_quality = load_health_timeline(
+        sql_client=sql_client,
+        equip_id=equip_id,
+        run_id=run_id,
+        output_manager=output_manager,
+        cfg=cfg,
+    )
+    
+    if health_df is None or health_df.empty:
+        Console.error("[RUL] Cannot proceed without health timeline")
+        raise RuntimeError("Health timeline unavailable")
+    
+    Console.info(f"[RUL] Loaded health timeline: {len(health_df)} points, quality={data_quality}")
+    
+    # Step 5: Load learning state
+    learning_state = load_learning_state(sql_client, equip_id)
+    Console.info(f"[RUL] Loaded learning state: cal_factor={learning_state.calibration_factor:.2f}")
+    
+    # Step 6: Compute RUL
+    rul_result = compute_rul(
+        health_df=health_df,
+        cfg=cfg,
+        learning_state=learning_state,
+        data_quality_flag=data_quality,
+    )
+    
+    # Step 7: Compute confidence
+    confidence = compute_confidence(
+        rul_multipath=rul_result["rul_multipath"],
+        model_diagnostics=rul_result["model_diagnostics"],
+        learning_state=learning_state,
+        data_quality=data_quality,
+    )
+    
+    Console.info(f"[RUL] Confidence score: {confidence:.2f}")
+    
+    # Step 8: Load sensor hotspots
+    sensor_hotspots_df = load_sensor_hotspots(sql_client, equip_id, run_id)
+    
+    # Step 9: Build all output DataFrames
+    Console.info("[RUL] Building output DataFrames...")
+    
+    tables = {}
+    
+    tables["ACM_HealthForecast_TS"] = make_health_forecast_ts(
+        health_forecast=rul_result["health_forecast"],
+        run_id=run_id,
+        equip_id=equip_id,
+    )
+    
+    tables["ACM_FailureForecast_TS"] = make_failure_forecast_ts(
+        failure_curve=rul_result["failure_curve"],
+        run_id=run_id,
+        equip_id=equip_id,
+    )
+    
+    tables["ACM_RUL_TS"] = make_rul_ts(
+        health_forecast=rul_result["health_forecast"],
+        rul_multipath=rul_result["rul_multipath"],
+        current_time=rul_result["current_time"],
+        run_id=run_id,
+        equip_id=equip_id,
+        confidence=confidence,
+    )
+    
+    tables["ACM_RUL_Summary"] = make_rul_summary(
+        rul_multipath=rul_result["rul_multipath"],
+        model_diagnostics=rul_result["model_diagnostics"],
+        data_quality=data_quality,
+        run_id=run_id,
+        equip_id=equip_id,
+        confidence=confidence,
+    )
+    
+    tables["ACM_RUL_Attribution"] = build_sensor_attribution(
+        sensor_hotspots_df=sensor_hotspots_df,
+        rul_multipath=rul_result["rul_multipath"],
+        current_time=rul_result["current_time"],
+        run_id=run_id,
+        equip_id=equip_id,
+    )
+    
+    tables["ACM_MaintenanceRecommendation"] = build_maintenance_recommendation(
+        rul_multipath=rul_result["rul_multipath"],
+        data_quality=data_quality,
+        confidence=confidence,
+        cfg=cfg,
+        run_id=run_id,
+        equip_id=equip_id,
+    )
+    
+    # Step 10: Write to SQL (if output_manager provided)
+    if output_manager is not None:
+        Console.info("[RUL] Writing outputs to SQL via OutputManager...")
+        for table_name, df in tables.items():
+            try:
+                output_manager.write_table(table_name, df)
+                Console.info(f"[RUL] ✓ Wrote {len(df)} rows to {table_name}")
+            except Exception as e:
+                Console.warn(f"[RUL] ✗ Failed to write {table_name}: {e}")
+    
+    # Step 11: Save learning state (future: after learning update)
+    # For now, save unchanged state to ensure table exists
+    try:
+        save_learning_state(sql_client, equip_id, learning_state)
+    except Exception as e:
+        Console.warn(f"[RUL] Failed to save learning state: {e}")
+    
+    # Step 12: Log summary
+    rul_hours = rul_result["rul_multipath"]["rul_final_hours"]
+    method = rul_result["rul_multipath"]["dominant_path"]
+    
+    Console.info("=" * 80)
+    Console.info(f"[RUL] ✓ Estimation complete")
+    Console.info(f"[RUL] RUL: {rul_hours:.1f} hours ({rul_hours/24:.1f} days)")
+    Console.info(f"[RUL] Method: {method}")
+    Console.info(f"[RUL] Confidence: {confidence:.2f}")
+    Console.info(f"[RUL] Data Quality: {data_quality}")
+    Console.info("=" * 80)
+    
+    return tables
