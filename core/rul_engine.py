@@ -22,9 +22,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 import json
+import os
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 from utils.logger import Console
 
@@ -55,8 +57,8 @@ class RULConfig:
 
 
 def norm_cdf(z: np.ndarray) -> np.ndarray:
-    """Standard normal CDF approximation"""
-    return 0.5 * (1.0 + np.tanh(z * np.sqrt(2.0 / np.pi)))
+    """Standard normal CDF using exact scipy implementation"""
+    return norm.cdf(z)
 
 
 def ensure_runid_str(run_id: Any) -> str:
@@ -574,9 +576,10 @@ class AR1Model(DegradationModel):
             Console.warn(f"[{self.name}] Insufficient variance: {var_yc}")
             return False
 
-        # Estimate AR(1) coefficient
-        cov = float(np.dot(yc[1:], yc[:-1]))
-        var = float(np.dot(yc[:-1], yc[:-1]))
+        # Estimate AR(1) coefficient with proper normalization
+        n = len(yc) - 1
+        cov = float(np.sum(yc[1:] * yc[:-1]) / n)  # Normalized covariance
+        var = float(np.var(yc[:-1]))  # Proper variance calculation
         self.phi = np.clip(cov / (var + 1e-9), -0.99, 0.99)
 
         # Residual variance
@@ -627,11 +630,16 @@ class AR1Model(DegradationModel):
 
         forecast = self.mu + ar_component + drift_component
 
-        # Growing uncertainty over time
+        # Growing uncertainty over time (AR component + drift uncertainty)
         if abs(self.phi) < 0.999:
-            var_mult = (1 - self.phi ** (2 * h)) / (1 - self.phi**2 + 1e-9)
+            var_ar = (1 - self.phi ** (2 * h)) / (1 - self.phi**2 + 1e-9)
         else:
-            var_mult = h
+            var_ar = h
+        
+        # Drift adds quadratic uncertainty growth
+        time_hours = h * (self.step_sec / 3600.0)
+        var_drift = (time_hours ** 2) * 0.1  # Drift uncertainty grows quadratically
+        var_mult = var_ar + var_drift
 
         var_mult = np.clip(var_mult, 1.0, 100.0)
         forecast_std = self.sigma * np.sqrt(var_mult)
@@ -664,7 +672,9 @@ class ExponentialDegradationModel(DegradationModel):
         t = (timestamps - timestamps[0]).total_seconds().values / 3600.0
 
         # Fit exponential decay via log-linear regression
-        offset = float(np.min(y)) - 1.0  # Stabilize for log
+        # Use 5th percentile of recent values as asymptotic level estimate
+        recent_window = min(len(y), 20)
+        offset = float(np.percentile(y[-recent_window:], 5))  # Statistically justified offset
         y_shifted = y - offset
 
         if np.any(y_shifted <= 0):
@@ -779,7 +789,8 @@ class WeibullInspiredModel(DegradationModel):
 
         t = (future_timestamps - self.t_base).total_seconds().values / 3600.0
 
-        forecast = self.h0 - self.k * (t**self.beta)
+        # Add lower bound to prevent negative health predictions
+        forecast = np.maximum(self.h0 - self.k * (t**self.beta), 0.0)
 
         # Uncertainty grows non-linearly
         t_rel = (future_timestamps - self.last_time).total_seconds().values / 3600.0
@@ -1124,9 +1135,9 @@ def compute_rul_multipath(
     """
     Compute RUL via three independent paths and select dominant.
     
-    Path 1 (Trajectory): Mean health forecast crosses failure threshold
-    Path 2 (Hazard): Failure probability exceeds threshold (e.g., 50%)
-    Path 3 (Energy): Reserved for future anomaly energy integration
+    Path 1 (Expected): Mean health forecast crosses failure threshold (50th percentile)
+    Path 2 (Conservative): CI_Lower crosses threshold (2.5th percentile)
+    Path 3 (Optimistic): CI_Upper crosses threshold (97.5th percentile)
     
     Args:
         health_forecast: DataFrame with [Timestamp, ForecastHealth, CI_Lower, CI_Upper]
@@ -1136,17 +1147,17 @@ def compute_rul_multipath(
     
     Returns:
         Dict with:
-        - rul_trajectory_hours: RUL from trajectory path (or None)
-        - rul_hazard_hours: RUL from hazard path (or None)
-        - rul_energy_hours: RUL from energy path (or None)
+        - rul_trajectory_hours: RUL from expected/mean path (or None)
+        - rul_hazard_hours: RUL from conservative path (or None, 2.5th percentile)
+        - rul_energy_hours: RUL from optimistic path (or None, 97.5th percentile)
         - rul_final_hours: Selected RUL
         - lower_bound_hours: Lower confidence bound
         - upper_bound_hours: Upper confidence bound
-        - dominant_path: Which path was used ("trajectory", "hazard", or "energy")
+        - dominant_path: Which path was used ("trajectory", "conservative", or "optimistic")
     """
     Console.info("[RUL-Multipath] Computing RUL via multiple paths...")
     
-    # Path 1: Trajectory crossing (mean forecast < threshold)
+    # Path 1: Trajectory crossing (mean forecast < threshold) - Expected RUL (50th percentile)
     rul_trajectory = None
     if health_forecast is not None and not health_forecast.empty:
         trajectory_crossing = health_forecast[
@@ -1155,76 +1166,64 @@ def compute_rul_multipath(
         if not trajectory_crossing.empty:
             t1 = trajectory_crossing.iloc[0]["Timestamp"]
             rul_trajectory = (t1 - current_time).total_seconds() / 3600
-            Console.info(f"[RUL-Multipath] Trajectory crossing at {t1}, RUL={rul_trajectory:.1f}h")
+            Console.info(f"[RUL-Multipath] Trajectory crossing (mean) at {t1}, RUL={rul_trajectory:.1f}h")
         else:
             Console.info("[RUL-Multipath] No trajectory crossing within forecast horizon")
     
-    # Path 2: Hazard accumulation (failure probability >= 50%)
-    rul_hazard = None
-    hazard_prob_threshold = 0.5  # 50% probability
-    if failure_curve is not None and not failure_curve.empty:
-        hazard_crossing = failure_curve[failure_curve["FailureProb"] >= hazard_prob_threshold]
-        if not hazard_crossing.empty:
-            t2 = hazard_crossing.iloc[0]["Timestamp"]
-            rul_hazard = (t2 - current_time).total_seconds() / 3600
-            Console.info(f"[RUL-Multipath] Hazard crossing at {t2}, RUL={rul_hazard:.1f}h")
+    # Path 2: Conservative (2.5th percentile) - CI_Lower crossing (early warning)
+    rul_conservative = None
+    if health_forecast is not None and not health_forecast.empty:
+        conservative_crossing = health_forecast[
+            health_forecast["CI_Lower"] <= cfg.health_threshold
+        ]
+        if not conservative_crossing.empty:
+            t2 = conservative_crossing.iloc[0]["Timestamp"]
+            rul_conservative = (t2 - current_time).total_seconds() / 3600
+            Console.info(f"[RUL-Multipath] Conservative crossing (CI_Lower) at {t2}, RUL={rul_conservative:.1f}h")
         else:
-            Console.info("[RUL-Multipath] No hazard crossing within forecast horizon")
+            Console.info("[RUL-Multipath] No conservative crossing within forecast horizon")
     
-    # Path 3: Energy (reserved for future integration)
-    rul_energy = None
-    # TODO: Integrate anomaly energy if available
+    # Path 3: Optimistic (97.5th percentile) - CI_Upper crossing (late warning)
+    rul_optimistic = None
+    if health_forecast is not None and not health_forecast.empty:
+        optimistic_crossing = health_forecast[
+            health_forecast["CI_Upper"] <= cfg.health_threshold
+        ]
+        if not optimistic_crossing.empty:
+            t3 = optimistic_crossing.iloc[0]["Timestamp"]
+            rul_optimistic = (t3 - current_time).total_seconds() / 3600
+            Console.info(f"[RUL-Multipath] Optimistic crossing (CI_Upper) at {t3}, RUL={rul_optimistic:.1f}h")
+        else:
+            Console.info("[RUL-Multipath] No optimistic crossing within forecast horizon")
     
-    # Select dominant RUL (minimum of available paths)
-    available_ruls = [r for r in [rul_trajectory, rul_hazard, rul_energy] if r is not None]
+    # Select dominant RUL (use conservative estimate for safety-critical decisions)
+    available_ruls = [r for r in [rul_trajectory, rul_conservative, rul_optimistic] if r is not None]
     
     if available_ruls:
+        # Use conservative path (minimum RUL) for safety
         rul_final = min(available_ruls)
         
         # Determine dominant path
         if rul_final == rul_trajectory:
             dominant_path = "trajectory"
-        elif rul_final == rul_hazard:
-            dominant_path = "hazard"
+        elif rul_final == rul_conservative:
+            dominant_path = "conservative"
         else:
-            dominant_path = "energy"
+            dominant_path = "optimistic"
     else:
         # No crossing detected, use max forecast horizon
         rul_final = cfg.max_forecast_hours
         dominant_path = "none"
         Console.info(f"[RUL-Multipath] No crossing detected, using max horizon: {rul_final:.1f}h")
     
-    # Compute confidence bounds from CI crossings
-    lower_bound = None
-    upper_bound = None
-    
-    if health_forecast is not None and not health_forecast.empty:
-        # Lower bound: CI_Lower crosses threshold
-        ci_lower_crossing = health_forecast[
-            health_forecast["CI_Lower"] <= cfg.health_threshold
-        ]
-        if not ci_lower_crossing.empty:
-            t_lower = ci_lower_crossing.iloc[0]["Timestamp"]
-            lower_bound = (t_lower - current_time).total_seconds() / 3600
-        
-        # Upper bound: CI_Upper crosses threshold
-        ci_upper_crossing = health_forecast[
-            health_forecast["CI_Upper"] <= cfg.health_threshold
-        ]
-        if not ci_upper_crossing.empty:
-            t_upper = ci_upper_crossing.iloc[0]["Timestamp"]
-            upper_bound = (t_upper - current_time).total_seconds() / 3600
-    
-    # If bounds not available, use ±30% of RUL
-    if lower_bound is None:
-        lower_bound = max(0.0, rul_final * 0.7)
-    if upper_bound is None:
-        upper_bound = rul_final * 1.3
+    # Confidence bounds: reuse percentile crossings; fallback to +/-30%
+    lower_bound = rul_conservative if rul_conservative is not None else max(0.0, rul_final * 0.7)
+    upper_bound = rul_optimistic if rul_optimistic is not None else rul_final * 1.3
     
     result = {
         "rul_trajectory_hours": rul_trajectory,
-        "rul_hazard_hours": rul_hazard,
-        "rul_energy_hours": rul_energy,
+        "rul_hazard_hours": rul_conservative,  # Conservative estimate
+        "rul_energy_hours": rul_optimistic,  # Optimistic estimate
         "rul_final_hours": float(rul_final),
         "lower_bound_hours": float(lower_bound),
         "upper_bound_hours": float(upper_bound),
@@ -1233,7 +1232,7 @@ def compute_rul_multipath(
     
     Console.info(
         f"[RUL-Multipath] Final RUL={rul_final:.1f}h "
-        f"(trajectory={rul_trajectory}, hazard={rul_hazard}, dominant={dominant_path})"
+        f"(trajectory={rul_trajectory}, conservative={rul_conservative}, optimistic={rul_optimistic}, dominant={dominant_path})"
     )
     
     return result
@@ -1696,49 +1695,53 @@ def compute_confidence(
     Returns:
         Confidence score in [0.0, 1.0]
     """
-    confidence = 1.0
+    # Use principled weighted sum instead of multiplicative factors
+    # Weights: 40% CI confidence, 30% model agreement, 20% calibration, 10% data quality
     
-    # Factor 1: CI width (relative to RUL)
+    # Factor 1: CI width (relative to RUL) - narrower is better
     rul = rul_multipath["rul_final_hours"]
     lower = rul_multipath["lower_bound_hours"]
     upper = rul_multipath["upper_bound_hours"]
     
+    ci_confidence = 0.5  # Default
     if rul > 0:
         ci_width_fraction = (upper - lower) / rul
         ci_confidence = np.clip(1.0 - ci_width_fraction / 2.0, 0.0, 1.0)
-        confidence *= ci_confidence
     
-    # Factor 2: Model agreement
+    # Factor 2: Model agreement - similar weights indicate agreement
+    agreement_score = 0.5  # Default
     weights = model_diagnostics.get("weights", {})
     if len(weights) > 1:
-        # If multiple models fitted and weights are similar, confidence is higher
         weight_values = list(weights.values())
         weight_std = np.std(weight_values)
         weight_mean = np.mean(weight_values)
         if weight_mean > 0:
             agreement_score = 1.0 - min(weight_std / weight_mean, 1.0)
-            confidence *= 0.7 + 0.3 * agreement_score  # Bounded contribution
     
-    # Factor 3: Calibration stability
+    # Factor 3: Calibration stability - well-calibrated models are reliable
     cal_factor = learning_state.calibration_factor
     if 0.8 <= cal_factor <= 1.2:
-        # Well-calibrated
-        calibration_score = 1.0
+        calibration_score = 1.0  # Well-calibrated
     else:
-        # Poorly calibrated
-        calibration_score = 0.7
-    confidence *= calibration_score
+        calibration_score = max(0.3, 1.0 - abs(cal_factor - 1.0))  # Degrade smoothly
     
     # Factor 4: Data quality
-    quality_multipliers = {
+    quality_scores = {
         "OK": 1.0,
         "SPARSE": 0.8,
-        "GAPPY": 0.7,
-        "FLAT": 0.6,
-        "MISSING": 0.5,
+        "GAPPY": 0.6,
+        "FLAT": 0.5,
+        "MISSING": 0.3,
     }
-    quality_mult = quality_multipliers.get(data_quality, 0.8)
-    confidence *= quality_mult
+    quality_score = quality_scores.get(data_quality, 0.7)
+    
+    # Weighted sum (normalized to [0, 1])
+    confidence = (
+        0.4 * ci_confidence +
+        0.3 * agreement_score +
+        0.2 * calibration_score +
+        0.1 * quality_score
+    )
     
     # Clamp to [0, 1]
     confidence = np.clip(confidence, 0.0, 1.0)
