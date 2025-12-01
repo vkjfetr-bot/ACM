@@ -134,150 +134,124 @@ class ForecastState:
             return "[]"
 
 
-def save_forecast_state(state: ForecastState, artifact_root: Path, equip: str, sql_client=None) -> None:
+def save_forecast_state(state: ForecastState, equip: str, sql_client) -> None:
     """
-    Save ForecastState to filesystem and optionally SQL.
+    Save ForecastState to SQL (SQL-ONLY MODE).
     
     Args:
         state: ForecastState object to persist
-        artifact_root: Root artifacts directory
-        equip: Equipment name
-        sql_client: Optional SQL client for dual persistence
+        equip: Equipment name (for logging)
+        sql_client: SQL client for persistence
     """
-    # Filesystem persistence
-    if artifact_root.name == equip:
-        state_dir = artifact_root / "models"
-    else:
-        state_dir = artifact_root / equip / "models"
-    
-    state_dir.mkdir(parents=True, exist_ok=True)
-    state_file = state_dir / "forecast_state.json"
+    if sql_client is None:
+        Console.error("[FORECAST_STATE] SQL client required for SQL-only mode")
+        return
     
     try:
-        with open(state_file, "w") as f:
-            json.dump(state.to_dict(), f, indent=2)
-        Console.info(f"[FORECAST_STATE] Saved state v{state.state_version} to {state_file}")
+        cur = sql_client.cursor()
+        
+        # Convert dicts to JSON strings for SQL storage
+        model_params_json = json.dumps(state.model_params)
+        forecast_quality_json = json.dumps(state.forecast_quality)
+        
+        # Upsert into ACM_ForecastState
+        cur.execute("""
+            MERGE INTO dbo.ACM_ForecastState AS target
+            USING (SELECT ? AS EquipID, ? AS StateVersion) AS source
+            ON target.EquipID = source.EquipID AND target.StateVersion = source.StateVersion
+            WHEN MATCHED THEN
+                UPDATE SET
+                    ModelType = ?,
+                    ModelParamsJson = ?,
+                    ResidualVariance = ?,
+                    LastForecastHorizonJson = ?,
+                    HazardBaseline = ?,
+                    LastRetrainTime = ?,
+                    TrainingDataHash = ?,
+                    TrainingWindowHours = ?,
+                    ForecastQualityJson = ?
+            WHEN NOT MATCHED THEN
+                INSERT (EquipID, StateVersion, ModelType, ModelParamsJson, ResidualVariance,
+                        LastForecastHorizonJson, HazardBaseline, LastRetrainTime,
+                        TrainingDataHash, TrainingWindowHours, ForecastQualityJson)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            state.equip_id, state.state_version,  # MERGE match
+            state.model_type, model_params_json, state.residual_variance,
+            state.last_forecast_horizon_json, state.hazard_baseline,
+            state.last_retrain_time, state.training_data_hash,
+            state.training_window_hours, forecast_quality_json,  # UPDATE values
+            state.equip_id, state.state_version, state.model_type,
+            model_params_json, state.residual_variance,
+            state.last_forecast_horizon_json, state.hazard_baseline,
+            state.last_retrain_time, state.training_data_hash,
+            state.training_window_hours, forecast_quality_json  # INSERT values
+        ))
+        
+        if not sql_client.conn.autocommit:
+            sql_client.conn.commit()
+        
+        Console.info(f"[FORECAST_STATE] Saved state v{state.state_version} to ACM_ForecastState (EquipID={state.equip_id})")
     except Exception as e:
-        Console.warn(f"[FORECAST_STATE] Failed to save state to filesystem: {e}")
-    
-    # SQL persistence (optional, dual-write)
-    if sql_client is not None:
-        try:
-            cur = sql_client.cursor()
-            
-            # Convert dicts to JSON strings for SQL storage
-            model_params_json = json.dumps(state.model_params)
-            forecast_quality_json = json.dumps(state.forecast_quality)
-            
-            # Upsert into ACM_ForecastState
-            cur.execute("""
-                MERGE INTO dbo.ACM_ForecastState AS target
-                USING (SELECT ? AS EquipID, ? AS StateVersion) AS source
-                ON target.EquipID = source.EquipID AND target.StateVersion = source.StateVersion
-                WHEN MATCHED THEN
-                    UPDATE SET
-                        ModelType = ?,
-                        ModelParamsJson = ?,
-                        ResidualVariance = ?,
-                        LastForecastHorizonJson = ?,
-                        HazardBaseline = ?,
-                        LastRetrainTime = ?,
-                        TrainingDataHash = ?,
-                        TrainingWindowHours = ?,
-                        ForecastQualityJson = ?
-                WHEN NOT MATCHED THEN
-                    INSERT (EquipID, StateVersion, ModelType, ModelParamsJson, ResidualVariance,
-                            LastForecastHorizonJson, HazardBaseline, LastRetrainTime,
-                            TrainingDataHash, TrainingWindowHours, ForecastQualityJson)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """, (
-                state.equip_id, state.state_version,  # MERGE match
-                state.model_type, model_params_json, state.residual_variance,
-                state.last_forecast_horizon_json, state.hazard_baseline,
-                state.last_retrain_time, state.training_data_hash,
-                state.training_window_hours, forecast_quality_json,  # UPDATE values
-                state.equip_id, state.state_version, state.model_type,
-                model_params_json, state.residual_variance,
-                state.last_forecast_horizon_json, state.hazard_baseline,
-                state.last_retrain_time, state.training_data_hash,
-                state.training_window_hours, forecast_quality_json  # INSERT values
-            ))
-            
-            if not sql_client.conn.autocommit:
-                sql_client.conn.commit()
-            
-            Console.info(f"[FORECAST_STATE] Saved state v{state.state_version} to ACM_ForecastState (EquipID={state.equip_id})")
-        except Exception as e:
-            Console.warn(f"[FORECAST_STATE] Failed to save state to SQL: {e}")
+        Console.error(f"[FORECAST_STATE] Failed to save state to SQL: {e}")
 
 
-def load_forecast_state(artifact_root: Path, equip: str, equip_id: Optional[int] = None, sql_client=None) -> Optional[ForecastState]:
+def load_forecast_state(equip: str, equip_id: int, sql_client) -> Optional[ForecastState]:
     """
-    Load latest ForecastState from filesystem or SQL.
+    Load latest ForecastState from SQL (SQL-ONLY MODE).
     
     Args:
-        artifact_root: Root artifacts directory
-        equip: Equipment name
-        equip_id: Equipment ID (required for SQL loading)
-        sql_client: Optional SQL client to load from database
+        equip: Equipment name (for logging)
+        equip_id: Equipment ID (required)
+        sql_client: SQL client to load from database
     
     Returns:
         ForecastState object or None if not found
     """
-    # Try SQL first if available
-    if sql_client is not None and equip_id is not None:
-        try:
-            cur = sql_client.cursor()
-            cur.execute("""
-                SELECT TOP 1
-                    EquipID, StateVersion, ModelType, ModelParamsJson, ResidualVariance,
-                    LastForecastHorizonJson, HazardBaseline, LastRetrainTime,
-                    TrainingDataHash, TrainingWindowHours, ForecastQualityJson
-                FROM dbo.ACM_ForecastState
-                WHERE EquipID = ?
-                ORDER BY StateVersion DESC
-            """, (equip_id,))
-            
-            row = cur.fetchone()
-            cur.close()
-            
-            if row:
-                state = ForecastState(
-                    equip_id=row[0],
-                    state_version=row[1],
-                    model_type=row[2],
-                    model_params=json.loads(row[3]) if row[3] else {},
-                    residual_variance=float(row[4]) if row[4] is not None else 0.0,
-                    last_forecast_horizon_json=row[5] or "[]",
-                    hazard_baseline=float(row[6]) if row[6] is not None else 0.0,
-                    last_retrain_time=row[7].isoformat() if row[7] else datetime.now(timezone.utc).isoformat(),
-                    training_data_hash=row[8] or "",
-                    training_window_hours=int(row[9]) if row[9] is not None else 72,
-                    forecast_quality=json.loads(row[10]) if row[10] else {}
-                )
-                Console.info(f"[FORECAST_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
-                return state
-        except Exception as e:
-            Console.warn(f"[FORECAST_STATE] Failed to load state from SQL: {e}")
+    if sql_client is None:
+        Console.error("[FORECAST_STATE] SQL client required for SQL-only mode")
+        return None
     
-    # Fallback to filesystem
-    if artifact_root.name == equip:
-        state_file = artifact_root / "models" / "forecast_state.json"
-    else:
-        state_file = artifact_root / equip / "models" / "forecast_state.json"
-    
-    if not state_file.exists():
-        Console.info("[FORECAST_STATE] No prior forecast state found")
+    if equip_id is None:
+        Console.error("[FORECAST_STATE] equip_id required for SQL-only mode")
         return None
     
     try:
-        with open(state_file, "r") as f:
-            data = json.load(f)
-        state = ForecastState.from_dict(data)
-        Console.info(f"[FORECAST_STATE] Loaded state v{state.state_version} from {state_file}")
-        return state
+        cur = sql_client.cursor()
+        cur.execute("""
+            SELECT TOP 1
+                EquipID, StateVersion, ModelType, ModelParamsJson, ResidualVariance,
+                LastForecastHorizonJson, HazardBaseline, LastRetrainTime,
+                TrainingDataHash, TrainingWindowHours, ForecastQualityJson
+            FROM dbo.ACM_ForecastState
+            WHERE EquipID = ?
+            ORDER BY StateVersion DESC
+        """, (equip_id,))
+        
+        row = cur.fetchone()
+        cur.close()
+        
+        if row:
+            state = ForecastState(
+                equip_id=row[0],
+                state_version=row[1],
+                model_type=row[2],
+                model_params=json.loads(row[3]) if row[3] else {},
+                residual_variance=float(row[4]) if row[4] is not None else 0.0,
+                last_forecast_horizon_json=row[5] or "[]",
+                hazard_baseline=float(row[6]) if row[6] is not None else 0.0,
+                last_retrain_time=row[7].isoformat() if row[7] else datetime.now(timezone.utc).isoformat(),
+                training_data_hash=row[8] or "",
+                training_window_hours=int(row[9]) if row[9] is not None else 72,
+                forecast_quality=json.loads(row[10]) if row[10] else {}
+            )
+            Console.info(f"[FORECAST_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
+            return state
+        else:
+            Console.info(f"[FORECAST_STATE] No prior forecast state found for EquipID={equip_id}")
+            return None
     except Exception as e:
-        Console.warn(f"[FORECAST_STATE] Failed to load state from filesystem: {e}")
+        Console.error(f"[FORECAST_STATE] Failed to load state from SQL: {e}")
         return None
 
 

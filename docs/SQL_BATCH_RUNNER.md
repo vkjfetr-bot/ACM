@@ -34,13 +34,7 @@ The **SQL Batch Runner** enables continuous ACM processing directly from the SQL
 Process single equipment from coldstart through all batches:
 
 ```powershell
-# PowerShell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN
-```
-
-```bash
-# Python
-python scripts/sql_batch_runner.py --equip FD_FAN
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --start-from-beginning
 ```
 
 ### Multiple Equipment
@@ -48,7 +42,7 @@ python scripts/sql_batch_runner.py --equip FD_FAN
 Process multiple equipment in parallel:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN,GAS_TURBINE -MaxWorkers 2
+python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --start-from-beginning
 ```
 
 ### Resume from Previous Run
@@ -56,7 +50,7 @@ Process multiple equipment in parallel:
 Resume processing after interruption:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -Resume
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --resume
 ```
 
 ### Dry Run (Preview)
@@ -64,7 +58,7 @@ Resume processing after interruption:
 Preview what would be processed without executing:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -DryRun
+python scripts/sql_batch_runner.py --equip FD_FAN --dry-run
 ```
 
 ### Custom Parameters
@@ -72,7 +66,7 @@ Preview what would be processed without executing:
 Adjust tick window and coldstart attempts:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -TickMinutes 15 -MaxColdstartAttempts 5
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 60 --max-coldstart-attempts 5 --start-from-beginning
 ```
 
 ## Processing Flow
@@ -172,20 +166,22 @@ Tracked in `.sql_batch_progress.json`:
 
 ## Parameters
 
-### PowerShell Parameters
+### CLI Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-Equipment` | string[] | (required) | Equipment codes (e.g., FD_FAN) |
-| `-SQLServer` | string | localhost\B19CL3PCQLSERVER | SQL Server instance |
-| `-SQLDatabase` | string | ACM | Database name |
-| `-TickMinutes` | int | 30 | Batch window size in minutes |
-| `-MaxColdstartAttempts` | int | 10 | Max coldstart retry attempts |
-| `-MaxWorkers` | int | 1 | Parallel workers |
-| `-Resume` | switch | false | Resume from last batch |
-| `-DryRun` | switch | false | Preview without execution |
+| `--equip` | list[str] | (required) | Equipment codes (e.g., `FD_FAN GAS_TURBINE`) |
+| `--sql-server` | string | localhost\B19CL3PCQLSERVER | SQL Server instance |
+| `--sql-database` | string | ACM | Database name |
+| `--tick-minutes` | int | 30 | Batch window size in minutes |
+| `--max-coldstart-attempts` | int | 10 | Max coldstart retry attempts |
+| `--max-workers` | int | 1 | Parallel workers |
+| `--max-batches` | int | unlimited | Optional cap for demos/tests |
+| `--start-from-beginning` | flag | off | Force restart from earliest historian timestamp |
+| `--resume` | flag | off | Resume from last batch checkpoint |
+| `--dry-run` | flag | off | Preview without execution |
 
-### Python Parameters
+### Discover More Options
 
 ```bash
 python scripts/sql_batch_runner.py --help
@@ -198,7 +194,7 @@ python scripts/sql_batch_runner.py --help
 Process FD_FAN from scratch:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --start-from-beginning
 ```
 
 **What happens:**
@@ -212,7 +208,7 @@ Process FD_FAN from scratch:
 Resume processing after Ctrl+C or failure:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -Resume
+python scripts/sql_batch_runner.py --equip FD_FAN --resume
 ```
 
 **What happens:**
@@ -226,7 +222,7 @@ Resume processing after Ctrl+C or failure:
 Process two equipment simultaneously:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN,GAS_TURBINE -MaxWorkers 2
+python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2 --start-from-beginning
 ```
 
 **What happens:**
@@ -240,7 +236,7 @@ Process two equipment simultaneously:
 See what would be processed without running:
 
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -DryRun
+python scripts/sql_batch_runner.py --equip FD_FAN --dry-run
 ```
 
 **What happens:**
@@ -274,7 +270,7 @@ See what would be processed without running:
 
 3. Increase max attempts:
    ```powershell
-   .\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -MaxColdstartAttempts 20
+   python scripts/sql_batch_runner.py --equip FD_FAN --max-coldstart-attempts 20 --start-from-beginning
    ```
 
 ### Issue: "No data returned from SQL historian"
@@ -313,7 +309,7 @@ See what would be processed without running:
 1. Delete progress file and restart:
    ```powershell
    Remove-Item "artifacts\.sql_batch_progress.json"
-   .\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN
+   python scripts/sql_batch_runner.py --equip FD_FAN --start-from-beginning
    ```
 
 2. Or manually edit JSON to fix corruption
@@ -327,12 +323,12 @@ See what would be processed without running:
 **Solutions:**
 1. Increase tick window:
    ```powershell
-   .\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -TickMinutes 60
+   python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 60 --start-from-beginning
    ```
 
 2. Process multiple equipment in parallel:
    ```powershell
-   .\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN,GAS_TURBINE -MaxWorkers 2
+   python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2 --start-from-beginning
    ```
 
 3. Optimize SQL stored procedures (index tuning)
@@ -342,13 +338,13 @@ See what would be processed without running:
 ### 1. Start with Dry Run
 Always preview with `-DryRun` first to validate setup:
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -DryRun
+python scripts/sql_batch_runner.py --equip FD_FAN --dry-run
 ```
 
 ### 2. Use Resume for Long Runs
 For equipment with months/years of data, use `-Resume`:
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -Resume
+python scripts/sql_batch_runner.py --equip FD_FAN --resume
 ```
 This allows safe Ctrl+C interruption and continuation.
 
@@ -361,7 +357,7 @@ Get-Content "artifacts\.sql_batch_progress.json" | ConvertFrom-Json | Format-Lis
 ### 4. Parallel Processing
 For multiple equipment, use parallel workers:
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN,GAS_TURBINE,COND_PUMP -MaxWorkers 3
+python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE COND_PUMP --max-workers 3 --start-from-beginning
 ```
 
 ### 5. Adjust Tick Window
@@ -406,7 +402,7 @@ Match tick window to actual job frequency:
 ### SQL Batch Runner (New)
 ✅ **For SQL historian**:
 ```powershell
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN
+python scripts/sql_batch_runner.py --equip FD_FAN --start-from-beginning
 ```
 
 ## Verdict Summary

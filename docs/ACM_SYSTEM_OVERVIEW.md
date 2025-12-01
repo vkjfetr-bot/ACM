@@ -28,14 +28,58 @@ This handbook is a complete, implementation-level walkthrough of ACM V8 for new 
 
 ---
 
+## Codebase Map (Deep Index)
+
+- **Top-level runtime**
+  - `core/acm_main.py`: Orchestrator CLI entry; parses config, routes file-vs-SQL data load, runs detectors/fusion/episodes/regimes/drift, writes outputs, and finalizes SQL run metadata.
+  - `core/output_manager.py`: Unified IO hub; CSV + SQL loading (`load_data`, `_load_data_from_sql`), analytics writers, batching, and table allowlist/field defaults.
+  - `core/model_persistence.py`: Model registry + joblib cache manager; SQL-only/dual-write handling, manifest management, and load/save semantics.
+  - `core/forecasting.py`: Enhanced forecasting and regime-aware projections; handles config ingestion and detector alignment.
+  - `core/rul_engine.py`: RUL computation pipeline; persistence, run metadata extraction, and health/failure timelines.
+  - `core/regimes.py`, `core/drift.py`, `core/fuse.py`, `core/fast_features.py`, `core/outliers.py`, `core/correlation.py`: Detector heads and feature plumbing used by `acm_main`.
+  - `core/sql_client.py`: Thin pyodbc wrapper used by SQL mode (SP calls, retries).
+  - `core/smart_coldstart.py`: Coldstart retry/orchestration when SQL historian is sparse.
+  - `utils/logger.py`, `utils/timer.py`: Console logging, SQL sink integration, heartbeat, timing helpers.
+
+- **Persistence & SQL assets**
+  - `scripts/sql/` (numbered migrations + helpers):
+    - `49_create_equipment_data_tables.sql`, `51_create_historian_sp_temp.sql`: Equipment data tables and historian SP used by SQL mode.
+    - `52_fix_start_run_sp.sql` + later migrations: `usp_ACM_StartRun` window handling, coldstart fixes.
+    - `50_create_tag_equipment_map.sql`, `53_validate_all_tables.sql`, `54_create_latest_run_views.sql`: Tag mapping, table validation, latest-run dedup views.
+    - `load_equipment_data_to_sql.py`, `load_historian_from_csv.py`: CSV → SQL loaders (equipment tables vs unified historian).
+    - `populate_acm_config.py`: Syncs `configs/config_table.csv` into `ACM_Config`.
+    - `migrations/008_fix_start_run_data_range.sql`: Start-run window fix (OUTPUT params).
+  - `configs/sql_connection.ini*`: DSN/auth for `SQLClient`.
+
+- **Batch automation & runners**
+  - `scripts/sql_batch_runner.py`: Continuous SQL batch engine; coldstart retries, window walking, progress tracking, output QA, and env toggles (`ACM_BATCH_MODE`, `ACM_FORCE_SQL_MODE`).
+  - `scripts/run/run_sql_batch.ps1`: PowerShell wrapper for `sql_batch_runner` (tick, resume, parallel workers).
+  - `scripts/run/run_file_mode.ps1`: File-mode convenience wrapper (CSV paths).
+  - `scripts/run_data_range_batches.ps1`, `scripts/run_all_batches.ps1`: Helpers for specific batch ranges/runs.
+
+- **Monitoring, analysis, and QA scripts**
+  - `scripts/analyze_*`, `tools/*.py`, `check_*.py`: Post-run analysis, counts, schema checks, dashboard/data sanity, and truncation tools.
+  - `scripts/sql/test_sql_mode_loading.py`: Sanity test for historian SP load path.
+  - `scripts/update_grafana_dashboards.ps1`: Bulk dashboard query updates.
+
+- **Documentation & status**
+  - `docs/ACM_SYSTEM_OVERVIEW.md`: This handbook; now includes the deep map.
+  - SQL mode/batch docs: `docs/SQL_BATCH_RUNNER.md`, `docs/SQL_BATCH_QUICK_REF.md`, `docs/SQL-44_IMPLEMENTATION.md`, `docs/BATCH_MODE_WAVE_PATTERN_FIX.md`, `docs/SQL_INTEGRATION_PLAN.md`.
+  - Architecture/guides: `docs/CONTINUOUS_LEARNING.md`, `docs/CHANGELOG.md`, `docs/ACM_SYSTEM_OVERVIEW.md`.
+
+- **Configuration & artifacts**
+  - `configs/config_table.csv`: Canonical config table (mirrored into `ACM_Config`).
+  - `artifacts/`: Per-run outputs/models (file mode) and cached baselines; SQL mode minimizes usage.
+  - `code_tags.tsv`: Lightweight symbol index (name/kind/path:line) generated for quick lookup (ctags fallback).
+
+---
+
 ## 2) Runtime Modes & Entry Points
 
 **CLI:** `python -m core.acm_main --equip <EQUIP> [--train-csv ... --score-csv ...] [--config ...] [--clear-cache] [--log-level ...] [--disable-sql-logging]`
 
-**SQL batch automation:** `python scripts/sql_batch_runner.py --equip FD_FAN [--resume --max-workers N --tick-minutes 240]`  
-Uses SQL historian tables and calls `usp_ACM_StartRun`/`usp_ACM_FinalizeRun`. Handles cold-start retries and progress tracking (`.sql_batch_progress.json`).
-
-**Batch mode (PowerShell helper):** `scripts/run_batch_mode.ps1 -Equipment FD_FAN -NumBatches 5 -StartBatch 1` sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM` for sequential batches.
+**SQL batch automation:** `python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --start-from-beginning`  
+Uses SQL historian tables and calls `usp_ACM_StartRun`/`usp_ACM_FinalizeRun`. Handles cold-start retries and progress tracking (`.sql_batch_progress.json`). This command sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM`; avoid manipulating them elsewhere.
 
 **File mode helper (diagnostics-only):** `powershell ./scripts/run/run_file_mode.ps1` (wraps acm_main with CSV defaults).
 
@@ -140,7 +184,7 @@ Key paths (ParamPath) and reasoning:
 
 ### Scripts (operations)
 - `scripts/sql_batch_runner.py`: continuous SQL processing with ticked windows, resume, cold-start retries, historian coverage checks.
-- `scripts/run_batch_mode.ps1`: sequential batch runner that sets batch env vars.
+- `python scripts/sql_batch_runner.py ...`: single entry point for SQL batch/continuous runs.
 - `scripts/sql/populate_acm_config.py`: pushes `config_table.csv` rows into SQL `ACM_Config`.
 - Validation/check scripts: `check_*`, `validate_*`, `monitor_*`, `analyze_*` for dashboards, data gaps, drift, forecast status, table population.
 - `scripts/sql/*`: SQL schema helpers and tests.

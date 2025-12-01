@@ -63,7 +63,7 @@ ALLOWED_TABLES = {
     # Forecasting & RUL tables
     'ACM_HealthForecast_TS','ACM_FailureForecast_TS',
     'ACM_RUL_TS','ACM_RUL_Summary','ACM_RUL_Attribution',
-    'ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
+    'ACM_DetectorForecast_TS','ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
     'ACM_EnhancedFailureProbability_TS','ACM_FailureCausation',
     'ACM_EnhancedMaintenanceRecommendation','ACM_RecommendedActions',
     'ACM_SensorNormalized_TS',
@@ -831,18 +831,15 @@ class OutputManager:
         Console.info(f"[DATA] Loading from SQL historian: {equipment_name}")
         Console.info(f"[DATA] Time range: {start_utc} to {end_utc}")
         
-        # Get EquipID for the stored procedure call
-        equip_id = self.equip_id if hasattr(self, 'equip_id') and self.equip_id else None
-        
         # Call stored procedure to get all data for time range
+        # Pass EquipmentName directly - SP will resolve to correct data table (e.g., FD_FAN_Data)
         hb = Heartbeat("Calling usp_ACM_GetHistorianData_TEMP", next_hint="parse results", eta_hint=5).start()
         try:
             cur = self.sql_client.cursor()
-            # Pass EquipID to stored procedure (SP will resolve EquipmentName internally)
-            # Use named parameters to avoid positional mismatch with optional @TagNames parameter
+            # Pass EquipmentName to stored procedure (SP resolves to {EquipmentName}_Data table)
             cur.execute(
-                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipID=?",
-                (start_utc, end_utc, equip_id)
+                "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipmentName=?",
+                (start_utc, end_utc, equipment_name)
             )
             
             # Fetch all rows
@@ -1763,25 +1760,45 @@ class OutputManager:
                     Console.warn("[OUTPUT] PCA detector not fitted, skipping metrics write")
                     return 0
                     
-                # Build metrics dataframe from PCA detector
-                metrics = {
-                    'n_components': pca_detector.pca.n_components_,
-                    'variance_explained': float(pca_detector.pca.explained_variance_ratio_.sum()),
-                    'n_features': len(pca_detector.keep_cols),
-                }
-                sql_df = pd.DataFrame([metrics])
+                # Build metrics in long format for SQL schema:
+                # RunID, EquipID, ComponentName, MetricType, Value, Timestamp
+                metrics_rows = []
+                timestamp = datetime.now()
+                run_id_val = run_id or self.run_id
+                equip_id_val = self.equip_id or 0
+                
+                metrics_rows.append({
+                    'RunID': run_id_val,
+                    'EquipID': equip_id_val,
+                    'ComponentName': 'PCA',
+                    'MetricType': 'n_components',
+                    'Value': float(pca_detector.pca.n_components_),
+                    'Timestamp': timestamp
+                })
+                metrics_rows.append({
+                    'RunID': run_id_val,
+                    'EquipID': equip_id_val,
+                    'ComponentName': 'PCA',
+                    'MetricType': 'variance_explained',
+                    'Value': float(pca_detector.pca.explained_variance_ratio_.sum()),
+                    'Timestamp': timestamp
+                })
+                metrics_rows.append({
+                    'RunID': run_id_val,
+                    'EquipID': equip_id_val,
+                    'ComponentName': 'PCA',
+                    'MetricType': 'n_features',
+                    'Value': float(len(pca_detector.keep_cols)),
+                    'Timestamp': timestamp
+                })
+                
+                sql_df = pd.DataFrame(metrics_rows)
             # Legacy style: use provided dataframe
             elif df is not None:
                 sql_df = df.copy()
             else:
                 Console.warn("[OUTPUT] write_pca_metrics called without pca_detector or df")
                 return 0
-            
-            # Add metadata if missing
-            if 'RunID' not in sql_df.columns:
-                sql_df['RunID'] = run_id or self.run_id
-            if 'EquipID' not in sql_df.columns:
-                sql_df['EquipID'] = self.equip_id or 0
             
             # Expected columns vary - just pass through with metadata
             return self._bulk_insert_sql('ACM_PCA_Metrics', sql_df)
@@ -4240,6 +4257,4 @@ def create_output_manager(sql_client=None, run_id: str = None, equip_id: int = N
         equip_id=equip_id,
         **kwargs
     )
-
-
 

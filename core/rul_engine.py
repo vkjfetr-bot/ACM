@@ -1025,6 +1025,18 @@ def compute_rul(
         Console.warn(f"[RUL] Insufficient data points: {len(health_values)} < {cfg.min_points}")
         return _default_rul_result(cfg, data_quality_flag, current_time)
     
+    # Check current health for recovery detection
+    current_health = float(health_values[-1])
+    healthy_threshold = 90.0  # Consider equipment healthy above 90%
+    Console.info(f"[RUL] Current health: {current_health:.1f}%")
+    
+    # Recovery detection: If health is well above failure threshold, equipment is healthy
+    if current_health >= healthy_threshold:
+        Console.info(f"[RUL] Equipment is HEALTHY (health={current_health:.1f}% >= {healthy_threshold}%)")
+        Console.info(f"[RUL] Setting RUL to maximum forecast horizon: {cfg.max_forecast_hours:.1f}h")
+        # Return healthy state result with max RUL
+        return _healthy_rul_result(health_df, cfg, data_quality_flag, current_time, current_health)
+    
     # Detect sampling interval
     deltas = np.diff(timestamps.values.astype("int64")) / 1e9 / 3600.0  # hours
     sampling_interval_hours = float(np.median(deltas))
@@ -1279,6 +1291,94 @@ def _default_rul_result(
         "per_model": {},
         "sampling_interval_hours": 1.0,
     }
+    
+    return {
+        "health_forecast": health_forecast_df,
+        "failure_curve": failure_curve_df,
+        "rul_multipath": rul_multipath,
+        "model_diagnostics": model_diagnostics,
+        "data_quality": data_quality_flag,
+        "current_time": current_time,
+    }
+
+
+def _healthy_rul_result(
+    health_df: pd.DataFrame,
+    cfg: RULConfig,
+    data_quality_flag: str,
+    current_time: pd.Timestamp,
+    current_health: float,
+) -> Dict[str, Any]:
+    """
+    Return RUL result for healthy equipment (health > 90%).
+    
+    When equipment has recovered or is in healthy state, we return:
+    - Flat health forecast at current level
+    - Zero failure probability
+    - RUL set to max forecast horizon
+    
+    Args:
+        health_df: Health timeline DataFrame (indexed by Timestamp)
+        cfg: Configuration
+        data_quality_flag: Data quality assessment
+        current_time: Current timestamp
+        current_health: Current health percentage
+    
+    Returns:
+        Dict with same structure as compute_rul()
+    """
+    Console.info(f"[RUL-Healthy] Equipment recovered/healthy (health={current_health:.1f}%)")
+    
+    # Detect sampling interval from health_df
+    timestamps = health_df.index
+    deltas = np.diff(timestamps.values.astype("int64")) / 1e9 / 3600.0  # hours
+    sampling_interval_hours = float(np.median(deltas)) if len(deltas) > 0 else 1.0
+    
+    # Build future time index
+    n_future_steps = int(cfg.max_forecast_hours / sampling_interval_hours)
+    n_future_steps = max(n_future_steps, 10)
+    
+    future_timestamps = pd.date_range(
+        start=current_time,
+        periods=n_future_steps + 1,
+        freq=f"{sampling_interval_hours}H"
+    )[1:]
+    
+    # Flat forecast at current health level (assuming stability)
+    health_forecast_df = pd.DataFrame({
+        "Timestamp": future_timestamps,
+        "ForecastHealth": [current_health] * len(future_timestamps),
+        "CI_Lower": [max(current_health - 5.0, 0.0)] * len(future_timestamps),
+        "CI_Upper": [min(current_health + 5.0, 100.0)] * len(future_timestamps),
+    })
+    
+    # Zero failure probability (equipment is healthy)
+    failure_curve_df = pd.DataFrame({
+        "Timestamp": future_timestamps,
+        "FailureProb": [0.0] * len(future_timestamps),
+        "ThresholdUsed": [cfg.health_threshold] * len(future_timestamps),
+    })
+    
+    # Set RUL to maximum forecast horizon
+    rul_multipath = {
+        "rul_trajectory_hours": None,  # No crossing
+        "rul_hazard_hours": None,       # No crossing
+        "rul_energy_hours": None,       # No crossing
+        "rul_final_hours": cfg.max_forecast_hours,
+        "lower_bound_hours": cfg.max_forecast_hours,
+        "upper_bound_hours": cfg.max_forecast_hours,
+        "dominant_path": "healthy",
+    }
+    
+    # Minimal diagnostics for healthy state
+    model_diagnostics = {
+        "weights": {"healthy_state": 1.0},
+        "fit_status": {"healthy_state": True},
+        "per_model": {},
+        "sampling_interval_hours": sampling_interval_hours,
+    }
+    
+    Console.info(f"[RUL-Healthy] RUL set to {cfg.max_forecast_hours:.1f}h (healthy state)")
     
     return {
         "health_forecast": health_forecast_df,
@@ -1727,7 +1827,8 @@ def run_rul(
     
     # Step 3: Cleanup old forecasts
     try:
-        cleanup_old_forecasts(sql_client, equip_id, cfg)
+        keep_runs = int(os.getenv("ACM_FORECAST_RUNS_RETAIN", "2"))
+        cleanup_old_forecasts(sql_client, equip_id, keep_runs)
     except Exception as e:
         Console.warn(f"[RUL] Forecast cleanup failed: {e}")
     

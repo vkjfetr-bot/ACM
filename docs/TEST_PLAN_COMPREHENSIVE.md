@@ -47,9 +47,9 @@ Validate ACM pipeline after critical fixes: RUL writes, batch overlap deduplicat
 **Objective**: Validate batch overlap deduplication and _Latest views
 
 **Steps**:
-1. Run 100 batches for FD_FAN:
+1. Run 100 daily batches for FD_FAN:
    ```powershell
-   scripts/run_batch_mode.ps1 -Equipment FD_FAN -NumBatches 100 -StartBatch 1
+   python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --max-batches 100 --start-from-beginning
    ```
 2. Query base table vs Latest view row counts:
    ```sql

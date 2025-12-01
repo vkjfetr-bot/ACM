@@ -111,9 +111,10 @@ def _configure_logging(logging_cfg, args):
     if args.log_format or (logging_cfg or {}).get("format"):
         Console.set_format(args.log_format or logging_cfg.get("format"))
 
+    # SQL-ONLY MODE: File logging completely disabled
     log_file = args.log_file or (logging_cfg or {}).get("file")
     if log_file:
-        Console.set_output(Path(log_file))
+        Console.warn(f"[CONFIG] File logging disabled in SQL-only mode (ignoring --log-file={log_file})")
 
     module_levels = []
     cfg_module_levels = (logging_cfg or {}).get("module_levels")
@@ -577,7 +578,6 @@ def _calculate_adaptive_thresholds(
                 f"[THRESHOLD] Persisting to SQL: equip_id={equip_id} | samples={len(fused_scores)} | "
                 f"method={threshold_results.get('method')} | conf={threshold_results.get('confidence')}"
             )
-            import hashlib
             config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
             
             output_manager.write_threshold_metadata(
@@ -752,7 +752,7 @@ def main() -> None:
     T = Timer(enable=True)
 
     equip = args.equip
-    art_root = Path("artifacts")
+    # SQL-ONLY MODE: No artifacts folder
     cfg_path = Path(args.config) if args.config else None
     cfg = _load_config(cfg_path, equipment_name=equip)
     
@@ -814,42 +814,32 @@ def main() -> None:
 
     Console.info(f"[ACM] Inside Main Now")
     Console.info(f"--- Starting ACM V5 for {equip} ---")
-    Console.info(f"[CFG] storage_backend={'sql' if SQL_MODE else 'file'}  |  artifacts={art_root}")
+    Console.info(f"[CFG] storage_backend=SQL_ONLY")
     Console.info(f"[CFG] batch_mode={BATCH_MODE}  |  continuous_learning={CONTINUOUS_LEARNING}")
     if CONTINUOUS_LEARNING:
         Console.info(f"[CFG] model_update_interval={model_update_interval}  |  threshold_update_interval={threshold_update_interval}")
     sql_log_sink = None
 
     # CRITICAL FIX: ALWAYS enforce artifacts/{EQUIP}/run_{timestamp}/ structure
-    # STRICT: Only allow "artifacts" as base - strip everything else
+    # SQL-ONLY MODE: No artifacts directories
     equip_slug = equip.replace(" ", "_")
     run_id_ts = time.strftime("%Y%m%d_%H%M%S")
-
-    # ENFORCE: ONLY artifacts/{EQUIP}/run_{timestamp}/ - NO INTERMEDIATE FOLDERS
-    # User passes "artifacts" or "artifacts/anything" → ALWAYS becomes artifacts/{EQUIP}/
-    base_artifacts = Path("artifacts")  # HARDCODED - ignore user's subdirectories
-    equip_root = base_artifacts / equip_slug
-    run_dir = equip_root / f"run_{run_id_ts}"
-    Console.info(f"[RUN] Creating unique run directory: {run_dir}")
-    models_dir = run_dir / "models"
-    if not SQL_MODE:
-        models_dir.mkdir(parents=True, exist_ok=True)
+    Console.info(f"[RUN] SQL-only mode: run_{run_id_ts}")
+    
+    # SQL-ONLY MODE: Dummy values for filesystem variables (unused in SQL mode)
+    run_dir = Path(".")  # Dummy - never created
+    tables_dir = Path(".")  # Dummy - never created
+    art_root = Path(".")  # Dummy artifact root for SQL-ONLY mode (no filesystem persistence)
 
     # Heartbeat gating
     heartbeat_on = bool(cfg.get("runtime", {}).get("heartbeat", True))
 
-    # SQL MODE: disable legacy joblib cache reuse to avoid dual caching
-    reuse_models = bool(cfg.get("runtime", {}).get("reuse_model_fit", False)) and (not SQL_MODE)
-    # CRITICAL FIX: Stable cache must match equipment root (artifacts/{EQUIP}/models/)
-    stable_models_dir = equip_root / "models"
-    if not SQL_MODE:
-        try:
-            stable_models_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-    # Refit-request marker path (set by quality/drift policy)
-    refit_flag_path = stable_models_dir / "refit_requested.flag"
-    model_cache_path = (stable_models_dir / "detectors.joblib")
+    # SQL MODE: disable legacy joblib cache reuse (SQL-only)
+    reuse_models = False  # SQL-ONLY MODE: No filesystem model caching
+    
+    # SQL-ONLY MODE: These variables unused but kept for legacy code compatibility
+    refit_flag_path = None
+    model_cache_path = None
     detector_cache: Optional[Dict[str, Any]] = None
     train_feature_hash: Optional[str] = None  # DEBT-09: Changed to str for stable hash
     current_train_columns: Optional[List[str]] = None
@@ -862,8 +852,6 @@ def main() -> None:
     score_numeric: Optional[pd.DataFrame] = None
     cache_payload: Optional[Dict[str, Any]] = None
     regime_quality_ok: bool = True
-    if not SQL_MODE:
-        _ensure_dir(run_dir)
 
     if args.clear_cache:
         if model_cache_path.exists():
@@ -2240,7 +2228,6 @@ def main() -> None:
             if regime_model_was_trained and regime_model is not None:
                 try:
                     from core.model_persistence import save_regime_state
-                    import hashlib
                     
                     # Generate config hash for change detection
                     regime_cfg_str = str(cfg.get("regimes", {}))
@@ -3860,9 +3847,9 @@ def main() -> None:
                         config=cfg,
                         output_manager=output_manager,
                         tables_dir=tables_dir,
-                        artifact_root=Path("artifacts"),
                         equip=equip,
                         current_batch_time=batch_time,
+                        sensor_data=score if 'score' in locals() else None,
                     )
                     if metrics:
                         Console.info(
@@ -3983,9 +3970,9 @@ def main() -> None:
                 config=cfg,
                 output_manager=output_manager,
                 tables_dir=tables_dir,
-                artifact_root=Path("artifacts"),
                 equip=equip,
                 current_batch_time=batch_time,
+                sensor_data=score if 'score' in locals() else None,
             )
             if metrics:
                 Console.info(

@@ -2,39 +2,23 @@
 
 ## Common Commands
 
-### PowerShell (Recommended)
+### Standard One-Liner (all equipment, full historian)
 
 ```powershell
-# Basic: Process single equipment
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN
-
-# Resume: Continue from last batch
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -Resume
-
-# Parallel: Process multiple equipment
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN,GAS_TURBINE -MaxWorkers 2
-
-# Preview: Dry run without execution
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -DryRun
-
-# Custom: Adjust tick window
-.\scripts\run\run_sql_batch.ps1 -Equipment FD_FAN -TickMinutes 15
+python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --start-from-beginning
 ```
 
-### Python (Advanced)
+### Useful Variations
 
-```bash
-# Basic
-python scripts/sql_batch_runner.py --equip FD_FAN
+```powershell
+# Resume from checkpoint
+python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --resume
 
-# Multiple equipment
-python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2
-
-# Resume
-python scripts/sql_batch_runner.py --equip FD_FAN --resume
-
-# Dry run
+# Dry run without executing
 python scripts/sql_batch_runner.py --equip FD_FAN --dry-run
+
+# Smaller windows for debugging
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 60 --max-batches 12 --start-from-beginning
 ```
 
 ## Check Progress

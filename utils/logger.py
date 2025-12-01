@@ -44,13 +44,11 @@ class Logger:
     def __init__(self):
         self._level = self._get_level_from_env()
         self._format = self._get_format_from_env()
-        self._file: Optional[TextIO] = None
-        self._file_path: Optional[Path] = None
         self._ascii_only = self._get_ascii_only_from_env()
-        self._setup_file_output()
         self._module_levels: Dict[str, LogLevel] = {}
         self._sinks: List[Callable[[Dict[str, Any]], None]] = []
         self._sink_lock = threading.Lock()
+        # SQL-ONLY MODE: No file output - logs go to stdout/stderr + SQL sink only
     
     def _get_level_from_env(self) -> LogLevel:
         """Get log level from LOG_LEVEL environment variable."""
@@ -95,18 +93,7 @@ class Logger:
         except (UnicodeEncodeError, AttributeError, LookupError):
             return True  # Fallback to ASCII on any encoding error
     
-    def _setup_file_output(self):
-        """Setup file output if LOG_FILE is specified."""
-        file_path = os.getenv("LOG_FILE")
-        if file_path:
-            try:
-                self._file_path = Path(file_path)
-                self._file_path.parent.mkdir(parents=True, exist_ok=True)
-                self._file = self._file_path.open("a", encoding="utf-8")
-            except Exception as e:
-                # Fallback: warn to stderr but continue
-                print(f"[WARNING] Could not open log file {file_path}: {e}", file=sys.stderr)
-                self._file = None
+    # REMOVED: _setup_file_output() - SQL-only mode, no file logging
     
     def set_level(self, level: str | LogLevel) -> None:
         """Set the minimum log level."""
@@ -130,18 +117,9 @@ class Logger:
         self._format = fmt
     
     def set_output(self, file_path: Optional[Path]) -> None:
-        """Set the file output path."""
-        if self._file:
-            self._file.close()
-            self._file = None
-        
+        """DEPRECATED: File output disabled in SQL-only mode. This is a no-op."""
         if file_path:
-            try:
-                self._file_path = file_path
-                self._file_path.parent.mkdir(parents=True, exist_ok=True)
-                self._file = self._file_path.open("a", encoding="utf-8")
-            except Exception as e:
-                print(f"[WARNING] Could not open log file {file_path}: {e}", file=sys.stderr)
+            print(f"[WARNING] File logging disabled - ignoring log file path: {file_path}", file=sys.stderr)
     
     @property
     def ascii_only(self) -> bool:
@@ -220,14 +198,8 @@ class Logger:
             safe_formatted = formatted.encode(stream.encoding or 'ascii', errors='replace').decode(stream.encoding or 'ascii')
             print(safe_formatted, file=stream)
         
-        # Write to file if configured
-        if self._file:
-            try:
-                self._file.write(formatted + "\n")
-                self._file.flush()
-            except Exception:
-                pass  # Silent failure to avoid recursion
-
+        # SQL-ONLY MODE: File writing removed, only sinks (SQL + stdout)
+        
         sinks = None
         if self._sinks:
             with self._sink_lock:
@@ -297,12 +269,8 @@ class Logger:
         return self._ascii_only
     
     def __del__(self):
-        """Close file handle on destruction."""
-        if self._file:
-            try:
-                self._file.close()
-            except Exception:
-                pass
+        """SQL-ONLY MODE: No file cleanup needed."""
+        pass
 
 
 # Global logger instance
@@ -484,13 +452,10 @@ class Heartbeat:
 
 def jsonl_logger(path: Path) -> Callable[[Dict[str, Any]], None]:
     """
-    Append JSON lines to `path` with a simple writer:
-      {"event":"START","block":"FEATURES","t":...}
-      {"event":"END","block":"FEATURES","t":...,"dt_s":...}
+    DEPRECATED: File logging disabled in SQL-only mode.
+    Returns a no-op function that discards all log records.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fh = path.open("a", encoding="utf-8")
+    print(f"[WARNING] jsonl_logger() called with path={path} but file logging is disabled", file=sys.stderr)
     def write(obj: Dict[str, Any]) -> None:
-        fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        fh.flush()
+        pass  # No-op in SQL-only mode
     return write

@@ -26,8 +26,8 @@ python tools/check_counts.py
 
 ### Step 2: Batch Mode Test (15 min)
 ```powershell
-# Run 100 batches
-scripts/run_batch_mode.ps1 -Equipment FD_FAN -NumBatches 100 -StartBatch 1
+# Run 100 daily batches
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --max-batches 100 --start-from-beginning
 ```
 
 **Expected**: All 100 complete, logs show "Completed batch X"
@@ -106,7 +106,7 @@ SELECT TOP 5 * FROM ACM_RUL_Summary WHERE EquipID = 1 AND Method IS NULL;
 # Run all tests sequentially (30 min)
 python tools/truncate_acm_tables.py; `
 python -m core.acm_main --equip FD_FAN; `
-scripts/run_batch_mode.ps1 -Equipment FD_FAN -NumBatches 100 -StartBatch 1; `
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --max-batches 100 --start-from-beginning; `
 python tools/check_counts.py
 ```
 
