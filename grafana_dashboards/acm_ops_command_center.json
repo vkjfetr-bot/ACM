@@ -253,7 +253,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Episodes detected in latest run (ACM_Episodes).",
+      "description": "Episodes detected in latest run (ACM_Episodes_Latest).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -310,7 +310,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT TOP 1\n  GETUTCDATE() AS time,\n  'Episodes (Latest Run)' AS metric,\n  ISNULL(EpisodeCount, 0) AS value\nFROM ACM_Episodes\nWHERE EquipID = $equipment\nORDER BY RunID DESC",
+          "rawSql": "SELECT TOP 1\n  GETUTCDATE() AS time,\n  'Episodes (Latest Run)' AS metric,\n  ISNULL(EpisodeCount, 0) AS value\nFROM ACM_Episodes_Latest\nWHERE EquipID = $equipment\nORDER BY RunID DESC",
           "refId": "A"
         }
       ],
@@ -322,7 +322,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Health index trend with thresholds. Source: ACM_HealthTimeline.",
+      "description": "Health index trend with thresholds. Source: ACM_HealthTimeline_Latest.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -384,7 +384,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n  Timestamp AS time,\n  HealthIndex AS value,\n  'Health Index' AS metric\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  HealthIndex AS value,\n  'Health Index' AS metric\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
           "refId": "A"
         }
       ],
@@ -396,7 +396,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Operating regime over time. Source: ACM_RegimeTimeline.",
+      "description": "Operating regime over time. Source: ACM_RegimeTimeline_Latest.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -445,7 +445,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n  Timestamp AS time,\n  RegimeLabel AS metric,\n  1 AS value\nFROM ACM_RegimeTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  RegimeLabel AS metric,\n  1 AS value\nFROM ACM_RegimeTimeline_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
           "refId": "A"
         }
       ],
@@ -577,7 +577,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Top 10 hotspots with z-scores and alert counts. Source: ACM_SensorHotspots.",
+      "description": "Top 10 hotspots with z-scores and alert counts. Source: ACM_SensorHotspots_Latest.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -628,7 +628,7 @@
             "uid": "${datasource}"
           },
           "format": "table",
-          "rawSql": "SELECT TOP 10\n  SensorName AS [Sensor],\n  MaxTimestamp AS [Peak Time],\n  MaxAbsZ AS [Max |Z|],\n  LatestAbsZ AS [Latest |Z|],\n  AboveAlertCount AS [Alert Count]\nFROM ACM_SensorHotspots\nWHERE EquipID = $equipment\nORDER BY MaxAbsZ DESC",
+          "rawSql": "SELECT TOP 10\n  SensorName AS [Sensor],\n  MaxTimestamp AS [Peak Time],\n  MaxAbsZ AS [Max |Z|],\n  LatestAbsZ AS [Latest |Z|],\n  AboveAlertCount AS [Alert Count]\nFROM ACM_SensorHotspots_Latest\nWHERE EquipID = $equipment\nORDER BY MaxAbsZ DESC",
           "refId": "A"
         }
       ],

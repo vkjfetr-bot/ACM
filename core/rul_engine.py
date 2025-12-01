@@ -243,37 +243,88 @@ def load_sensor_hotspots(
     if sql_client is None:
         Console.warn("[RUL] No SQL client; cannot load sensor hotspots")
         return pd.DataFrame()
-    
-    try:
+
+    def _run_query(sql: str) -> pd.DataFrame:
         cur = sql_client.cursor()
-        cur.execute(
-            """
-            SELECT SensorName, FailureContribution, 
-                   COALESCE(Z, ZScoreAtFailure) as ZScoreAtFailure,
-                   COALESCE(AlertCount, AboveAlertCount) as AlertCount
-            FROM dbo.ACM_SensorHotspots
-            WHERE EquipID = ? AND RunID = ?
-            ORDER BY FailureContribution DESC
-            """,
-            (equip_id, run_id),
+        try:
+            cur.execute(sql, (equip_id, run_id))
+            rows = cur.fetchall()
+            columns = [col[0] for col in (cur.description or [])]
+            return pd.DataFrame.from_records(rows, columns=columns)
+        finally:
+            cur.close()
+
+    base_query = """
+        SELECT SensorName,
+               FailureContribution,
+               ZScoreAtFailure,
+               AlertCount,
+               MaxAbsZ,
+               MaxSignedZ,
+               LatestSignedZ,
+               AboveAlertCount
+        FROM dbo.ACM_SensorHotspots
+        WHERE EquipID = ? AND RunID = ?
+        ORDER BY FailureContribution DESC
+    """
+
+    fallback_query = """
+        SELECT SensorName,
+               MaxAbsZ,
+               MaxSignedZ,
+               LatestSignedZ,
+               AboveAlertCount
+        FROM dbo.ACM_SensorHotspots
+        WHERE EquipID = ? AND RunID = ?
+        ORDER BY MaxAbsZ DESC
+    """
+
+    df: pd.DataFrame
+    try:
+        df = _run_query(base_query)
+    except Exception as primary_err:
+        Console.warn(
+            f"[RUL] SensorHotspots schema missing attribution columns; deriving contributions instead ({primary_err})"
         )
-        rows = cur.fetchall()
-        cur.close()
-        
-        if rows:
-            df = pd.DataFrame.from_records(
-                rows,
-                columns=["SensorName", "FailureContribution", "ZScoreAtFailure", "AlertCount"]
-            )
-            Console.info(f"[RUL] Loaded {len(df)} sensor hotspots from SQL")
-            return df
-        else:
-            Console.warn(f"[RUL] No sensor hotspots found for EquipID={equip_id}, RunID={run_id}")
+        try:
+            df = _run_query(fallback_query)
+        except Exception as fallback_err:
+            Console.warn(f"[RUL] Failed to load sensor hotspots: {fallback_err}")
             return pd.DataFrame()
-            
-    except Exception as e:
-        Console.warn(f"[RUL] Failed to load sensor hotspots: {e}")
+
+    if df.empty:
+        Console.warn(f"[RUL] No sensor hotspots found for EquipID={equip_id}, RunID={run_id}")
         return pd.DataFrame()
+
+    # Derive required columns when legacy schema omits them
+    if "FailureContribution" not in df.columns:
+        abs_vals = pd.to_numeric(df.get("MaxAbsZ"), errors="coerce").abs().fillna(0.0)
+        total = abs_vals.sum()
+        if total > 0:
+            df["FailureContribution"] = (abs_vals / total).clip(lower=0.0)
+        elif abs_vals.max() > 0:
+            df["FailureContribution"] = (abs_vals / abs_vals.max()).clip(lower=0.0)
+        else:
+            df["FailureContribution"] = 0.0
+
+    if "ZScoreAtFailure" not in df.columns:
+        z_source = df.get("MaxSignedZ")
+        if z_source is None or (hasattr(z_source, "isna") and z_source.isna().all()):
+            z_source = df.get("LatestSignedZ")
+        if z_source is None:
+            z_source = pd.Series([0.0] * len(df))
+        df["ZScoreAtFailure"] = pd.to_numeric(z_source, errors="coerce").fillna(0.0)
+
+    if "AlertCount" not in df.columns:
+        alerts = df.get("AboveAlertCount")
+        if alerts is None:
+            alerts = pd.Series([0] * len(df))
+        df["AlertCount"] = pd.to_numeric(alerts, errors="coerce").fillna(0).astype(int)
+
+    result = df[["SensorName", "FailureContribution", "ZScoreAtFailure", "AlertCount"]].copy()
+    result = result.sort_values("FailureContribution", ascending=False).reset_index(drop=True)
+    Console.info(f"[RUL] Loaded {len(result)} sensor hotspots from SQL")
+    return result
 
 
 # ============================================================================
@@ -1777,7 +1828,24 @@ def run_rul(
         Console.info("[RUL] Writing outputs to SQL via OutputManager...")
         for table_name, df in tables.items():
             try:
-                output_manager.write_table(table_name, df)
+                # Prefer OutputManager.write_table if available
+                if hasattr(output_manager, 'write_table'):
+                    output_manager.write_table(table_name, df)
+                else:
+                    # Fallback: inject metadata and required fields then bulk insert
+                    sql_df = df.copy()
+                    if 'RunID' not in sql_df.columns:
+                        sql_df['RunID'] = run_id
+                    if 'EquipID' not in sql_df.columns:
+                        sql_df['EquipID'] = equip_id
+                    now = pd.Timestamp.now()
+                    if 'Method' in sql_df.columns:
+                        sql_df['Method'] = sql_df['Method'].fillna('default')
+                    if 'LastUpdate' in sql_df.columns:
+                        sql_df['LastUpdate'] = sql_df['LastUpdate'].fillna(now)
+                    if 'EarliestMaintenance' in sql_df.columns:
+                        sql_df['EarliestMaintenance'] = sql_df['EarliestMaintenance'].fillna(now)
+                    output_manager._bulk_insert_sql(table_name, sql_df)
                 Console.info(f"[RUL] ✓ Wrote {len(df)} rows to {table_name}")
             except Exception as e:
                 Console.warn(f"[RUL] ✗ Failed to write {table_name}: {e}")
@@ -1785,7 +1853,8 @@ def run_rul(
     # Step 11: Save learning state (future: after learning update)
     # For now, save unchanged state to ensure table exists
     try:
-        save_learning_state(sql_client, equip_id, learning_state)
+        # save_learning_state expects (sql_client, state)
+        save_learning_state(sql_client, learning_state)
     except Exception as e:
         Console.warn(f"[RUL] Failed to save learning state: {e}")
     

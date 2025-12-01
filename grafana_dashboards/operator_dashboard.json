@@ -87,7 +87,7 @@
             "uid": "bdyo5lzrp2xfka"
           },
           "format": "time_series",
-          "rawSql": "SELECT TOP 1\n  Timestamp AS time,\n  'Current Health' AS metric,\n  HealthIndex AS value\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp DESC",
+          "rawSql": "SELECT TOP 1\n  Timestamp AS time,\n  'Current Health' AS metric,\n  HealthIndex AS value\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp DESC",
           "refId": "A"
         }
       ],
@@ -550,7 +550,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  Timestamp AS time,\n  'Historical' AS metric,\n  HealthIndex AS value\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT\n  Timestamp AS time,\n  'Forecast' AS metric,\n  ForecastHealth AS value\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT\n  Timestamp AS time,\n  'CI Lower' AS metric,\n  CiLower AS value\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT\n  Timestamp AS time,\n  'CI Upper' AS metric,\n  CiUpper AS value\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY time",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  'Historical' AS metric,\n  HealthIndex AS value\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT\n  Timestamp AS time,\n  'Forecast' AS metric,\n  ForecastHealth AS value\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT\n  Timestamp AS time,\n  'CI Lower' AS metric,\n  CiLower AS value\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT\n  Timestamp AS time,\n  'CI Upper' AS metric,\n  CiUpper AS value\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY time",
           "refId": "A",
           "sql": {
             "columns": [
@@ -770,7 +770,7 @@
             "uid": "cf42m5bbjxmo0e"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n  Timestamp AS time,\n  'Fused Anomaly Score' AS metric,\n  FusedZ AS value\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  'Fused Anomaly Score' AS metric,\n  FusedZ AS value\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
           "refId": "A"
         }
       ],

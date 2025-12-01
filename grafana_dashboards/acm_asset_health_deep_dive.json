@@ -28,7 +28,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Percent of points in ALERT zone over last 7 days from ACM_HealthTimeline.",
+      "description": "Percent of points in ALERT zone over last 7 days from ACM_HealthTimeline_Latest.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -91,7 +91,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n  GETUTCDATE() AS time,\n  'Pct in ALERT (7d)' AS metric,\n  CASE WHEN COUNT(*) = 0 THEN 0 ELSE 100.0 * SUM(CASE WHEN HealthZone = 'ALERT' THEN 1 ELSE 0 END) / COUNT(*) END AS value\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND Timestamp >= DATEADD(day, -7, GETUTCDATE())",
+          "rawSql": "SELECT\n  GETUTCDATE() AS time,\n  'Pct in ALERT (7d)' AS metric,\n  CASE WHEN COUNT(*) = 0 THEN 0 ELSE 100.0 * SUM(CASE WHEN HealthZone = 'ALERT' THEN 1 ELSE 0 END) / COUNT(*) END AS value\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment\n  AND Timestamp >= DATEADD(day, -7, GETUTCDATE())",
           "refId": "A"
         }
       ],
@@ -103,7 +103,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Average health index over last 7 days from ACM_HealthTimeline.",
+      "description": "Average health index over last 7 days from ACM_HealthTimeline_Latest.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -160,7 +160,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n  GETUTCDATE() AS time,\n  'Avg Health (7d)' AS metric,\n  COALESCE(AVG(HealthIndex), 0) AS value\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND Timestamp >= DATEADD(day, -7, GETUTCDATE())",
+          "rawSql": "SELECT\n  GETUTCDATE() AS time,\n  'Avg Health (7d)' AS metric,\n  COALESCE(AVG(HealthIndex), 0) AS value\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment\n  AND Timestamp >= DATEADD(day, -7, GETUTCDATE())",
           "refId": "A"
         }
       ],
@@ -172,7 +172,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Health and fused Z trend with alert annotations. Source: ACM_HealthTimeline and ACM_DefectTimeline.",
+      "description": "Health and fused Z trend with alert annotations. Source: ACM_HealthTimeline_Latest and ACM_DefectTimeline.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -233,7 +233,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT Timestamp AS time, HealthIndex AS value, 'Health Index' AS metric\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, FusedZ, 'Fused Z' AS metric\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
+          "rawSql": "SELECT Timestamp AS time, HealthIndex AS value, 'Health Index' AS metric\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, FusedZ, 'Fused Z' AS metric\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
           "refId": "A"
         }
       ],
@@ -245,7 +245,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Regime timeline to correlate operating mode with health. Source: ACM_RegimeTimeline.",
+      "description": "Regime timeline to correlate operating mode with health. Source: ACM_RegimeTimeline_Latest.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -294,7 +294,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT Timestamp AS time, RegimeLabel AS metric, 1 AS value\nFROM ACM_RegimeTimeline\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
+          "rawSql": "SELECT Timestamp AS time, RegimeLabel AS metric, 1 AS value\nFROM ACM_RegimeTimeline_Latest\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
           "refId": "A"
         }
       ],

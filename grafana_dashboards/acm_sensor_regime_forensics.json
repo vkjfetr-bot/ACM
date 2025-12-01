@@ -28,7 +28,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Count of sensors currently above alert thresholds. Source: ACM_SensorHotspots.",
+      "description": "Count of sensors currently above alert thresholds. Source: ACM_SensorHotspots_Latest.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -85,7 +85,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT\n  GETUTCDATE() AS time,\n  'Active Hotspots' AS metric,\n  COUNT(*) AS value\nFROM ACM_SensorHotspots\nWHERE EquipID = $equipment\n  AND (AboveAlertCount > 0 OR LatestAbsZ >= 3)",
+          "rawSql": "SELECT\n  GETUTCDATE() AS time,\n  'Active Hotspots' AS metric,\n  COUNT(*) AS value\nFROM ACM_SensorHotspots_Latest\nWHERE EquipID = $equipment\n  AND (AboveAlertCount > 0 OR LatestAbsZ >= 3)",
           "refId": "A"
         }
       ],
@@ -97,7 +97,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Top 15 hotspots with latest and peak z-scores. Source: ACM_SensorHotspots.",
+      "description": "Top 15 hotspots with latest and peak z-scores. Source: ACM_SensorHotspots_Latest.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -148,7 +148,7 @@
             "uid": "${datasource}"
           },
           "format": "table",
-          "rawSql": "SELECT TOP 15\n  SensorName AS [Sensor],\n  MaxTimestamp AS [Peak Time],\n  MaxAbsZ AS [Max |Z|],\n  LatestTimestamp AS [Latest Time],\n  LatestAbsZ AS [Latest |Z|],\n  AboveAlertCount AS [Alert Count]\nFROM ACM_SensorHotspots\nWHERE EquipID = $equipment\nORDER BY MaxAbsZ DESC",
+          "rawSql": "SELECT TOP 15\n  SensorName AS [Sensor],\n  MaxTimestamp AS [Peak Time],\n  MaxAbsZ AS [Max |Z|],\n  LatestTimestamp AS [Latest Time],\n  LatestAbsZ AS [Latest |Z|],\n  AboveAlertCount AS [Alert Count]\nFROM ACM_SensorHotspots_Latest\nWHERE EquipID = $equipment\nORDER BY MaxAbsZ DESC",
           "refId": "A"
         }
       ],
@@ -214,7 +214,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Threshold crossings (direction and magnitude). Source: ACM_ThresholdCrossings.",
+      "description": "Threshold crossings (direction and magnitude). Source: ACM_ThresholdCrossings_Latest.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -249,7 +249,7 @@
             "uid": "${datasource}"
           },
           "format": "table",
-          "rawSql": "SELECT TOP 50\n  Timestamp,\n  DetectorType,\n  Direction,\n  ZScore,\n  Threshold\nFROM ACM_ThresholdCrossings\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp DESC",
+          "rawSql": "SELECT TOP 50\n  Timestamp,\n  DetectorType,\n  Direction,\n  ZScore,\n  Threshold\nFROM ACM_ThresholdCrossings_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp DESC",
           "refId": "A"
         }
       ],
@@ -261,7 +261,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Detector Z-scores over time (fused plus core detectors). Source: ACM_Scores_Wide.",
+      "description": "Detector Z-scores over time (fused plus core detectors). Source: ACM_Scores_Wide_Latest.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -305,7 +305,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT Timestamp AS time, fused AS value, 'fused' AS metric FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, ar1_z, 'ar1_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_spe_z, 'pca_spe_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_t2_z, 'pca_t2_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, gmm_z, 'gmm_z' FROM ACM_Scores_Wide WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
+          "rawSql": "SELECT Timestamp AS time, fused AS value, 'fused' AS metric FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, ar1_z, 'ar1_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_spe_z, 'pca_spe_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_t2_z, 'pca_t2_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, gmm_z, 'gmm_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
           "refId": "A"
         }
       ],

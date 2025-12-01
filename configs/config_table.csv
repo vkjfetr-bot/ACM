@@ -242,3 +242,6 @@ EquipID,Category,ParamPath,ParamValue,ValueType,LastUpdated,UpdatedBy,ChangeReas
 0,models,max_model_age_days,30,int,2025-11-29 00:00:00,COPILOT,Reject cached models older than this many days,
 0,runtime,reuse_model_fit,True,bool,2025-11-29 00:00:00,COPILOT,Enable legacy joblib detector cache (disable in SQL mode),
 2621,runtime,tick_minutes,1440,int,2025-11-30 00:00:00,COPILOT,gas_turbine_hourly_cadence,
+0,data,min_train_samples,200,int,2025-12-01 00:00:00,COPILOT,Minimum samples for training (K-means n_clusters=6 requires 6+ samples; use 200 for statistical validity),
+1,data,min_train_samples,200,int,2025-12-01 00:00:00,COPILOT,FD_FAN minimum training samples,
+2621,data,min_train_samples,200,int,2025-12-01 00:00:00,COPILOT,GAS_TURBINE minimum training samples,

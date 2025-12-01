@@ -100,7 +100,7 @@
           "format": "table",
           "rawQuery": true,
           "refId": "A",
-          "rawSql": "SELECT TOP 1 HealthIndex FROM ACM_HealthTimeline WHERE EquipID = $equipment ORDER BY Timestamp DESC"
+          "rawSql": "SELECT TOP 1 HealthIndex FROM ACM_HealthTimeline_Latest WHERE EquipID = $equipment ORDER BY Timestamp DESC"
         }
       ],
       "title": "Overall Health",
@@ -228,7 +228,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 1 CONCAT('Regime ', CAST(RegimeLabel as VARCHAR)) as CurrentRegime FROM ACM_RegimeTimeline WHERE EquipID = $equipment ORDER BY Timestamp DESC"
+          "rawSql": "SELECT TOP 1 CONCAT('Regime ', CAST(RegimeLabel as VARCHAR)) as CurrentRegime FROM ACM_RegimeTimeline_Latest WHERE EquipID = $equipment ORDER BY Timestamp DESC"
         }
       ],
       "title": "Current Regime",
@@ -266,7 +266,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 1 CONCAT(SensorName, ' (z=', CAST(ROUND(LatestAbsZ, 2) as VARCHAR), ')') as WorstSensor FROM ACM_SensorHotspots WHERE EquipID = $equipment ORDER BY LatestAbsZ DESC"
+          "rawSql": "SELECT TOP 1 CONCAT(SensorName, ' (z=', CAST(ROUND(LatestAbsZ, 2) as VARCHAR), ')') as WorstSensor FROM ACM_SensorHotspots_Latest WHERE EquipID = $equipment ORDER BY LatestAbsZ DESC"
         }
       ],
       "title": "Worst Sensor",
@@ -311,7 +311,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp as time, HealthIndex AS \"Health Index\", FusedZ AS \"Fused Score\" FROM ACM_HealthTimeline WHERE EquipID = $equipment AND $__timeFilter(Timestamp) ORDER BY Timestamp"
+          "rawSql": "SELECT Timestamp as time, HealthIndex AS \"Health Index\", FusedZ AS \"Fused Score\" FROM ACM_HealthTimeline_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp) ORDER BY Timestamp"
         }
       ],
       "title": "Health Index Timeline",
@@ -427,7 +427,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp as time, CAST(RegimeLabel as nvarchar(50)) as metric, 1.0 as value FROM ACM_RegimeTimeline WHERE EquipID = $equipment AND $__timeFilter(Timestamp) ORDER BY Timestamp"
+          "rawSql": "SELECT Timestamp as time, CAST(RegimeLabel as nvarchar(50)) as metric, 1.0 as value FROM ACM_RegimeTimeline_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp) ORDER BY Timestamp"
         }
       ],
       "title": "Regime Timeline",
@@ -617,12 +617,12 @@
           "type": "mssql",
           "uid": "${datasource}"
         },
-        "definition": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline ORDER BY EquipID",
+        "definition": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline_Latest ORDER BY EquipID",
         "includeAll": false,
         "label": "Equipment",
         "name": "equipment",
         "options": [],
-        "query": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline ORDER BY EquipID",
+        "query": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline_Latest ORDER BY EquipID",
         "refresh": 1,
         "sort": 1,
         "type": "query"

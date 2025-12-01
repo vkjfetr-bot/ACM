@@ -115,7 +115,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 1 HealthIndex FROM ACM_HealthTimeline \n           WHERE EquipID = $equipment \n           ORDER BY Timestamp DESC",
+          "rawSql": "SELECT TOP 1 HealthIndex FROM ACM_HealthTimeline_Latest \n           WHERE EquipID = $equipment \n           ORDER BY Timestamp DESC",
           "refId": "A"
         }
       ],
@@ -187,7 +187,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 1 \n           CASE \n             WHEN HealthIndex >= 85 THEN 'HEALTHY'\n             WHEN HealthIndex >= 70 THEN 'CAUTION'\n             ELSE 'ALERT'\n           END as Status\n           FROM ACM_HealthTimeline \n           WHERE EquipID = $equipment \n           ORDER BY Timestamp DESC",
+          "rawSql": "SELECT TOP 1 \n           CASE \n             WHEN HealthIndex >= 85 THEN 'HEALTHY'\n             WHEN HealthIndex >= 70 THEN 'CAUTION'\n             ELSE 'ALERT'\n           END as Status\n           FROM ACM_HealthTimeline_Latest \n           WHERE EquipID = $equipment \n           ORDER BY Timestamp DESC",
           "refId": "A",
           "sql": {
             "columns": [
@@ -266,7 +266,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 1 \n           CONCAT(SensorName, ' (z=', CAST(ROUND(LatestAbsZ, 2) as VARCHAR), ')') as WorstSensor\n           FROM ACM_SensorHotspots \n           WHERE EquipID = $equipment\n           AND RunID = (SELECT MAX(RunID) FROM ACM_SensorHotspots WHERE EquipID = $equipment)\n           ORDER BY LatestAbsZ DESC",
+          "rawSql": "SELECT TOP 1 \n           CONCAT(SensorName, ' (z=', CAST(ROUND(LatestAbsZ, 2) as VARCHAR), ')') as WorstSensor\n           FROM ACM_SensorHotspots_Latest \n           WHERE EquipID = $equipment\n           AND RunID = (SELECT MAX(RunID) FROM ACM_SensorHotspots_Latest WHERE EquipID = $equipment)\n           ORDER BY LatestAbsZ DESC",
           "refId": "A",
           "sql": {
             "columns": [
@@ -475,7 +475,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 1 \n           CONCAT('Regime ', CAST(RegimeLabel as VARCHAR)) as CurrentRegime\n           FROM ACM_RegimeTimeline \n           WHERE EquipID = $equipment \n           ORDER BY Timestamp DESC",
+          "rawSql": "SELECT TOP 1 \n           CONCAT('Regime ', CAST(RegimeLabel as VARCHAR)) as CurrentRegime\n           FROM ACM_RegimeTimeline_Latest \n           WHERE EquipID = $equipment \n           ORDER BY Timestamp DESC",
           "refId": "A",
           "sql": {
             "columns": [
@@ -640,7 +640,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex,\n    FusedZ\nFROM ACM_HealthTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
+          "rawSql": "SELECT\n    Timestamp AS time,\n    HealthIndex,\n    FusedZ\nFROM ACM_HealthTimeline_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -983,7 +983,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    Timestamp AS time,\n    CONCAT('Regime ', CAST(RegimeLabel AS VARCHAR(10))) AS value\nFROM ACM_RegimeTimeline\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
+          "rawSql": "SELECT\n    Timestamp AS time,\n    CONCAT('Regime ', CAST(RegimeLabel AS VARCHAR(10))) AS value\nFROM ACM_RegimeTimeline_Latest\nWHERE EquipID = $equipment\n  AND $__timeFilter(Timestamp)\nORDER BY Timestamp;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1283,7 +1283,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  TOP 20 SensorName AS [Sensor Name],\n  ROUND(LatestAbsZ, 2) AS [Current Z-Score],\n  ROUND(MaxAbsZ, 2) AS [Peak Z-Score],\n  MaxTimestamp AS [Peak Time],\n  ROUND(LatestValue, 2) AS [Current Value],\n  ROUND(TrainMean, 2) AS [Normal Mean],\n  AboveAlertCount AS [Alert Count],\n  CASE\n    WHEN LatestAbsZ >= 3 THEN 'ALERT'\n    WHEN LatestAbsZ >= 2 THEN 'CAUTION'\n    ELSE 'NORMAL'\n  END AS [Level]\nFROM\n  ACM_SensorHotspots\nWHERE\n  EquipID = $equipment\n  AND $__timeFilter(MaxTimestamp)\n  AND RunID = (\n    SELECT\n      MAX(RunID)\n    FROM\n      ACM_SensorHotspots\n    WHERE\n      EquipID = $equipment\n  )\nORDER BY\n  LatestAbsZ DESC",
+          "rawSql": "SELECT\n  TOP 20 SensorName AS [Sensor Name],\n  ROUND(LatestAbsZ, 2) AS [Current Z-Score],\n  ROUND(MaxAbsZ, 2) AS [Peak Z-Score],\n  MaxTimestamp AS [Peak Time],\n  ROUND(LatestValue, 2) AS [Current Value],\n  ROUND(TrainMean, 2) AS [Normal Mean],\n  AboveAlertCount AS [Alert Count],\n  CASE\n    WHEN LatestAbsZ >= 3 THEN 'ALERT'\n    WHEN LatestAbsZ >= 2 THEN 'CAUTION'\n    ELSE 'NORMAL'\n  END AS [Level]\nFROM\n  ACM_SensorHotspots_Latest\nWHERE\n  EquipID = $equipment\n  AND $__timeFilter(MaxTimestamp)\n  AND RunID = (\n    SELECT\n      MAX(RunID)\n    FROM\n      ACM_SensorHotspots_Latest\n    WHERE\n      EquipID = $equipment\n  )\nORDER BY\n  LatestAbsZ DESC",
           "refId": "A",
           "sql": {
             "columns": [
@@ -3041,7 +3041,7 @@
         {
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "-- FusedZ over time with adaptive vs hardcoded thresholds\nSELECT \n  ht.Timestamp AS time,\n  'FusedZ' AS metric,\n  ht.FusedZ AS value\nFROM ACM_HealthTimeline ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nUNION ALL\n\n-- Latest adaptive threshold (flat line)\nSELECT \n  ht.Timestamp AS time,\n  'Adaptive Threshold' AS metric,\n  (\n    SELECT TOP 1 ThresholdValue \n    FROM ACM_ThresholdMetadata \n    WHERE EquipID = $equipment \n      AND ThresholdType = 'fused_alert_z' \n      AND RegimeID IS NULL \n      AND IsActive = 1\n    ORDER BY CreatedAt DESC\n  ) AS value\nFROM ACM_HealthTimeline ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nUNION ALL\n\n-- Hardcoded 3.0 for comparison\nSELECT \n  ht.Timestamp AS time,\n  'Hardcoded 3.0' AS metric,\n  3.0 AS value\nFROM ACM_HealthTimeline ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nORDER BY time, metric",
+          "rawSql": "-- FusedZ over time with adaptive vs hardcoded thresholds\nSELECT \n  ht.Timestamp AS time,\n  'FusedZ' AS metric,\n  ht.FusedZ AS value\nFROM ACM_HealthTimeline_Latest ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nUNION ALL\n\n-- Latest adaptive threshold (flat line)\nSELECT \n  ht.Timestamp AS time,\n  'Adaptive Threshold' AS metric,\n  (\n    SELECT TOP 1 ThresholdValue \n    FROM ACM_ThresholdMetadata \n    WHERE EquipID = $equipment \n      AND ThresholdType = 'fused_alert_z' \n      AND RegimeID IS NULL \n      AND IsActive = 1\n    ORDER BY CreatedAt DESC\n  ) AS value\nFROM ACM_HealthTimeline_Latest ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nUNION ALL\n\n-- Hardcoded 3.0 for comparison\nSELECT \n  ht.Timestamp AS time,\n  'Hardcoded 3.0' AS metric,\n  3.0 AS value\nFROM ACM_HealthTimeline_Latest ht\nWHERE ht.EquipID = $equipment\n  AND $__timeFilter(ht.Timestamp)\n\nORDER BY time, metric",
           "refId": "A"
         }
       ],
@@ -3336,12 +3336,12 @@
           "type": "mssql",
           "uid": "${datasource}"
         },
-        "definition": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline ORDER BY EquipID",
+        "definition": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline_Latest ORDER BY EquipID",
         "includeAll": false,
         "label": "Equipment",
         "name": "equipment",
         "options": [],
-        "query": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline ORDER BY EquipID",
+        "query": "SELECT DISTINCT EquipID FROM ACM_HealthTimeline_Latest ORDER BY EquipID",
         "refresh": 1,
         "regex": "",
         "sort": 1,

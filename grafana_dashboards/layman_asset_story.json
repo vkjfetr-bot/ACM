@@ -18,7 +18,7 @@
             "refId": "A",
             "format": "time_series",
             "datasource": { "type": "mssql", "uid": "ACM-SQL" },
-            "rawSql": "SELECT TOP 1 Timestamp AS time, HealthIndex AS value FROM dbo.ACM_HealthTimeline WHERE EquipID = $__equip ORDER BY Timestamp DESC"
+            "rawSql": "SELECT TOP 1 Timestamp AS time, HealthIndex AS value FROM dbo.ACM_HealthTimeline_Latest WHERE EquipID = $__equip ORDER BY Timestamp DESC"
           }
         ],
         "fieldConfig": {

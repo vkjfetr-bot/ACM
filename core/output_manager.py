@@ -813,6 +813,7 @@ class OutputManager:
         """
         data_cfg = cfg.get("data", {})
         ts_col = _cfg_get(data_cfg, "timestamp_col", "EntryDateTime")
+        min_train_samples = int(_cfg_get(data_cfg, "min_train_samples", 10))
         
         # SQL mode requires explicit time windows
         if not start_utc or not end_utc:
@@ -868,8 +869,8 @@ class OutputManager:
             hb.stop()
         
         # Validate sufficient data
-        if len(df_all) < 10:
-            raise ValueError(f"[DATA] Insufficient data from SQL historian: {len(df_all)} rows (minimum 10 required)")
+        if len(df_all) < min_train_samples:
+            raise ValueError(f"[DATA] Insufficient data from SQL historian: {len(df_all)} rows (minimum {min_train_samples} required)")
 
         # Robust timestamp handling for SQL historian: if configured column is missing
         # but the standard EntryDateTime column is present, fall back to it.
@@ -1742,17 +1743,43 @@ class OutputManager:
             Console.warn(f"[OUTPUT] write_pca_loadings failed: {e}")
             return 0
     
-    def write_pca_metrics(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write PCA metrics to ACM_PCA_Metrics table."""
-        if not self._check_sql_health() or df.empty:
+    def write_pca_metrics(self, pca_detector=None, tables_dir=None, enable_sql=True, df=None, run_id=None) -> int:
+        """Write PCA metrics to ACM_PCA_Metrics table.
+        
+        Args:
+            pca_detector: PCASubspaceDetector instance (new style)
+            tables_dir: Path for file output (ignored in SQL-only mode)
+            enable_sql: Whether SQL write is enabled
+            df: Pre-built DataFrame (legacy style, optional)
+            run_id: Run ID for legacy style
+        """
+        if not self._check_sql_health() or not enable_sql:
             return 0
             
         try:
-            sql_df = df.copy()
+            # New style: extract metrics from PCA detector
+            if pca_detector is not None:
+                if not hasattr(pca_detector, 'pca') or pca_detector.pca is None:
+                    Console.warn("[OUTPUT] PCA detector not fitted, skipping metrics write")
+                    return 0
+                    
+                # Build metrics dataframe from PCA detector
+                metrics = {
+                    'n_components': pca_detector.pca.n_components_,
+                    'variance_explained': float(pca_detector.pca.explained_variance_ratio_.sum()),
+                    'n_features': len(pca_detector.keep_cols),
+                }
+                sql_df = pd.DataFrame([metrics])
+            # Legacy style: use provided dataframe
+            elif df is not None:
+                sql_df = df.copy()
+            else:
+                Console.warn("[OUTPUT] write_pca_metrics called without pca_detector or df")
+                return 0
             
             # Add metadata if missing
             if 'RunID' not in sql_df.columns:
-                sql_df['RunID'] = run_id
+                sql_df['RunID'] = run_id or self.run_id
             if 'EquipID' not in sql_df.columns:
                 sql_df['EquipID'] = self.equip_id or 0
             
@@ -1821,68 +1848,6 @@ class OutputManager:
             non_numeric_cols={"RunID", "EquipID", "Timestamp", "regime_label", "transient_state"},
             index=False,
             date_format="%Y-%m-%d %H:%M:%S"
-        )
-    
-    def write_pca_metrics(self,
-                         pca_detector,
-                         tables_dir: Path,
-                         enable_sql: bool = False) -> Dict[str, Any]:
-        """
-        Write PCA metrics (variance explained, components) to ACM_PCA_Metrics table.
-        
-        Args:
-            pca_detector: Fitted PCASubspaceDetector with .pca attribute
-            tables_dir: Directory for CSV output (SQL-only mode skips)
-            enable_sql: Whether to write to SQL database
-            
-        Returns:
-            Write result dict with csv_path and sql_count
-        """
-        if not hasattr(pca_detector, 'pca') or pca_detector.pca is None:
-            Console.warn("[OUTPUT] PCA detector not fitted, skipping metrics output")
-            return {"csv_path": None, "sql_count": None}
-        
-        pca = pca_detector.pca
-        metrics_data = []
-        
-        # Add variance explained per component
-        if hasattr(pca, 'explained_variance_ratio_'):
-            for i, var_ratio in enumerate(pca.explained_variance_ratio_):
-                metrics_data.append({
-                    'ComponentName': f'PC{i+1}',
-                    'MetricType': 'VarianceRatio',
-                    'Value': round(float(var_ratio), 6)
-                })
-        
-        # Add cumulative variance
-        if hasattr(pca, 'explained_variance_ratio_'):
-            cumulative_var = pca.explained_variance_ratio_.cumsum()
-            for i, cum_var in enumerate(cumulative_var):
-                metrics_data.append({
-                    'ComponentName': f'PC{i+1}',
-                    'MetricType': 'CumulativeVariance',
-                    'Value': round(float(cum_var), 6)
-                })
-        
-        # Add total components count
-        if hasattr(pca, 'n_components_'):
-            metrics_data.append({
-                'ComponentName': 'Total',
-                'MetricType': 'ComponentCount',
-                'Value': int(pca.n_components_)
-            })
-        
-        if not metrics_data:
-            Console.warn("[OUTPUT] No PCA metrics available to write")
-            return {"csv_path": None, "sql_count": None}
-        
-        pca_metrics_df = pd.DataFrame(metrics_data)
-        
-        return self.write_dataframe(
-            pca_metrics_df,
-            tables_dir / "pca_metrics.csv",
-            table_name="ACM_PCA_Metrics",
-            enable_sql=enable_sql
         )
     
     def write_episodes(self, 
@@ -4087,6 +4052,35 @@ class OutputManager:
                     """,
                     (equip_id, threshold_type)
                 )
+
+                def write_table(self, table_name: str, df: pd.DataFrame, delete_existing: bool = False) -> int:
+                    """Generic SQL table writer with RunID/EquipID injection and required field defaults.
+                    Compatible with RUL/forecast tables expecting non-null columns.
+                    """
+                    if not self._check_sql_health() or df is None or df.empty:
+                        return 0
+                    try:
+                        sql_df = df.copy()
+                        # Inject metadata
+                        if 'RunID' not in sql_df.columns:
+                            sql_df['RunID'] = self.run_id
+                        if 'EquipID' not in sql_df.columns:
+                            sql_df['EquipID'] = self.equip_id or 0
+
+                        # Fill common required columns if present and null
+                        now = pd.Timestamp.now()
+                        if 'Method' in sql_df.columns:
+                            sql_df['Method'] = sql_df['Method'].fillna('default')
+                        if 'LastUpdate' in sql_df.columns:
+                            sql_df['LastUpdate'] = sql_df['LastUpdate'].fillna(now)
+                        if 'EarliestMaintenance' in sql_df.columns:
+                            sql_df['EarliestMaintenance'] = sql_df['EarliestMaintenance'].fillna(now)
+
+                        # Bulk insert
+                        return self._bulk_insert_sql(table_name, sql_df)
+                    except Exception as e:
+                        Console.warn(f"[OUTPUT] write_table failed for {table_name}: {e}")
+                        return 0
             
             # Prepare rows to insert
             rows = []
