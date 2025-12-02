@@ -1859,7 +1859,8 @@ class OutputManager:
     def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
         """Upsert PCA metrics using MERGE to avoid duplicate key violations.
         
-        Primary key is (RunID, EquipID, ComponentName, MetricType), so update if exists.
+        Primary key is (RunID, EquipID) ONLY - multiple rows per run with different MetricType/ComponentName.
+        Delete existing entries for this RunID+EquipID first, then bulk insert all new rows.
         """
         if df.empty or self.sql_client is None:
             return 0
@@ -1867,8 +1868,17 @@ class OutputManager:
         try:
             conn = self.sql_client.conn
             cursor = conn.cursor()
-            row_count = 0
             
+            # Get unique RunID+EquipID pairs to delete
+            run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
+            
+            # Delete all existing rows for these RunID+EquipID combinations
+            for _, pair in run_equip_pairs.iterrows():
+                delete_sql = "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?"
+                cursor.execute(delete_sql, (pair['RunID'], pair['EquipID']))
+            
+            # Now insert all new rows
+            row_count = 0
             for _, row in df.iterrows():
                 run_id = row['RunID']
                 equip_id = row['EquipID']
@@ -1877,18 +1887,11 @@ class OutputManager:
                 value = row['Value']
                 timestamp = row.get('Timestamp', datetime.now())
                 
-                # MERGE upsert: update if key exists, insert otherwise
-                merge_sql = """
-                MERGE INTO ACM_PCA_Metrics AS target
-                USING (SELECT ? AS RunID, ? AS EquipID, ? AS ComponentName, ? AS MetricType, ? AS Value) AS source
-                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.ComponentName = source.ComponentName AND target.MetricType = source.MetricType)
-                WHEN MATCHED THEN
-                    UPDATE SET Value = source.Value
-                WHEN NOT MATCHED THEN
-                    INSERT (RunID, EquipID, ComponentName, MetricType, Value)
-                    VALUES (source.RunID, source.EquipID, source.ComponentName, source.MetricType, source.Value);
+                insert_sql = """
+                INSERT INTO ACM_PCA_Metrics (RunID, EquipID, ComponentName, MetricType, Value, Timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """
-                cursor.execute(merge_sql, (run_id, equip_id, component, metric_type, value))
+                cursor.execute(insert_sql, (run_id, equip_id, component, metric_type, value, timestamp))
                 row_count += cursor.rowcount
             
             conn.commit()
