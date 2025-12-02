@@ -1920,6 +1920,10 @@ class OutputManager:
         if 'ForecastStd' not in df.columns:
             df['ForecastStd'] = 0.0
         
+        # Fill any NaN values in critical columns
+        df['Method'] = df['Method'].fillna('ExponentialSmoothing')
+        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
+        
         try:
             conn = self.sql_client.conn
             cursor = conn.cursor()
@@ -1987,13 +1991,18 @@ class OutputManager:
         if df.empty or self.sql_client is None:
             return 0
         
+        # Always make a copy to avoid modifying original and ensure Method column exists
+        df = df.copy()
+        
         # Ensure all required columns exist with defaults before upsert
         if 'Method' not in df.columns:
-            df = df.copy()
             df['Method'] = 'GaussianTail'
         if 'ThresholdUsed' not in df.columns:
-            df = df.copy()
             df['ThresholdUsed'] = 70.0
+        
+        # Fill any NaN values in Method column
+        df['Method'] = df['Method'].fillna('GaussianTail')
+        df['ThresholdUsed'] = df['ThresholdUsed'].fillna(70.0)
         
         try:
             conn = self.sql_client.conn
@@ -2061,6 +2070,12 @@ class OutputManager:
             df['Method'] = 'AR1'
         if 'ForecastStd' not in df.columns:
             df['ForecastStd'] = 0.0
+        
+        # Fill any NaN values in critical columns
+        df['Method'] = df['Method'].fillna('AR1')
+        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
+        if 'DetectorName' in df.columns:
+            df['DetectorName'] = df['DetectorName'].fillna('UNKNOWN')
         
         try:
             conn = self.sql_client.conn
@@ -2137,6 +2152,12 @@ class OutputManager:
             df['Method'] = 'AR1'
         if 'ForecastStd' not in df.columns:
             df['ForecastStd'] = 0.0
+        
+        # Fill any NaN values in critical columns
+        df['Method'] = df['Method'].fillna('AR1')
+        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
+        if 'SensorName' in df.columns:
+            df['SensorName'] = df['SensorName'].fillna('UNKNOWN')
         
         try:
             conn = self.sql_client.conn
