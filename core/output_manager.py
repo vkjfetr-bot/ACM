@@ -1857,10 +1857,9 @@ class OutputManager:
             return 0
 
     def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
-        """Upsert PCA metrics using MERGE to avoid duplicate key violations.
+        """Upsert PCA metrics by deleting existing RunID+EquipID entries first, then inserting all new rows.
         
-        Primary key is (RunID, EquipID) ONLY - multiple rows per run with different MetricType/ComponentName.
-        Delete existing entries for this RunID+EquipID first, then bulk insert all new rows.
+        Primary key is (RunID, EquipID) ONLY. Each run can have multiple rows with different MetricType/ComponentName.
         """
         if df.empty or self.sql_client is None:
             return 0
@@ -1869,15 +1868,18 @@ class OutputManager:
             conn = self.sql_client.conn
             cursor = conn.cursor()
             
-            # Get unique RunID+EquipID pairs to delete
+            # Get unique RunID+EquipID pairs
             run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
             
-            # Delete all existing rows for these RunID+EquipID combinations
+            # DELETE existing rows for all RunID+EquipID combinations
             for _, pair in run_equip_pairs.iterrows():
                 delete_sql = "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?"
                 cursor.execute(delete_sql, (pair['RunID'], pair['EquipID']))
             
-            # Now insert all new rows
+            # Commit DELETE before INSERT to release PRIMARY KEY locks
+            conn.commit()
+            
+            # INSERT all new rows
             row_count = 0
             for _, row in df.iterrows():
                 run_id = row['RunID']

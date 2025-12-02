@@ -10,7 +10,7 @@
   "n_pca_components": 3,
   "silhouette_score": 0.5459371209144592,
   "quality_ok": false,
-  "last_trained_time": "2025-12-02T07:39:28.998565+00:00",
-  "config_hash": "5f383bef93c15e76",
+  "last_trained_time": "2025-12-02T07:53:26.628983+00:00",
+  "config_hash": "4334d1f76de541fb",
   "regime_basis_hash": "17687353707632604696"
 }
