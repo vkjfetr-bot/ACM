@@ -1659,6 +1659,14 @@ def build_maintenance_recommendation(
             urgency = "MEDIUM"
         action += " (poor data quality - improve sensor coverage)"
     
+    # Calculate maintenance windows based on RUL
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    earliest_maintenance = now + timedelta(hours=max(0, rul_hours - 48))  # 48h before expected failure
+    preferred_window_start = now + timedelta(hours=max(0, rul_hours - 72))  # 72h before
+    preferred_window_end = now + timedelta(hours=rul_hours)  # At expected failure time
+    failure_prob_at_window_end = min(1.0, max(0.0, 1.0 - (rul_hours / max(rul_hours, 168))))  # Higher prob as RUL decreases
+    
     recommendation = {
         "RunID": run_id,
         "EquipID": equip_id,
@@ -1667,6 +1675,11 @@ def build_maintenance_recommendation(
         "RUL_Hours": rul_hours,
         "Confidence": confidence,
         "DataQuality": data_quality,
+        "EarliestMaintenance": earliest_maintenance,
+        "PreferredWindowStart": preferred_window_start,
+        "PreferredWindowEnd": preferred_window_end,
+        "FailureProbAtWindowEnd": failure_prob_at_window_end,
+        "Comment": None,  # Optional field
     }
     
     df = pd.DataFrame([recommendation])

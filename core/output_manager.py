@@ -1913,6 +1913,13 @@ class OutputManager:
         if df.empty or self.sql_client is None:
             return 0
         
+        # Ensure all required columns exist with defaults before upsert
+        df = df.copy()
+        if 'Method' not in df.columns:
+            df['Method'] = 'ExponentialSmoothing'
+        if 'ForecastStd' not in df.columns:
+            df['ForecastStd'] = 0.0
+        
         try:
             conn = self.sql_client.conn
             cursor = conn.cursor()
@@ -1928,6 +1935,19 @@ class OutputManager:
                 ci_upper = row.get('CiUpper', 0.0)
                 forecast_std = row.get('ForecastStd', 0.0)
                 method = row.get('Method', 'ExponentialSmoothing')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(forecast_health):
+                    forecast_health = 0.0
+                if pd.isna(ci_lower):
+                    ci_lower = 0.0
+                if pd.isna(ci_upper):
+                    ci_upper = 0.0
+                if pd.isna(forecast_std):
+                    forecast_std = 0.0
+                if pd.isna(method):
+                    method = 'ExponentialSmoothing'
+                    
                 created_at = row.get('CreatedAt', datetime.now())
                 
                 # MERGE upsert: update if key exists, insert otherwise
@@ -1967,6 +1987,14 @@ class OutputManager:
         if df.empty or self.sql_client is None:
             return 0
         
+        # Ensure all required columns exist with defaults before upsert
+        if 'Method' not in df.columns:
+            df = df.copy()
+            df['Method'] = 'GaussianTail'
+        if 'ThresholdUsed' not in df.columns:
+            df = df.copy()
+            df['ThresholdUsed'] = 70.0
+        
         try:
             conn = self.sql_client.conn
             cursor = conn.cursor()
@@ -1979,6 +2007,15 @@ class OutputManager:
                 failure_prob = row.get('FailureProb', 0.0)
                 threshold_used = row.get('ThresholdUsed', 70.0)
                 method = row.get('Method', 'GaussianTail')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(method):
+                    method = 'GaussianTail'
+                if pd.isna(threshold_used):
+                    threshold_used = 70.0
+                if pd.isna(failure_prob):
+                    failure_prob = 0.0
+                    
                 created_at = row.get('CreatedAt', datetime.now())
                 
                 merge_sql = """
@@ -2018,6 +2055,13 @@ class OutputManager:
         if df.empty or self.sql_client is None:
             return 0
         
+        # Ensure all required columns exist with defaults before upsert
+        df = df.copy()
+        if 'Method' not in df.columns:
+            df['Method'] = 'AR1'
+        if 'ForecastStd' not in df.columns:
+            df['ForecastStd'] = 0.0
+        
         try:
             conn = self.sql_client.conn
             cursor = conn.cursor()
@@ -2033,6 +2077,21 @@ class OutputManager:
                 ci_upper = row.get('CiUpper', 0.0)
                 forecast_std = row.get('ForecastStd', 0.0)
                 method = row.get('Method', 'AR1')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(forecast_value):
+                    forecast_value = 0.0
+                if pd.isna(ci_lower):
+                    ci_lower = 0.0
+                if pd.isna(ci_upper):
+                    ci_upper = 0.0
+                if pd.isna(forecast_std):
+                    forecast_std = 0.0
+                if pd.isna(method):
+                    method = 'AR1'
+                if pd.isna(detector_name):
+                    detector_name = 'UNKNOWN'
+                    
                 created_at = row.get('CreatedAt', datetime.now())
                 
                 merge_sql = """
@@ -2072,6 +2131,13 @@ class OutputManager:
         if df.empty or self.sql_client is None:
             return 0
         
+        # Ensure all required columns exist with defaults before upsert
+        df = df.copy()
+        if 'Method' not in df.columns:
+            df['Method'] = 'AR1'
+        if 'ForecastStd' not in df.columns:
+            df['ForecastStd'] = 0.0
+        
         try:
             conn = self.sql_client.conn
             cursor = conn.cursor()
@@ -2087,6 +2153,21 @@ class OutputManager:
                 ci_upper = row.get('CiUpper', 0.0)
                 forecast_std = row.get('ForecastStd', 0.0)
                 method = row.get('Method', 'AR1')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(forecast_value):
+                    forecast_value = 0.0
+                if pd.isna(ci_lower):
+                    ci_lower = 0.0
+                if pd.isna(ci_upper):
+                    ci_upper = 0.0
+                if pd.isna(forecast_std):
+                    forecast_std = 0.0
+                if pd.isna(method):
+                    method = 'AR1'
+                if pd.isna(sensor_name):
+                    sensor_name = 'UNKNOWN'
+                    
                 created_at = row.get('CreatedAt', datetime.now())
                 
                 merge_sql = """
