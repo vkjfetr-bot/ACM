@@ -872,80 +872,98 @@ def run_enhanced_forecasting_sql(
         if getattr(current_batch_time, "tzinfo", None) is not None:
             current_batch_time = current_batch_time.tz_localize(None).to_pydatetime()
 
-    # --- Cleanup old forecast data to prevent RunID overlap in charts ---
+    # --- Retention policy (DISABLED BY DEFAULT) ---
+    # Previously, older forecast runs were deleted to reduce chart clutter, which
+    # prevented historical forecast visibility. We now KEEP ALL runs unless an
+    # explicit retention limit is set via ACM_FORECAST_ENABLE_RETENTION + ACM_FORECAST_RUNS_RETAIN.
     try:
         import os
-        try:
-            keep_runs = int(os.getenv("ACM_FORECAST_RUNS_RETAIN", "2"))
-        except Exception:
-            keep_runs = 2
-        keep_runs = max(1, min(int(keep_runs), 50))
-        cur = sql_client.cursor()
-        # Keep only the 2 most recent RunIDs to preserve some history while reducing clutter
-        cur.execute("""
-            WITH RankedRuns AS (
-                SELECT RunID,
-                       ROW_NUMBER() OVER (ORDER BY MAX(CreatedAt) DESC) AS rn
-                FROM dbo.ACM_HealthForecast_TS
-                WHERE EquipID = ?
-                GROUP BY RunID
-            )
-            DELETE H
-            FROM dbo.ACM_HealthForecast_TS H
-            JOIN RankedRuns R ON H.RunID = R.RunID AND R.rn > ?
-            WHERE H.EquipID = ?
-        """, (equip_id, keep_runs, equip_id))
-        
-        cur.execute("""
-            WITH RankedRuns AS (
-                SELECT RunID,
-                       ROW_NUMBER() OVER (ORDER BY MAX(CreatedAt) DESC) AS rn
-                FROM dbo.ACM_FailureForecast_TS
-                WHERE EquipID = ?
-                GROUP BY RunID
-            )
-            DELETE F
-            FROM dbo.ACM_FailureForecast_TS F
-            JOIN RankedRuns R ON F.RunID = R.RunID AND R.rn > ?
-            WHERE F.EquipID = ?
-        """, (equip_id, keep_runs, equip_id))
-        
-        if not sql_client.conn.autocommit:
-            sql_client.conn.commit()
-        Console.info(f"[ENHANCED_FORECAST] Cleaned old forecast data for EquipID={equip_id} (kept {keep_runs} RunIDs)")
+        enable_retention = os.getenv("ACM_FORECAST_ENABLE_RETENTION", "0") == "1"
+        if enable_retention:
+            try:
+                keep_runs = int(os.getenv("ACM_FORECAST_RUNS_RETAIN", "30"))
+            except Exception:
+                keep_runs = 30
+            keep_runs = max(1, min(int(keep_runs), 1000))
+            cur = sql_client.cursor()
+            for table_name in ("ACM_HealthForecast_TS", "ACM_FailureForecast_TS"):
+                cur.execute(f"""
+                    WITH RankedRuns AS (
+                        SELECT RunID,
+                               ROW_NUMBER() OVER (ORDER BY MAX(CreatedAt) DESC) AS rn
+                        FROM dbo.{table_name}
+                        WHERE EquipID = ?
+                        GROUP BY RunID
+                    )
+                    DELETE T
+                    FROM dbo.{table_name} T
+                    JOIN RankedRuns R ON T.RunID = R.RunID AND R.rn > ?
+                    WHERE T.EquipID = ?
+                """, (equip_id, keep_runs, equip_id))
+            if not sql_client.conn.autocommit:
+                sql_client.conn.commit()
+            Console.info(f"[ENHANCED_FORECAST] Retention active: kept {keep_runs} RunIDs (EquipID={equip_id})")
+        else:
+            Console.info("[ENHANCED_FORECAST] Retention disabled; preserving all historical forecast runs")
     except Exception as e:
-        # FOR-CODE-02: Non-fatal data condition - log and continue with forecasting
-        Console.warn(f"[ENHANCED_FORECAST] Failed to cleanup old forecasts: {e}")
+        Console.warn(f"[ENHANCED_FORECAST] Retention policy error (non-fatal): {e}")
 
     # --- Load health timeline with sliding window (FORECAST-STATE-02) ---
     lookback_hours = int(forecast_cfg.get("training_window_hours", 72))
     
-    if enable_continuous and prev_state:
-        # Use sliding window: last N hours + current batch
-        cutoff_time = current_batch_time - timedelta(hours=lookback_hours)
-        Console.info(f"[FORECAST] Using sliding window: {lookback_hours}h lookback from {cutoff_time}")
-        
-        try:
-            cur = sql_client.cursor()
-            cur.execute("""
-                SELECT Timestamp, HealthIndex, FusedZ
-                FROM dbo.ACM_HealthTimeline
-                WHERE EquipID = ? AND Timestamp >= ?
-                ORDER BY Timestamp
-            """, (equip_id, cutoff_time))
-            rows = cur.fetchall()
-            cur.close()
-            
-            if rows:
-                df_health = pd.DataFrame.from_records(
-                    rows, 
-                    columns=["Timestamp", "HealthIndex", "FusedZ"]
-                )
-            else:
+    force_full_history = os.getenv("ACM_FORECAST_FULL_HISTORY_MODE", "0") == "1"
+    if enable_continuous:
+        if force_full_history:
+            Console.info("[FORECAST] Full-history mode enabled (initial backfill or start-from-beginning run)")
+            try:
+                cur = sql_client.cursor()
+                cur.execute("""
+                    SELECT Timestamp, HealthIndex, FusedZ
+                    FROM dbo.ACM_HealthTimeline
+                    WHERE EquipID = ?
+                    ORDER BY Timestamp
+                """, (equip_id,))
+                rows = cur.fetchall()
+                cur.close()
+                df_health = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex", "FusedZ"]) if rows else None
+            except Exception as e:
+                Console.warn(f"[FORECAST] Failed to load full history health data: {e}")
                 df_health = None
-        except Exception as e:
-            Console.warn(f"[FORECAST] Failed to load sliding window health data: {e}")
-            df_health = None
+        elif prev_state:
+            # Use sliding window: last N hours + current batch
+            cutoff_time = current_batch_time - timedelta(hours=lookback_hours)
+            Console.info(f"[FORECAST] Using sliding window: {lookback_hours}h lookback from {cutoff_time}")
+            try:
+                cur = sql_client.cursor()
+                cur.execute("""
+                    SELECT Timestamp, HealthIndex, FusedZ
+                    FROM dbo.ACM_HealthTimeline
+                    WHERE EquipID = ? AND Timestamp >= ?
+                    ORDER BY Timestamp
+                """, (equip_id, cutoff_time))
+                rows = cur.fetchall()
+                cur.close()
+                df_health = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex", "FusedZ"]) if rows else None
+            except Exception as e:
+                Console.warn(f"[FORECAST] Failed to load sliding window health data: {e}")
+                df_health = None
+        else:
+            # No previous state yet; bootstrap using all available history up to current batch time
+            Console.info("[FORECAST] No previous state found; bootstrapping with full history up to current batch time")
+            try:
+                cur = sql_client.cursor()
+                cur.execute("""
+                    SELECT Timestamp, HealthIndex, FusedZ
+                    FROM dbo.ACM_HealthTimeline
+                    WHERE EquipID = ? AND Timestamp <= ?
+                    ORDER BY Timestamp
+                """, (equip_id, current_batch_time))
+                rows = cur.fetchall()
+                cur.close()
+                df_health = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex", "FusedZ"]) if rows else None
+            except Exception as e:
+                Console.warn(f"[FORECAST] Failed to load bootstrap health data: {e}")
+                df_health = None
     else:
         # Fallback to single-run load for backward compatibility
         try:

@@ -892,8 +892,10 @@ class OutputManager:
             hb.stop()
         
         # Validate sufficient data
-        if len(df_all) < min_train_samples:
-            raise ValueError(f"[DATA] Insufficient data from SQL historian: {len(df_all)} rows (minimum {min_train_samples} required)")
+        # For coldstart, enforce minimum. For incremental scoring, allow smaller batches.
+        required_minimum = min_train_samples if is_coldstart else max(10, min_train_samples // 10)
+        if len(df_all) < required_minimum:
+            raise ValueError(f"[DATA] Insufficient data from SQL historian: {len(df_all)} rows (minimum {required_minimum} required)")
 
         # Robust timestamp handling for SQL historian: if configured column is missing
         # but the standard EntryDateTime column is present, fall back to it.
@@ -1389,6 +1391,25 @@ class OutputManager:
             #         if rows_deleted > 0:
             #             Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}")
 
+            # RUL-UPSERT: Proactively delete existing rows for current RunID to avoid PK violations
+            try:
+                if table_name in { 'ACM_RUL_TS', 'ACM_RUL_Summary', 'ACM_RUL_Attribution' }:
+                    if 'RunID' in table_cols and self.run_id:
+                        if 'EquipID' in table_cols and self.equip_id is not None:
+                            rows_deleted = cur.execute(
+                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?",
+                                (self.run_id, int(self.equip_id or 0))
+                            ).rowcount
+                        else:
+                            rows_deleted = cur.execute(
+                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?",
+                                (self.run_id,)
+                            ).rowcount
+                        if rows_deleted and rows_deleted > 0:
+                            Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
+            except Exception as del_ex:
+                Console.warn(f"[OUTPUT] Pre-delete for {table_name} failed (RunID={self.run_id}, EquipID={self.equip_id}): {del_ex}")
+
             # only insert columns that actually exist in the table
             columns = [c for c in df.columns if c in table_cols]
             cols_str = ", ".join(f"[{c}]" for c in columns)
@@ -1879,9 +1900,7 @@ class OutputManager:
             run_dir / "scores.csv",
             sql_table=sql_table,
             sql_columns=score_columns,
-            non_numeric_cols={"RunID", "EquipID", "Timestamp", "regime_label", "transient_state"},
-            index=False,
-            date_format="%Y-%m-%d %H:%M:%S"
+            non_numeric_cols={"RunID", "EquipID", "Timestamp", "regime_label", "transient_state"}
         )
     
     def write_episodes(self, 
@@ -1903,25 +1922,30 @@ class OutputManager:
         # Prepare episodes for output
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
         
-        # REG-CSV-01: Individual episodes now written to ACM_Episodes in SQL mode
-        # This enables SQL-based episode readers in regimes.py for regime analysis
-        sql_table = "ACM_Episodes" if enable_sql else None
+        # SCHEMA-FIX: Individual episodes go to ACM_EpisodeDiagnostics (not ACM_Episodes which is run-level summary)
+        sql_table = "ACM_EpisodeDiagnostics" if enable_sql else None
         episode_columns = {
-            'start_ts': 'StartTs', 
-            'end_ts': 'EndTs',
-            'duration_s': 'DurationSeconds',
-            'duration_hours': 'DurationHours',
-            'len': 'RecordCount',
-            'peak_fused_z': 'PeakFusedZ',
-            'avg_fused_z': 'AvgFusedZ',
-            'min_health_index': 'MinHealthIndex',
-            'peak_timestamp': 'PeakTimestamp',
-            'culprits': 'Culprits',
-            'alert_mode': 'AlertMode',
-            'severity': 'Severity',
-            'status': 'Status',
-            'MaxRegimeLabel': 'MaxRegimeLabel'
+            'episode_id': 'episode_id',
+            'peak_fused_z': 'peak_z',
+            'peak_timestamp': 'peak_timestamp', 
+            'duration_hours': 'duration_h',
+            'culprits': 'dominant_sensor',
+            'severity': 'severity',
+            'avg_fused_z': 'avg_z',
+            'min_health_index': 'min_health_index'
         }
+        
+        # Add episode_id if missing (sequential)
+        if 'episode_id' not in episodes_for_output.columns:
+            episodes_for_output['episode_id'] = range(1, len(episodes_for_output) + 1)
+        
+        # Calculate duration_hours from duration_s if needed
+        if 'duration_hours' not in episodes_for_output.columns and 'duration_s' in episodes_for_output.columns:
+            episodes_for_output['duration_hours'] = episodes_for_output['duration_s'] / 3600.0
+        
+        # Extract peak_timestamp from start_ts if missing
+        if 'peak_timestamp' not in episodes_for_output.columns and 'start_ts' in episodes_for_output.columns:
+            episodes_for_output['peak_timestamp'] = episodes_for_output['start_ts']
         
         # Map regime_label to MaxRegimeLabel
         if 'regime_label' in episodes_for_output.columns:
@@ -1942,10 +1966,25 @@ class OutputManager:
             sql_table=sql_table,
             sql_columns=episode_columns,
             non_numeric_cols={
-                "RunID", "EquipID", "StartTs", "EndTs", "PeakTimestamp",
-                "MaxRegimeLabel", "Culprits", "AlertMode", "Severity", "Status"
+                "RunID", "EquipID", "episode_id", "peak_timestamp",
+                "dominant_sensor", "severity", "min_health_index"
             }
         )
+        
+        # Also write run-level summary to ACM_Episodes
+        if enable_sql and not episodes_df.empty:
+            try:
+                summary = pd.DataFrame([{
+                    'RunID': self.run_id,
+                    'EquipID': self.equip_id or 0,
+                    'EpisodeCount': len(episodes_df),
+                    'MedianDurationMinutes': episodes_df.get('duration_s', pd.Series([0])).median() / 60.0 if 'duration_s' in episodes_df.columns else 0.0,
+                    'MaxFusedZ': episodes_df.get('peak_fused_z', pd.Series([0])).max() if 'peak_fused_z' in episodes_df.columns else 0.0,
+                    'AvgFusedZ': episodes_df.get('avg_fused_z', pd.Series([0])).mean() if 'avg_fused_z' in episodes_df.columns else 0.0
+                }])
+                self._bulk_insert_sql('ACM_Episodes', summary)
+            except Exception as summary_err:
+                Console.warn(f"[EPISODES] Failed to write summary to ACM_Episodes: {summary_err}")
         
         # OUT-28: Emit episodes severity mapping JSON
         if not self.sql_only_mode:

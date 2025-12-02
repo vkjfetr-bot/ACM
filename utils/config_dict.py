@@ -122,7 +122,9 @@ class ConfigDict(MutableMapping):
                         value = param_value
                     
                     # Build nested dict structure
-                    if category not in config:
+                    if category not in config or not isinstance(config.get(category), dict):
+                        # If a previous root-level value (e.g. bool) occupied this category, promote it to a dict
+                        # Root scalar gets discarded (no clear merge semantics); mixed representations are unsupported.
                         config[category] = {}
                     
                     # Handle nested paths: "pca.n_components" -> config['models']['pca']['n_components']
@@ -130,10 +132,7 @@ class ConfigDict(MutableMapping):
                         keys = param_path.split(".")
                         target = config[category]
                         for k in keys[:-1]:
-                            if k not in target:
-                                target[k] = {}
-                            elif not isinstance(target[k], dict):
-                                # Overwrite non-dict values (e.g., auto_retrain=True -> auto_retrain={...})
+                            if k not in target or not isinstance(target[k], dict):
                                 target[k] = {}
                             target = target[k]
                         target[keys[-1]] = value
@@ -196,20 +195,22 @@ class ConfigDict(MutableMapping):
                     value = value.lower() in ("true", "1", "yes")
                 
                 # Build nested dict structure
-                if category not in config:
+                if category not in config or not isinstance(config.get(category), dict):
+                    # Promote any prior root-level scalar to dict to allow nested params
                     config[category] = {}
                 
                 # Handle nested paths: "pca.n_components" -> config['models']['pca']['n_components']
-                keys = param_path.split(".")
-                target = config[category]
-                for k in keys[:-1]:
-                    if k not in target:
-                        target[k] = {}
-                    elif not isinstance(target[k], dict):
-                        # Overwrite non-dict values with dict to support nested paths
-                        target[k] = {}
-                    target = target[k]
-                target[keys[-1]] = value
+                keys = param_path.split(".") if param_path else []
+                if not keys:
+                    # Root-level value (rare) replaces entire category
+                    config[category] = value
+                else:
+                    target = config[category]
+                    for k in keys[:-1]:
+                        if k not in target or not isinstance(target[k], dict):
+                            target[k] = {}
+                        target = target[k]
+                    target[keys[-1]] = value
             
             return config
         

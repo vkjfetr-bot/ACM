@@ -619,6 +619,9 @@ class SQLBatchRunner:
         env = dict(os.environ)
         env["ACM_FORCE_SQL_MODE"] = "1"
         env["ACM_BATCH_MODE"] = "1"
+        # Propagate start-from-beginning intent to forecasting layer (used to force full-history model init)
+        if self.start_from_beginning and batch_num == 0:
+            env["ACM_FORECAST_FULL_HISTORY_MODE"] = "1"
         env["ACM_BATCH_NUM"] = str(batch_num)
 
         # Stream child output live so devs can see progress (instead of buffering everything).
