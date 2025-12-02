@@ -528,6 +528,32 @@ class OutputManager:
                 'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
                 'SourceRunID': 'UNKNOWN', 'EquipID': 0, 'MergeWeight': 0.0
             },
+            'ACM_HealthForecast_TS': {
+                'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
+                'Method': 'ExponentialSmoothing', 'LastUpdate': 'ts'
+            },
+            'ACM_FailureForecast_TS': {
+                'Timestamp': 'ts', 'FailureProb': 0.0, 'ThresholdUsed': 0.0,
+                'Method': 'GaussianTail'
+            },
+            'ACM_FailureHazard_TS': {
+                'Timestamp': 'ts', 'HazardRaw': 0.0, 'HazardSmooth': 0.0,
+                'Method': 'EWMA'
+            },
+            'ACM_DetectorForecast_TS': {
+                'Timestamp': 'ts', 'DetectorType': 'UNKNOWN', 'ForecastZ': 0.0,
+                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialSmoothing'
+            },
+            'ACM_SensorForecast_TS': {
+                'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'ForecastValue': 0.0,
+                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialSmoothing'
+            },
+            'ACM_RUL_Summary': {
+                'RUL_Hours': 0.0, 'Method': 'Multipath', 'LastUpdate': 'ts'
+            },
+            'ACM_RUL_TS': {
+                'Timestamp': 'ts', 'RUL_Hours': 0.0, 'Method': 'Multipath'
+            },
             'ACM_FailureHazard_TS': {
                 'Timestamp': 'ts', 'HazardRaw': 0.0, 'HazardSmooth': 0.0, 'Survival': 0.0,
                 'FailureProb': 0.0, 'RunID': 'UNKNOWN', 'EquipID': 0
@@ -1128,8 +1154,7 @@ class OutputManager:
                        sql_columns: Optional[Dict[str, str]] = None,
                        non_numeric_cols: Optional[set] = None,
                        add_created_at: bool = False,
-                       allow_repair: bool = True,
-                       **csv_kwargs) -> Dict[str, Any]:
+                       allow_repair: bool = True) -> Dict[str, Any]:
         """
         Write DataFrame to SQL (file output disabled).
         
@@ -1210,7 +1235,8 @@ class OutputManager:
                     result['error'] = str(e)
                     self.stats['sql_failures'] += 1
             elif not sql_table:
-                 Console.warn(f"[OUTPUT] No SQL table specified for {file_path.name}, and file output is disabled. Data not persisted.")
+                # No target; skip quietly
+                return result
             
         except Exception as e:
             Console.error(f"[OUTPUT] Failed to write {file_path}: {e}")
@@ -1221,12 +1247,9 @@ class OutputManager:
             elapsed = time.time() - start_time
             self.stats['write_time'] += elapsed
             
-            # FCST-15: Cache DataFrame for downstream modules
-            # Always cache, even if no actual write happened
-            # Store by filename (without path) so modules can reference by simple name
+            # FCST-15: Cache DataFrame for downstream modules (lightweight)
             cache_key = file_path.name  # e.g., "scores.csv"
-            self._artifact_cache[cache_key] = df.copy()
-            Console.info(f"[OUTPUT] Cached {cache_key} in artifact cache ({len(df)} rows)")
+            self._artifact_cache[cache_key] = df
         
         return result
 
@@ -1263,10 +1286,6 @@ class OutputManager:
         filled = {}
         missing_fields = []
         
-        # OUT-17: Add repair audit column
-        repair_flag_col = f"{table_name}_RepairFlag"
-        out[repair_flag_col] = 0  # 0 = no repair, 1 = repaired
-        
         for col, default in req.items():
             if default == 'ts':
                 val = sentinel_ts
@@ -1281,7 +1300,6 @@ class OutputManager:
                 if allow_repair:
                     out[col] = val
                     filled[col] = 'added'
-                    out[repair_flag_col] = 1
             else:
                 # Check for nulls
                 try:
@@ -1295,7 +1313,6 @@ class OutputManager:
                     needs_repair = True
                     if allow_repair:
                         out.loc[null_mask, col] = val
-                        out.loc[null_mask, repair_flag_col] = 1
                         filled[col] = count
                         
             if needs_repair:
@@ -1305,7 +1322,7 @@ class OutputManager:
         repair_info['missing_fields'] = missing_fields
         
         if filled:
-            Console.info(f"[SCHEMA] {table_name}: applied defaults {filled}")
+            Console.warn(f"[SCHEMA] {table_name}: applied defaults {filled}")
         if not allow_repair and repair_info['repairs_needed']:
             Console.warn(f"[SCHEMA] {table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}")
             

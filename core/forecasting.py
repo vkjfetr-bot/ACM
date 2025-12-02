@@ -46,6 +46,7 @@ import json
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 from utils.logger import Console  # type: ignore
 # FOR-DQ-02: Use centralized timestamp normalization
@@ -142,15 +143,28 @@ def compute_data_hash(df: pd.DataFrame) -> str:
     More efficient than CSV serialization; maintains same semantics (hash changes when data changes).
     """
     try:
-        # Sort columns for determinism
+        # Sort columns for determinism and hash per-dtype to avoid object-array instability
         sorted_cols = sorted(df.columns)
-        vals = df[sorted_cols].to_numpy(copy=False).tobytes()
-        
-        # Include schema to detect column type changes
-        schema = str(list(zip(sorted_cols, [str(dt) for dt in df[sorted_cols].dtypes]))).encode()
-        
-        return hashlib.sha256(vals + schema).hexdigest()[:16]
-    except Exception:
+        parts: List[bytes] = []
+        schema = []
+        for col in sorted_cols:
+            series = df[col]
+            dtype_str = str(series.dtype)
+            schema.append((col, dtype_str))
+            if pd.api.types.is_numeric_dtype(series):
+                vals = series.astype("float64").to_numpy(copy=False)
+                parts.append(vals.tobytes())
+            elif pd.api.types.is_datetime64_any_dtype(series):
+                vals = series.view("int64").to_numpy(copy=False)
+                parts.append(vals.tobytes())
+            else:
+                vals = series.astype("string").fillna("").to_numpy(copy=False)
+                parts.append("||".join(vals).encode())
+        schema_bytes = str(schema).encode()
+        payload = b"".join(parts) + schema_bytes
+        return hashlib.sha256(payload).hexdigest()[:16]
+    except Exception as e:
+        Console.warn(f"[FORECAST] Failed to compute data hash: {e}")
         return ""
 
 
@@ -159,7 +173,9 @@ def should_retrain(
     sql_client: SqlClient,
     equip_id: int,
     current_data_hash: str,
-    config: Dict[str, Any]
+    config: Dict[str, Any],
+    current_batch_time: Optional[datetime] = None,
+    forecast_quality: Optional[Dict[str, float]] = None
 ) -> Tuple[bool, str]:
     """
     Determine if full model retrain is needed.
@@ -180,14 +196,25 @@ def should_retrain(
     drift_threshold = float(forecast_cfg.get("drift_retrain_threshold", 1.5))
     energy_threshold = float(forecast_cfg.get("energy_spike_threshold", 1.5))
     error_threshold = float(forecast_cfg.get("forecast_error_threshold", 2.0))
+    max_hours_between_retrain = float(forecast_cfg.get("max_hours_between_retrain", 168.0))
+    if current_batch_time is None:
+        current_batch_time = datetime.now()
     
     # No prior state always triggers retrain
     if prev_state is None:
         return True, "No prior forecast state (cold start)"
     
-    # Check data hash change
-    if prev_state.training_data_hash != current_data_hash:
-        return True, f"Training data changed (hash mismatch)"
+    # Check data hash change (disable in continuous sliding-window mode to avoid perpetual retrain)
+    hash_check_enabled = bool(forecast_cfg.get("enable_hash_check", not forecast_cfg.get("enable_continuous", True)))
+    if hash_check_enabled and current_data_hash:
+        if prev_state.training_data_hash != current_data_hash:
+            return True, f"Training data changed (hash mismatch)"
+
+    # Check forecast accuracy degradation (if provided by caller)
+    if forecast_quality:
+        rmse = float(forecast_quality.get("rmse", 0.0) or 0.0)
+        if rmse > error_threshold:
+            return True, f"Forecast accuracy degraded (RMSE={rmse:.2f} > {error_threshold})"
     
     # Check drift (FOR-CODE-02: Non-fatal SQL query - warn and continue)
     try:
@@ -239,6 +266,16 @@ def should_retrain(
     except Exception as e:
         # FOR-CODE-02: Non-fatal data condition - log and continue without energy check
         Console.warn(f"[FORECAST] Failed to check anomaly energy: {e}")
+    
+    # Time-based retrain safeguard
+    try:
+        if prev_state and getattr(prev_state, "last_retrain_time", None):
+            last_retrain_ts = datetime.fromisoformat(prev_state.last_retrain_time)
+            hours_since = (current_batch_time - last_retrain_ts).total_seconds() / 3600.0
+            if hours_since > max_hours_between_retrain:
+                return True, f"Scheduled retrain ({hours_since:.0f}h since last > {max_hours_between_retrain}h limit)"
+    except Exception as e:
+        Console.warn(f"[FORECAST] Failed to evaluate time-based retrain: {e}")
     
     # All checks passed - incremental update sufficient
     return False, "Model stable, incremental update"
@@ -432,7 +469,7 @@ def merge_forecast_horizons(
 def smooth_failure_probability_hazard(
     prev_hazard_baseline: float,
     new_probability_series: pd.Series,
-    dt_hours: float = 1.0,
+    dt_hours: Optional[float] = None,
     alpha: float = DEFAULT_HAZARD_SMOOTHING_ALPHA
 ) -> pd.DataFrame:
     """
@@ -457,23 +494,36 @@ def smooth_failure_probability_hazard(
         return pd.DataFrame()
     
     df_result = pd.DataFrame(index=new_probability_series.index)
+    # Derive cadence if not provided
+    if dt_hours is None and len(new_probability_series.index) > 1:
+        diffs = pd.Series(new_probability_series.index).diff().dropna().dt.total_seconds() / 3600.0
+        if not diffs.empty and diffs.median() > 0:
+            dt_hours = float(diffs.median())
+    if dt_hours is None or dt_hours <= 0:
+        dt_hours = 1.0
+    # Allow variable cadence per step if index irregular
+    dt_vec = np.diff(new_probability_series.index.values.astype("datetime64[ns]")) / np.timedelta64(1, "h")
+    if dt_vec.size == 0:
+        dt_vec = np.array([dt_hours])
+    dt_vec = np.insert(dt_vec, 0, dt_vec[0] if dt_vec.size else dt_hours)
     
     # Convert probability to hazard rate (clip to avoid log(0))
     p_clipped = new_probability_series.clip(1e-9, 1 - 1e-9)
-    lambda_raw = -np.log(1 - p_clipped) / dt_hours
-    df_result["HazardRaw"] = lambda_raw
+    p_np = p_clipped.to_numpy(dtype=float, copy=False)
+    lambda_raw_np = -np.log(1 - p_np) / dt_vec
+    df_result["HazardRaw"] = lambda_raw_np
     
     # EWMA smoothing with previous baseline
-    lambda_smooth = np.zeros(len(lambda_raw))
-    lambda_smooth[0] = alpha * lambda_raw.iloc[0] + (1 - alpha) * prev_hazard_baseline
+    lambda_smooth = np.zeros(len(lambda_raw_np))
+    lambda_smooth[0] = alpha * lambda_raw_np[0] + (1 - alpha) * prev_hazard_baseline
     
-    for i in range(1, len(lambda_raw)):
-        lambda_smooth[i] = alpha * lambda_raw.iloc[i] + (1 - alpha) * lambda_smooth[i-1]
+    for i in range(1, len(lambda_raw_np)):
+        lambda_smooth[i] = alpha * lambda_raw_np[i] + (1 - alpha) * lambda_smooth[i-1]
     
     df_result["HazardSmooth"] = lambda_smooth
     
     # Compute cumulative hazard and survival probability
-    cumulative_hazard = np.cumsum(lambda_smooth * dt_hours)
+    cumulative_hazard = np.cumsum(lambda_smooth * dt_vec)
     df_result["Survival"] = np.exp(-cumulative_hazard)
     df_result["FailureProb"] = 1 - df_result["Survival"]
     df_result["Timestamp"] = df_result.index
@@ -812,9 +862,15 @@ def run_enhanced_forecasting_sql(
             # FOR-CODE-02: Non-fatal state load failure - log and continue without previous state
             Console.warn(f"[FORECAST] Failed to load previous state: {e}")
     
-    # Use provided batch time or fall back to now() (for real-time scenarios)
+    # Use provided batch time or fall back to now() (for real-time scenarios); ensure naive
     if current_batch_time is None:
         current_batch_time = datetime.now()
+    else:
+        current_batch_time = pd.to_datetime(current_batch_time, errors="coerce")
+        if pd.isna(current_batch_time):
+            current_batch_time = datetime.now()
+        if getattr(current_batch_time, "tzinfo", None) is not None:
+            current_batch_time = current_batch_time.tz_localize(None).to_pydatetime()
 
     # --- Cleanup old forecast data to prevent RunID overlap in charts ---
     try:
@@ -828,29 +884,31 @@ def run_enhanced_forecasting_sql(
         # Keep only the 2 most recent RunIDs to preserve some history while reducing clutter
         cur.execute("""
             WITH RankedRuns AS (
-                SELECT DISTINCT RunID, 
+                SELECT RunID,
                        ROW_NUMBER() OVER (ORDER BY MAX(CreatedAt) DESC) AS rn
                 FROM dbo.ACM_HealthForecast_TS
                 WHERE EquipID = ?
                 GROUP BY RunID
             )
-            DELETE FROM dbo.ACM_HealthForecast_TS
-            WHERE EquipID = ? 
-              AND RunID IN (SELECT RunID FROM RankedRuns WHERE rn > ?)
-        """, (equip_id, equip_id, keep_runs))
+            DELETE H
+            FROM dbo.ACM_HealthForecast_TS H
+            JOIN RankedRuns R ON H.RunID = R.RunID AND R.rn > ?
+            WHERE H.EquipID = ?
+        """, (equip_id, keep_runs, equip_id))
         
         cur.execute("""
             WITH RankedRuns AS (
-                SELECT DISTINCT RunID, 
+                SELECT RunID,
                        ROW_NUMBER() OVER (ORDER BY MAX(CreatedAt) DESC) AS rn
                 FROM dbo.ACM_FailureForecast_TS
                 WHERE EquipID = ?
                 GROUP BY RunID
             )
-            DELETE FROM dbo.ACM_FailureForecast_TS
-            WHERE EquipID = ? 
-              AND RunID IN (SELECT RunID FROM RankedRuns WHERE rn > ?)
-        """, (equip_id, equip_id, keep_runs))
+            DELETE F
+            FROM dbo.ACM_FailureForecast_TS F
+            JOIN RankedRuns R ON F.RunID = R.RunID AND R.rn > ?
+            WHERE F.EquipID = ?
+        """, (equip_id, keep_runs, equip_id))
         
         if not sql_client.conn.autocommit:
             sql_client.conn.commit()
@@ -932,9 +990,20 @@ def run_enhanced_forecasting_sql(
         return {"tables": {}, "metrics": {}}
 
     # FOR-CODE-03: health_series instead of hi
+    limited_history = False
     if health_series.size < MIN_FORECAST_SAMPLES:
-        Console.warn(f"[ENHANCED_FORECAST] Insufficient health history ({health_series.size} points); skipping")
-        return {"tables": {}, "metrics": {}}
+        Console.warn(f"[ENHANCED_FORECAST] Limited health history ({health_series.size} points < {MIN_FORECAST_SAMPLES}); using baseline smoothing with wide intervals")
+        limited_history = True
+    # Infer cadence (hours) from health timeline; fallback set later after config
+    health_dt_hours = None
+    if len(health_series.index) > 1:
+        diffs = np.diff(health_series.index.values.astype("datetime64[ns]")) / np.timedelta64(1, "h")
+        diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        if diffs.size:
+            health_dt_hours = float(np.median(diffs))
+    prev_smoothing_params = {}
+    if prev_state and isinstance(getattr(prev_state, "model_params", None), dict):
+        prev_smoothing_params = prev_state.model_params.get("smoothing", {}) or {}
 
     # --- Load detector scores from ACM_Scores_Wide ---
     try:
@@ -991,20 +1060,46 @@ def run_enhanced_forecasting_sql(
         Console.warn(f"[ENHANCED_FORECAST] Removed {dupe_count} duplicate timestamps (kept last occurrence)")
     
     df_scores = df_scores.set_index("Timestamp")
+    # Drop columns with excessive missingness to align with detector guardrails
+    nz_thresh = int(0.5 * len(df_scores.index))
+    drop_cols = [c for c in df_scores.columns if df_scores[c].count() < nz_thresh]
+    if drop_cols:
+        Console.warn(f"[ENHANCED_FORECAST] Dropping score columns with >50% NaN: {drop_cols}")
+        df_scores = df_scores.drop(columns=drop_cols, errors="ignore")
 
     if df_scores.empty:
         Console.warn("[ENHANCED_FORECAST] Detector scores dataframe empty after cleaning; skipping")
         return {"tables": {}, "metrics": {}}
+
+    regime_label = None
+    for cand in ("regime_label", "regime"):
+        if cand in df_scores.columns:
+            last_val = df_scores[cand].dropna()
+            if not last_val.empty:
+                regime_label = str(last_val.iloc[-1])
+            df_scores = df_scores.drop(columns=[cand], errors="ignore")
+            break
     
     # --- FORECAST-STATE-02: Conditional retraining check ---
-    current_data_hash = compute_data_hash(df_health) if enable_continuous else ""
+    hash_enabled = bool(forecast_cfg.get("enable_hash_check", not enable_continuous))
+    current_data_hash = compute_data_hash(df_health) if hash_enabled else ""
     retrain_needed = True
     retrain_reason = "Initial training"
-    
+    forecast_quality_metrics: Dict[str, float] = {}
     if enable_continuous and prev_state:
         try:
+            forecast_quality_metrics = compute_forecast_quality(prev_state, sql_client, equip_id, current_batch_time)
+        except Exception as e:
+            Console.warn(f"[FORECAST] Forecast quality check failed: {e}")
+        try:
             retrain_needed, retrain_reason = should_retrain(
-                prev_state, sql_client, equip_id, current_data_hash, config_map
+                prev_state,
+                sql_client,
+                equip_id,
+                current_data_hash,
+                config_map,
+                current_batch_time=current_batch_time,
+                forecast_quality=forecast_quality_metrics
             )
             Console.info(f"[FORECAST] Retrain decision: {retrain_needed} - {retrain_reason}")
         except Exception as e:
@@ -1018,48 +1113,103 @@ def run_enhanced_forecasting_sql(
     
     Console.info("[ENHANCED_FORECAST] Starting comprehensive forecasting with exponential smoothing")
     
-    # Extract forecast configuration
+    # Extract forecast configuration (single source of truth for horizon)
     failure_threshold = float(forecast_cfg.get("failure_threshold", 70.0))
-    forecast_hours = int(forecast_cfg.get("forecast_hours", 24))
+    forecast_hours = max(1, int(forecast_cfg.get("forecast_hours") or forecast_cfg.get("max_forecast_hours", 24)))
     alpha = float(forecast_cfg.get("smoothing_alpha", 0.3))  # Exponential smoothing parameter
+    beta = float(forecast_cfg.get("smoothing_beta", 0.2))    # Trend smoothing parameter
+    max_trend_per_hour = float(forecast_cfg.get("max_trend_per_hour", 5.0))
+    flatline_epsilon = float(forecast_cfg.get("flatline_epsilon", 1e-3))
+    health_min = float(forecast_cfg.get("health_min", 0.0))
+    health_max = float(forecast_cfg.get("health_max", 100.0))
+    if health_min >= health_max:
+        health_min, health_max = 0.0, 100.0
+    configured_dt_hours = float(forecast_cfg.get("dt_hours", 0.0)) or None
+    failure_threshold = min(max(failure_threshold, health_min), health_max)
+    sm_dt = float(prev_smoothing_params.get("dt_hours")) if prev_smoothing_params.get("dt_hours") not in (None, "") else None
+    dt_hours = configured_dt_hours or sm_dt or health_dt_hours or 1.0
     
     # --- 1. Health Forecast with Exponential Smoothing ---
     try:
-        # Calculate trend using simple exponential smoothing
-        health_values = health_series.values
+        # Prepare series (median imputation to align with ACM standards)
+        health_values = pd.Series(health_series, copy=True).astype(float)
+        median_val = float(np.nanmedian(health_values)) if health_values.size else 0.0
+        if not np.isfinite(median_val):
+            median_val = 0.0
+        health_values = health_values.fillna(median_val)
         n = len(health_values)
+        # Detect flatline/low-variance series and guard slopes
+        span = float(np.nanmax(health_values) - np.nanmin(health_values)) if health_values.size else 0.0
+        base_variance = float(np.nanvar(health_values)) if health_values.size else 0.0
         
-        # Simple exponential smoothing with trend
-        level = health_values[0]
-        trend = 0.0
-        beta = 0.1  # Trend smoothing parameter
+        # Initialize Holt's linear trend components
+        level = float(health_values.iloc[0])
+        trend = float(health_values.iloc[1] - health_values.iloc[0]) if n > 1 else 0.0
+        # Warm-start from previous smoothing params when available and no retrain requested
+        if not retrain_needed and prev_smoothing_params:
+            lvl_prev = prev_smoothing_params.get("estimated_level")
+            tr_prev = prev_smoothing_params.get("estimated_trend")
+            if lvl_prev is not None and np.isfinite(lvl_prev):
+                level = float(lvl_prev)
+            if tr_prev is not None and np.isfinite(tr_prev):
+                trend = float(tr_prev)
+        level_history: List[float] = [level]
+        trend_history: List[float] = [trend]
+        forecast_errors: List[float] = []
         
-        # Fit the model on historical data
+        # Fit Holt's linear trend (level uses previous level+trend)
         for i in range(1, n):
+            obs = float(health_values.iloc[i])
             prev_level = level
-            level = alpha * health_values[i] + (1 - alpha) * (level + trend)
-            trend = beta * (level - prev_level) + (1 - beta) * trend
+            prev_trend = trend
+            level = alpha * obs + (1 - alpha) * (prev_level + prev_trend)
+            trend = beta * (level - prev_level) + (1 - beta) * prev_trend
+            trend = float(np.clip(trend, -max_trend_per_hour * dt_hours, max_trend_per_hour * dt_hours))
+            level_history.append(level)
+            trend_history.append(trend)
+            forecast_errors.append(obs - (prev_level + prev_trend))
+        
+        # Use robust fallback when history is extremely short
+        if n < 2:
+            forecast_errors = [0.0]
+        
+        # Flatline/variance guard: if nearly constant, zero the trend and widen error
+        if span < flatline_epsilon or base_variance < (flatline_epsilon ** 2):
+            trend = 0.0
+            trend_history = [0.0] * len(trend_history)
+            forecast_errors = [0.0]
+        
+        std_error = float(np.std(forecast_errors)) if len(forecast_errors) > 0 else 5.0
+        if not np.isfinite(std_error) or std_error < 1e-6:
+            std_error = 1.0  # Prevent degenerate CI widths
+        if limited_history:
+            std_error *= 1.5  # Inflate uncertainty when history is short
         
         # Generate forecast
         last_timestamp = health_series.index[-1]
+        forecast_freq = pd.to_timedelta(dt_hours, unit="h")
         forecast_timestamps = pd.date_range(
-            start=last_timestamp + pd.Timedelta(hours=1),
+            start=last_timestamp + forecast_freq,
             periods=forecast_hours,
-            freq='1H'
+            freq=forecast_freq
         )
         
         # Forecast values with trend
         forecast_values = []
+        ci_lower = []
+        ci_upper = []
+        forecast_stds = []
         for h in range(1, forecast_hours + 1):
             forecast_val = level + h * trend
-            forecast_values.append(max(0.0, min(100.0, forecast_val)))  # Clamp to [0, 100]
-        
-        # Calculate confidence intervals (wider as we go further)
-        residuals = health_values[1:] - health_values[:-1]
-        std_error = np.std(residuals) if len(residuals) > 0 else 5.0
-        
-        ci_lower = [max(0.0, val - 1.96 * std_error * np.sqrt(h)) for h, val in enumerate(forecast_values, 1)]
-        ci_upper = [min(100.0, val + 1.96 * std_error * np.sqrt(h)) for h, val in enumerate(forecast_values, 1)]
+            forecast_val = max(health_min, min(health_max, forecast_val))  # Clamp to configured scale
+            # Variance growth approximation for Holt's method
+            var_mult = np.sqrt(1.0 + (alpha ** 2) * h + (beta ** 2) * (h ** 2))
+            horizon_std = std_error * var_mult
+            ci_width = 1.96 * horizon_std
+            forecast_values.append(forecast_val)
+            forecast_stds.append(horizon_std)
+            ci_lower.append(max(health_min, forecast_val - ci_width))
+            ci_upper.append(min(health_max, forecast_val + ci_width))
         
         # Build health forecast DataFrame
         health_forecast_df = pd.DataFrame({
@@ -1067,34 +1217,39 @@ def run_enhanced_forecasting_sql(
             "EquipID": equip_id,
             "Timestamp": forecast_timestamps,
             "ForecastHealth": forecast_values,
-            "CiLower": ci_lower,
+            "CI_Lower": ci_lower,
+            "CI_Upper": ci_upper,
+            "CiLower": ci_lower,  # schema/dashboard compatibility
             "CiUpper": ci_upper,
             "ForecastStd": std_error,
+            "ForecastStdHorizon": forecast_stds,
             "Method": "ExponentialSmoothing",
         })
+        if regime_label is not None:
+            health_forecast_df["RegimeLabel"] = regime_label
         
         Console.info(f"[FORECAST] Generated {len(health_forecast_df)} hour health forecast (trend={trend:.2f})")
         
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] Health forecasting failed: {e}")
-        health_forecast_df = pd.DataFrame()
+        # Empty DataFrame with correct schema for SQL compatibility
+        health_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "ForecastStdHorizon", "Method"])
         forecast_values = []
+        forecast_stds = []
+        forecast_timestamps = pd.DatetimeIndex([])
 
     # --- 2. Failure Probability Calculation ---
+    hazard_df = pd.DataFrame()
     try:
         if len(forecast_values) > 0:
-            # Calculate failure probability based on distance from threshold
-            # Sigmoid function: as health drops below threshold, probability increases
             failure_probs = []
-            for fh in forecast_values:
-                if fh >= failure_threshold:
-                    prob = 0.0
-                else:
-                    # Exponential increase as health drops below threshold
-                    distance = failure_threshold - fh
-                    # Probability = 1 - exp(-k * distance)
-                    k = 0.05  # Controls steepness
-                    prob = 1.0 - np.exp(-k * distance)
+            # Use per-horizon stds when available, fallback to global std_error
+            horizon_stds = list(np.asarray(health_forecast_df.get("ForecastStdHorizon", [std_error] * len(forecast_values))))
+            
+            for fh, fh_std in zip(forecast_values, horizon_stds):
+                spread = max(float(fh_std), 1e-3)
+                z = (failure_threshold - fh) / spread
+                prob = float(norm.cdf(z))  # Probability health is below threshold
                 failure_probs.append(min(1.0, max(0.0, prob)))
             
             failure_prob_df = pd.DataFrame({
@@ -1103,35 +1258,72 @@ def run_enhanced_forecasting_sql(
                 "Timestamp": forecast_timestamps,
                 "FailureProb": failure_probs,
                 "ThresholdUsed": failure_threshold,
-                "Method": "SigmoidDegradation",
+                "Method": "GaussianTail",
             })
+            if regime_label is not None:
+                failure_prob_df["RegimeLabel"] = regime_label
+            
+            if enable_continuous and prev_state:
+                try:
+                    prev_hazard = float(getattr(prev_state, "hazard_baseline", 0.0) or 0.0)
+                    hazard_alpha = float(forecast_cfg.get("hazard_alpha", DEFAULT_HAZARD_SMOOTHING_ALPHA))
+                    hazard_df = smooth_failure_probability_hazard(
+                        prev_hazard_baseline=prev_hazard,
+                        new_probability_series=pd.Series(failure_probs, index=forecast_timestamps),
+                        dt_hours=dt_hours,
+                        alpha=hazard_alpha
+                    )
+                    if not hazard_df.empty:
+                        hazard_df = hazard_df.copy()
+                        hazard_df.insert(0, "RunID", run_id)
+                        hazard_df.insert(1, "EquipID", equip_id)
+                        if regime_label is not None:
+                            hazard_df["RegimeLabel"] = regime_label
+                except Exception as hz_e:
+                    Console.warn(f"[FORECAST] Hazard smoothing failed: {hz_e}")
             
             max_failure_prob = max(failure_probs)
             Console.info(f"[FORECAST] Max failure probability: {max_failure_prob*100:.1f}%")
         else:
-            failure_prob_df = pd.DataFrame()
+            # Empty DataFrame with correct schema for SQL compatibility
+            failure_prob_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "FailureProb", "ThresholdUsed", "Method"])
             max_failure_prob = 0.0
             
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] Failure probability computation failed: {e}")
-        failure_prob_df = pd.DataFrame()
+        # Empty DataFrame with correct schema for SQL compatibility
+        failure_prob_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "FailureProb", "ThresholdUsed", "Method"])
+        hazard_df = pd.DataFrame()
         max_failure_prob = 0.0
 
-    # --- 3. RUL Estimation ---
+    # --- 3. RUL Estimation (probabilistic first-passage approximation) ---
     try:
-        if len(forecast_values) > 0:
-            # Find when health crosses failure threshold
-            rul_hours = None
+        base_time = health_series.index[-1] if len(health_series) else pd.Timestamp.now()
+        rul_hours = float(forecast_hours + 24)  # default buffer fallback
+
+        def _rul_from_cdf(timestamps: pd.Series, cdf: np.ndarray) -> Tuple[float, float]:
+            cdf = np.clip(cdf, 0.0, 1.0)
+            cdf = np.maximum.accumulate(cdf)
+            deltas = np.diff(np.concatenate(([0.0], cdf)))
+            hours = (pd.to_datetime(timestamps) - base_time).total_seconds() / 3600.0
+            hours = np.maximum(hours, 0.0)
+            first_cross = next((h for h, p in zip(hours, cdf) if p >= 0.5), float(forecast_hours + 24))
+            expected = float(np.sum(deltas * hours)) if deltas.size else float(forecast_hours + 24)
+            return first_cross, expected
+
+        if not hazard_df.empty and "FailureProb" in hazard_df.columns:
+            rul_cross, rul_exp = _rul_from_cdf(hazard_df["Timestamp"], hazard_df["FailureProb"].to_numpy(copy=False))
+            rul_hours = rul_cross if rul_cross is not None else rul_exp
+            Console.info(f"[FORECAST] RUL (hazard-based): {rul_hours:.1f}h")
+        elif len(forecast_values) > 0 and len(failure_prob_df) > 0:
+            rul_cross, rul_exp = _rul_from_cdf(failure_prob_df["Timestamp"], failure_prob_df["FailureProb"].to_numpy(copy=False))
+            rul_hours = rul_cross if rul_cross is not None else rul_exp
+            Console.info(f"[FORECAST] RUL (probabilistic tail): {rul_hours:.1f}h")
+        elif len(forecast_values) > 0:
             for h, fh in enumerate(forecast_values, 1):
                 if fh < failure_threshold:
                     rul_hours = float(h)
                     break
-            
-            if rul_hours is None:
-                # Health doesn't cross threshold in forecast window
-                rul_hours = float(forecast_hours + 24)  # Assume good for forecast window + buffer
-            
-            Console.info(f"[FORECAST] RUL estimated: {rul_hours:.1f} hours")
         else:
             rul_hours = 168.0  # Default 1 week
             
@@ -1141,7 +1333,8 @@ def run_enhanced_forecasting_sql(
 
     # --- 4A. Detector Attribution (Active Detectors) ---
     # Forecast detector Z-score trends (PCA, CUSUM, GMM, IForest, etc.)
-    detector_forecast_df = pd.DataFrame()
+    detector_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "DetectorName", "ForecastValue", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "Method", "RegimeLabel", "FusedZ"])
+    detector_state: Dict[str, Any] = {}
     try:
         if df_scores is not None and not df_scores.empty:
             latest_scores = df_scores.iloc[-1]
@@ -1151,56 +1344,91 @@ def run_enhanced_forecasting_sql(
             
             if z_cols:
                 # Get absolute Z-scores for active detectors
-                detector_scores = {col.replace('_z', ''): abs(latest_scores[col]) for col in z_cols if pd.notna(latest_scores[col])}
+                min_detector_z = float(forecast_cfg.get("min_detector_z", 1.0))
+                detector_scores = {}
+                for col in z_cols:
+                    val = latest_scores.get(col)
+                    if pd.notna(val) and np.isfinite(val):
+                        aval = float(abs(val))
+                        if aval >= min_detector_z:
+                            detector_scores[col.replace('_z', '')] = aval
+                fused_val = latest_scores.get("fused")
                 
                 # Sort by magnitude - top active detectors
                 top_detectors = sorted(detector_scores.items(), key=lambda x: x[1], reverse=True)[:10]
                 
                 # Generate forecast for top detectors
                 detector_forecast_rows = []
+                decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
+                max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
+                det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
+                horizons = np.arange(1, len(forecast_timestamps) + 1, dtype=float)
+                decay = np.exp(-decay_rate * horizons)
                 for detector_name, z_score in top_detectors:
-                    for h, ts in enumerate(forecast_timestamps, 1):
-                        # Linear trend for detector Z-scores
-                        forecast_val = z_score * (1.0 + 0.01 * h)
-                        detector_forecast_rows.append({
+                    base = float(np.clip(z_score, 0.0, max_detector_z))
+                    proj = np.clip(base * decay, 0.0, max_detector_z)
+                    ci_lower = np.maximum(0.0, proj - det_ci_hw)
+                    ci_upper = np.minimum(max_detector_z, proj + det_ci_hw)
+                    detector_forecast_rows.extend([
+                        {
                             "RunID": run_id,
                             "EquipID": equip_id,
                             "Timestamp": ts,
                             "DetectorName": detector_name,  # e.g., 'pca_spe', 'cusum', 'gmm'
-                            "ForecastValue": forecast_val,
-                            "CiLower": None,
-                            "CiUpper": None,
+                            "ForecastValue": float(pv),
+                            "CI_Lower": float(cl),
+                            "CI_Upper": float(cu),
+                            "CiLower": float(cl),
+                            "CiUpper": float(cu),
                             "ForecastStd": None,
-                            "Method": "LinearTrend",
-                        })
+                            "Method": "ExponentialDecay",
+                            "RegimeLabel": regime_label,
+                            "FusedZ": float(fused_val) if pd.notna(fused_val) else None,
+                        }
+                        for ts, pv, cl, cu in zip(forecast_timestamps, proj, ci_lower, ci_upper)
+                    ])
                 
+                detector_state = {
+                    "top_detectors": [{"name": n, "z": float(z)} for n, z in top_detectors],
+                    "decay_rate": decay_rate,
+                    "max_detector_z": max_detector_z,
+                    "ci_halfwidth": det_ci_hw,
+                    "fused_z": float(fused_val) if pd.notna(fused_val) else None,
+                }
                 detector_forecast_df = pd.DataFrame(detector_forecast_rows)
                 Console.info(f"[FORECAST] Generated detector forecast for {len(top_detectors)} active detectors")
             
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] Detector forecast failed: {e}")
-        detector_forecast_df = pd.DataFrame()
+        # Empty DataFrame with correct schema for SQL compatibility
+        detector_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "DetectorName", "ForecastValue", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "Method", "RegimeLabel", "FusedZ"])
 
     # --- 4B. Physical Sensor Attribution (Hot Sensors) ---
     # Forecast actual physical sensor values (Motor Current, Temperature, Pressure, etc.)
-    sensor_forecast_df = pd.DataFrame()
+    sensor_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "SensorName", "ForecastValue", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "Method", "RegimeLabel"])
+    sensor_state: Dict[str, Any] = {}
     try:
         if sensor_data is not None and not sensor_data.empty:
-            # Get the latest sensor readings
-            latest_sensors = sensor_data.iloc[-1]
-            
             # Get numeric sensor columns (exclude datetime/categorical)
             sensor_cols = [c for c in sensor_data.columns if pd.api.types.is_numeric_dtype(sensor_data[c])]
+            if sensor_cols:
+                sensor_df_num = sensor_data[sensor_cols].copy()
+                medians = sensor_df_num.median()
+                sensor_df_num = sensor_df_num.fillna(medians)
+            else:
+                sensor_df_num = pd.DataFrame()
+            sensor_min_global = forecast_cfg.get("sensor_min", None)
+            sensor_max_global = forecast_cfg.get("sensor_max", None)
             
-            if sensor_cols and len(sensor_data) >= 10:  # Need minimum history
+            if not sensor_df_num.empty and len(sensor_df_num) >= 10:  # Need minimum history
                 # Calculate sensor variability (standard deviation) to identify changing sensors
                 sensor_variability = {}
-                for col in sensor_cols:
-                    recent_data = sensor_data[col].tail(24)  # Last 24 hours
+                for col in sensor_df_num.columns:
+                    recent_data = sensor_df_num[col].tail(24)  # Last 24 hours
                     if recent_data.notna().sum() >= 5:
                         std_val = recent_data.std()
                         mean_val = recent_data.mean()
-                        if mean_val != 0 and pd.notna(std_val):
+                        if abs(mean_val) > 1e-6 and pd.notna(std_val):
                             # Coefficient of variation - identifies sensors with significant change
                             sensor_variability[col] = abs(std_val / mean_val)
                 
@@ -1209,33 +1437,73 @@ def run_enhanced_forecasting_sql(
                 
                 # Generate forecast for top changing sensors
                 sensor_forecast_rows = []
+                sensor_state_details: List[Dict[str, Any]] = []
+                max_sensor_slope = float(forecast_cfg.get("max_sensor_slope", 10.0))
+                # Optional engineering bounds per sensor name
+                sensor_bounds = forecast_cfg.get("sensor_bounds", {}) or {}
                 for sensor_name, variability in top_sensors:
                     # Get recent trend
-                    recent_values = sensor_data[sensor_name].tail(24).dropna()
+                    recent_values = sensor_df_num[sensor_name].tail(24).dropna()
                     if len(recent_values) >= 5:
                         # Calculate simple linear trend
                         x = np.arange(len(recent_values))
                         y = recent_values.values
                         trend = np.polyfit(x, y, 1)[0] if len(x) > 1 else 0.0
+                        trend = float(np.clip(trend, -max_sensor_slope, max_sensor_slope))
                         
                         current_val = recent_values.iloc[-1]
+                        resid_std = float(np.std(y - (trend * x + (y[0] if len(y) else 0)))) if len(y) else 0.0
+                        bound_min = sensor_bounds.get(sensor_name, {}).get("min", None)
+                        bound_max = sensor_bounds.get(sensor_name, {}).get("max", None)
                         
                         for h, ts in enumerate(forecast_timestamps, 1):
                             # Linear extrapolation from current value
                             forecast_val = current_val + (trend * h)
-                            
+                            if bound_min is not None:
+                                forecast_val = max(bound_min, forecast_val)
+                            if bound_max is not None:
+                                forecast_val = min(bound_max, forecast_val)
+                            if sensor_min_global is not None:
+                                forecast_val = max(sensor_min_global, forecast_val)
+                            if sensor_max_global is not None:
+                                forecast_val = min(sensor_max_global, forecast_val)
+                            ci_low = forecast_val - resid_std if resid_std else None
+                            ci_up = forecast_val + resid_std if resid_std else None
+                            for clamp_val, setter in [(sensor_min_global, "low"), (sensor_max_global, "high"), (bound_min, "low"), (bound_max, "high")]:
+                                if clamp_val is not None:
+                                    if setter == "low" and ci_low is not None:
+                                        ci_low = max(clamp_val, ci_low)
+                                    if setter == "high" and ci_up is not None:
+                                        ci_up = min(clamp_val, ci_up)
                             sensor_forecast_rows.append({
                                 "RunID": run_id,
                                 "EquipID": equip_id,
                                 "Timestamp": ts,
                                 "SensorName": sensor_name,  # Actual sensor like "Motor Current", "Bearing Temperature"
                                 "ForecastValue": forecast_val,
-                                "CiLower": None,
-                                "CiUpper": None,
-                                "ForecastStd": None,
+                                "CI_Lower": ci_low,
+                                "CI_Upper": ci_up,
+                                "CiLower": ci_low,
+                                "CiUpper": ci_up,
+                                "ForecastStd": resid_std if resid_std else None,
                                 "Method": "LinearTrend",
+                                "RegimeLabel": regime_label,
                             })
+                        sensor_state_details.append({
+                            "name": sensor_name,
+                            "variability": float(variability),
+                            "trend": float(trend),
+                            "resid_std": float(resid_std),
+                            "bound_min": bound_min,
+                            "bound_max": bound_max,
+                        })
                 
+                sensor_state = {
+                    "top_sensors": sensor_state_details,
+                    "max_sensor_slope": max_sensor_slope,
+                    "sensor_min": sensor_min_global,
+                    "sensor_max": sensor_max_global,
+                }
                 sensor_forecast_df = pd.DataFrame(sensor_forecast_rows)
                 Console.info(f"[FORECAST] Generated physical sensor forecast for {len(top_sensors)} sensors")
             else:
@@ -1245,34 +1513,50 @@ def run_enhanced_forecasting_sql(
             
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] Physical sensor forecast failed: {e}")
-        sensor_forecast_df = pd.DataFrame()
+        # Empty DataFrame with correct schema for SQL compatibility
+        sensor_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "SensorName", "ForecastValue", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "Method", "RegimeLabel"])
 
     # --- 5. RUL Summary ---
     try:
         predicted_failure_time = health_series.index[-1] + pd.Timedelta(hours=rul_hours)
+        ci_lower_rul = None
+        ci_upper_rul = None
+        if not health_forecast_df.empty:
+            lower_hit = health_forecast_df[health_forecast_df["CI_Lower"] <= failure_threshold]
+            upper_hit = health_forecast_df[health_forecast_df["CI_Upper"] <= failure_threshold]
+            if not lower_hit.empty:
+                ci_lower_rul = float((lower_hit.iloc[0]["Timestamp"] - health_series.index[-1]).total_seconds() / 3600.0)
+            if not upper_hit.empty:
+                ci_upper_rul = float((upper_hit.iloc[0]["Timestamp"] - health_series.index[-1]).total_seconds() / 3600.0)
+        lower_bound_val = ci_lower_rul if ci_lower_rul is not None else max(0.0, rul_hours - 12.0)
+        upper_bound_val = ci_upper_rul if ci_upper_rul is not None else rul_hours + 12.0
         
         rul_summary_df = pd.DataFrame([{
             "RunID": run_id,
             "EquipID": equip_id,
             "RUL_Hours": rul_hours,
-            "LowerBound": max(0.0, rul_hours - 12.0),  # +/- 12 hour uncertainty
-            "UpperBound": rul_hours + 12.0,
+            "RUL_CI_Lower_Hours": float(lower_bound_val),
+            "RUL_CI_Upper_Hours": float(upper_bound_val),
+            "LowerBound": float(lower_bound_val),  # schema compatibility
+            "UpperBound": float(upper_bound_val),
             "Confidence": 0.8 if len(health_series) > 100 else 0.6,  # Higher confidence with more data
-            "Method": "ExponentialSmoothing",
+            "Method": "ExponentialSmoothingProbabilistic",
             "LastUpdate": datetime.now(),
+            "RegimeLabel": regime_label,
             "RUL_Trajectory_Hours": rul_hours,
-            "RUL_Hazard_Hours": None,
-            "RUL_Energy_Hours": None,
+            "RUL_Hazard_Hours": ci_lower_rul,
+            "RUL_Energy_Hours": ci_upper_rul,
             "RUL_Final_Hours": rul_hours,
-            "ConfidenceBand_Hours": 12.0,
-            "DominantPath": "Trajectory",
+            "ConfidenceBand_Hours": float(upper_bound_val - lower_bound_val),
+            "DominantPath": "probabilistic",
         }])
         
         Console.info(f"[FORECAST] RUL summary created: {rul_hours:.1f}h until failure threshold")
         
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] RUL summary creation failed: {e}")
-        rul_summary_df = pd.DataFrame()
+        # Empty DataFrame with correct schema for SQL compatibility
+        rul_summary_df = pd.DataFrame(columns=["RunID", "EquipID", "RUL_Hours", "RUL_CI_Lower_Hours", "RUL_CI_Upper_Hours", "LowerBound", "UpperBound", "Confidence", "Method", "LastUpdate", "RegimeLabel", "RUL_Trajectory_Hours", "RUL_Hazard_Hours", "RUL_Energy_Hours", "RUL_Final_Hours", "ConfidenceBand_Hours", "DominantPath"])
 
     # --- 6. Build output tables ---
     tables: Dict[str, pd.DataFrame] = {}
@@ -1282,6 +1566,9 @@ def run_enhanced_forecasting_sql(
 
     if not failure_prob_df.empty:
         tables["failure_forecast_ts"] = failure_prob_df
+    
+    if not hazard_df.empty:
+        tables["failure_hazard_ts"] = hazard_df
 
     if not detector_forecast_df.empty:
         tables["detector_forecast_ts"] = detector_forecast_df
@@ -1300,6 +1587,8 @@ def run_enhanced_forecasting_sql(
         "urgency_score": float(max_failure_prob * 100.0),  # Scale to 0-100
         "confidence": 0.8 if len(health_series) > 100 else 0.6,
     }
+    if regime_label is not None:
+        metrics["regime_label"] = regime_label
 
     Console.info(
         f"[ENHANCED_FORECAST] RUL={metrics['rul_hours']:.1f}h, "
@@ -1311,65 +1600,60 @@ def run_enhanced_forecasting_sql(
     # --- 8. State Persistence (FORECAST-STATE-02: Full continuous forecasting) ---
     if enable_continuous and equip and sql_client:
         try:
-            # Compute forecast quality metrics
-            forecast_quality = {}
-            
-            try:
-                # Calculate RMSE if we have historical forecasts to compare
-                if prev_state and prev_state.last_forecast_horizon_json:
-                    prev_forecast = json.loads(prev_state.last_forecast_horizon_json)
-                    if prev_forecast:
-                        # Compare previous forecast with actual health values
-                        actual_values = health_series.tail(len(prev_forecast)).values
-                        forecast_vals = [p.get('health', 0) for p in prev_forecast[:len(actual_values)]]
-                        
-                        if len(actual_values) == len(forecast_vals) and len(actual_values) > 0:
-                            rmse = np.sqrt(np.mean((np.array(actual_values) - np.array(forecast_vals)) ** 2))
-                            mae = np.mean(np.abs(np.array(actual_values) - np.array(forecast_vals)))
-                            
-                            forecast_quality = {
-                                "rmse": float(rmse),
-                                "mae": float(mae),
-                                "forecast_accuracy": float(100.0 * (1.0 - min(1.0, rmse / 100.0))),
-                                "evaluation_samples": len(actual_values)
-                            }
-                            
-                            Console.info(f"[FORECAST_QUALITY] RMSE={rmse:.2f}, MAE={mae:.2f}, Accuracy={forecast_quality['forecast_accuracy']:.1f}%")
-                        
-            except Exception as qe:
-                Console.warn(f"[FORECAST] Failed to compute forecast quality: {qe}")
-            
+            # Compute forecast quality metrics (single canonical source)
+            forecast_quality = dict(forecast_quality_metrics) if forecast_quality_metrics else {}
+            if forecast_quality:
+                rmse_val = float(forecast_quality.get("rmse", 0.0) or 0.0)
+                forecast_quality.setdefault(
+                    "forecast_accuracy",
+                    float(100.0 * (1.0 - min(1.0, rmse_val / max(health_max - health_min, 1e-3)))))
+
             # Build forecast horizon JSON for next iteration comparison
-            forecast_horizon_data = []
+            forecast_horizon_json = "[]"
             try:
-                for i, (ts, val) in enumerate(zip(forecast_timestamps, forecast_values)):
-                    forecast_horizon_data.append({
-                        "timestamp": ts.isoformat(),
-                        "health": float(val),
-                        "horizon_hours": i + 1
-                    })
+                horizon_df = pd.DataFrame({
+                    "Timestamp": forecast_timestamps,
+                    "ForecastHealth": forecast_values,
+                    "CI_Lower": ci_lower,
+                    "CI_Upper": ci_upper,
+                })
+                forecast_horizon_json = ForecastState.serialize_forecast_horizon(horizon_df)
             except Exception as fhe:
                 Console.warn(f"[FORECAST] Failed to serialize forecast horizon: {fhe}")
-                forecast_horizon_data = []
             
-            # Calculate hazard baseline (average failure probability in forecast window)
-            hazard_baseline = float(max_failure_prob) if max_failure_prob > 0 else 0.0
+            # Calculate hazard baseline (last smoothed hazard for continuity)
+            if not hazard_df.empty and "HazardSmooth" in hazard_df.columns:
+                hazard_baseline = float(hazard_df["HazardSmooth"].iloc[-1])
+            else:
+                hazard_baseline = float(max_failure_prob) if max_failure_prob > 0 else 0.0
             
             # Create comprehensive forecast state
-            new_state = ForecastState(
-                equip_id=equip_id,
-                state_version=(prev_state.state_version + 1) if prev_state else 1,
-                model_type="ExponentialSmoothing_v2",  # Version identifier for model evolution
-                model_params={
+            model_params_payload = {
+                "smoothing": {
                     "alpha": float(alpha),
                     "beta": float(beta),
                     "failure_threshold": float(failure_threshold),
                     "forecast_hours": int(forecast_hours),
                     "estimated_trend": float(trend) if 'trend' in locals() else 0.0,
-                    "estimated_level": float(level) if 'level' in locals() else 0.0
+                    "estimated_level": float(level) if 'level' in locals() else 0.0,
+                    "training_median": float(median_val),
+                    "training_variance": float(base_variance),
+                    "max_trend_per_hour": float(max_trend_per_hour),
+                    "dt_hours": float(dt_hours),
+                    "health_min": float(health_min),
+                    "health_max": float(health_max),
                 },
+                "detectors": detector_state,
+                "sensors": sensor_state,
+                "regime": regime_label,
+            }
+            new_state = ForecastState(
+                equip_id=equip_id,
+                state_version=(prev_state.state_version + 1) if prev_state else 1,
+                model_type="ExponentialSmoothing_v2",  # Version identifier for model evolution
+                model_params=model_params_payload,
                 residual_variance=float(std_error ** 2) if 'std_error' in locals() else 0.0,
-                last_forecast_horizon_json=json.dumps(forecast_horizon_data),
+                last_forecast_horizon_json=forecast_horizon_json,
                 hazard_baseline=hazard_baseline,
                 last_retrain_time=current_batch_time.isoformat() if current_batch_time else datetime.now().isoformat(),
                 training_data_hash=current_data_hash,
@@ -1442,6 +1726,7 @@ def run_and_persist_enhanced_forecasting(
     ef_sql_map = {
         "health_forecast_ts": "ACM_HealthForecast_TS",
         "failure_forecast_ts": "ACM_FailureForecast_TS",
+        "failure_hazard_ts": "ACM_FailureHazard_TS",
         "detector_forecast_ts": "ACM_DetectorForecast_TS",
         "sensor_forecast_ts": "ACM_SensorForecast_TS",
         "rul_summary": "ACM_RUL_Summary",
@@ -1449,6 +1734,7 @@ def run_and_persist_enhanced_forecasting(
     ef_csv_map = {
         "health_forecast_ts": "health_forecast.csv",
         "failure_forecast_ts": "failure_forecast.csv",
+        "failure_hazard_ts": "failure_hazard.csv",
         "detector_forecast_ts": "detector_forecast.csv",
         "sensor_forecast_ts": "sensor_forecast.csv",
         "rul_summary": "rul_summary.csv",
@@ -1456,6 +1742,7 @@ def run_and_persist_enhanced_forecasting(
     timestamp_columns = {
         "health_forecast_ts": ["Timestamp"],
         "failure_forecast_ts": ["Timestamp"],
+        "failure_hazard_ts": ["Timestamp"],
         "detector_forecast_ts": ["Timestamp"],
         "sensor_forecast_ts": ["Timestamp"],
     }
