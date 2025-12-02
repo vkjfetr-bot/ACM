@@ -1838,11 +1838,53 @@ class OutputManager:
                 Console.warn("[OUTPUT] write_pca_metrics called without pca_detector or df")
                 return 0
             
-            # Expected columns vary - just pass through with metadata
-            return self._bulk_insert_sql('ACM_PCA_Metrics', sql_df)
+            # Use MERGE upsert to handle duplicate keys gracefully
+            return self._upsert_pca_metrics(sql_df)
             
         except Exception as e:
             Console.warn(f"[OUTPUT] write_pca_metrics failed: {e}")
+            return 0
+
+    def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
+        """Upsert PCA metrics using MERGE to avoid duplicate key violations.
+        
+        Primary key is (RunID, EquipID, ComponentName, MetricType), so update if exists.
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                component = row.get('ComponentName', 'PCA')
+                metric_type = row['MetricType']
+                value = row['Value']
+                timestamp = row.get('Timestamp', datetime.now())
+                
+                # MERGE upsert: update if key exists, insert otherwise
+                merge_sql = """
+                MERGE INTO ACM_PCA_Metrics AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS ComponentName, ? AS MetricType, ? AS Value) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.ComponentName = source.ComponentName AND target.MetricType = source.MetricType)
+                WHEN MATCHED THEN
+                    UPDATE SET Value = source.Value
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, ComponentName, MetricType, Value)
+                    VALUES (source.RunID, source.EquipID, source.ComponentName, source.MetricType, source.Value);
+                """
+                cursor.execute(merge_sql, (run_id, equip_id, component, metric_type, value))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_pca_metrics failed: {e}")
             return 0
     
     def write_run_stats(self, stats_data: Dict[str, Any]) -> int:

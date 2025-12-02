@@ -11,8 +11,8 @@ DETECTOR_LABELS = {
     'pca_t2_z': 'Multivariate Outlier (PCA-T²)',
     'iforest_z': 'Rare State (IsolationForest)',
     'gmm_z': 'Density Anomaly (GMM)',
-    'mhal_z': 'Statistical Outlier (Mahalanobis)',
-    'omr_z': 'Persistent Outlier (OMR)',
+    'mhal_z': 'Multivariate Distance (Mahalanobis)',
+    'omr_z': 'Baseline Consistency (OMR)',
     'river_hst_z': 'Streaming Anomaly (River)',
     'fused_z': 'Fused Multi-Detector'
 }
@@ -24,8 +24,8 @@ DETECTOR_LABELS_SHORT = {
     'pca_t2_z': 'Outlier (PCA-T²)',
     'iforest_z': 'Rare State (IF)',
     'gmm_z': 'Density (GMM)',
-    'mhal_z': 'Statistical (MD)',
-    'omr_z': 'Persistent (OMR)',
+    'mhal_z': 'Distance (Mahal)',
+    'omr_z': 'Baseline (OMR)',
     'river_hst_z': 'Streaming (River)',
     'fused_z': 'Fused'
 }
