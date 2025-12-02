@@ -641,7 +641,20 @@ class Fuser:
                 culprit_sensor = Fuser._get_base_sensor(str(top_feature))
                 culprits = f"{primary_detector}({culprit_sensor})"
 
-            rows.append({"start_ts": start_ts, "end_ts": end_ts, "duration_s": duration_s, "len": int(e - s + 1), "culprits": culprits})
+            # Calculate fused score statistics for the episode
+            episode_fused = x[s:e+1]
+            peak_fused_z = float(np.nanmax(episode_fused)) if len(episode_fused) > 0 else 0.0
+            avg_fused_z = float(np.nanmean(episode_fused)) if len(episode_fused) > 0 else 0.0
+            
+            rows.append({
+                "start_ts": start_ts, 
+                "end_ts": end_ts, 
+                "duration_s": duration_s, 
+                "len": int(e - s + 1), 
+                "culprits": culprits,
+                "peak_fused_z": peak_fused_z,
+                "avg_fused_z": avg_fused_z
+            })
         return pd.DataFrame(rows)
 
 

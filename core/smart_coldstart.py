@@ -290,7 +290,21 @@ class SmartColdstart:
         if not state.needs_coldstart:
             Console.info(f"[COLDSTART] Models exist for {self.equip_name}, coldstart not needed")
             # Load with original window for incremental scoring (ALL data goes to score)
-            return self._load_data_window(output_manager, cfg, initial_start, initial_end, coldstart_complete=True, is_coldstart=False)
+            # NOTE: If data insufficient for this batch window, gracefully return NOOP
+            try:
+                train, score, meta, complete = self._load_data_window(output_manager, cfg, initial_start, initial_end, coldstart_complete=True, is_coldstart=False)
+                if train is None and score is None:
+                    # Insufficient data in this window - not an error, just skip this batch
+                    window_hours = (initial_end - initial_start).total_seconds() / 3600
+                    Console.warn(f"[COLDSTART] Insufficient data in {window_hours:.1f}h window - batch will NOOP (models exist but no new data)")
+                    return None, None, None, False
+                return train, score, meta, complete
+            except ValueError as e:
+                # Data insufficient - expected when batch windows are smaller than min samples
+                window_hours = (initial_end - initial_start).total_seconds() / 3600
+                Console.warn(f"[COLDSTART] Insufficient data in {window_hours:.1f}h window: {e}")
+                Console.info(f"[COLDSTART] Batch will NOOP (models exist but no new data to score)")
+                return None, None, None, False
         
         Console.info(f"[COLDSTART] Status: {state}")
         

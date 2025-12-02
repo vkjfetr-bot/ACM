@@ -273,7 +273,13 @@ def _write_run_meta_json(local_vars: Dict[str, Any]) -> None:
             },
             "model_quality": {
                 "data_quality_score": data_quality_score,
-                "refit_requested": bool(refit_flag_path.exists()) if isinstance(refit_flag_path, Path) else False
+                "refit_requested": (
+                    False if refit_flag_path is None else (
+                        Path(refit_flag_path).exists() if isinstance(refit_flag_path, str) else (
+                            refit_flag_path.exists() if isinstance(refit_flag_path, Path) else False
+                        )
+                    )
+                )
             },
             "output_artifacts": {
                 "tables_generated": tables_generated,
@@ -1557,7 +1563,13 @@ def main() -> None:
         with T.section("models.refit_flag"):
             try:
                 # File-mode flag
-                if not SQL_MODE and refit_flag_path.exists():
+                if not SQL_MODE and (
+                    refit_flag_path is not None and (
+                        (Path(refit_flag_path).exists() if isinstance(refit_flag_path, str) else (
+                            refit_flag_path.exists() if isinstance(refit_flag_path, Path) else False
+                        ))
+                    )
+                ):
                     refit_requested = True
                     Console.warn(f"[MODEL] Refit requested by quality policy; bypassing cache this run")
                     try:
@@ -3638,8 +3650,7 @@ def main() -> None:
                             stream = frame.copy().reset_index().rename(columns={"index": "ts"})
                             output_manager.write_dataframe(
                                 stream, 
-                                models_dir / "score_stream.csv",
-                                index=False
+                                models_dir / "score_stream.csv"
                             )
                         except Exception as se:
                             Console.warn(f"[IO] Failed to write score_stream via OutputManager: {se}")
@@ -4314,7 +4325,13 @@ def main() -> None:
                     min_health_index=run_metadata.get("min_health_index"),
                     max_fused_z=run_metadata.get("max_fused_z"),
                     data_quality_score=data_quality_score,
-                    refit_requested=refit_flag_path.exists() if 'refit_flag_path' in locals() else False,
+                    refit_requested=(
+                        False if 'refit_flag_path' not in locals() or refit_flag_path is None else (
+                            Path(refit_flag_path).exists() if isinstance(refit_flag_path, str) else (
+                                refit_flag_path.exists() if isinstance(refit_flag_path, Path) else False
+                            )
+                        )
+                    ),
                     kept_columns=kept_cols_str,
                     error_message=err_json if outcome == "FAIL" and 'err_json' in locals() else None
                 )
