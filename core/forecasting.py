@@ -1784,6 +1784,15 @@ def run_and_persist_enhanced_forecasting(
 
         sql_table = ef_sql_map.get(logical_name)
         csv_name = ef_csv_map.get(logical_name, f"{logical_name}.csv")
+        
+        # DEBUG: Log columns and Method values before write
+        if sql_table == "ACM_FailureForecast_TS":
+            Console.info(f"[DEBUG] Before write_dataframe: columns={list(df_to_write.columns)}")
+            if "Method" in df_to_write.columns:
+                Console.info(f"[DEBUG] Method column dtype={df_to_write['Method'].dtype}, nulls={df_to_write['Method'].isna().sum()}, first 5 values={list(df_to_write['Method'].head())}")
+            else:
+                Console.warn(f"[DEBUG] Method column MISSING from df_to_write!")
+        
         output_manager.write_dataframe(
             df_to_write,
             tables_dir / csv_name,

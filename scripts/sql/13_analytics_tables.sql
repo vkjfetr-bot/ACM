@@ -189,13 +189,18 @@ GO
 IF OBJECT_ID('dbo.ACM_CulpritHistory','U') IS NULL
 BEGIN
 CREATE TABLE dbo.ACM_CulpritHistory (
-    RunID              uniqueidentifier NOT NULL,
-    EquipID            int NOT NULL,
-    Detector           nvarchar(128) NOT NULL,
-    EpisodeCount       int NULL,
-    TotalDurationHours float NULL,
-    CreatedAt          datetime2(3) NOT NULL CONSTRAINT DF_ACM_CulpritHistory_CreatedAt DEFAULT (SYSUTCDATETIME()),
-    CONSTRAINT PK_ACM_CulpritHistory PRIMARY KEY CLUSTERED (RunID, Detector)
+    RunID                uniqueidentifier NOT NULL,
+    EquipID              int NOT NULL,
+    StartTimestamp       datetime2(3) NOT NULL,
+    EndTimestamp         datetime2(3) NULL,
+    DurationHours        float NULL,
+    PrimaryDetector      nvarchar(256) NOT NULL,
+    WeightedContribution float NULL,
+    LeadMeanZ            float NULL,
+    DuringMeanZ          float NULL,
+    LagMeanZ             float NULL,
+    CreatedAt            datetime2(3) NOT NULL CONSTRAINT DF_ACM_CulpritHistory_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT PK_ACM_CulpritHistory PRIMARY KEY CLUSTERED (RunID, EquipID, StartTimestamp)
 );
 CREATE NONCLUSTERED INDEX IX_CulpritHistory_EquipID ON dbo.ACM_CulpritHistory(EquipID, RunID);
 END
