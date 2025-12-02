@@ -1226,8 +1226,19 @@ class OutputManager:
                     if add_created_at:
                         sql_df["CreatedAt"] = pd.Timestamp.now().tz_localize(None)
                     
-                    # Bulk insert with batching
-                    inserted = self._bulk_insert_sql(sql_table, sql_df)
+                    # FORECAST-UPSERT-05: Route forecast tables to MERGE upsert methods
+                    if sql_table == "ACM_HealthForecast_TS":
+                        inserted = self._upsert_health_forecast_ts(sql_df)
+                    elif sql_table == "ACM_FailureForecast_TS":
+                        inserted = self._upsert_failure_forecast_ts(sql_df)
+                    elif sql_table == "ACM_DetectorForecast_TS":
+                        inserted = self._upsert_detector_forecast_ts(sql_df)
+                    elif sql_table == "ACM_SensorForecast_TS":
+                        inserted = self._upsert_sensor_forecast_ts(sql_df)
+                    else:
+                        # Bulk insert with batching for all other tables
+                        inserted = self._bulk_insert_sql(sql_table, sql_df)
+                    
                     result['sql_written'] = inserted > 0
                     if result['sql_written']: 
                         self.stats['sql_writes'] += 1
@@ -1885,6 +1896,219 @@ class OutputManager:
             
         except Exception as e:
             Console.warn(f"[OUTPUT] _upsert_pca_metrics failed: {e}")
+            return 0
+    
+    def _upsert_health_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-01: Upsert health forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, Timestamp), so update if exists.
+        Schema: RunID, EquipID, Timestamp, ForecastHealth, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                # Extract columns that match SQL schema
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                timestamp = row['Timestamp']
+                forecast_health = row.get('ForecastHealth', 0.0)
+                ci_lower = row.get('CiLower', 0.0)
+                ci_upper = row.get('CiUpper', 0.0)
+                forecast_std = row.get('ForecastStd', 0.0)
+                method = row.get('Method', 'ExponentialSmoothing')
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                # MERGE upsert: update if key exists, insert otherwise
+                merge_sql = """
+                MERGE INTO ACM_HealthForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET ForecastHealth = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, Timestamp, ForecastHealth, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause params
+                    run_id, equip_id, timestamp,
+                    # UPDATE params
+                    forecast_health, ci_lower, ci_upper, forecast_std, method,
+                    # INSERT params
+                    run_id, equip_id, timestamp, forecast_health, ci_lower, ci_upper, forecast_std, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_health_forecast_ts failed: {e}")
+            return 0
+    
+    def _upsert_failure_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-02: Upsert failure forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, Timestamp), so update if exists.
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                timestamp = row['Timestamp']
+                failure_prob = row.get('FailureProb', 0.0)
+                threshold_used = row.get('ThresholdUsed', 70.0)
+                method = row.get('Method', 'GaussianTail')
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                merge_sql = """
+                MERGE INTO ACM_FailureForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET FailureProb = ?, ThresholdUsed = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, Timestamp, FailureProb, ThresholdUsed, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause
+                    run_id, equip_id, timestamp,
+                    # UPDATE
+                    failure_prob, threshold_used, method,
+                    # INSERT
+                    run_id, equip_id, timestamp, failure_prob, threshold_used, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_failure_forecast_ts failed: {e}")
+            return 0
+    
+    def _upsert_detector_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-03: Upsert detector forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, DetectorName, Timestamp), so update if exists.
+        Schema: RunID, EquipID, DetectorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                detector_name = row['DetectorName']
+                timestamp = row['Timestamp']
+                forecast_value = row.get('ForecastValue', 0.0)
+                ci_lower = row.get('CiLower', 0.0)
+                ci_upper = row.get('CiUpper', 0.0)
+                forecast_std = row.get('ForecastStd', 0.0)
+                method = row.get('Method', 'AR1')
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                merge_sql = """
+                MERGE INTO ACM_DetectorForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS DetectorName, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.DetectorName = source.DetectorName AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET ForecastValue = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, DetectorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause
+                    run_id, equip_id, detector_name, timestamp,
+                    # UPDATE
+                    forecast_value, ci_lower, ci_upper, forecast_std, method,
+                    # INSERT
+                    run_id, equip_id, detector_name, timestamp, forecast_value, ci_lower, ci_upper, forecast_std, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_detector_forecast_ts failed: {e}")
+            return 0
+    
+    def _upsert_sensor_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-04: Upsert sensor forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, SensorName, Timestamp), so update if exists.
+        Schema: RunID, EquipID, SensorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                sensor_name = row['SensorName']
+                timestamp = row['Timestamp']
+                forecast_value = row.get('ForecastValue', 0.0)
+                ci_lower = row.get('CiLower', 0.0)
+                ci_upper = row.get('CiUpper', 0.0)
+                forecast_std = row.get('ForecastStd', 0.0)
+                method = row.get('Method', 'AR1')
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                merge_sql = """
+                MERGE INTO ACM_SensorForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS SensorName, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.SensorName = source.SensorName AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET ForecastValue = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, SensorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause
+                    run_id, equip_id, sensor_name, timestamp,
+                    # UPDATE
+                    forecast_value, ci_lower, ci_upper, forecast_std, method,
+                    # INSERT
+                    run_id, equip_id, sensor_name, timestamp, forecast_value, ci_lower, ci_upper, forecast_std, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_sensor_forecast_ts failed: {e}")
             return 0
     
     def write_run_stats(self, stats_data: Dict[str, Any]) -> int:
