@@ -530,10 +530,10 @@ class OutputManager:
             },
             'ACM_HealthForecast_TS': {
                 'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
-                'Method': 'ExponentialSmoothing', 'LastUpdate': 'ts'
+                'Method': 'ExponentialSmoothing', 'LastUpdate': 'ts', 'CiLower': 0.0, 'CiUpper': 0.0
             },
             'ACM_FailureForecast_TS': {
-                'Timestamp': 'ts', 'FailureProb': 0.0, 'ThresholdUsed': 0.0,
+                'Timestamp': 'ts', 'FailureProb': 0.0, 'ThresholdUsed': 50.0,
                 'Method': 'GaussianTail'
             },
             'ACM_FailureHazard_TS': {
@@ -542,11 +542,11 @@ class OutputManager:
             },
             'ACM_DetectorForecast_TS': {
                 'Timestamp': 'ts', 'DetectorType': 'UNKNOWN', 'ForecastZ': 0.0,
-                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialSmoothing'
+                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialDecay', 'CiLower': 0.0, 'CiUpper': 0.0
             },
             'ACM_SensorForecast_TS': {
                 'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'ForecastValue': 0.0,
-                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialSmoothing'
+                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'LinearTrend', 'CiLower': 0.0, 'CiUpper': 0.0
             },
             'ACM_RUL_Summary': {
                 'RUL_Hours': 0.0, 'Method': 'Multipath', 'LastUpdate': 'ts'

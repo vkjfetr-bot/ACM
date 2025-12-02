@@ -1242,6 +1242,7 @@ def run_enhanced_forecasting_sql(
             "ForecastStd": std_error,
             "ForecastStdHorizon": forecast_stds,
             "Method": "ExponentialSmoothing",
+            "LastUpdate": datetime.now(),
         })
         if regime_label is not None:
             health_forecast_df["RegimeLabel"] = regime_label
@@ -1251,7 +1252,7 @@ def run_enhanced_forecasting_sql(
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] Health forecasting failed: {e}")
         # Empty DataFrame with correct schema for SQL compatibility
-        health_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "ForecastStdHorizon", "Method"])
+        health_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "ForecastStdHorizon", "Method", "LastUpdate"])
         forecast_values = []
         forecast_stds = []
         forecast_timestamps = pd.DatetimeIndex([])
@@ -1278,6 +1279,11 @@ def run_enhanced_forecasting_sql(
                 "ThresholdUsed": failure_threshold,
                 "Method": "GaussianTail",
             })
+            # Ensure all required columns exist with proper dtypes
+            if "ThresholdUsed" not in failure_prob_df.columns:
+                failure_prob_df["ThresholdUsed"] = float(failure_threshold)
+            if "Method" not in failure_prob_df.columns:
+                failure_prob_df["Method"] = "GaussianTail"
             if regime_label is not None:
                 failure_prob_df["RegimeLabel"] = regime_label
             
