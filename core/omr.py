@@ -46,6 +46,8 @@ class OMRModel:
     linear_models: Optional[List[Dict[str, Any]]] = None  # Stored ridge sub-models for linear mode
     train_samples: int = 0  # Track training sample count
     train_features: int = 0  # Track training feature count
+    train_medians: Optional[np.ndarray] = None  # For consistent imputation
+    var_mask: Optional[np.ndarray] = None  # Feature variance mask for zero-variance drop
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize for persistence."""
@@ -71,6 +73,8 @@ class OMRModel:
             "scaler_bytes": scaler_bytes.read(),
             "train_samples": self.train_samples,
             "train_features": self.train_features,
+            "train_medians": self.train_medians.tolist() if self.train_medians is not None else None,
+            "var_mask": self.var_mask.tolist() if self.var_mask is not None else None,
         }
         if self.linear_models is not None:
             payload["linear_models"] = [
@@ -107,6 +111,9 @@ class OMRDetector:
     DEFAULT_N_COMPONENTS = 5
     DEFAULT_ALPHA = 1.0
     DEFAULT_MIN_SAMPLES = 100
+    VARIANCE_FLOOR = 1e-9  # Drop near-constant features
+    MISSINGNESS_DROP = 0.5  # Drop columns with >50% missing
+    HEALTHY_REGIME_DEFAULT = None  # Use configured label or majority regime
     
     def __init__(self, cfg: Optional[Dict[str, Any]] = None):
         """
@@ -128,6 +135,9 @@ class OMRDetector:
         
         # Z-score clipping (configurable)
         self.max_z_score = float(omr_cfg.get("max_z_score", self.MAX_Z_SCORE))
+        self.variance_floor = float(omr_cfg.get("variance_floor", self.VARIANCE_FLOOR))
+        self.missingness_drop = float(omr_cfg.get("missingness_drop", self.MISSINGNESS_DROP))
+        self.healthy_regime_label = omr_cfg.get("healthy_regime", self.HEALTHY_REGIME_DEFAULT)
         
         self._is_fitted = False
         self.model: Optional[OMRModel] = None
@@ -180,23 +190,37 @@ class OMRDetector:
         
         return True, None
     
-    def _prepare_data(self, X: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
+    def _prepare_data(self, X: pd.DataFrame, medians: Optional[pd.Series] = None, var_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, List[str]]:
         """
         Prepare data for modeling (handle missing values).
         
         Args:
             X: Input DataFrame
+            medians: Optional precomputed medians to reuse for imputation
+            var_mask: Optional variance mask to select columns
             
         Returns:
             (cleaned_array, feature_names)
         """
-        # Handle missing values with median imputation
-        X_clean = X.fillna(X.median())
+        # Drop columns with excessive missingness
+        if self.missingness_drop > 0:
+            keep_cols = [c for c in X.columns if X[c].notna().mean() >= (1.0 - self.missingness_drop)]
+            X = X[keep_cols]
+        # Use provided medians or compute
+        medians_to_use = medians if medians is not None else X.median()
+        X_clean = X.fillna(medians_to_use)
         
         # For remaining NaNs (e.g., all-NaN columns), fill with 0
         X_clean = X_clean.fillna(0)
         
-        return X_clean.values, list(X.columns)
+        # Apply variance mask if provided
+        if var_mask is not None and len(var_mask) == X_clean.shape[1]:
+            X_clean = X_clean.iloc[:, var_mask]
+            feature_names = list(X_clean.columns)
+        else:
+            feature_names = list(X_clean.columns)
+        
+        return X_clean.values, feature_names
     
     def _compute_optimal_components(
         self, 
@@ -291,7 +315,11 @@ class OMRDetector:
         
         # Filter to healthy regime if labels provided
         if regime_labels is not None and len(regime_labels) == len(X):
-            healthy_regime = int(np.min(regime_labels))
+            if self.healthy_regime_label is not None:
+                healthy_regime = self.healthy_regime_label
+            else:
+                # Choose majority regime as healthy if not specified
+                healthy_regime = pd.Series(regime_labels).mode().iloc[0]
             healthy_mask = regime_labels == healthy_regime
             n_healthy = int(np.sum(healthy_mask))
             
@@ -302,6 +330,16 @@ class OMRDetector:
         # Prepare data
         X_clean, feature_names = self._prepare_data(X)
         n_samples, n_features = X_clean.shape
+
+        # Drop zero-variance columns and store mask for scoring alignment
+        var = np.var(X_clean, axis=0)
+        var_mask = var > self.variance_floor
+        if not var_mask.any():
+            Console.warn("[OMR] All features constant; skipping fit")
+            return self
+        X_clean = X_clean[:, var_mask]
+        feature_names = [name for name, keep in zip(feature_names, var_mask) if keep]
+        n_features = len(feature_names)
         
         # Check minimum samples
         min_required = max(20, min(self.min_samples // 2, n_features))
@@ -342,7 +380,10 @@ class OMRDetector:
             # Compute residuals
             residuals = X_scaled - X_recon
             residual_norm = np.linalg.norm(residuals, axis=1)
-            train_residual_std = float(np.std(residual_norm))
+            # Robust scale to reduce heavy-tail sensitivity
+            mad = float(np.median(np.abs(residual_norm - np.median(residual_norm)))) if residual_norm.size else 0.0
+            robust_scale = mad * 1.4826 if mad > 0 else np.std(residual_norm)
+            train_residual_std = float(robust_scale)
             
             # Enforce lower bound to prevent division by zero
             train_residual_std = max(train_residual_std, self.MIN_RESIDUAL_STD)
@@ -357,6 +398,8 @@ class OMRDetector:
                 linear_models=linear_models if selected_model == ModelType.LINEAR.value else None,
                 train_samples=n_samples,
                 train_features=n_features,
+                train_medians=np.median(X_clean, axis=0),
+                var_mask=var_mask.astype(bool),
             )
             self._is_fitted = True
             
@@ -449,8 +492,15 @@ class OMRDetector:
                 return zeros, empty_contrib
             return zeros
         
-        X_clean, _ = self._prepare_data(X)
-        
+        # Align columns to training feature order and mask
+        if self.model.feature_names:
+            X = X.reindex(self.model.feature_names, axis=1)
+        X_clean, _ = self._prepare_data(
+            X,
+            medians=pd.Series(self.model.train_medians, index=self.model.feature_names) if self.model.train_medians is not None else None,
+            var_mask=self.model.var_mask
+        )
+            
         # Scale
         X_scaled = self.model.scaler.transform(X_clean)
         
@@ -588,6 +638,8 @@ class OMRDetector:
                 linear_models=linear_models,
                 train_samples=model_dict.get("train_samples", 0),
                 train_features=model_dict.get("train_features", 0),
+                train_medians=np.array(model_dict["train_medians"]) if model_dict.get("train_medians") is not None else None,
+                var_mask=np.array(model_dict["var_mask"], dtype=bool) if model_dict.get("var_mask") is not None else None,
             )
             inst._is_fitted = True
         return inst

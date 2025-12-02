@@ -1,0 +1,10 @@
+                                                                                                                                                                                                                                                                
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+CREATE PROCEDURE dbo.usp_ACM_GetHistorianData_TEMP
+    @StartTime DATETIME2,
+    @EndTime DATETIME2,
+    @TagNames NVARCHAR(MAX) = NULL,        -- Comma-separated tag names (NULL = all tags)
+    @EquipID INT = NULL,                   -- Equipment ID 
+
+(1 rows affected)

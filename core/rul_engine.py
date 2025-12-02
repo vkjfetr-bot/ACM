@@ -1490,6 +1490,7 @@ def make_rul_ts(
         "LowerBound": [max(0.0, lower_bound - (pd.Timestamp(ts) - current_time).total_seconds() / 3600) for ts in timestamps],
         "UpperBound": [upper_bound - (pd.Timestamp(ts) - current_time).total_seconds() / 3600 for ts in timestamps],
         "Confidence": confidence,
+        "Method": rul_multipath.get("dominant_path", "Multipath"),
     })
     
     return df
@@ -1526,7 +1527,8 @@ def make_rul_summary(
         "LowerBound": rul_multipath["lower_bound_hours"],
         "UpperBound": rul_multipath["upper_bound_hours"],
         "Confidence": confidence,
-        "Method": rul_multipath["dominant_path"],
+        "Method": rul_multipath.get("dominant_path", "Multipath"),
+        "LastUpdate": pd.Timestamp.now(),
         "AR1_Weight": weights.get("AR1", 0.0),
         "Exp_Weight": weights.get("Exponential", 0.0),
         "Weibull_Weight": weights.get("Weibull", 0.0),
@@ -1536,7 +1538,7 @@ def make_rul_summary(
         "RUL_Hazard_Hours": rul_multipath.get("rul_hazard_hours"),
         "RUL_Energy_Hours": rul_multipath.get("rul_energy_hours"),
         "RUL_Final_Hours": rul_multipath["rul_final_hours"],  # Duplicate for explicit multipath tracking
-        "DominantPath": rul_multipath["dominant_path"],  # Add dominant path indicator
+        "DominantPath": rul_multipath.get("dominant_path", "Multipath"),  # Add dominant path indicator
     }
     
     df = pd.DataFrame([summary])
