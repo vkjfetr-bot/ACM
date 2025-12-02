@@ -3830,15 +3830,13 @@ class OutputManager:
             if duration_h == 0.0 and 'duration_s' in episode:
                 duration_h = episode['duration_s'] / 3600.0
             
-            # Dominant sensor from culprits
+            # Dominant sensor from culprits (already formatted with human-readable labels by fuse.py)
             culprits_str = episode.get('culprits', '')
             dominant_sensor = 'Unknown'
             if culprits_str and isinstance(culprits_str, str):
-                # Parse culprits format: "sensor1(0.85), sensor2(0.12)"
-                culprits_list = culprits_str.split(',')
-                if culprits_list:
-                    first_culprit = culprits_list[0].strip()
-                    dominant_sensor = first_culprit.split('(')[0].strip() if '(' in first_culprit else first_culprit
+                # Culprits are already human-readable from format_culprit_label()
+                # Examples: "Density Anomaly (GMM)", "Correlation Break (PCA-SPE) → DEMO.SIM.FSAB"
+                dominant_sensor = culprits_str.strip() if culprits_str.strip() else 'Unknown'
             
             # Severity and reason
             severity = episode.get('severity', 'MEDIUM')
