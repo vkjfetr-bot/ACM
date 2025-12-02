@@ -2315,7 +2315,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 50 episode_id AS EpisodeID, peak_timestamp AS PeakTime, duration_h AS DurationHours, peak_z AS MaxFusedZ, avg_z AS AvgFusedZ, severity AS Severity, dominant_sensor AS TopCulprit FROM ACM_EpisodeDiagnostics WHERE EquipID = $equipment AND $__timeFilter(peak_timestamp) ORDER BY peak_timestamp DESC",
+          "rawSql": "SELECT TOP 50 episode_id AS EpisodeID, peak_timestamp AS PeakTime, duration_h AS DurationHours, peak_z AS MaxFusedZ, avg_z AS AvgFusedZ, severity AS Severity, dominant_sensor AS DetectionMethod FROM ACM_EpisodeDiagnostics WHERE EquipID = $equipment AND $__timeFilter(peak_timestamp) ORDER BY peak_timestamp DESC",
           "refId": "A"
         }
       ],
