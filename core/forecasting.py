@@ -1371,6 +1371,137 @@ def adaptive_exponential_smoothing(
 
 
 # ============================================================================
+# P2-FIX-3.2: Regime-Specific Forecasting Models
+# ============================================================================
+
+def forecast_by_regime(
+    health_series: pd.Series,
+    regime_series: pd.Series,
+    config: Dict[str, Any],
+    dt_hours: float = 1.0,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fit regime-specific Holt models where sufficient data exists.
+    
+    P2-FIX-3.2: Per-regime forecasting for better accuracy within operating regimes.
+    
+    Args:
+        health_series: Health index time series (aligned with regime_series)
+        regime_series: Regime labels time series
+        config: Forecast configuration dict
+        dt_hours: Time step in hours (for trend scaling)
+    
+    Returns:
+        Dict mapping regime name to forecast DataFrame with columns:
+        [Timestamp, ForecastHealth, CI_Lower, CI_Upper, Regime]
+    
+    Logic:
+        - Split data by regime
+        - For each regime with sufficient samples (>= MIN_FORECAST_SAMPLES):
+          - Detect/remove outliers
+          - Optimize alpha/beta if enabled
+          - Fit Holt's linear trend
+          - Generate forecast with bootstrap CI
+        - Return dict of regime-specific forecasts
+    """
+    forecast_cfg = config.get("forecast", {})
+    horizon = int(forecast_cfg.get("forecast_hours", 24))
+    alpha_default = float(forecast_cfg.get("smoothing_alpha", 0.3))
+    beta_default = float(forecast_cfg.get("smoothing_beta", 0.2))
+    enable_adaptive = bool(forecast_cfg.get("enable_adaptive_smoothing", True))
+    enable_bootstrap = bool(forecast_cfg.get("enable_bootstrap_ci", BOOTSTRAP_ENABLED_DEFAULT))
+    n_boot = int(forecast_cfg.get("bootstrap_n", BOOTSTRAP_N_REPLICATES_DEFAULT))
+    health_min = float(forecast_cfg.get("health_min", 0.0))
+    health_max = float(forecast_cfg.get("health_max", 100.0))
+    
+    # Align series by index
+    if regime_series is None or regime_series.empty:
+        Console.warn("[FORECAST] No regime data; skipping regime-specific forecasting")
+        return {}
+    
+    # Get unique regimes
+    regimes = regime_series.dropna().unique()
+    forecasts: Dict[str, pd.DataFrame] = {}
+    
+    for regime in regimes:
+        regime_str = str(regime)
+        mask = regime_series == regime
+        regime_health = health_series[mask]
+        
+        if len(regime_health) < MIN_FORECAST_SAMPLES:
+            Console.warn(f"[FORECAST] Insufficient data for regime '{regime_str}' ({len(regime_health)} < {MIN_FORECAST_SAMPLES}), skipping")
+            continue
+        
+        try:
+            # Clean outliers
+            series_clean = detect_and_remove_outliers(regime_health)
+            
+            # Optimize alpha/beta if enabled
+            alpha, beta = alpha_default, beta_default
+            if enable_adaptive and len(series_clean) >= MIN_FORECAST_SAMPLES:
+                alpha, beta = adaptive_exponential_smoothing(series_clean, initial_alpha=alpha, initial_beta=beta)
+                Console.info(f"[FORECAST] Regime '{regime_str}': Adaptive smoothing params: alpha={alpha:.3f}, beta={beta:.3f}")
+            
+            # Fit Holt's linear trend
+            values = series_clean.astype(float).to_numpy()
+            n = len(values)
+            level = float(values[0])
+            trend = float(values[1] - values[0]) / dt_hours if n > 1 else 0.0
+            
+            for i in range(1, n):
+                prev_level = level
+                prev_trend = trend
+                level = alpha * float(values[i]) + (1 - alpha) * (prev_level + prev_trend)
+                trend = beta * (level - prev_level) + (1 - beta) * prev_trend
+            
+            # Generate forecast
+            forecast_values = np.array([level + (h + 1) * trend for h in range(horizon)], dtype=float)
+            
+            # Compute variance (P0-FIX-1.2: 1 + h + h^2/2 multiplier for Holt)
+            residuals = values[1:] - (alpha * values[:-1] + (1 - alpha) * (level + trend))
+            sigma = float(np.std(residuals)) if len(residuals) > 0 else 1e-6
+            horizon_stds = sigma * np.sqrt(1.0 + np.arange(1, horizon + 1) + (np.arange(1, horizon + 1)**2) / 2.0)
+            
+            # Bootstrap CI
+            if enable_bootstrap:
+                ci_lower, ci_upper = _bootstrap_ci_from_noise(
+                    forecast_values, horizon_stds, n_boot=n_boot, ci=BOOTSTRAP_CI_LEVEL,
+                    health_min=health_min, health_max=health_max
+                )
+            else:
+                z = norm.ppf(1.0 - (1.0 - BOOTSTRAP_CI_LEVEL) / 2.0)
+                ci_lower = np.maximum(health_min, forecast_values - z * horizon_stds).tolist()
+                ci_upper = np.minimum(health_max, forecast_values + z * horizon_stds).tolist()
+            
+            # Create timestamps
+            last_timestamp = series_clean.index[-1]
+            freq_inferred = series_clean.index.freq or pd.infer_freq(series_clean.index) or f"{dt_hours}H"
+            timestamps = pd.date_range(
+                start=last_timestamp + pd.Timedelta(hours=dt_hours),
+                periods=horizon,
+                freq=freq_inferred
+            )
+            
+            # Build forecast DataFrame
+            df_fc = pd.DataFrame({
+                "Timestamp": timestamps,
+                "ForecastHealth": forecast_values,
+                "CI_Lower": ci_lower,
+                "CI_Upper": ci_upper,
+                "Regime": regime_str,
+            })
+            
+            forecasts[regime_str] = df_fc
+            Console.info(f"[FORECAST] Generated {horizon}h forecast for regime '{regime_str}' (n={len(series_clean)}, trend={trend:.2f}/h)")
+            
+        except Exception as e:
+            Console.warn(f"[FORECAST] Failed to generate forecast for regime '{regime_str}': {e}")
+            continue
+    
+    return forecasts
+
+
+# ============================================================================
 # Enhanced Forecasting (SQL-backed)
 # ============================================================================
 
