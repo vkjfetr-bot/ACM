@@ -177,6 +177,119 @@ def _estimate_rul_monte_carlo(
     }
 
 # ============================================================================
+# P1-2.1: Comprehensive Forecast Quality Metrics
+# ============================================================================
+def _compute_forecast_quality_metrics(
+    actual: np.ndarray,
+    forecast: np.ndarray,
+    ci_lower: Optional[np.ndarray] = None,
+    ci_upper: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """
+    Compute comprehensive forecast quality metrics.
+    
+    Metrics:
+    - RMSE: Root mean squared error
+    - MAE: Mean absolute error
+    - MAPE: Mean absolute percentage error
+    - Bias: Mean forecast error (positive = over-forecast)
+    - Coverage: Fraction of actuals within CI (target 95%)
+    - Interval Width: Mean CI width (sharpness metric)
+    - Directional Accuracy: Fraction of correct trend predictions
+    
+    Args:
+        actual: Observed values
+        forecast: Predicted values
+        ci_lower: Lower confidence interval bounds (optional)
+        ci_upper: Upper confidence interval bounds (optional)
+    
+    Returns:
+        Dictionary of quality metrics
+    """
+    actual = np.asarray(actual, dtype=float)
+    forecast = np.asarray(forecast, dtype=float)
+    
+    # Filter valid pairs
+    valid = np.isfinite(actual) & np.isfinite(forecast)
+    if not np.any(valid):
+        return {
+            "rmse": float("nan"),
+            "mae": float("nan"),
+            "mape": float("nan"),
+            "bias": float("nan"),
+            "coverage_95": float("nan"),
+            "interval_width": float("nan"),
+            "directional_accuracy": float("nan"),
+            "n_samples": 0.0,
+        }
+    
+    actual_valid = actual[valid]
+    forecast_valid = forecast[valid]
+    errors = forecast_valid - actual_valid
+    
+    # Core error metrics
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    mae = float(np.mean(np.abs(errors)))
+    
+    # MAPE (avoid division by zero)
+    denominator = np.abs(actual_valid)
+    denominator = np.where(denominator < 1e-6, 1e-6, denominator)
+    mape = float(np.mean(np.abs(errors / denominator)) * 100.0)
+    
+    # Bias (directional forecast error)
+    bias = float(np.mean(errors))
+    
+    # CI coverage and width
+    if ci_lower is not None and ci_upper is not None:
+        ci_lower = np.asarray(ci_lower, dtype=float)
+        ci_upper = np.asarray(ci_upper, dtype=float)
+        ci_valid = valid & np.isfinite(ci_lower) & np.isfinite(ci_upper)
+        
+        if np.any(ci_valid):
+            actual_ci = actual[ci_valid]
+            lower_ci = ci_lower[ci_valid]
+            upper_ci = ci_upper[ci_valid]
+            
+            in_ci = (actual_ci >= lower_ci) & (actual_ci <= upper_ci)
+            coverage = float(np.mean(in_ci))
+            width = float(np.mean(upper_ci - lower_ci))
+        else:
+            coverage = float("nan")
+            width = float("nan")
+    else:
+        coverage = float("nan")
+        width = float("nan")
+    
+    # Directional accuracy (trend prediction)
+    if len(actual_valid) >= 2:
+        actual_diff = np.diff(actual_valid)
+        forecast_diff = np.diff(forecast_valid)
+        
+        # Sign agreement (ignoring near-zero changes)
+        threshold = 0.01 * np.std(actual_diff) if np.std(actual_diff) > 0 else 1e-6
+        significant = np.abs(actual_diff) > threshold
+        
+        if np.any(significant):
+            actual_sign = np.sign(actual_diff[significant])
+            forecast_sign = np.sign(forecast_diff[significant])
+            directional_acc = float(np.mean(actual_sign == forecast_sign))
+        else:
+            directional_acc = 1.0  # All changes insignificant
+    else:
+        directional_acc = float("nan")
+    
+    return {
+        "rmse": rmse,
+        "mae": mae,
+        "mape": mape,
+        "bias": bias,
+        "coverage_95": coverage,
+        "interval_width": width,
+        "directional_accuracy": directional_acc,
+        "n_samples": float(np.sum(valid)),
+    }
+
+# ============================================================================
 # P0-1.3: Cumulative Probability → Hazard Rate Conversion
 # ============================================================================
 def _cumulative_prob_to_hazard(
@@ -1935,15 +2048,16 @@ def run_enhanced_forecasting_sql(
                 # Generate AR(1)-based forecast for top detectors (P3-FIX-4.1)
                 detector_forecast_rows = []
                 horizons = np.arange(1, len(forecast_timestamps) + 1, dtype=float)
+                # Initialize detector forecast defaults (P0-FIX: scope issue)
+                decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
+                max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
+                det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
                 for detector_name, z_score in top_detectors:
                     # Build detector history series
                     hist = df_scores[detector_name + "_z"].astype(float).dropna()
                     recent = hist.tail(168)
                     if len(recent) < 10:
                         # fallback exponential decay
-                        decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
-                        max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
-                        det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
                         decay = np.exp(-decay_rate * horizons)
                         base = float(np.clip(z_score, 0.0, max_detector_z))
                         proj = np.clip(base * decay, 0.0, max_detector_z)
@@ -1952,9 +2066,7 @@ def run_enhanced_forecasting_sql(
                     else:
                         x = recent.to_numpy(dtype=float)
                         if len(x) < 2 or np.allclose(x, x[0]):
-                            decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
-                            max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
-                            det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
+                            # Use defaults already initialized above
                             decay = np.exp(-decay_rate * horizons)
                             base = float(np.clip(z_score, 0.0, max_detector_z))
                             proj = np.clip(base * decay, 0.0, max_detector_z)

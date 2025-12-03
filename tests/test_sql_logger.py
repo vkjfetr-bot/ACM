@@ -44,7 +44,7 @@ def test_sql_log_sink_writes_records():
         "level": "INFO",
         "module": "tests.test_sql_logger",
         "message": "Hello SQL sink",
-        "context": {"foo": "bar"},
+        "context": {"foo": "bar", "event_type": "TEST", "step": "hello_step", "duration_ms": 12.5},
     }
     sink(record)
 
@@ -56,8 +56,12 @@ def test_sql_log_sink_writes_records():
     assert params[1] == 42
     assert params[3] == "INFO"
     assert params[4] == "tests.test_sql_logger"
-    assert params[5] == "Hello SQL sink"
-    assert params[6] == '{"foo": "bar"}'
+    assert params[5] == "TEST"
+    assert params[7] == "hello_step"
+    assert params[8] == 12.5
+    assert params[20] == "Hello SQL sink"
+    assert params[19] == '{"foo": "bar"}'
+    assert params[21] == '{"foo": "bar", "event_type": "TEST", "step": "hello_step", "duration_ms": 12.5}'
     assert client.conn.commit_calls >= 1
 
 

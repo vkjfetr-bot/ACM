@@ -76,7 +76,7 @@ This handbook is a complete, implementation-level walkthrough of ACM V8 for new 
 
 ## 2) Runtime Modes & Entry Points
 
-**CLI:** `python -m core.acm_main --equip <EQUIP> [--train-csv ... --score-csv ...] [--config ...] [--clear-cache] [--log-level ...] [--disable-sql-logging]`
+**CLI:** `python -m core.acm_main --equip <EQUIP> [--train-csv ... --score-csv ...] [--config ...] [--clear-cache] [--log-level ...]`
 
 **SQL batch automation:** `python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --start-from-beginning`  
 Uses SQL historian tables and calls `usp_ACM_StartRun`/`usp_ACM_FinalizeRun`. Handles cold-start retries and progress tracking (`.sql_batch_progress.json`). This command sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM`; avoid manipulating them elsewhere.
@@ -115,7 +115,7 @@ Key paths (ParamPath) and reasoning:
 - `--config` loads a YAML overrides file merged atop the config table row.
 - `--train-csv` / `--score-csv` override ingestion paths per run.
 - `--clear-cache` forces detector refit, ignoring cached joblib.
-- Logging overrides: `--log-level`, `--log-format`, `--log-module-level`, `--log-file`, `--disable-sql-logging`.
+- Logging overrides: `--log-level`, `--log-format`, `--log-module-level`, `--log-file` (SQL sink is always on in SQL mode).
 
 ---
 
@@ -221,7 +221,7 @@ python -m core.acm_main --equip FD_FAN ^
 4) **Run (SQL mode example)**
 ```
 python -m core.acm_main --equip FD_FAN --log-level INFO
-# Uses SQL config row, historian, and SQL sinks. Disable SQL log sink with --disable-sql-logging.
+# Uses SQL config row, historian, and SQL sinks (SQL logging always enabled in SQL mode).
 ```
 
 5) **Batch runner (SQL, continuous)**
