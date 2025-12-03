@@ -1,7 +1,7 @@
 # ACM Copilot Guardrails (current)
 
-- **Mission**: keep the ACM pipeline healthy (CSV/SQL ingest, detector fusion, analytics outputs under `artifacts/{EQUIP}/run_*`). Primary entrypoint: `python -m core.acm_main --equip FD_FAN` (`run_pipeline()` in `core/acm_main.py`).
-- **Modes**: file-mode reads `data/*.csv`; SQL-mode uses `configs/sql_connection.ini` via `core/sql_client.SQLClient`. File-mode must stay working before SQL-path changes ship.
+- **Mission**: keep the ACM pipeline healthy
+- **Modes**: file-mode reads `data/*.csv`; SQL-mode uses `configs/sql_connection.ini` via `core/sql_client.SQLClient`. File-mode must stay working before SQL-path changes ship. DO NOT USE FILE MODE EVER!!!!!!!!
 - **Batch mode**: run `python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --start-from-beginning` (adjust args as needed). This command sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM`; do not set them in code.
 - **No emojis ever** in code, comments, tests, or generated content.
 

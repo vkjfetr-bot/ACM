@@ -103,7 +103,10 @@ def _apply_module_overrides(entries):
 
 def _configure_logging(logging_cfg, args):
     """Apply CLI/config logging overrides and return flags."""
-    enable_sql_logging = bool((logging_cfg or {}).get("enable_sql_sink", True))
+    enable_sql_logging_cfg = (logging_cfg or {}).get("enable_sql_sink")
+    if enable_sql_logging_cfg is False:
+        Console.warn("[LOG] SQL sink disable flag in config is ignored; SQL logging is always enabled in SQL mode.")
+    enable_sql_logging = True
 
     if args.log_level or (logging_cfg or {}).get("level"):
         Console.set_level(args.log_level or logging_cfg.get("level"))
@@ -125,9 +128,6 @@ def _configure_logging(logging_cfg, args):
     if args.log_module_level:
         module_levels.extend(args.log_module_level)
     _apply_module_overrides(module_levels)
-
-    if args.disable_sql_logging:
-        enable_sql_logging = False
 
     return {"enable_sql_logging": enable_sql_logging}
 
@@ -750,7 +750,6 @@ def main() -> None:
     ap.add_argument("--log-file", help="Write logs to the specified file.")
     ap.add_argument("--log-module-level", action="append", default=[], metavar="MODULE=LEVEL",
                     help="Set per-module log level overrides (repeatable).")
-    ap.add_argument("--disable-sql-logging", action="store_true", help="Disable SQL RunLogs sink even in SQL mode.")
     ap.add_argument("--start-time", help="Override start time for SQL run (ISO format).")
     ap.add_argument("--end-time", help="Override end time for SQL run (ISO format).")
     args = ap.parse_args()

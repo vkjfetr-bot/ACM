@@ -36,7 +36,7 @@ Batch mode simply runs ACM against a historical baseline (training) window and a
 
 1. **Data layout:** Put normal/stable data into `train_csv` and the most-recent window into `score_csv`. In file mode, ACM ingests them from the path literal. In SQL mode, ensure the connection string in `configs/sql_connection.ini` points to the right database and the config table row sets `storage_backend=sql`.
 2. **Key CLI knobs:** Pass `--train-csv` and `--score-csv` (or their aliases `--baseline-csv` / `--batch-csv`) to override the defaults. Use `--clear-cache` to force retraining instead of reusing a cached model if the baseline drifted.
-3. **Logging:** Control verbosity with `--log-level`/`--log-format` and target specific modules with multiple `--log-module-level MODULE=LEVEL` entries (e.g., `--log-module-level core.fast_features=DEBUG`). Write logs to disk with `--log-file` or keep them on the console. Disable SQL run-log writes without touching SQL mode via `--disable-sql-logging`.
+3. **Logging:** Control verbosity with `--log-level`/`--log-format` and target specific modules with multiple `--log-module-level MODULE=LEVEL` entries (e.g., `--log-module-level core.fast_features=DEBUG`). Write logs to disk with `--log-file` or keep them on the console. SQL run-log writes are always enabled in SQL mode.
 4. **Automation:** Use `scripts/sql_batch_runner.py` (and its `scripts/sql/*` helpers) to invoke ACM programmatically for many equipment codes or integrate with a scheduler.
 
 The same command-line options work for both file and SQL batch runs because ACM uses the configuration row to decide whether to stream data through CSV files or the shared SQL client.
@@ -48,7 +48,7 @@ The same command-line options work for both file and SQL batch runs because ACM 
 - `--train-csv` / `--baseline-csv`: path to historical data used for model fitting.
 - `--score-csv` / `--batch-csv`: path to the current window of observations to evaluate.
 - `--clear-cache`: delete any cached model for this equipment to force retraining.
-- Logging: `--log-level`, `--log-format`, `--log-module-level`, `--log-file`, `--disable-sql-logging`.
+- Logging: `--log-level`, `--log-format`, `--log-module-level`, `--log-file`.
 
 ACM decides between file and SQL mode based on the configuration (see `core/sql_logger.py` and the `storage_backend` entry). SQL mode wraps data ingestion/output with `core.sql_client.SQLClient` and calls stored procedures instead of writing to CSV files.
 

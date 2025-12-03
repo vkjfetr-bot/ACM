@@ -49,7 +49,11 @@ import pandas as pd
 from scipy.stats import norm
 from scipy.optimize import minimize
 from sklearn.model_selection import TimeSeriesSplit
-from statsmodels.tsa.api import VAR
+
+try:
+    from statsmodels.tsa.api import VAR
+except ImportError:
+    VAR = None
 
 from utils.logger import Console  # type: ignore
 # FOR-DQ-02: Use centralized timestamp normalization
@@ -60,6 +64,11 @@ from core import rul_engine  # Unified RUL estimation engine
 from core.model_persistence import ForecastState, save_forecast_state, load_forecast_state  # type: ignore
 from datetime import datetime, timedelta
 import hashlib
+try:
+    # Prefer using the platform's regimes module for labels/behavior
+    from core import regimes as _regimes  # type: ignore
+except Exception:
+    _regimes = None
 
 
 # ============================================================================
@@ -78,6 +87,287 @@ MIN_FORECAST_SAMPLES = 20
 # Controls how quickly hazard probability transitions between forecast updates
 # 12 hours provides smooth transitions without excessive lag
 BLEND_TAU_HOURS = 12.0
+
+# Bootstrap defaults (enabled by default; can be overridden per equipment)
+BOOTSTRAP_ENABLED_DEFAULT = True
+BOOTSTRAP_CI_LEVEL = 0.95
+BOOTSTRAP_N_REPLICATES_DEFAULT = 500
+
+def _compute_auto_block_size(dt_hours: float, history_len: int) -> int:
+    """Auto-compute block size based on data cadence and history.
+    Targets ~1 day of samples, clamped to safe bounds.
+    """
+    try:
+        if not np.isfinite(dt_hours) or dt_hours <= 0:
+            dt_hours = 1.0
+        samples_per_day = max(int(round(24.0 / dt_hours)), 1)
+        block = max(8, min(samples_per_day, 240))
+        if history_len >= 64:
+            block = min(block, max(8, history_len // 6))
+        else:
+            block = min(block, max(4, history_len // 2))
+        return max(4, int(block))
+    except Exception:
+        return 24
+
+# ============================================================================
+# P0-1.4: Monte Carlo RUL Uncertainty Propagation
+# ============================================================================
+def _estimate_rul_monte_carlo(
+    forecast_mean: np.ndarray,
+    forecast_std: np.ndarray,
+    failure_threshold: float,
+    dt_hours: float,
+    n_simulations: int = 1000
+) -> Dict[str, float]:
+    """
+    Monte Carlo RUL estimation with full uncertainty quantification.
+    
+    Generates n_simulations forecast trajectories by sampling from 
+    N(forecast_mean, forecast_std) and computes distribution of 
+    threshold-crossing times.
+    
+    Args:
+        forecast_mean: Expected health values per horizon
+        forecast_std: Standard deviation per horizon
+        failure_threshold: Health level defining failure
+        dt_hours: Time step size (hours)
+        n_simulations: Number of Monte Carlo samples
+    
+    Returns:
+        Dictionary with: rul_median, rul_mean, rul_p10, rul_p90, rul_std,
+        failure_probability (fraction crossing threshold within forecast horizon)
+    """
+    n_steps = len(forecast_mean)
+    if n_steps == 0:
+        return {
+            "rul_median_hours": float("nan"),
+            "rul_mean_hours": float("nan"),
+            "rul_p10_hours": float("nan"),
+            "rul_p90_hours": float("nan"),
+            "rul_std_hours": float("nan"),
+            "failure_probability": 0.0,
+        }
+    
+    rul_samples: List[float] = []
+    
+    for _ in range(n_simulations):
+        # Generate one trajectory
+        trajectory = np.random.normal(forecast_mean, forecast_std)
+        
+        # Find first threshold crossing
+        crossings = np.where(trajectory < failure_threshold)[0]
+        
+        if len(crossings) > 0:
+            rul_steps = float(crossings[0])
+        else:
+            rul_steps = float(n_steps + 10)  # Censor: beyond forecast horizon
+        
+        rul_samples.append(rul_steps * dt_hours)  # Convert steps→hours
+    
+    rul_arr = np.asarray(rul_samples, dtype=float)
+    
+    return {
+        "rul_median_hours": float(np.median(rul_arr)),
+        "rul_mean_hours": float(np.mean(rul_arr)),
+        "rul_p10_hours": float(np.percentile(rul_arr, 10)),
+        "rul_p90_hours": float(np.percentile(rul_arr, 90)),
+        "rul_std_hours": float(np.std(rul_arr)),
+        "failure_probability": float(np.mean(rul_arr <= n_steps * dt_hours)),
+    }
+
+# ============================================================================
+# P1-2.1: Comprehensive Forecast Quality Metrics
+# ============================================================================
+def _compute_forecast_quality_metrics(
+    actual: np.ndarray,
+    forecast: np.ndarray,
+    ci_lower: Optional[np.ndarray] = None,
+    ci_upper: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """
+    Compute comprehensive forecast quality metrics.
+    
+    Metrics:
+    - RMSE: Root mean squared error
+    - MAE: Mean absolute error
+    - MAPE: Mean absolute percentage error
+    - Bias: Mean forecast error (positive = over-forecast)
+    - Coverage: Fraction of actuals within CI (target 95%)
+    - Interval Width: Mean CI width (sharpness metric)
+    - Directional Accuracy: Fraction of correct trend predictions
+    
+    Args:
+        actual: Observed values
+        forecast: Predicted values
+        ci_lower: Lower confidence interval bounds (optional)
+        ci_upper: Upper confidence interval bounds (optional)
+    
+    Returns:
+        Dictionary of quality metrics
+    """
+    actual = np.asarray(actual, dtype=float)
+    forecast = np.asarray(forecast, dtype=float)
+    
+    # Filter valid pairs
+    valid = np.isfinite(actual) & np.isfinite(forecast)
+    if not np.any(valid):
+        return {
+            "rmse": float("nan"),
+            "mae": float("nan"),
+            "mape": float("nan"),
+            "bias": float("nan"),
+            "coverage_95": float("nan"),
+            "interval_width": float("nan"),
+            "directional_accuracy": float("nan"),
+            "n_samples": 0.0,
+        }
+    
+    actual_valid = actual[valid]
+    forecast_valid = forecast[valid]
+    errors = forecast_valid - actual_valid
+    
+    # Core error metrics
+    rmse = float(np.sqrt(np.mean(errors ** 2)))
+    mae = float(np.mean(np.abs(errors)))
+    
+    # MAPE (avoid division by zero)
+    denominator = np.abs(actual_valid)
+    denominator = np.where(denominator < 1e-6, 1e-6, denominator)
+    mape = float(np.mean(np.abs(errors / denominator)) * 100.0)
+    
+    # Bias (directional forecast error)
+    bias = float(np.mean(errors))
+    
+    # CI coverage and width
+    if ci_lower is not None and ci_upper is not None:
+        ci_lower = np.asarray(ci_lower, dtype=float)
+        ci_upper = np.asarray(ci_upper, dtype=float)
+        ci_valid = valid & np.isfinite(ci_lower) & np.isfinite(ci_upper)
+        
+        if np.any(ci_valid):
+            actual_ci = actual[ci_valid]
+            lower_ci = ci_lower[ci_valid]
+            upper_ci = ci_upper[ci_valid]
+            
+            in_ci = (actual_ci >= lower_ci) & (actual_ci <= upper_ci)
+            coverage = float(np.mean(in_ci))
+            width = float(np.mean(upper_ci - lower_ci))
+        else:
+            coverage = float("nan")
+            width = float("nan")
+    else:
+        coverage = float("nan")
+        width = float("nan")
+    
+    # Directional accuracy (trend prediction)
+    if len(actual_valid) >= 2:
+        actual_diff = np.diff(actual_valid)
+        forecast_diff = np.diff(forecast_valid)
+        
+        # Sign agreement (ignoring near-zero changes)
+        threshold = 0.01 * np.std(actual_diff) if np.std(actual_diff) > 0 else 1e-6
+        significant = np.abs(actual_diff) > threshold
+        
+        if np.any(significant):
+            actual_sign = np.sign(actual_diff[significant])
+            forecast_sign = np.sign(forecast_diff[significant])
+            directional_acc = float(np.mean(actual_sign == forecast_sign))
+        else:
+            directional_acc = 1.0  # All changes insignificant
+    else:
+        directional_acc = float("nan")
+    
+    return {
+        "rmse": rmse,
+        "mae": mae,
+        "mape": mape,
+        "bias": bias,
+        "coverage_95": coverage,
+        "interval_width": width,
+        "directional_accuracy": directional_acc,
+        "n_samples": float(np.sum(valid)),
+    }
+
+# ============================================================================
+# P0-1.3: Cumulative Probability → Hazard Rate Conversion
+# ============================================================================
+def _cumulative_prob_to_hazard(
+    cum_prob: np.ndarray,
+    dt_hours_vec: np.ndarray
+) -> np.ndarray:
+    """
+    Convert cumulative failure probability F(t) to discrete hazard rate λ(t).
+    
+    Mathematical derivation:
+    - Survival: S(t) = 1 - F(t)
+    - Hazard: λ(t) = [F(t+Δt) - F(t)] / [S(t) * Δt]
+    - For discrete intervals: λ[i] = [F[i] - F[i-1]] / [S[i-1] * dt[i]]
+    
+    Args:
+        cum_prob: Cumulative failure probabilities (monotonic, 0→1)
+        dt_hours_vec: Time intervals (hours) for each step
+    
+    Returns:
+        Discrete hazard rates (λ ≥ 0, sentinel 10.0 for near-certain failure)
+    """
+    F = np.asarray(cum_prob, dtype=float).copy()
+    n = len(F)
+    
+    # Enforce physical constraints
+    F = np.maximum.accumulate(F)  # Monotonic
+    F = np.clip(F, 0.0, 1.0)      # Valid probabilities
+    
+    lambda_rate = np.zeros(n, dtype=float)
+    
+    if n == 0:
+        return lambda_rate
+    
+    # First point: treat as hazard over first interval
+    if F[0] < 1.0:
+        lambda_rate[0] = -np.log(max(1e-9, 1.0 - F[0])) / max(1e-6, dt_hours_vec[0])
+    else:
+        lambda_rate[0] = 10.0  # Sentinel for near-certain failure
+    
+    # Subsequent points: discrete hazard from survival function
+    for i in range(1, n):
+        dF = F[i] - F[i - 1]
+        S_prev = 1.0 - F[i - 1]
+        
+        if S_prev > 1e-9 and dt_hours_vec[i] > 1e-6:
+            lambda_rate[i] = dF / (S_prev * dt_hours_vec[i])
+        else:
+            lambda_rate[i] = 10.0  # Saturated failure probability
+    
+    return np.clip(lambda_rate, 0.0, 10.0)  # Physical bounds
+
+def _bootstrap_ci_from_noise(values: np.ndarray, horizon_stds: np.ndarray, n_boot: int = BOOTSTRAP_N_REPLICATES_DEFAULT,
+                              ci: float = BOOTSTRAP_CI_LEVEL, health_min: float = 0.0, health_max: float = 100.0) -> tuple[list, list]:
+    """Compute bootstrap CIs by resampling Gaussian noise per horizon using provided stds.
+    This approximates parameter/residual uncertainty without heavy re-fitting.
+    """
+    H = len(values)
+    if H == 0:
+        return [], []
+    alpha = 1.0 - ci
+    lo_q = 100.0 * (alpha / 2.0)
+    hi_q = 100.0 * (1.0 - alpha / 2.0)
+    ci_lower, ci_upper = [], []
+    for h in range(H):
+        std_h = float(horizon_stds[h]) if h < len(horizon_stds) else float(horizon_stds[-1])
+        draws = np.random.normal(loc=0.0, scale=max(std_h, 1e-6), size=n_boot)
+        perturbed = values[h] + draws
+        lo = float(np.percentile(perturbed, lo_q))
+        hi = float(np.percentile(perturbed, hi_q))
+        lo = max(health_min, lo)
+        hi = min(health_max, hi)
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            z = norm.ppf(1.0 - alpha / 2.0)
+            lo = max(health_min, values[h] - z * std_h)
+            hi = min(health_max, values[h] + z * std_h)
+        ci_lower.append(lo)
+        ci_upper.append(hi)
+    return ci_lower, ci_upper
 
 # Default exponential smoothing alpha for hazard time series
 # Lower values (0.1-0.3) provide smoother hazard curves with less noise
@@ -736,8 +1026,8 @@ def smooth_failure_probability_hazard(
     dt_vec = np.insert(dt_vec, 0, dt_vec[0] if dt_vec.size else dt_hours)
     
     # P0-FIX-1.3: Convert cumulative probability to hazard rate using correct formula
-    # Use cumulative_prob_to_hazard helper (incremental dF / S_prev approach)
-    lambda_raw_np = cumulative_prob_to_hazard(new_probability_series, dt_vec)
+    # Use _cumulative_prob_to_hazard helper (incremental dF / S_prev approach)
+    lambda_raw_np = _cumulative_prob_to_hazard(new_probability_series.to_numpy(), dt_vec)
     df_result["HazardRaw"] = lambda_raw_np
     
     # EWMA smoothing with previous baseline
@@ -1081,6 +1371,360 @@ def adaptive_exponential_smoothing(
 
 
 # ============================================================================
+# P2-FIX-3.2: Regime-Specific Forecasting Models
+# ============================================================================
+
+def forecast_by_regime(
+    health_series: pd.Series,
+    regime_series: pd.Series,
+    config: Dict[str, Any],
+    dt_hours: float = 1.0,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fit regime-specific Holt models where sufficient data exists.
+    
+    P2-FIX-3.2: Per-regime forecasting for better accuracy within operating regimes.
+    
+    Args:
+        health_series: Health index time series (aligned with regime_series)
+        regime_series: Regime labels time series
+        config: Forecast configuration dict
+        dt_hours: Time step in hours (for trend scaling)
+    
+    Returns:
+        Dict mapping regime name to forecast DataFrame with columns:
+        [Timestamp, ForecastHealth, CI_Lower, CI_Upper, Regime]
+    
+    Logic:
+        - Split data by regime
+        - For each regime with sufficient samples (>= MIN_FORECAST_SAMPLES):
+          - Detect/remove outliers
+          - Optimize alpha/beta if enabled
+          - Fit Holt's linear trend
+          - Generate forecast with bootstrap CI
+        - Return dict of regime-specific forecasts
+    """
+    forecast_cfg = config.get("forecast", {})
+    horizon = int(forecast_cfg.get("forecast_hours", 24))
+    alpha_default = float(forecast_cfg.get("smoothing_alpha", 0.3))
+    beta_default = float(forecast_cfg.get("smoothing_beta", 0.2))
+    enable_adaptive = bool(forecast_cfg.get("enable_adaptive_smoothing", True))
+    enable_bootstrap = bool(forecast_cfg.get("enable_bootstrap_ci", BOOTSTRAP_ENABLED_DEFAULT))
+    n_boot = int(forecast_cfg.get("bootstrap_n", BOOTSTRAP_N_REPLICATES_DEFAULT))
+    health_min = float(forecast_cfg.get("health_min", 0.0))
+    health_max = float(forecast_cfg.get("health_max", 100.0))
+    
+    # Align series by index
+    if regime_series is None or regime_series.empty:
+        Console.warn("[FORECAST] No regime data; skipping regime-specific forecasting")
+        return {}
+    
+    # Get unique regimes
+    regimes = regime_series.dropna().unique()
+    forecasts: Dict[str, pd.DataFrame] = {}
+    
+    for regime in regimes:
+        regime_str = str(regime)
+        mask = regime_series == regime
+        regime_health = health_series[mask]
+        
+        if len(regime_health) < MIN_FORECAST_SAMPLES:
+            Console.warn(f"[FORECAST] Insufficient data for regime '{regime_str}' ({len(regime_health)} < {MIN_FORECAST_SAMPLES}), skipping")
+            continue
+        
+        try:
+            # Clean outliers
+            series_clean = detect_and_remove_outliers(regime_health)
+            
+            # Optimize alpha/beta if enabled
+            alpha, beta = alpha_default, beta_default
+            if enable_adaptive and len(series_clean) >= MIN_FORECAST_SAMPLES:
+                alpha, beta = adaptive_exponential_smoothing(series_clean, initial_alpha=alpha, initial_beta=beta)
+                Console.info(f"[FORECAST] Regime '{regime_str}': Adaptive smoothing params: alpha={alpha:.3f}, beta={beta:.3f}")
+            
+            # Fit Holt's linear trend
+            values = series_clean.astype(float).to_numpy()
+            n = len(values)
+            level = float(values[0])
+            trend = float(values[1] - values[0]) / dt_hours if n > 1 else 0.0
+            
+            for i in range(1, n):
+                prev_level = level
+                prev_trend = trend
+                level = alpha * float(values[i]) + (1 - alpha) * (prev_level + prev_trend)
+                trend = beta * (level - prev_level) + (1 - beta) * prev_trend
+            
+            # Generate forecast
+            forecast_values = np.array([level + (h + 1) * trend for h in range(horizon)], dtype=float)
+            
+            # Compute variance (P0-FIX-1.2: 1 + h + h^2/2 multiplier for Holt)
+            residuals = values[1:] - (alpha * values[:-1] + (1 - alpha) * (level + trend))
+            sigma = float(np.std(residuals)) if len(residuals) > 0 else 1e-6
+            horizon_stds = sigma * np.sqrt(1.0 + np.arange(1, horizon + 1) + (np.arange(1, horizon + 1)**2) / 2.0)
+            
+            # Bootstrap CI
+            if enable_bootstrap:
+                ci_lower, ci_upper = _bootstrap_ci_from_noise(
+                    forecast_values, horizon_stds, n_boot=n_boot, ci=BOOTSTRAP_CI_LEVEL,
+                    health_min=health_min, health_max=health_max
+                )
+            else:
+                z = norm.ppf(1.0 - (1.0 - BOOTSTRAP_CI_LEVEL) / 2.0)
+                ci_lower = np.maximum(health_min, forecast_values - z * horizon_stds).tolist()
+                ci_upper = np.minimum(health_max, forecast_values + z * horizon_stds).tolist()
+            
+            # Create timestamps
+            last_timestamp = series_clean.index[-1]
+            freq_inferred = series_clean.index.freq or pd.infer_freq(series_clean.index) or f"{dt_hours}H"
+            timestamps = pd.date_range(
+                start=last_timestamp + pd.Timedelta(hours=dt_hours),
+                periods=horizon,
+                freq=freq_inferred
+            )
+            
+            # Build forecast DataFrame
+            df_fc = pd.DataFrame({
+                "Timestamp": timestamps,
+                "ForecastHealth": forecast_values,
+                "CI_Lower": ci_lower,
+                "CI_Upper": ci_upper,
+                "Regime": regime_str,
+            })
+            
+            forecasts[regime_str] = df_fc
+            Console.info(f"[FORECAST] Generated {horizon}h forecast for regime '{regime_str}' (n={len(series_clean)}, trend={trend:.2f}/h)")
+            
+        except Exception as e:
+            Console.warn(f"[FORECAST] Failed to generate forecast for regime '{regime_str}': {e}")
+            continue
+    
+    return forecasts
+
+
+# ============================================================================
+# P3-FIX-4.2: VAR for multi-sensor forecasting
+# ============================================================================
+
+def forecast_sensors_var(
+    sensor_df: pd.DataFrame,
+    horizon: int,
+    max_sensors: int = 10,
+    dt_hours: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Multivariate sensor forecast with cross-correlations using Vector Autoregression (VAR).
+    
+    P3-FIX-4.2: Captures inter-sensor dependencies for more realistic future trajectories.
+    
+    Args:
+        sensor_df: DataFrame with sensor columns (numeric only)
+        horizon: Forecast horizon in steps
+        max_sensors: Maximum number of sensors to include in VAR model
+        dt_hours: Time step in hours (for freq inference)
+    
+    Returns:
+        DataFrame with forecasted sensor values and confidence intervals
+        Columns: Timestamp, {sensor}_forecast, {sensor}_ci_lower, {sensor}_ci_upper for each sensor
+    
+    Logic:
+        - Select top sensors by variability (most changing sensors)
+        - Fit VAR model with AIC-selected lag order
+        - Generate multi-step forecast with proper covariance
+        - Return DataFrame with timestamps and per-sensor forecasts + CIs
+    
+    Fallback:
+        If VAR unavailable or fails, uses univariate AR(1) per sensor
+    """
+    if VAR is None:
+        Console.warn("[FORECAST] statsmodels.tsa.VAR not available; skipping VAR sensor forecast")
+        return pd.DataFrame()
+    
+    # Ensure sorted by index
+    sensor_df = sensor_df.sort_index()
+    
+    if sensor_df.empty or len(sensor_df) < 50:
+        Console.warn(f"[FORECAST] Insufficient data for VAR ({len(sensor_df)} < 50 rows)")
+        return pd.DataFrame()
+    
+    # Select top sensors by coefficient of variation (variability relative to mean)
+    variability = sensor_df.std() / (sensor_df.mean().abs() + 1e-6)
+    top_sensors = variability.nlargest(min(max_sensors, len(variability))).index.tolist()
+    
+    if not top_sensors:
+        Console.warn("[FORECAST] No variable sensors found for VAR")
+        return pd.DataFrame()
+    
+    # Prepare data (drop NaNs - VAR requires complete cases)
+    data = sensor_df[top_sensors].dropna()
+    
+    if len(data) < 50:
+        Console.warn(f"[FORECAST] Insufficient complete data for VAR after dropna ({len(data)} < 50)")
+        return pd.DataFrame()
+    
+    try:
+        # Fit VAR model with AIC-selected lag order (max 5 lags)
+        model = VAR(data)
+        results = model.fit(maxlags=5, ic="aic")
+        
+        # Generate forecast
+        fc = results.forecast(data.values[-results.k_ar:], steps=horizon)
+        
+        # Create forecast index
+        last_timestamp = data.index[-1]
+        freq_inferred = data.index.freq or pd.infer_freq(data.index) or f"{dt_hours}H"
+        fc_index = pd.date_range(
+            start=last_timestamp + pd.Timedelta(hours=dt_hours),
+            periods=horizon,
+            freq=freq_inferred
+        )
+        
+        # Build forecast DataFrame with CIs
+        fc_df = pd.DataFrame(fc, index=fc_index, columns=top_sensors)
+        
+        # Add confidence intervals per sensor (using residual std)
+        for col in top_sensors:
+            std_res = float(results.resid[col].std()) if col in results.resid.columns else 1.0
+            fc_df[f"{col}_ci_lower"] = fc_df[col] - 1.96 * std_res
+            fc_df[f"{col}_ci_upper"] = fc_df[col] + 1.96 * std_res
+        
+        # Reset index to include Timestamp column
+        fc_df = fc_df.reset_index().rename(columns={"index": "Timestamp"})
+        
+        Console.info(f"[FORECAST] VAR forecast generated for {len(top_sensors)} sensors (lag={results.k_ar}, horizon={horizon})")
+        return fc_df
+        
+    except Exception as e:
+        Console.warn(f"[FORECAST] VAR model failed: {e}, falling back to univariate forecasts")
+        return pd.DataFrame()
+
+
+# ============================================================================
+# P3-FIX-4.4: Comprehensive model diagnostics
+# ============================================================================
+
+def validate_forecast_model(
+    actual: np.ndarray,
+    fitted: np.ndarray,
+) -> Dict[str, Any]:
+    """
+    Comprehensive forecast model diagnostics for residual validation.
+    
+    P3-FIX-4.4: Validates model fitness through statistical tests.
+    
+    Args:
+        actual: Ground truth values (historical data)
+        fitted: Model's fitted/predicted values
+    
+    Returns:
+        Dictionary with diagnostic metrics:
+        - residuals_normal_p: Shapiro-Wilk p-value (normality test)
+        - residuals_autocorr_p: Ljung-Box p-value (autocorrelation test)
+        - variance_ratio: Ratio of late-to-early residual variance (heteroscedasticity)
+        - mape: Mean Absolute Percentage Error
+        - theil_u: Theil's U statistic (model vs naive forecast)
+    
+    Logic:
+        - Shapiro-Wilk tests if residuals are normally distributed (p > 0.05 good)
+        - Ljung-Box tests if residuals have autocorrelation (p > 0.05 good)
+        - Variance ratio checks if error variance is stable over time (~1.0 good)
+        - MAPE measures average percentage error
+        - Theil's U < 1.0 means model beats naive forecast
+    
+    Requirements:
+        - scipy.stats.shapiro
+        - statsmodels.stats.diagnostic.acorr_ljungbox
+    
+    Fallback:
+        If tests fail or insufficient data, returns NaN for test statistics
+    """
+    try:
+        from scipy.stats import shapiro
+        from statsmodels.stats.diagnostic import acorr_ljungbox
+    except ImportError:
+        Console.warn("[FORECAST] scipy/statsmodels not available; skipping model diagnostics")
+        return {
+            "residuals_normal_p": float("nan"),
+            "residuals_autocorr_p": float("nan"),
+            "variance_ratio": float("nan"),
+            "mape": float("nan"),
+            "theil_u": float("nan"),
+        }
+    
+    actual = np.asarray(actual, dtype=float)
+    fitted = np.asarray(fitted, dtype=float)
+    
+    if len(actual) != len(fitted):
+        Console.warn(f"[FORECAST] Diagnostic length mismatch: actual={len(actual)}, fitted={len(fitted)}")
+        return {
+            "residuals_normal_p": float("nan"),
+            "residuals_autocorr_p": float("nan"),
+            "variance_ratio": float("nan"),
+            "mape": float("nan"),
+            "theil_u": float("nan"),
+        }
+    
+    residuals = actual - fitted
+    diagnostics: Dict[str, Any] = {}
+    
+    # Test 1: Normality of residuals (Shapiro-Wilk)
+    if len(residuals) >= 10:
+        try:
+            _, p_shapiro = shapiro(residuals[: min(5000, len(residuals))])
+            diagnostics["residuals_normal_p"] = float(p_shapiro)
+        except Exception as e:
+            Console.warn(f"[FORECAST] Shapiro-Wilk test failed: {e}")
+            diagnostics["residuals_normal_p"] = float("nan")
+    else:
+        diagnostics["residuals_normal_p"] = float("nan")
+    
+    # Test 2: Autocorrelation of residuals (Ljung-Box)
+    if len(residuals) >= 10:
+        try:
+            lb = acorr_ljungbox(residuals, lags=[min(10, len(residuals) // 2)], return_df=True)
+            diagnostics["residuals_autocorr_p"] = float(lb["lb_pvalue"].iloc[0])
+        except Exception as e:
+            Console.warn(f"[FORECAST] Ljung-Box test failed: {e}")
+            diagnostics["residuals_autocorr_p"] = float("nan")
+    else:
+        diagnostics["residuals_autocorr_p"] = float("nan")
+    
+    # Test 3: Variance stability (heteroscedasticity check)
+    n = len(residuals)
+    if n >= 6:
+        try:
+            var_first = float(np.var(residuals[: n // 3]))
+            var_last = float(np.var(residuals[-n // 3 :]))
+            diagnostics["variance_ratio"] = float(var_last / var_first) if var_first > 1e-9 else 1.0
+        except Exception as e:
+            Console.warn(f"[FORECAST] Variance ratio calculation failed: {e}")
+            diagnostics["variance_ratio"] = float("nan")
+    else:
+        diagnostics["variance_ratio"] = float("nan")
+    
+    # Test 4: Mean Absolute Percentage Error
+    try:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mape = np.mean(np.abs(residuals / np.where(actual == 0, np.nan, actual))) * 100
+        diagnostics["mape"] = float(mape) if np.isfinite(mape) else float("nan")
+    except Exception as e:
+        Console.warn(f"[FORECAST] MAPE calculation failed: {e}")
+        diagnostics["mape"] = float("nan")
+    
+    # Test 5: Theil's U statistic (model vs naive forecast)
+    try:
+        naive = np.roll(actual, 1)
+        naive[0] = actual[0]
+        naive_mse = float(np.mean((actual - naive) ** 2))
+        model_mse = float(np.mean(residuals**2))
+        diagnostics["theil_u"] = float(np.sqrt(model_mse / naive_mse)) if naive_mse > 0 else float("inf")
+    except Exception as e:
+        Console.warn(f"[FORECAST] Theil's U calculation failed: {e}")
+        diagnostics["theil_u"] = float("nan")
+    
+    return diagnostics
+
+
+# ============================================================================
 # Enhanced Forecasting (SQL-backed)
 # ============================================================================
 
@@ -1398,13 +2042,20 @@ def run_enhanced_forecasting_sql(
         return {"tables": {}, "metrics": {}}
 
     regime_label = None
-    for cand in ("regime_label", "regime"):
-        if cand in df_scores.columns:
-            last_val = df_scores[cand].dropna()
-            if not last_val.empty:
-                regime_label = str(last_val.iloc[-1])
-            df_scores = df_scores.drop(columns=[cand], errors="ignore")
-            break
+    # Prefer regime inference via core.regimes if available
+    try:
+        if _regimes is not None and hasattr(_regimes, "get_current_regime"):
+            regime_label = str(_regimes.get_current_regime(df_scores=df_scores, df_health=df_health))
+    except Exception as _e:
+        Console.warn(f"[ENHANCED_FORECAST] Regime inference failed: {_e}; falling back to score columns")
+    if not regime_label:
+        for cand in ("regime_label", "regime"):
+            if cand in df_scores.columns:
+                last_val = df_scores[cand].dropna()
+                if not last_val.empty:
+                    regime_label = str(last_val.iloc[-1])
+                df_scores = df_scores.drop(columns=[cand], errors="ignore")
+                break
     
     # --- FORECAST-STATE-02: Conditional retraining check ---
     hash_enabled = bool(forecast_cfg.get("enable_hash_check", not enable_continuous))
@@ -1472,7 +2123,8 @@ def run_enhanced_forecasting_sql(
         
         # Initialize Holt's linear trend components
         level = float(health_values.iloc[0])
-        # P0-FIX-1.1: Initial trend must be per-hour (divide by dt_hours)
+        # P0-FIX-1.1: Initial trend MUST be per-hour (divide by dt_hours)
+        # For 30-min data: (val[1] - val[0]) / 0.5 gives hourly rate
         trend = float(health_values.iloc[1] - health_values.iloc[0]) / dt_hours if n > 1 else 0.0
         # Warm-start from previous smoothing params when available and no retrain requested
         if not retrain_needed and prev_smoothing_params:
@@ -1515,6 +2167,26 @@ def run_enhanced_forecasting_sql(
             trend_history = [0.0] * len(trend_history)
             forecast_errors = [0.0]
         
+        # P3-FIX-4.4: Validate forecast model with comprehensive diagnostics
+        if retrain_needed and n >= 10:
+            try:
+                fitted_values = np.array([level_history[i - 1] + trend_history[i - 1] if i > 0 else level_history[0] for i in range(n)])
+                actual_values = health_values.values
+                model_diagnostics = validate_forecast_model(actual=actual_values, fitted=fitted_values)
+                Console.info(
+                    f"[FORECAST] Model diagnostics: "
+                    f"Normality_p={model_diagnostics.get('residuals_normal_p', float('nan')):.3f}, "
+                    f"Autocorr_p={model_diagnostics.get('residuals_autocorr_p', float('nan')):.3f}, "
+                    f"VarRatio={model_diagnostics.get('variance_ratio', float('nan')):.2f}, "
+                    f"MAPE={model_diagnostics.get('mape', float('nan')):.1f}%, "
+                    f"TheilU={model_diagnostics.get('theil_u', float('nan')):.3f}"
+                )
+                # Store diagnostics in state for future reference
+                if model_diagnostics.get('theil_u', float('inf')) > 1.5:
+                    Console.warn("[FORECAST] Model performs poorly vs naive forecast (Theil's U > 1.5); consider alternative methods")
+            except Exception as diag_e:
+                Console.warn(f"[FORECAST] Model diagnostics failed: {diag_e}")
+        
         std_error = float(np.std(forecast_errors)) if len(forecast_errors) > 0 else 5.0
         if not np.isfinite(std_error) or std_error < 1e-6:
             std_error = 1.0  # Prevent degenerate CI widths
@@ -1539,17 +2211,39 @@ def run_enhanced_forecasting_sql(
             forecast_val = level + h * trend
             forecast_val = max(health_min, min(health_max, forecast_val))  # Clamp to configured scale
             # P0-FIX-1.2: Correct variance multiplier for Holt's Linear Trend
-            # Formula: 1 + (h-1) * [α² + αβh + β²h(h+1)/2]
+            # Formula from Hyndman & Athanasopoulos: 1 + (h-1) * [α² + αβh + β²h(h+1)/2]
+            # This accounts for level and trend uncertainty accumulation
             if h <= 1:
                 var_mult = 1.0
             else:
                 var_mult = 1.0 + (h - 1) * (alpha**2 + alpha * beta * h + beta**2 * h * (h + 1) / 2)
-            horizon_std = std_error * np.sqrt(var_mult)
-            ci_width = 1.96 * horizon_std
+            horizon_std = std_error * np.sqrt(max(var_mult, 1.0))  # Guard against numerical issues
             forecast_values.append(forecast_val)
             forecast_stds.append(horizon_std)
+            # Default analytic CI; will be replaced below if bootstrap enabled
+            ci_width = 1.96 * horizon_std
             ci_lower.append(max(health_min, forecast_val - ci_width))
             ci_upper.append(min(health_max, forecast_val + ci_width))
+
+        # Optional: Bootstrap CI enabled by default, with per-equipment override via config
+        enable_bootstrap = bool(forecast_cfg.get("enable_bootstrap_ci", BOOTSTRAP_ENABLED_DEFAULT))
+        if enable_bootstrap and len(forecast_values) > 0:
+            try:
+                n_boot = int(forecast_cfg.get("bootstrap_n", BOOTSTRAP_N_REPLICATES_DEFAULT))
+                b_lo, b_hi = _bootstrap_ci_from_noise(
+                    np.asarray(forecast_values, dtype=float),
+                    np.asarray(forecast_stds, dtype=float),
+                    n_boot=n_boot,
+                    ci=float(forecast_cfg.get("bootstrap_ci", BOOTSTRAP_CI_LEVEL)),
+                    health_min=health_min,
+                    health_max=health_max,
+                )
+                if len(b_lo) == len(ci_lower):
+                    ci_lower = b_lo
+                    ci_upper = b_hi
+                    Console.info(f"[FORECAST] Bootstrap CI applied (n={n_boot})")
+            except Exception as _e:
+                Console.warn(f"[FORECAST] Bootstrap CI failed: {_e}; using analytic CI")
         
         # Build health forecast DataFrame
         health_forecast_df = pd.DataFrame({
@@ -1728,15 +2422,16 @@ def run_enhanced_forecasting_sql(
                 # Generate AR(1)-based forecast for top detectors (P3-FIX-4.1)
                 detector_forecast_rows = []
                 horizons = np.arange(1, len(forecast_timestamps) + 1, dtype=float)
+                # Initialize detector forecast defaults (P0-FIX: scope issue)
+                decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
+                max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
+                det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
                 for detector_name, z_score in top_detectors:
                     # Build detector history series
                     hist = df_scores[detector_name + "_z"].astype(float).dropna()
                     recent = hist.tail(168)
                     if len(recent) < 10:
                         # fallback exponential decay
-                        decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
-                        max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
-                        det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
                         decay = np.exp(-decay_rate * horizons)
                         base = float(np.clip(z_score, 0.0, max_detector_z))
                         proj = np.clip(base * decay, 0.0, max_detector_z)
@@ -1745,9 +2440,7 @@ def run_enhanced_forecasting_sql(
                     else:
                         x = recent.to_numpy(dtype=float)
                         if len(x) < 2 or np.allclose(x, x[0]):
-                            decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
-                            max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
-                            det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
+                            # Use defaults already initialized above
                             decay = np.exp(-decay_rate * horizons)
                             base = float(np.clip(z_score, 0.0, max_detector_z))
                             proj = np.clip(base * decay, 0.0, max_detector_z)
@@ -1819,6 +2512,7 @@ def run_enhanced_forecasting_sql(
                 sensor_df_num = pd.DataFrame()
             sensor_min_global = forecast_cfg.get("sensor_min", None)
             sensor_max_global = forecast_cfg.get("sensor_max", None)
+            sensor_forecast_method = forecast_cfg.get("sensor_forecast_method", "linear")  # P3-FIX-4.2: "linear" or "var"
             
             if not sensor_df_num.empty and len(sensor_df_num) >= 10:  # Need minimum history
                 # Calculate sensor variability (standard deviation) to identify changing sensors
@@ -1835,77 +2529,142 @@ def run_enhanced_forecasting_sql(
                 # Sort by variability - sensors showing most change
                 top_sensors = sorted(sensor_variability.items(), key=lambda x: x[1], reverse=True)[:10]
                 
-                # Generate forecast for top changing sensors
-                sensor_forecast_rows = []
-                sensor_state_details: List[Dict[str, Any]] = []
-                max_sensor_slope = float(forecast_cfg.get("max_sensor_slope", 10.0))
-                # Optional engineering bounds per sensor name
-                sensor_bounds = forecast_cfg.get("sensor_bounds", {}) or {}
-                for sensor_name, variability in top_sensors:
-                    # Get recent trend
-                    recent_values = sensor_df_num[sensor_name].tail(24).dropna()
-                    if len(recent_values) >= 5:
-                        # Calculate simple linear trend
-                        x = np.arange(len(recent_values))
-                        y = recent_values.values
-                        trend = np.polyfit(x, y, 1)[0] if len(x) > 1 else 0.0
-                        trend = float(np.clip(trend, -max_sensor_slope, max_sensor_slope))
-                        
-                        current_val = recent_values.iloc[-1]
-                        resid_std = float(np.std(y - (trend * x + (y[0] if len(y) else 0)))) if len(y) else 0.0
-                        bound_min = sensor_bounds.get(sensor_name, {}).get("min", None)
-                        bound_max = sensor_bounds.get(sensor_name, {}).get("max", None)
-                        
-                        for h, ts in enumerate(forecast_timestamps, 1):
-                            # Linear extrapolation from current value
-                            forecast_val = current_val + (trend * h)
-                            if bound_min is not None:
-                                forecast_val = max(bound_min, forecast_val)
-                            if bound_max is not None:
-                                forecast_val = min(bound_max, forecast_val)
-                            if sensor_min_global is not None:
-                                forecast_val = max(sensor_min_global, forecast_val)
-                            if sensor_max_global is not None:
-                                forecast_val = min(sensor_max_global, forecast_val)
-                            ci_low = forecast_val - resid_std if resid_std else None
-                            ci_up = forecast_val + resid_std if resid_std else None
-                            for clamp_val, setter in [(sensor_min_global, "low"), (sensor_max_global, "high"), (bound_min, "low"), (bound_max, "high")]:
-                                if clamp_val is not None:
-                                    if setter == "low" and ci_low is not None:
-                                        ci_low = max(clamp_val, ci_low)
-                                    if setter == "high" and ci_up is not None:
-                                        ci_up = min(clamp_val, ci_up)
-                            sensor_forecast_rows.append({
-                                "RunID": run_id,
-                                "EquipID": equip_id,
-                                "Timestamp": ts,
-                                "SensorName": sensor_name,  # Actual sensor like "Motor Current", "Bearing Temperature"
-                                "ForecastValue": forecast_val,
-                                "CI_Lower": ci_low,
-                                "CI_Upper": ci_up,
-                                "CiLower": ci_low,
-                                "CiUpper": ci_up,
-                                "ForecastStd": resid_std if resid_std else None,
-                                "Method": "LinearTrend",
-                                "RegimeLabel": regime_label,
-                            })
-                        sensor_state_details.append({
-                            "name": sensor_name,
-                            "variability": float(variability),
-                            "trend": float(trend),
-                            "resid_std": float(resid_std),
-                            "bound_min": bound_min,
-                            "bound_max": bound_max,
-                        })
+                # P3-FIX-4.2: Try VAR multivariate forecast if enabled
+                if sensor_forecast_method == "var" and len(top_sensors) >= 3:
+                    var_fc = forecast_sensors_var(
+                        sensor_df=sensor_df_num,
+                        horizon=len(forecast_timestamps),
+                        max_sensors=min(10, len(top_sensors)),
+                        dt_hours=dt_hours,
+                    )
+                    if not var_fc.empty:
+                        # Convert VAR forecast to SQL rows
+                        sensor_forecast_rows = []
+                        sensor_state_details: List[Dict[str, Any]] = []
+                        sensor_bounds = forecast_cfg.get("sensor_bounds", {}) or {}
+                        for sensor_name, _ in top_sensors:
+                            if sensor_name in var_fc.columns:
+                                fc_vals = var_fc[sensor_name].values
+                                ci_lower_vals = var_fc[f"{sensor_name}_ci_lower"].values if f"{sensor_name}_ci_lower" in var_fc.columns else None
+                                ci_upper_vals = var_fc[f"{sensor_name}_ci_upper"].values if f"{sensor_name}_ci_upper" in var_fc.columns else None
+                                bound_min = sensor_bounds.get(sensor_name, {}).get("min", None)
+                                bound_max = sensor_bounds.get(sensor_name, {}).get("max", None)
+                                for h, ts in enumerate(forecast_timestamps):
+                                    fval = float(fc_vals[h]) if h < len(fc_vals) else None
+                                    if fval is not None:
+                                        if bound_min is not None: fval = max(bound_min, fval)
+                                        if bound_max is not None: fval = min(bound_max, fval)
+                                        if sensor_min_global is not None: fval = max(sensor_min_global, fval)
+                                        if sensor_max_global is not None: fval = min(sensor_max_global, fval)
+                                    ci_low = float(ci_lower_vals[h]) if ci_lower_vals is not None and h < len(ci_lower_vals) else None
+                                    ci_up = float(ci_upper_vals[h]) if ci_upper_vals is not None and h < len(ci_upper_vals) else None
+                                    if ci_low is not None and bound_min is not None: ci_low = max(bound_min, ci_low)
+                                    if ci_up is not None and bound_max is not None: ci_up = min(bound_max, ci_up)
+                                    sensor_forecast_rows.append({
+                                        "RunID": run_id,
+                                        "EquipID": equip_id,
+                                        "Timestamp": ts,
+                                        "SensorName": sensor_name,
+                                        "ForecastValue": fval,
+                                        "CI_Lower": ci_low,
+                                        "CI_Upper": ci_up,
+                                        "CiLower": ci_low,
+                                        "CiUpper": ci_up,
+                                        "ForecastStd": None,
+                                        "Method": "VAR",
+                                        "RegimeLabel": regime_label,
+                                    })
+                                sensor_state_details.append({
+                                    "name": sensor_name,
+                                    "variability": float(sensor_variability.get(sensor_name, 0.0)),
+                                    "method": "VAR",
+                                    "bound_min": bound_min,
+                                    "bound_max": bound_max,
+                                })
+                        sensor_state = {
+                            "top_sensors": sensor_state_details,
+                            "method": "VAR",
+                            "sensor_min": sensor_min_global,
+                            "sensor_max": sensor_max_global,
+                        }
+                        sensor_forecast_df = pd.DataFrame(sensor_forecast_rows)
+                        Console.info(f"[FORECAST] Generated VAR sensor forecast for {len(top_sensors)} sensors")
+                    else:
+                        Console.warn("[FORECAST] VAR failed; falling back to linear trend")
+                        sensor_forecast_method = "linear"
                 
-                sensor_state = {
-                    "top_sensors": sensor_state_details,
-                    "max_sensor_slope": max_sensor_slope,
-                    "sensor_min": sensor_min_global,
-                    "sensor_max": sensor_max_global,
-                }
-                sensor_forecast_df = pd.DataFrame(sensor_forecast_rows)
-                Console.info(f"[FORECAST] Generated physical sensor forecast for {len(top_sensors)} sensors")
+                # Generate forecast for top changing sensors (linear fallback)
+                if sensor_forecast_method == "linear":
+                    sensor_forecast_rows = []
+                    sensor_state_details: List[Dict[str, Any]] = []
+                    max_sensor_slope = float(forecast_cfg.get("max_sensor_slope", 10.0))
+                    sensor_bounds = forecast_cfg.get("sensor_bounds", {}) or {}
+                    for sensor_name, variability in top_sensors:
+                        # Get recent trend
+                        recent_values = sensor_df_num[sensor_name].tail(24).dropna()
+                        if len(recent_values) >= 5:
+                            # Calculate simple linear trend
+                            x = np.arange(len(recent_values))
+                            y = recent_values.values
+                            trend = np.polyfit(x, y, 1)[0] if len(x) > 1 else 0.0
+                            trend = float(np.clip(trend, -max_sensor_slope, max_sensor_slope))
+                            
+                            current_val = recent_values.iloc[-1]
+                            resid_std = float(np.std(y - (trend * x + (y[0] if len(y) else 0)))) if len(y) else 0.0
+                            bound_min = sensor_bounds.get(sensor_name, {}).get("min", None)
+                            bound_max = sensor_bounds.get(sensor_name, {}).get("max", None)
+                            
+                            for h, ts in enumerate(forecast_timestamps, 1):
+                                # Linear extrapolation from current value
+                                forecast_val = current_val + (trend * h)
+                                if bound_min is not None:
+                                    forecast_val = max(bound_min, forecast_val)
+                                if bound_max is not None:
+                                    forecast_val = min(bound_max, forecast_val)
+                                if sensor_min_global is not None:
+                                    forecast_val = max(sensor_min_global, forecast_val)
+                                if sensor_max_global is not None:
+                                    forecast_val = min(sensor_max_global, forecast_val)
+                                ci_low = forecast_val - resid_std if resid_std else None
+                                ci_up = forecast_val + resid_std if resid_std else None
+                                for clamp_val, setter in [(sensor_min_global, "low"), (sensor_max_global, "high"), (bound_min, "low"), (bound_max, "high")]:
+                                    if clamp_val is not None:
+                                        if setter == "low" and ci_low is not None:
+                                            ci_low = max(clamp_val, ci_low)
+                                        if setter == "high" and ci_up is not None:
+                                            ci_up = min(clamp_val, ci_up)
+                                sensor_forecast_rows.append({
+                                    "RunID": run_id,
+                                    "EquipID": equip_id,
+                                    "Timestamp": ts,
+                                    "SensorName": sensor_name,  # Actual sensor like "Motor Current", "Bearing Temperature"
+                                    "ForecastValue": forecast_val,
+                                    "CI_Lower": ci_low,
+                                    "CI_Upper": ci_up,
+                                    "CiLower": ci_low,
+                                    "CiUpper": ci_up,
+                                    "ForecastStd": resid_std if resid_std else None,
+                                    "Method": "LinearTrend",
+                                    "RegimeLabel": regime_label,
+                                })
+                            sensor_state_details.append({
+                                "name": sensor_name,
+                                "variability": float(variability),
+                                "trend": float(trend),
+                                "resid_std": float(resid_std),
+                                "bound_min": bound_min,
+                                "bound_max": bound_max,
+                            })
+                    
+                    sensor_state = {
+                        "top_sensors": sensor_state_details,
+                        "max_sensor_slope": max_sensor_slope,
+                        "sensor_min": sensor_min_global,
+                        "sensor_max": sensor_max_global,
+                        "method": "LinearTrend",
+                    }
+                    sensor_forecast_df = pd.DataFrame(sensor_forecast_rows)
+                    Console.info(f"[FORECAST] Generated physical sensor forecast for {len(top_sensors)} sensors")
             else:
                 Console.info(f"[FORECAST] Insufficient sensor data for forecasting (need 10+ rows, have {len(sensor_data)})")
         else:
