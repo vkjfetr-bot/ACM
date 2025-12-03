@@ -1228,6 +1228,9 @@ class OutputManager:
                         sql_df["EquipID"] = self.equip_id or 0
                     # OUT-17: Apply per-table required NOT NULL defaults with repair policy
                     sql_df, repair_info = self._apply_sql_required_defaults(sql_table, sql_df, allow_repair)
+                    # MED-02: Log what was repaired for observability
+                    if repair_info.get('repairs_needed'):
+                        Console.debug(f"[SCHEMA] Applied defaults to {sql_table}: {repair_info.get('missing_fields')}")
                     
                     # OUT-17: Block write if repairs needed but not allowed
                     if not allow_repair and repair_info['repairs_needed']:
@@ -1483,38 +1486,26 @@ class OutputManager:
                     cols_all = set(_get_table_columns(cursor_factory, table_name))
                     self._table_columns_cache[table_name] = cols_all
                     table_cols = cols_all
-            # NOTE: DELETE before INSERT removed - unnecessary since RunID is unique per run
-            # Each pipeline execution generates a new RunID, so no duplicate data exists
-            # Keeping this comment for historical context about the upsert pattern
-            # if "RunID" in df.columns and self.run_id and "RunID" in table_cols:
-            #     # Prefer scoping by (RunID, EquipID) when possible
-            #     if "EquipID" in df.columns and "EquipID" in table_cols and self.equip_id is not None:
-            #         rows_deleted = cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0))).rowcount
-            #         if rows_deleted > 0:
-            #             Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
-            #     else:
-            #         rows_deleted = cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,)).rowcount
-            #         if rows_deleted > 0:
-            #             Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}")
-
-            # RUL-UPSERT: Proactively delete existing rows for current RunID to avoid PK violations
+            # CRIT-01/HIGH-02: Standardize DELETE-before-INSERT for tables keyed by RunID
+            # Apply for all tables with RunID in schema, scoped by EquipID when available.
             try:
-                if table_name in { 'ACM_RUL_TS', 'ACM_RUL_Summary', 'ACM_RUL_Attribution' }:
-                    if 'RunID' in table_cols and self.run_id:
-                        if 'EquipID' in table_cols and self.equip_id is not None:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?",
-                                (self.run_id, int(self.equip_id or 0))
-                            ).rowcount
-                        else:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?",
-                                (self.run_id,)
-                            ).rowcount
-                        if rows_deleted and rows_deleted > 0:
-                            Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
+                if "RunID" in table_cols and self.run_id:
+                    if "EquipID" in table_cols and self.equip_id is not None:
+                        rows_deleted = cur.execute(
+                            f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?",
+                            (self.run_id, int(self.equip_id or 0))
+                        ).rowcount
+                    else:
+                        rows_deleted = cur.execute(
+                            f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?",
+                            (self.run_id,)
+                        ).rowcount
+                    if rows_deleted and rows_deleted > 0:
+                        Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
             except Exception as del_ex:
-                Console.warn(f"[OUTPUT] Pre-delete for {table_name} failed (RunID={self.run_id}, EquipID={self.equip_id}): {del_ex}")
+                Console.warn(f"[OUTPUT] Standard pre-delete for {table_name} failed: {del_ex}")
+
+            # Note: RUL tables are already covered by standardized pre-delete above.
 
             # only insert columns that actually exist in the table
             columns = [c for c in df.columns if c in table_cols]
@@ -1659,6 +1650,159 @@ class OutputManager:
         long["Source"] = source
         long["RunID"] = run_id
         return long
+
+    # ==================== MISSING ANALYTICS GENERATORS (MED-03..MED-09) ====================
+
+    def _generate_culprit_history(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
+        """Extract culprit sensors per episode with basic scoring.
+        Returns DataFrame suitable for ACM_CulpritHistory: RunID, EquipID, EpisodeID, Sensor, Contribution.
+        """
+        if episodes_df is None or len(episodes_df) == 0:
+            return pd.DataFrame(columns=["RunID","EquipID","EpisodeID","Sensor","Contribution"])  
+        rows = []
+        for i, ep in episodes_df.iterrows():
+            ep_id = ep.get("EpisodeID", i)
+            sensors = ep.get("CulpritSensors") or ep.get("Sensors") or []
+            if isinstance(sensors, str):
+                try:
+                    sensors = [s.strip() for s in sensors.split(',') if s.strip()]
+                except Exception:
+                    sensors = []
+            for s in sensors:
+                rows.append({
+                    "RunID": self.run_id,
+                    "EquipID": int(self.equip_id or 0),
+                    "EpisodeID": int(ep_id),
+                    "Sensor": str(s),
+                    "Contribution": float(ep.get("PeakZ", 0.0))
+                })
+        return pd.DataFrame(rows)
+
+    def _generate_episode_metrics(self, episodes_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute simple episode-level metrics: duration, peak_z, area.
+        Returns DataFrame for ACM_EpisodeMetrics.
+        """
+        if episodes_df is None or len(episodes_df) == 0:
+            return pd.DataFrame(columns=["RunID","EquipID","EpisodeID","DurationMinutes","PeakZ","Area"])
+        out = []
+        for i, ep in episodes_df.iterrows():
+            start = pd.to_datetime(ep.get("start_timestamp") or ep.get("StartTime"), errors="coerce")
+            end = pd.to_datetime(ep.get("end_timestamp") or ep.get("EndTime"), errors="coerce")
+            dur_min = float(((end - start).total_seconds()/60.0) if (isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp)) else 0.0)
+            out.append({
+                "RunID": self.run_id,
+                "EquipID": int(self.equip_id or 0),
+                "EpisodeID": int(ep.get("EpisodeID", i)),
+                "DurationMinutes": dur_min,
+                "PeakZ": float(ep.get("PeakZ", 0.0)),
+                "Area": float(ep.get("Area", 0.0)),
+            })
+        return pd.DataFrame(out)
+
+    def _generate_episode_diagnostics(self, episodes_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Create per-episode diagnostics rows with timestamps and severity label.
+        Returns DataFrame for ACM_EpisodeDiagnostics.
+        """
+        cols = ["RunID","EquipID","EpisodeID","PeakTimestamp","Severity","PeakZ"]
+        if episodes_df is None or len(episodes_df) == 0:
+            return pd.DataFrame(columns=cols)
+        rows = []
+        for i, ep in episodes_df.iterrows():
+            ts = pd.to_datetime(ep.get("peak_timestamp") or ep.get("PeakTimestamp"), errors="coerce")
+            peak_z = float(ep.get("PeakZ", 0.0))
+            severity = "CRITICAL" if peak_z >= 6 else ("HIGH" if peak_z >= 4 else ("MEDIUM" if peak_z >= 2 else "LOW"))
+            rows.append({
+                "RunID": self.run_id,
+                "EquipID": int(self.equip_id or 0),
+                "EpisodeID": int(ep.get("EpisodeID", i)),
+                "PeakTimestamp": ts,
+                "Severity": severity,
+                "PeakZ": peak_z,
+            })
+        return pd.DataFrame(rows)
+
+    def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame) -> pd.DataFrame:
+        """Melt OMR contributions wide DataFrame to long format.
+        Expected input columns end with '_contrib'; outputs columns: Timestamp, Sensor, Contribution.
+        """
+        if omr_contributions is None or len(omr_contributions) == 0:
+            return pd.DataFrame(columns=["Timestamp","Sensor","Contribution","RunID","EquipID"])
+        df = omr_contributions.copy()
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, errors="coerce")
+        df = df.reset_index().rename(columns={"index":"Timestamp"})
+        value_cols = [c for c in df.columns if c.endswith("_contrib")] or [c for c in df.columns if c not in ["Timestamp"]]
+        long = df.melt(id_vars=["Timestamp"], var_name="Sensor", value_name="Contribution")
+        long["Sensor"] = long["Sensor"].astype(str).str.replace("_contrib","", regex=False)
+        long["RunID"] = self.run_id
+        long["EquipID"] = int(self.equip_id or 0)
+        return long
+
+    def _generate_regime_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute simple regime statistics: counts and dwell (approx by consecutive runs).
+        Returns DataFrame for ACM_RegimeStats.
+        """
+        if scores_df is None or len(scores_df) == 0 or "regime_label" not in scores_df.columns:
+            return pd.DataFrame(columns=["RunID","EquipID","RegimeLabel","Count"])
+        regimes = pd.to_numeric(scores_df["regime_label"], errors="coerce")
+        regimes = regimes.dropna().astype(int)
+        counts = regimes.value_counts().sort_index()
+        out = []
+        for label, cnt in counts.items():
+            out.append({"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "RegimeLabel": int(label), "Count": int(cnt)})
+        return pd.DataFrame(out)
+
+    def _generate_daily_fused_profile(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Aggregate fused health by hour x day-of-week for profiling.
+        Returns DataFrame for ACM_DailyFusedProfile: Hour, DOW, MeanFusedZ.
+        """
+        if scores_df is None or len(scores_df) == 0 or "fused" not in scores_df.columns:
+            return pd.DataFrame(columns=["RunID","EquipID","Hour","DOW","MeanFusedZ"])
+        idx = pd.to_datetime(scores_df.index, errors="coerce")
+        df = pd.DataFrame({"Hour": idx.hour, "DOW": idx.dayofweek, "FusedZ": pd.to_numeric(scores_df["fused"], errors="coerce")})
+        grp = df.groupby(["Hour","DOW"], dropna=True)["FusedZ"].mean().reset_index().rename(columns={"FusedZ":"MeanFusedZ"})
+        grp["RunID"] = self.run_id
+        grp["EquipID"] = int(self.equip_id or 0)
+        return grp[["RunID","EquipID","Hour","DOW","MeanFusedZ"]]
+
+    def _generate_health_histogram(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Bin health index into 10-point buckets (0-100).
+        Returns DataFrame for ACM_HealthHistogram: BinStart, BinEnd, Count.
+        """
+        if scores_df is None or len(scores_df) == 0:
+            return pd.DataFrame(columns=["RunID","EquipID","BinStart","BinEnd","Count"])
+        fused = pd.to_numeric(scores_df.get("fused"), errors="coerce")
+        health = 100.0 / (1.0 + fused**2) if fused is not None else pd.Series([], dtype=float)
+        bins = list(range(0, 101, 10))
+        cats = pd.cut(health, bins=bins, include_lowest=True, right=False)
+        counts = cats.value_counts().sort_index()
+        rows = []
+        for interval, cnt in counts.items():
+            try:
+                start = int(interval.left)
+                end = int(interval.right)
+            except Exception:
+                start, end = 0, 0
+            rows.append({"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "BinStart": start, "BinEnd": end, "Count": int(cnt)})
+        return pd.DataFrame(rows)
+
+    def _generate_alert_age(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute time since first alert crossing based on fused z threshold (default 3.0).
+        Returns DataFrame for ACM_AlertAge with a single row per run.
+        """
+        threshold = 3.0
+        cols = ["RunID","EquipID","FirstAlert","LastAlert","AlertAgeHours"]
+        if scores_df is None or len(scores_df) == 0 or "fused" not in scores_df.columns:
+            return pd.DataFrame([{c: None for c in cols}])
+        idx = pd.to_datetime(scores_df.index, errors="coerce")
+        fused = pd.to_numeric(scores_df["fused"], errors="coerce")
+        alert_mask = fused >= threshold
+        if not alert_mask.any():
+            return pd.DataFrame([{"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "FirstAlert": None, "LastAlert": None, "AlertAgeHours": 0.0}])
+        first_ts = idx[alert_mask].min()
+        last_ts = idx[alert_mask].max()
+        age_hours = float((last_ts - first_ts).total_seconds()/3600.0) if (isinstance(first_ts, pd.Timestamp) and isinstance(last_ts, pd.Timestamp)) else 0.0
+        return pd.DataFrame([{"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "FirstAlert": first_ts, "LastAlert": last_ts, "AlertAgeHours": age_hours}])
 
     # ==================== SPECIALIZED SQL WRITE FUNCTIONS ====================
     # These replace all the scattered write functions from data_io.py, storage.py, 
