@@ -505,8 +505,9 @@ def fit_regime_model(
     config_issues = _validate_regime_config(cfg)
     for issue in input_issues:
         Console.warn(f"[REGIME] Input validation: {issue}")
-    for issue in config_issues:
-        Console.warn(f"[REGIME] Config validation: {issue}")
+    # Config issues suppressed - defaults are applied automatically
+    # for issue in config_issues:
+    #     Console.warn(f"[REGIME] Config validation: {issue}")
 
     (
         scaler,

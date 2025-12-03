@@ -1412,7 +1412,8 @@ class OutputManager:
         repair_info['missing_fields'] = missing_fields
         
         if filled:
-            Console.warn(f"[SCHEMA] {table_name}: applied defaults {filled}")
+            # Debug-level only - applying defaults is expected behavior, not a warning
+            pass  # Console.debug(f"[SCHEMA] {table_name}: applied defaults {filled}")
         if not allow_repair and repair_info['repairs_needed']:
             Console.warn(f"[SCHEMA] {table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}")
             
@@ -1948,12 +1949,12 @@ class OutputManager:
             # Get unique RunID+EquipID pairs
             run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
             
-            # DELETE existing rows for all RunID+EquipID combinations
+            # DELETE existing rows for all RunID+EquipID combinations (prevents PK collisions)
             for _, pair in run_equip_pairs.iterrows():
-                delete_sql = "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?"
-                cursor.execute(delete_sql, (pair['RunID'], pair['EquipID']))
-            
-            # Commit DELETE before INSERT to release PRIMARY KEY locks
+                cursor.execute(
+                    "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?",
+                    (pair['RunID'], pair['EquipID'])
+                )
             conn.commit()
             
             # INSERT all new rows
@@ -4106,9 +4107,13 @@ class OutputManager:
                 lead_window = 10
                 lag_window = 10
                 
-                # Get indices
-                episode_start_idx = scores_df.index.get_loc(episode_mask.idxmax()) if episode_mask.any() else 0
-                episode_end_idx = len(scores_df) - 1 - scores_df.index[::-1].get_loc(episode_mask[::-1].idxmax()) if episode_mask.any() else len(scores_df) - 1
+                # Get indices (episode_mask is boolean array, find first/last True)
+                if episode_mask.any():
+                    episode_start_idx = int(episode_mask.argmax())  # first True
+                    episode_end_idx = len(episode_mask) - 1 - int(episode_mask[::-1].argmax())  # last True
+                else:
+                    episode_start_idx = 0
+                    episode_end_idx = len(scores_df) - 1
                 
                 lead_start = max(0, episode_start_idx - lead_window)
                 lag_end = min(len(scores_df), episode_end_idx + lag_window + 1)

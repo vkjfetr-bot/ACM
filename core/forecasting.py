@@ -216,36 +216,16 @@ def should_retrain(
         if rmse > error_threshold:
             return True, f"Forecast accuracy degraded (RMSE={rmse:.2f} > {error_threshold})"
     
-    # Check drift (FOR-CODE-02: Non-fatal SQL query - warn and continue)
-    try:
-        cur = sql_client.cursor()
-        cur.execute("""
-            SELECT AVG(DriftValue) as AvgDrift
-            FROM (
-                SELECT TOP 5 DriftValue
-                FROM dbo.ACM_DriftMetrics
-                WHERE EquipID = ?
-                ORDER BY Timestamp DESC
-            ) recent
-        """, (equip_id,))
-        row = cur.fetchone()
-        cur.close()
-        
-        if row and row[0] is not None:
-            avg_drift = float(row[0])
-            if avg_drift > drift_threshold:
-                return True, f"Drift spike detected (avg={avg_drift:.2f} > {drift_threshold})"
-    except Exception as e:
-        # FOR-CODE-02: Non-fatal data condition - log and continue without drift check
-        Console.warn(f"[FORECAST] Failed to check drift: {e}")
+    # Drift check disabled - ACM_DriftMetrics table not yet implemented
+    # TODO: Enable when drift metrics table is created and populated
     
-    # Check anomaly energy spike (FOR-CODE-02: Non-fatal SQL query - warn and continue)
+    # Check anomaly energy spike using simpler aggregate (FOR-CODE-02: Non-fatal SQL query - warn and continue)
     try:
         cur = sql_client.cursor()
         cur.execute("""
             SELECT 
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY AnomalyEnergy) as P95,
-                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY AnomalyEnergy) as Median
+                MAX(AnomalyEnergy) as MaxEnergy,
+                AVG(AnomalyEnergy) as AvgEnergy
             FROM (
                 SELECT TOP 100 
                     SUM(POWER(CAST(fused AS FLOAT), 2)) as AnomalyEnergy
@@ -259,10 +239,10 @@ def should_retrain(
         cur.close()
         
         if row and row[0] is not None and row[1] is not None:
-            p95 = float(row[0])
-            median = float(row[1])
-            if median > 0 and p95 > energy_threshold * median:
-                return True, f"Anomaly energy spike (P95={p95:.2f} > {energy_threshold}x median)"
+            max_energy = float(row[0])
+            avg_energy = float(row[1])
+            if avg_energy > 0 and max_energy > energy_threshold * avg_energy:
+                return True, f"Anomaly energy spike (Max={max_energy:.2f} > {energy_threshold}x avg)"
     except Exception as e:
         # FOR-CODE-02: Non-fatal data condition - log and continue without energy check
         Console.warn(f"[FORECAST] Failed to check anomaly energy: {e}")
