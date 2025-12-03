@@ -1502,6 +1502,103 @@ def forecast_by_regime(
 
 
 # ============================================================================
+# P3-FIX-4.2: VAR for multi-sensor forecasting
+# ============================================================================
+
+def forecast_sensors_var(
+    sensor_df: pd.DataFrame,
+    horizon: int,
+    max_sensors: int = 10,
+    dt_hours: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Multivariate sensor forecast with cross-correlations using Vector Autoregression (VAR).
+    
+    P3-FIX-4.2: Captures inter-sensor dependencies for more realistic future trajectories.
+    
+    Args:
+        sensor_df: DataFrame with sensor columns (numeric only)
+        horizon: Forecast horizon in steps
+        max_sensors: Maximum number of sensors to include in VAR model
+        dt_hours: Time step in hours (for freq inference)
+    
+    Returns:
+        DataFrame with forecasted sensor values and confidence intervals
+        Columns: Timestamp, {sensor}_forecast, {sensor}_ci_lower, {sensor}_ci_upper for each sensor
+    
+    Logic:
+        - Select top sensors by variability (most changing sensors)
+        - Fit VAR model with AIC-selected lag order
+        - Generate multi-step forecast with proper covariance
+        - Return DataFrame with timestamps and per-sensor forecasts + CIs
+    
+    Fallback:
+        If VAR unavailable or fails, uses univariate AR(1) per sensor
+    """
+    if VAR is None:
+        Console.warn("[FORECAST] statsmodels.tsa.VAR not available; skipping VAR sensor forecast")
+        return pd.DataFrame()
+    
+    # Ensure sorted by index
+    sensor_df = sensor_df.sort_index()
+    
+    if sensor_df.empty or len(sensor_df) < 50:
+        Console.warn(f"[FORECAST] Insufficient data for VAR ({len(sensor_df)} < 50 rows)")
+        return pd.DataFrame()
+    
+    # Select top sensors by coefficient of variation (variability relative to mean)
+    variability = sensor_df.std() / (sensor_df.mean().abs() + 1e-6)
+    top_sensors = variability.nlargest(min(max_sensors, len(variability))).index.tolist()
+    
+    if not top_sensors:
+        Console.warn("[FORECAST] No variable sensors found for VAR")
+        return pd.DataFrame()
+    
+    # Prepare data (drop NaNs - VAR requires complete cases)
+    data = sensor_df[top_sensors].dropna()
+    
+    if len(data) < 50:
+        Console.warn(f"[FORECAST] Insufficient complete data for VAR after dropna ({len(data)} < 50)")
+        return pd.DataFrame()
+    
+    try:
+        # Fit VAR model with AIC-selected lag order (max 5 lags)
+        model = VAR(data)
+        results = model.fit(maxlags=5, ic="aic")
+        
+        # Generate forecast
+        fc = results.forecast(data.values[-results.k_ar:], steps=horizon)
+        
+        # Create forecast index
+        last_timestamp = data.index[-1]
+        freq_inferred = data.index.freq or pd.infer_freq(data.index) or f"{dt_hours}H"
+        fc_index = pd.date_range(
+            start=last_timestamp + pd.Timedelta(hours=dt_hours),
+            periods=horizon,
+            freq=freq_inferred
+        )
+        
+        # Build forecast DataFrame with CIs
+        fc_df = pd.DataFrame(fc, index=fc_index, columns=top_sensors)
+        
+        # Add confidence intervals per sensor (using residual std)
+        for col in top_sensors:
+            std_res = float(results.resid[col].std()) if col in results.resid.columns else 1.0
+            fc_df[f"{col}_ci_lower"] = fc_df[col] - 1.96 * std_res
+            fc_df[f"{col}_ci_upper"] = fc_df[col] + 1.96 * std_res
+        
+        # Reset index to include Timestamp column
+        fc_df = fc_df.reset_index().rename(columns={"index": "Timestamp"})
+        
+        Console.info(f"[FORECAST] VAR forecast generated for {len(top_sensors)} sensors (lag={results.k_ar}, horizon={horizon})")
+        return fc_df
+        
+    except Exception as e:
+        Console.warn(f"[FORECAST] VAR model failed: {e}, falling back to univariate forecasts")
+        return pd.DataFrame()
+
+
+# ============================================================================
 # Enhanced Forecasting (SQL-backed)
 # ============================================================================
 
@@ -2269,6 +2366,7 @@ def run_enhanced_forecasting_sql(
                 sensor_df_num = pd.DataFrame()
             sensor_min_global = forecast_cfg.get("sensor_min", None)
             sensor_max_global = forecast_cfg.get("sensor_max", None)
+            sensor_forecast_method = forecast_cfg.get("sensor_forecast_method", "linear")  # P3-FIX-4.2: "linear" or "var"
             
             if not sensor_df_num.empty and len(sensor_df_num) >= 10:  # Need minimum history
                 # Calculate sensor variability (standard deviation) to identify changing sensors
@@ -2285,77 +2383,142 @@ def run_enhanced_forecasting_sql(
                 # Sort by variability - sensors showing most change
                 top_sensors = sorted(sensor_variability.items(), key=lambda x: x[1], reverse=True)[:10]
                 
-                # Generate forecast for top changing sensors
-                sensor_forecast_rows = []
-                sensor_state_details: List[Dict[str, Any]] = []
-                max_sensor_slope = float(forecast_cfg.get("max_sensor_slope", 10.0))
-                # Optional engineering bounds per sensor name
-                sensor_bounds = forecast_cfg.get("sensor_bounds", {}) or {}
-                for sensor_name, variability in top_sensors:
-                    # Get recent trend
-                    recent_values = sensor_df_num[sensor_name].tail(24).dropna()
-                    if len(recent_values) >= 5:
-                        # Calculate simple linear trend
-                        x = np.arange(len(recent_values))
-                        y = recent_values.values
-                        trend = np.polyfit(x, y, 1)[0] if len(x) > 1 else 0.0
-                        trend = float(np.clip(trend, -max_sensor_slope, max_sensor_slope))
-                        
-                        current_val = recent_values.iloc[-1]
-                        resid_std = float(np.std(y - (trend * x + (y[0] if len(y) else 0)))) if len(y) else 0.0
-                        bound_min = sensor_bounds.get(sensor_name, {}).get("min", None)
-                        bound_max = sensor_bounds.get(sensor_name, {}).get("max", None)
-                        
-                        for h, ts in enumerate(forecast_timestamps, 1):
-                            # Linear extrapolation from current value
-                            forecast_val = current_val + (trend * h)
-                            if bound_min is not None:
-                                forecast_val = max(bound_min, forecast_val)
-                            if bound_max is not None:
-                                forecast_val = min(bound_max, forecast_val)
-                            if sensor_min_global is not None:
-                                forecast_val = max(sensor_min_global, forecast_val)
-                            if sensor_max_global is not None:
-                                forecast_val = min(sensor_max_global, forecast_val)
-                            ci_low = forecast_val - resid_std if resid_std else None
-                            ci_up = forecast_val + resid_std if resid_std else None
-                            for clamp_val, setter in [(sensor_min_global, "low"), (sensor_max_global, "high"), (bound_min, "low"), (bound_max, "high")]:
-                                if clamp_val is not None:
-                                    if setter == "low" and ci_low is not None:
-                                        ci_low = max(clamp_val, ci_low)
-                                    if setter == "high" and ci_up is not None:
-                                        ci_up = min(clamp_val, ci_up)
-                            sensor_forecast_rows.append({
-                                "RunID": run_id,
-                                "EquipID": equip_id,
-                                "Timestamp": ts,
-                                "SensorName": sensor_name,  # Actual sensor like "Motor Current", "Bearing Temperature"
-                                "ForecastValue": forecast_val,
-                                "CI_Lower": ci_low,
-                                "CI_Upper": ci_up,
-                                "CiLower": ci_low,
-                                "CiUpper": ci_up,
-                                "ForecastStd": resid_std if resid_std else None,
-                                "Method": "LinearTrend",
-                                "RegimeLabel": regime_label,
-                            })
-                        sensor_state_details.append({
-                            "name": sensor_name,
-                            "variability": float(variability),
-                            "trend": float(trend),
-                            "resid_std": float(resid_std),
-                            "bound_min": bound_min,
-                            "bound_max": bound_max,
-                        })
+                # P3-FIX-4.2: Try VAR multivariate forecast if enabled
+                if sensor_forecast_method == "var" and len(top_sensors) >= 3:
+                    var_fc = forecast_sensors_var(
+                        sensor_df=sensor_df_num,
+                        horizon=len(forecast_timestamps),
+                        max_sensors=min(10, len(top_sensors)),
+                        dt_hours=dt_hours,
+                    )
+                    if not var_fc.empty:
+                        # Convert VAR forecast to SQL rows
+                        sensor_forecast_rows = []
+                        sensor_state_details: List[Dict[str, Any]] = []
+                        sensor_bounds = forecast_cfg.get("sensor_bounds", {}) or {}
+                        for sensor_name, _ in top_sensors:
+                            if sensor_name in var_fc.columns:
+                                fc_vals = var_fc[sensor_name].values
+                                ci_lower_vals = var_fc[f"{sensor_name}_ci_lower"].values if f"{sensor_name}_ci_lower" in var_fc.columns else None
+                                ci_upper_vals = var_fc[f"{sensor_name}_ci_upper"].values if f"{sensor_name}_ci_upper" in var_fc.columns else None
+                                bound_min = sensor_bounds.get(sensor_name, {}).get("min", None)
+                                bound_max = sensor_bounds.get(sensor_name, {}).get("max", None)
+                                for h, ts in enumerate(forecast_timestamps):
+                                    fval = float(fc_vals[h]) if h < len(fc_vals) else None
+                                    if fval is not None:
+                                        if bound_min is not None: fval = max(bound_min, fval)
+                                        if bound_max is not None: fval = min(bound_max, fval)
+                                        if sensor_min_global is not None: fval = max(sensor_min_global, fval)
+                                        if sensor_max_global is not None: fval = min(sensor_max_global, fval)
+                                    ci_low = float(ci_lower_vals[h]) if ci_lower_vals is not None and h < len(ci_lower_vals) else None
+                                    ci_up = float(ci_upper_vals[h]) if ci_upper_vals is not None and h < len(ci_upper_vals) else None
+                                    if ci_low is not None and bound_min is not None: ci_low = max(bound_min, ci_low)
+                                    if ci_up is not None and bound_max is not None: ci_up = min(bound_max, ci_up)
+                                    sensor_forecast_rows.append({
+                                        "RunID": run_id,
+                                        "EquipID": equip_id,
+                                        "Timestamp": ts,
+                                        "SensorName": sensor_name,
+                                        "ForecastValue": fval,
+                                        "CI_Lower": ci_low,
+                                        "CI_Upper": ci_up,
+                                        "CiLower": ci_low,
+                                        "CiUpper": ci_up,
+                                        "ForecastStd": None,
+                                        "Method": "VAR",
+                                        "RegimeLabel": regime_label,
+                                    })
+                                sensor_state_details.append({
+                                    "name": sensor_name,
+                                    "variability": float(sensor_variability.get(sensor_name, 0.0)),
+                                    "method": "VAR",
+                                    "bound_min": bound_min,
+                                    "bound_max": bound_max,
+                                })
+                        sensor_state = {
+                            "top_sensors": sensor_state_details,
+                            "method": "VAR",
+                            "sensor_min": sensor_min_global,
+                            "sensor_max": sensor_max_global,
+                        }
+                        sensor_forecast_df = pd.DataFrame(sensor_forecast_rows)
+                        Console.info(f"[FORECAST] Generated VAR sensor forecast for {len(top_sensors)} sensors")
+                    else:
+                        Console.warn("[FORECAST] VAR failed; falling back to linear trend")
+                        sensor_forecast_method = "linear"
                 
-                sensor_state = {
-                    "top_sensors": sensor_state_details,
-                    "max_sensor_slope": max_sensor_slope,
-                    "sensor_min": sensor_min_global,
-                    "sensor_max": sensor_max_global,
-                }
-                sensor_forecast_df = pd.DataFrame(sensor_forecast_rows)
-                Console.info(f"[FORECAST] Generated physical sensor forecast for {len(top_sensors)} sensors")
+                # Generate forecast for top changing sensors (linear fallback)
+                if sensor_forecast_method == "linear":
+                    sensor_forecast_rows = []
+                    sensor_state_details: List[Dict[str, Any]] = []
+                    max_sensor_slope = float(forecast_cfg.get("max_sensor_slope", 10.0))
+                    sensor_bounds = forecast_cfg.get("sensor_bounds", {}) or {}
+                    for sensor_name, variability in top_sensors:
+                        # Get recent trend
+                        recent_values = sensor_df_num[sensor_name].tail(24).dropna()
+                        if len(recent_values) >= 5:
+                            # Calculate simple linear trend
+                            x = np.arange(len(recent_values))
+                            y = recent_values.values
+                            trend = np.polyfit(x, y, 1)[0] if len(x) > 1 else 0.0
+                            trend = float(np.clip(trend, -max_sensor_slope, max_sensor_slope))
+                            
+                            current_val = recent_values.iloc[-1]
+                            resid_std = float(np.std(y - (trend * x + (y[0] if len(y) else 0)))) if len(y) else 0.0
+                            bound_min = sensor_bounds.get(sensor_name, {}).get("min", None)
+                            bound_max = sensor_bounds.get(sensor_name, {}).get("max", None)
+                            
+                            for h, ts in enumerate(forecast_timestamps, 1):
+                                # Linear extrapolation from current value
+                                forecast_val = current_val + (trend * h)
+                                if bound_min is not None:
+                                    forecast_val = max(bound_min, forecast_val)
+                                if bound_max is not None:
+                                    forecast_val = min(bound_max, forecast_val)
+                                if sensor_min_global is not None:
+                                    forecast_val = max(sensor_min_global, forecast_val)
+                                if sensor_max_global is not None:
+                                    forecast_val = min(sensor_max_global, forecast_val)
+                                ci_low = forecast_val - resid_std if resid_std else None
+                                ci_up = forecast_val + resid_std if resid_std else None
+                                for clamp_val, setter in [(sensor_min_global, "low"), (sensor_max_global, "high"), (bound_min, "low"), (bound_max, "high")]:
+                                    if clamp_val is not None:
+                                        if setter == "low" and ci_low is not None:
+                                            ci_low = max(clamp_val, ci_low)
+                                        if setter == "high" and ci_up is not None:
+                                            ci_up = min(clamp_val, ci_up)
+                                sensor_forecast_rows.append({
+                                    "RunID": run_id,
+                                    "EquipID": equip_id,
+                                    "Timestamp": ts,
+                                    "SensorName": sensor_name,  # Actual sensor like "Motor Current", "Bearing Temperature"
+                                    "ForecastValue": forecast_val,
+                                    "CI_Lower": ci_low,
+                                    "CI_Upper": ci_up,
+                                    "CiLower": ci_low,
+                                    "CiUpper": ci_up,
+                                    "ForecastStd": resid_std if resid_std else None,
+                                    "Method": "LinearTrend",
+                                    "RegimeLabel": regime_label,
+                                })
+                            sensor_state_details.append({
+                                "name": sensor_name,
+                                "variability": float(variability),
+                                "trend": float(trend),
+                                "resid_std": float(resid_std),
+                                "bound_min": bound_min,
+                                "bound_max": bound_max,
+                            })
+                    
+                    sensor_state = {
+                        "top_sensors": sensor_state_details,
+                        "max_sensor_slope": max_sensor_slope,
+                        "sensor_min": sensor_min_global,
+                        "sensor_max": sensor_max_global,
+                        "method": "LinearTrend",
+                    }
+                    sensor_forecast_df = pd.DataFrame(sensor_forecast_rows)
+                    Console.info(f"[FORECAST] Generated physical sensor forecast for {len(top_sensors)} sensors")
             else:
                 Console.info(f"[FORECAST] Insufficient sensor data for forecasting (need 10+ rows, have {len(sensor_data)})")
         else:
