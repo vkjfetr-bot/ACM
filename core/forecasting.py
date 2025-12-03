@@ -49,7 +49,11 @@ import pandas as pd
 from scipy.stats import norm
 from scipy.optimize import minimize
 from sklearn.model_selection import TimeSeriesSplit
-from statsmodels.tsa.api import VAR
+
+try:
+    from statsmodels.tsa.api import VAR
+except ImportError:
+    VAR = None
 
 from utils.logger import Console  # type: ignore
 # FOR-DQ-02: Use centralized timestamp normalization
@@ -60,6 +64,11 @@ from core import rul_engine  # Unified RUL estimation engine
 from core.model_persistence import ForecastState, save_forecast_state, load_forecast_state  # type: ignore
 from datetime import datetime, timedelta
 import hashlib
+try:
+    # Prefer using the platform's regimes module for labels/behavior
+    from core import regimes as _regimes  # type: ignore
+except Exception:
+    _regimes = None
 
 
 # ============================================================================
@@ -78,6 +87,174 @@ MIN_FORECAST_SAMPLES = 20
 # Controls how quickly hazard probability transitions between forecast updates
 # 12 hours provides smooth transitions without excessive lag
 BLEND_TAU_HOURS = 12.0
+
+# Bootstrap defaults (enabled by default; can be overridden per equipment)
+BOOTSTRAP_ENABLED_DEFAULT = True
+BOOTSTRAP_CI_LEVEL = 0.95
+BOOTSTRAP_N_REPLICATES_DEFAULT = 500
+
+def _compute_auto_block_size(dt_hours: float, history_len: int) -> int:
+    """Auto-compute block size based on data cadence and history.
+    Targets ~1 day of samples, clamped to safe bounds.
+    """
+    try:
+        if not np.isfinite(dt_hours) or dt_hours <= 0:
+            dt_hours = 1.0
+        samples_per_day = max(int(round(24.0 / dt_hours)), 1)
+        block = max(8, min(samples_per_day, 240))
+        if history_len >= 64:
+            block = min(block, max(8, history_len // 6))
+        else:
+            block = min(block, max(4, history_len // 2))
+        return max(4, int(block))
+    except Exception:
+        return 24
+
+# ============================================================================
+# P0-1.4: Monte Carlo RUL Uncertainty Propagation
+# ============================================================================
+def _estimate_rul_monte_carlo(
+    forecast_mean: np.ndarray,
+    forecast_std: np.ndarray,
+    failure_threshold: float,
+    dt_hours: float,
+    n_simulations: int = 1000
+) -> Dict[str, float]:
+    """
+    Monte Carlo RUL estimation with full uncertainty quantification.
+    
+    Generates n_simulations forecast trajectories by sampling from 
+    N(forecast_mean, forecast_std) and computes distribution of 
+    threshold-crossing times.
+    
+    Args:
+        forecast_mean: Expected health values per horizon
+        forecast_std: Standard deviation per horizon
+        failure_threshold: Health level defining failure
+        dt_hours: Time step size (hours)
+        n_simulations: Number of Monte Carlo samples
+    
+    Returns:
+        Dictionary with: rul_median, rul_mean, rul_p10, rul_p90, rul_std,
+        failure_probability (fraction crossing threshold within forecast horizon)
+    """
+    n_steps = len(forecast_mean)
+    if n_steps == 0:
+        return {
+            "rul_median_hours": float("nan"),
+            "rul_mean_hours": float("nan"),
+            "rul_p10_hours": float("nan"),
+            "rul_p90_hours": float("nan"),
+            "rul_std_hours": float("nan"),
+            "failure_probability": 0.0,
+        }
+    
+    rul_samples: List[float] = []
+    
+    for _ in range(n_simulations):
+        # Generate one trajectory
+        trajectory = np.random.normal(forecast_mean, forecast_std)
+        
+        # Find first threshold crossing
+        crossings = np.where(trajectory < failure_threshold)[0]
+        
+        if len(crossings) > 0:
+            rul_steps = float(crossings[0])
+        else:
+            rul_steps = float(n_steps + 10)  # Censor: beyond forecast horizon
+        
+        rul_samples.append(rul_steps * dt_hours)  # Convert steps→hours
+    
+    rul_arr = np.asarray(rul_samples, dtype=float)
+    
+    return {
+        "rul_median_hours": float(np.median(rul_arr)),
+        "rul_mean_hours": float(np.mean(rul_arr)),
+        "rul_p10_hours": float(np.percentile(rul_arr, 10)),
+        "rul_p90_hours": float(np.percentile(rul_arr, 90)),
+        "rul_std_hours": float(np.std(rul_arr)),
+        "failure_probability": float(np.mean(rul_arr <= n_steps * dt_hours)),
+    }
+
+# ============================================================================
+# P0-1.3: Cumulative Probability → Hazard Rate Conversion
+# ============================================================================
+def _cumulative_prob_to_hazard(
+    cum_prob: np.ndarray,
+    dt_hours_vec: np.ndarray
+) -> np.ndarray:
+    """
+    Convert cumulative failure probability F(t) to discrete hazard rate λ(t).
+    
+    Mathematical derivation:
+    - Survival: S(t) = 1 - F(t)
+    - Hazard: λ(t) = [F(t+Δt) - F(t)] / [S(t) * Δt]
+    - For discrete intervals: λ[i] = [F[i] - F[i-1]] / [S[i-1] * dt[i]]
+    
+    Args:
+        cum_prob: Cumulative failure probabilities (monotonic, 0→1)
+        dt_hours_vec: Time intervals (hours) for each step
+    
+    Returns:
+        Discrete hazard rates (λ ≥ 0, sentinel 10.0 for near-certain failure)
+    """
+    F = np.asarray(cum_prob, dtype=float).copy()
+    n = len(F)
+    
+    # Enforce physical constraints
+    F = np.maximum.accumulate(F)  # Monotonic
+    F = np.clip(F, 0.0, 1.0)      # Valid probabilities
+    
+    lambda_rate = np.zeros(n, dtype=float)
+    
+    if n == 0:
+        return lambda_rate
+    
+    # First point: treat as hazard over first interval
+    if F[0] < 1.0:
+        lambda_rate[0] = -np.log(max(1e-9, 1.0 - F[0])) / max(1e-6, dt_hours_vec[0])
+    else:
+        lambda_rate[0] = 10.0  # Sentinel for near-certain failure
+    
+    # Subsequent points: discrete hazard from survival function
+    for i in range(1, n):
+        dF = F[i] - F[i - 1]
+        S_prev = 1.0 - F[i - 1]
+        
+        if S_prev > 1e-9 and dt_hours_vec[i] > 1e-6:
+            lambda_rate[i] = dF / (S_prev * dt_hours_vec[i])
+        else:
+            lambda_rate[i] = 10.0  # Saturated failure probability
+    
+    return np.clip(lambda_rate, 0.0, 10.0)  # Physical bounds
+
+def _bootstrap_ci_from_noise(values: np.ndarray, horizon_stds: np.ndarray, n_boot: int = BOOTSTRAP_N_REPLICATES_DEFAULT,
+                              ci: float = BOOTSTRAP_CI_LEVEL, health_min: float = 0.0, health_max: float = 100.0) -> tuple[list, list]:
+    """Compute bootstrap CIs by resampling Gaussian noise per horizon using provided stds.
+    This approximates parameter/residual uncertainty without heavy re-fitting.
+    """
+    H = len(values)
+    if H == 0:
+        return [], []
+    alpha = 1.0 - ci
+    lo_q = 100.0 * (alpha / 2.0)
+    hi_q = 100.0 * (1.0 - alpha / 2.0)
+    ci_lower, ci_upper = [], []
+    for h in range(H):
+        std_h = float(horizon_stds[h]) if h < len(horizon_stds) else float(horizon_stds[-1])
+        draws = np.random.normal(loc=0.0, scale=max(std_h, 1e-6), size=n_boot)
+        perturbed = values[h] + draws
+        lo = float(np.percentile(perturbed, lo_q))
+        hi = float(np.percentile(perturbed, hi_q))
+        lo = max(health_min, lo)
+        hi = min(health_max, hi)
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            z = norm.ppf(1.0 - alpha / 2.0)
+            lo = max(health_min, values[h] - z * std_h)
+            hi = min(health_max, values[h] + z * std_h)
+        ci_lower.append(lo)
+        ci_upper.append(hi)
+    return ci_lower, ci_upper
 
 # Default exponential smoothing alpha for hazard time series
 # Lower values (0.1-0.3) provide smoother hazard curves with less noise
@@ -736,8 +913,8 @@ def smooth_failure_probability_hazard(
     dt_vec = np.insert(dt_vec, 0, dt_vec[0] if dt_vec.size else dt_hours)
     
     # P0-FIX-1.3: Convert cumulative probability to hazard rate using correct formula
-    # Use cumulative_prob_to_hazard helper (incremental dF / S_prev approach)
-    lambda_raw_np = cumulative_prob_to_hazard(new_probability_series, dt_vec)
+    # Use _cumulative_prob_to_hazard helper (incremental dF / S_prev approach)
+    lambda_raw_np = _cumulative_prob_to_hazard(new_probability_series.to_numpy(), dt_vec)
     df_result["HazardRaw"] = lambda_raw_np
     
     # EWMA smoothing with previous baseline
@@ -1398,13 +1575,20 @@ def run_enhanced_forecasting_sql(
         return {"tables": {}, "metrics": {}}
 
     regime_label = None
-    for cand in ("regime_label", "regime"):
-        if cand in df_scores.columns:
-            last_val = df_scores[cand].dropna()
-            if not last_val.empty:
-                regime_label = str(last_val.iloc[-1])
-            df_scores = df_scores.drop(columns=[cand], errors="ignore")
-            break
+    # Prefer regime inference via core.regimes if available
+    try:
+        if _regimes is not None and hasattr(_regimes, "get_current_regime"):
+            regime_label = str(_regimes.get_current_regime(df_scores=df_scores, df_health=df_health))
+    except Exception as _e:
+        Console.warn(f"[ENHANCED_FORECAST] Regime inference failed: {_e}; falling back to score columns")
+    if not regime_label:
+        for cand in ("regime_label", "regime"):
+            if cand in df_scores.columns:
+                last_val = df_scores[cand].dropna()
+                if not last_val.empty:
+                    regime_label = str(last_val.iloc[-1])
+                df_scores = df_scores.drop(columns=[cand], errors="ignore")
+                break
     
     # --- FORECAST-STATE-02: Conditional retraining check ---
     hash_enabled = bool(forecast_cfg.get("enable_hash_check", not enable_continuous))
@@ -1472,7 +1656,8 @@ def run_enhanced_forecasting_sql(
         
         # Initialize Holt's linear trend components
         level = float(health_values.iloc[0])
-        # P0-FIX-1.1: Initial trend must be per-hour (divide by dt_hours)
+        # P0-FIX-1.1: Initial trend MUST be per-hour (divide by dt_hours)
+        # For 30-min data: (val[1] - val[0]) / 0.5 gives hourly rate
         trend = float(health_values.iloc[1] - health_values.iloc[0]) / dt_hours if n > 1 else 0.0
         # Warm-start from previous smoothing params when available and no retrain requested
         if not retrain_needed and prev_smoothing_params:
@@ -1539,17 +1724,39 @@ def run_enhanced_forecasting_sql(
             forecast_val = level + h * trend
             forecast_val = max(health_min, min(health_max, forecast_val))  # Clamp to configured scale
             # P0-FIX-1.2: Correct variance multiplier for Holt's Linear Trend
-            # Formula: 1 + (h-1) * [α² + αβh + β²h(h+1)/2]
+            # Formula from Hyndman & Athanasopoulos: 1 + (h-1) * [α² + αβh + β²h(h+1)/2]
+            # This accounts for level and trend uncertainty accumulation
             if h <= 1:
                 var_mult = 1.0
             else:
                 var_mult = 1.0 + (h - 1) * (alpha**2 + alpha * beta * h + beta**2 * h * (h + 1) / 2)
-            horizon_std = std_error * np.sqrt(var_mult)
-            ci_width = 1.96 * horizon_std
+            horizon_std = std_error * np.sqrt(max(var_mult, 1.0))  # Guard against numerical issues
             forecast_values.append(forecast_val)
             forecast_stds.append(horizon_std)
+            # Default analytic CI; will be replaced below if bootstrap enabled
+            ci_width = 1.96 * horizon_std
             ci_lower.append(max(health_min, forecast_val - ci_width))
             ci_upper.append(min(health_max, forecast_val + ci_width))
+
+        # Optional: Bootstrap CI enabled by default, with per-equipment override via config
+        enable_bootstrap = bool(forecast_cfg.get("enable_bootstrap_ci", BOOTSTRAP_ENABLED_DEFAULT))
+        if enable_bootstrap and len(forecast_values) > 0:
+            try:
+                n_boot = int(forecast_cfg.get("bootstrap_n", BOOTSTRAP_N_REPLICATES_DEFAULT))
+                b_lo, b_hi = _bootstrap_ci_from_noise(
+                    np.asarray(forecast_values, dtype=float),
+                    np.asarray(forecast_stds, dtype=float),
+                    n_boot=n_boot,
+                    ci=float(forecast_cfg.get("bootstrap_ci", BOOTSTRAP_CI_LEVEL)),
+                    health_min=health_min,
+                    health_max=health_max,
+                )
+                if len(b_lo) == len(ci_lower):
+                    ci_lower = b_lo
+                    ci_upper = b_hi
+                    Console.info(f"[FORECAST] Bootstrap CI applied (n={n_boot})")
+            except Exception as _e:
+                Console.warn(f"[FORECAST] Bootstrap CI failed: {_e}; using analytic CI")
         
         # Build health forecast DataFrame
         health_forecast_df = pd.DataFrame({
