@@ -283,10 +283,11 @@ class SQLBatchRunner:
 
     def _delete_models_for_equip(self, equip_id: int) -> None:
         """
-        Development helper: delete existing models for an equipment from
-        ModelRegistry so a coldstart can truly rebuild from scratch.
+        Delete existing models for an equipment from SQL ModelRegistry
+        so coldstart truly rebuilds from scratch (SQL-ONLY MODE).
         """
         try:
+            # Delete from SQL ModelRegistry
             with self._get_sql_connection() as conn:
                 cur = conn.cursor()
                 cur.execute(
@@ -294,8 +295,10 @@ class SQLBatchRunner:
                     "DELETE FROM dbo.ModelRegistry WHERE EquipID = ?",
                     (equip_id,),
                 )
+                deleted_count = cur.rowcount
                 conn.commit()
-            Console.info(f"[DEV] Deleted existing models from ModelRegistry for EquipID={equip_id}", equip_id=equip_id)
+            Console.info(f"[RESET] Deleted {deleted_count} models from SQL ModelRegistry for EquipID={equip_id}", equip_id=equip_id, deleted=deleted_count)
+                
         except Exception as e:
             Console.warn(f"[WARN] Failed to delete models for EquipID={equip_id}: {e}", error=str(e))
 
@@ -622,6 +625,9 @@ class SQLBatchRunner:
         # Propagate start-from-beginning intent to forecasting layer (used to force full-history model init)
         if self.start_from_beginning and batch_num == 0:
             env["ACM_FORECAST_FULL_HISTORY_MODE"] = "1"
+            Console.info(f"[BATCH] {equip_name}: Batch 0 in start-from-beginning mode - will perform coldstart split and train fresh models", equipment=equip_name, batch_num=batch_num)
+        else:
+            Console.info(f"[BATCH] {equip_name}: Batch {batch_num} - will load existing models and evolve incrementally", equipment=equip_name, batch_num=batch_num)
         env["ACM_BATCH_NUM"] = str(batch_num)
 
         # Stream child output live so devs can see progress (instead of buffering everything).
@@ -890,12 +896,15 @@ class SQLBatchRunner:
             Console.info(f"[PRECHECK] {equip_name}: Resolved EquipID={equip_id}", equipment=equip_name, equip_id=equip_id)
             # In dev mode, optionally infer tick size from raw data
             if self.start_from_beginning and not resume:
+                Console.info(f"[RESET] Starting from beginning for {equip_name} - performing full reset", equipment=equip_name)
                 inferred = self._infer_tick_minutes_from_raw(equip_name)
                 self.tick_minutes = inferred
                 self._set_tick_minutes(equip_id, inferred)
                 self._truncate_outputs_for_equip(equip_id)
-                # For a true fresh coldstart, also remove existing models
-                # so ModelRegistry does not short-circuit coldstart as complete.
+                # CRITICAL: Delete ALL existing models (SQL + filesystem) so first batch
+                # starts with fresh coldstart training. This ensures batch 0 trains new models,
+                # and subsequent batches evolve those models incrementally.
+                Console.info(f"[RESET] Deleting all existing models (SQL + filesystem) for {equip_name}", equipment=equip_name)
                 self._delete_models_for_equip(equip_id)
             else:
                 self._set_tick_minutes(equip_id, self.tick_minutes)

@@ -54,14 +54,14 @@ def test_sql_log_sink_writes_records():
     _, _, params = insert_calls[-1]
     assert params[0] == "run-123"
     assert params[1] == 42
-    assert params[3] == "INFO"
-    assert params[4] == "tests.test_sql_logger"
-    assert params[5] == "TEST"
-    assert params[7] == "hello_step"
-    assert params[8] == 12.5
-    assert params[20] == "Hello SQL sink"
-    assert params[19] == '{"foo": "bar"}'
-    assert params[21] == '{"foo": "bar", "event_type": "TEST", "step": "hello_step", "duration_ms": 12.5}'
+    assert params[5] == "INFO"
+    assert params[6] == "tests.test_sql_logger"
+    assert params[7] == "TEST"
+    assert params[9] == "hello_step"
+    assert params[10] == 12.5
+    assert params[22] == "Hello SQL sink"
+    assert params[21] == '{"foo": "bar"}'
+    assert params[23] == '{"foo": "bar", "event_type": "TEST", "step": "hello_step", "duration_ms": 12.5}'
     assert client.conn.commit_calls >= 1
 
 
@@ -79,3 +79,5 @@ def test_sql_log_sink_handles_missing_timestamp():
     _, _, params = insert_calls[-1]
     # LoggedAt should be auto-generated datetime
     assert isinstance(params[2], datetime)
+    assert params[3] is None or isinstance(params[3], datetime)
+    assert params[4] is None or isinstance(params[4], datetime)

@@ -47,6 +47,7 @@ from core.output_manager import OutputManager
 from core.sql_logger import SqlLogSink
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
+from core.episode_culprits_writer import write_episode_culprits_enhanced
 
 # SQL client (optional; only used in SQL mode)
 try:
@@ -925,9 +926,11 @@ def main() -> None:
 
     if sql_client and enable_sql_logging:
         try:
-            sql_log_sink = SqlLogSink(sql_client, run_id=run_id, equip_id=equip_id or None)
+            # Create separate SQL connection for logging to avoid cursor conflicts
+            log_sql_client = _sql_connect(cfg)
+            sql_log_sink = SqlLogSink(log_sql_client, run_id=run_id, equip_id=equip_id or None)
             Console.add_sink(sql_log_sink)
-            Console.info("[LOG] SQL log sink attached", module="acm_main")
+            Console.info("[LOG] SQL log sink attached with separate connection", module="acm_main")
         except Exception as e:
             sql_log_sink = None
             Console.warn(f"[LOG] Failed to attach SQL log sink: {e}")
@@ -1160,6 +1163,33 @@ def main() -> None:
                     
                     if used:
                         Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
+                        
+                        # BATCH-CONTINUITY-01: Validate baseline coverage of score window
+                        # Prevents statistics mismatch at batch boundaries
+                        if isinstance(train_numeric, pd.DataFrame) and len(train_numeric) > 0:
+                            tr_end_check = pd.to_datetime(train_numeric.index.max())
+                            sc_start_check = pd.to_datetime(score_numeric.index.min()) if isinstance(score_numeric, pd.DataFrame) and len(score_numeric) > 0 else None
+                            
+                            if sc_start_check is not None and tr_end_check < sc_start_check:
+                                gap_seconds = (sc_start_check - tr_end_check).total_seconds()
+                                gap_hours = gap_seconds / 3600
+                                
+                                if gap_hours > 1.0:  # Gap > 1 hour is significant
+                                    Console.warn(
+                                        f"[BASELINE] Baseline gap detected: {gap_hours:.1f}h between "
+                                        f"baseline end ({tr_end_check}) and score start ({sc_start_check})"
+                                    )
+                                    
+                                    # Extend baseline with first 20% of score window for continuity
+                                    if isinstance(score_numeric, pd.DataFrame) and len(score_numeric) > 10:
+                                        extension_size = max(10, int(0.2 * len(score_numeric)))
+                                        score_extension = score_numeric.iloc[:extension_size].copy()
+                                        train = pd.concat([train, score_extension], axis=0).drop_duplicates()
+                                        train_numeric = train.copy()
+                                        Console.info(
+                                            f"[BASELINE] Extended baseline with {len(score_extension)} "
+                                            f"score rows to bridge gap"
+                                        )
             except Exception as be:
                 Console.warn(f"[BASELINE] Cold-start baseline setup failed: {be}")
 
@@ -1188,6 +1218,16 @@ def main() -> None:
                         preview = ", ".join(low_var_features[:10])
                         Console.warn(
                             f"[DATA] {len(low_var)} low-variance sensor(s) in TRAIN (std<{low_var_threshold:g}): {preview}"
+                        )
+                    
+                    # BATCH-CONTINUITY-02: Log variance statistics for debugging batch artifacts
+                    if len(train_stds) > 0:
+                        var_min = float(train_stds.min())
+                        var_median = float(train_stds.median())
+                        var_p95 = float(train_stds.quantile(0.95))
+                        Console.debug(
+                            f"[DATA] Baseline variance: min={var_min:.2e}, "
+                            f"median={var_median:.2e}, p95={var_p95:.2e}"
                         )
 
                 # 3) Missing data report (per-tag null counts) → tables/data_quality.csv
@@ -1348,7 +1388,7 @@ def main() -> None:
                                     "train_present": dropped_col in (train.columns if hasattr(train, 'columns') else []),
                                     "score_present": dropped_col in (score.columns if hasattr(score, 'columns') else []),
                                 })
-                            if dropped_records:
+                            if dropped_records and not SQL_MODE:
                                 dropped_df = pd.DataFrame(dropped_records)
                                 output_mgr.write_dataframe(dropped_df, tables_dir / "dropped_sensors.csv")
                                 Console.info(f"[DATA] Wrote dropped sensors summary -> {tables_dir / 'dropped_sensors.csv'} ({len(dropped_records)} dropped)")
@@ -2566,7 +2606,7 @@ def main() -> None:
                             "global_scale": float(calibrator.scale),
                         })
                 
-                if per_regime_rows:
+                if per_regime_rows and not SQL_MODE:
                     # Convert to pandas DataFrame (output_mgr expects pandas)
                     per_regime_df = pd.DataFrame(per_regime_rows)
                     tables_dir = run_dir / "tables"
@@ -2597,7 +2637,7 @@ def main() -> None:
                         "raw_threshold": float(med_r + regime_thresh * max(scale_r, 1e-9)),
                     })
 
-            if threshold_rows:
+            if threshold_rows and not SQL_MODE:
                 tables_dir = run_dir / "tables"
                 tables_dir.mkdir(parents=True, exist_ok=True)
                 thresholds_df = pd.DataFrame(threshold_rows)
@@ -2952,7 +2992,7 @@ def main() -> None:
                 regime_stats = regimes.update_health_labels(regime_model, frame["regime_label"].to_numpy(copy=False), frame["fused"], cfg)
                 frame["regime_state"] = frame["regime_label"].map(lambda x: regime_model.health_labels.get(int(x), "unknown"))
                 summary_df = regimes.build_summary_dataframe(regime_model)
-                if not summary_df.empty and run_dir is not None:
+                if not summary_df.empty and run_dir is not None and not SQL_MODE:
                     tables_dir = run_dir / "tables"
                     tables_dir.mkdir(parents=True, exist_ok=True)
                     # Use OutputManager for efficient writing
@@ -3730,173 +3770,173 @@ def main() -> None:
                         except Exception as e:
                             Console.warn(f"[MODEL] Failed to cache detectors: {e}")
 
-            Console.info(f"[OK] rows={len(frame)} heads={','.join([c for c in frame.columns if c.endswith('_z')])} episodes={len(episodes)}")
-            Console.info(f"[ART] {run_dir / 'scores.csv'}") # type: ignore
-            Console.info(f"[ART] {run_dir / 'episodes.csv'}")
+            if not SQL_MODE:
+                Console.info(f"[OK] rows={len(frame)} heads={','.join([c for c in frame.columns if c.endswith('_z')])} episodes={len(episodes)}")
+                Console.info(f"[ART] {run_dir / 'scores.csv'}") # type: ignore
+                Console.info(f"[ART] {run_dir / 'episodes.csv'}")
 
-            # === COMPREHENSIVE ANALYTICS GENERATION ===
-            try:
-                # Use OutputManager directly for all output operations
-                tables_dir = run_dir / "tables"
-                if not SQL_MODE:
+                # === COMPREHENSIVE ANALYTICS GENERATION ===
+                try:
+                    # Use OutputManager directly for all output operations
+                    tables_dir = run_dir / "tables"
                     tables_dir.mkdir(exist_ok=True)
 
-                with T.section("outputs.comprehensive_analytics"):
-                    # Generate comprehensive analytics tables using OutputManager
-                    Console.info("[ANALYTICS] Generating comprehensive analytics tables...")
-                    
-                    try:
-                        # Generate all 23+ analytical tables
-                        output_manager.generate_all_analytics_tables(
-                            scores_df=frame,
-                            episodes_df=episodes,
-                            cfg=cfg,
-                            tables_dir=tables_dir,
-                            sensor_context=sensor_context
-                        )
-                        Console.info("[ANALYTICS] Successfully generated all comprehensive analytics tables")
-                        table_count = 23  # Comprehensive table count
-                    except Exception as e:
-                        Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
-                        # Fallback to basic tables
-                        Console.info("[ANALYTICS] Falling back to basic table generation...")
-                        table_count = 0
+                    with T.section("outputs.comprehensive_analytics"):
+                        # Generate comprehensive analytics tables using OutputManager
+                        Console.info("[ANALYTICS] Generating comprehensive analytics tables...")
                         
-                        # Health timeline (if we have fused scores)
-                        if 'fused' in frame.columns:
-                            health_df = pd.DataFrame({
-                                'timestamp': frame.index.strftime('%Y-%m-%d %H:%M:%S'),
-                                'fused_z': frame['fused'],
-                                'health_index': 100.0 / (1.0 + frame['fused'] ** 2)
-                            })
-                            output_manager.write_dataframe(health_df, tables_dir / "health_timeline.csv")
-                            table_count += 1
-                        
-                        # Regime timeline (if available)
-                        if 'regime_label' in frame.columns:
-                            regime_df = pd.DataFrame({
-                                'Timestamp': frame.index,
-                                'RegimeLabel': frame['regime_label'].astype(int),
-                                'EquipID': equip_id,
-                                'RunID': run_id
-                            })
-                            # Add RegimeState based on regime_model if available
-                            if regime_model and hasattr(regime_model, 'health_labels'):
-                                regime_df['RegimeState'] = regime_df['RegimeLabel'].map(
-                                    lambda x: regime_model.health_labels.get(int(x), 'unknown')
-                                )
-                            else:
-                                regime_df['RegimeState'] = 'unknown'
-                            
-                            output_manager.write_dataframe(
-                                regime_df, 
-                                tables_dir / "regime_timeline.csv",
-                                sql_table="ACM_RegimeTimeline" if SQL_MODE else None,
-                                add_created_at=True
-                            )
-                            table_count += 1
-
-                Console.info(f"[OUTPUTS] Generated {table_count} analytics tables via OutputManager")
-                Console.info(f"[OUTPUTS] Tables: {tables_dir}")
-                
-                # === FORECAST GENERATION ===
-                # FOR-CSV-01: Retired forecast_deprecated.run() in favor of comprehensive
-                # enhanced forecasting (RUL + failure hazard) later in pipeline.
-                # The legacy quick-forecast is replaced by the full enhanced forecasting
-                # module which runs after analytics generation and provides richer outputs.
-
-                # === RUL + SQL surfacing of forecast ===
-                try:
-                    # STACK-01: Unified RUL estimation via forecasting module
-                    rul_tables = forecasting.estimate_rul(
-                        tables_dir=tables_dir,
-                        equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                        run_id=str(run_id) if run_id is not None else None,
-                        config=cfg,
-                        sql_client=getattr(output_manager, "sql_client", None),
-                        output_manager=output_manager,
-                    )
-                    if rul_tables:
-                        Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables")
-                        enable_sql_rul = getattr(output_manager, "sql_client", None) is not None
-                        for sql_name, df in rul_tables.items():
-                            if df is None or df.empty:
-                                continue
-                            csv_name = {
-                                "ACM_HealthForecast_TS": "health_forecast_ts.csv",
-                                "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
-                                "ACM_RUL_TS": "rul_timeseries.csv",
-                                "ACM_RUL_Summary": "rul_summary.csv",
-                                "ACM_RUL_Attribution": "rul_attribution.csv",
-                                "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
-                            }.get(sql_name, f"{sql_name}.csv")
-                            out_path = tables_dir / csv_name
-                            output_manager.write_dataframe(
-                                df,
-                                out_path,
-                                sql_table=sql_name if enable_sql_rul else None,
-                                add_created_at="CreatedAt" not in df.columns,
-                            )
-                except Exception as e:
-                    Console.warn(f"[RUL] RUL estimation failed: {e}")
-
-                # === ENHANCED FORECASTING ===
-                try:
-                    Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
-                    # Extract latest batch time from frame.index for proper sliding window queries
-                    batch_time = None
-                    if 'frame' in locals() and frame is not None and not frame.empty:
                         try:
-                            batch_time = pd.to_datetime(frame.index.max())
-                        except Exception:
-                            pass
-                    metrics = forecasting.run_and_persist_enhanced_forecasting(
-                        sql_client=output_manager.sql_client,
-                        equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                        run_id=str(run_id) if run_id is not None else None,
-                        config=cfg,
-                        output_manager=output_manager,
-                        tables_dir=tables_dir,
-                        equip=equip,
-                        current_batch_time=batch_time,
-                        sensor_data=score if 'score' in locals() else None,
-                    )
-                    if metrics:
-                        Console.info(
-                            "[ENHANCED_FORECAST] "
-                            f"RUL={metrics.get('rul_hours', 0.0):.1f}h, "
-                            f"MaxFailProb={metrics.get('max_failure_probability', 0.0)*100:.1f}%, "
-                            f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
-                            f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
-                        )
-                        # Write retrain metadata (ACM_RunMetadata)
-                        try:
-                            if getattr(output_manager, 'sql_client', None):
-                                from core.run_metadata_writer import write_retrain_metadata
-                                write_retrain_metadata(
-                                    sql_client=output_manager.sql_client,
-                                    run_id=str(run_id),
-                                    equip_id=int(equip_id),
-                                    equip_name=str(equip),
-                                    retrain_decision=bool(metrics.get('retrain_needed', False)),
-                                    retrain_reason=str(metrics.get('retrain_reason', 'N/A')),
-                                    forecast_state_version=int(metrics.get('forecast_state_version', 0)),
-                                    model_age_batches=None,
-                                    forecast_rmse=metrics.get('forecast_rmse'),
-                                    forecast_mae=metrics.get('forecast_mae'),
-                                    forecast_mape=metrics.get('forecast_mape'),
-                                )
+                            # Generate all 23+ analytical tables
+                            output_manager.generate_all_analytics_tables(
+                                scores_df=frame,
+                                episodes_df=episodes,
+                                cfg=cfg,
+                                tables_dir=tables_dir,
+                                sensor_context=sensor_context
+                            )
+                            Console.info("[ANALYTICS] Successfully generated all comprehensive analytics tables")
+                            table_count = 23  # Comprehensive table count
                         except Exception as e:
-                            Console.warn(f"[RUN_META] Failed to write ACM_RunMetadata (file-mode block): {e}")
-                except Exception as e:
-                    Console.warn(f"[ENHANCED_FORECAST] Enhanced forecasting failed: {e}")
-            except Exception as e:
-                Console.warn(f"[OUTPUTS] Output generation failed: {e}")
+                            Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
+                            # Fallback to basic tables
+                            Console.info("[ANALYTICS] Falling back to basic table generation...")
+                            table_count = 0
+                            
+                            # Health timeline (if we have fused scores)
+                            if 'fused' in frame.columns:
+                                health_df = pd.DataFrame({
+                                    'timestamp': frame.index.strftime('%Y-%m-%d %H:%M:%S'),
+                                    'fused_z': frame['fused'],
+                                    'health_index': 100.0 / (1.0 + frame['fused'] ** 2)
+                                })
+                                output_manager.write_dataframe(health_df, tables_dir / "health_timeline.csv")
+                                table_count += 1
+                            
+                            # Regime timeline (if available)
+                            if 'regime_label' in frame.columns:
+                                regime_df = pd.DataFrame({
+                                    'Timestamp': frame.index,
+                                    'RegimeLabel': frame['regime_label'].astype(int),
+                                    'EquipID': equip_id,
+                                    'RunID': run_id
+                                })
+                                # Add RegimeState based on regime_model if available
+                                if regime_model and hasattr(regime_model, 'health_labels'):
+                                    regime_df['RegimeState'] = regime_df['RegimeLabel'].map(
+                                        lambda x: regime_model.health_labels.get(int(x), 'unknown')
+                                    )
+                                else:
+                                    regime_df['RegimeState'] = 'unknown'
+                                
+                                output_manager.write_dataframe(
+                                    regime_df, 
+                                    tables_dir / "regime_timeline.csv",
+                                    sql_table="ACM_RegimeTimeline" if SQL_MODE else None,
+                                    add_created_at=True
+                                )
+                                table_count += 1
 
-            # File mode path exits here (finally still runs, no SQL finalize executed).
-            run_completion_time = datetime.now()
-            _maybe_write_run_meta_json(locals())
-            return
+                    Console.info(f"[OUTPUTS] Generated {table_count} analytics tables via OutputManager")
+                    Console.info(f"[OUTPUTS] Tables: {tables_dir}")
+                    
+                    # === FORECAST GENERATION ===
+                    # FOR-CSV-01: Retired forecast_deprecated.run() in favor of comprehensive
+                    # enhanced forecasting (RUL + failure hazard) later in pipeline.
+                    # The legacy quick-forecast is replaced by the full enhanced forecasting
+                    # module which runs after analytics generation and provides richer outputs.
+
+                    # === RUL + SQL surfacing of forecast ===
+                    try:
+                        # STACK-01: Unified RUL estimation via forecasting module
+                        rul_tables = forecasting.estimate_rul(
+                            tables_dir=tables_dir,
+                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                            run_id=str(run_id) if run_id is not None else None,
+                            config=cfg,
+                            sql_client=getattr(output_manager, "sql_client", None),
+                            output_manager=output_manager,
+                        )
+                        if rul_tables:
+                            Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables")
+                            enable_sql_rul = getattr(output_manager, "sql_client", None) is not None
+                            for sql_name, df in rul_tables.items():
+                                if df is None or df.empty:
+                                    continue
+                                csv_name = {
+                                    "ACM_HealthForecast_TS": "health_forecast_ts.csv",
+                                    "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
+                                    "ACM_RUL_TS": "rul_timeseries.csv",
+                                    "ACM_RUL_Summary": "rul_summary.csv",
+                                    "ACM_RUL_Attribution": "rul_attribution.csv",
+                                    "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
+                                }.get(sql_name, f"{sql_name}.csv")
+                                out_path = tables_dir / csv_name
+                                output_manager.write_dataframe(
+                                    df,
+                                    out_path,
+                                    sql_table=sql_name if enable_sql_rul else None,
+                                    add_created_at="CreatedAt" not in df.columns,
+                                )
+                    except Exception as e:
+                        Console.warn(f"[RUL] RUL estimation failed: {e}")
+
+                    # === ENHANCED FORECASTING ===
+                    try:
+                        Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
+                        # Extract latest batch time from frame.index for proper sliding window queries
+                        batch_time = None
+                        if 'frame' in locals() and frame is not None and not frame.empty:
+                            try:
+                                batch_time = pd.to_datetime(frame.index.max())
+                            except Exception:
+                                pass
+                        metrics = forecasting.run_and_persist_enhanced_forecasting(
+                            sql_client=output_manager.sql_client,
+                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                            run_id=str(run_id) if run_id is not None else None,
+                            config=cfg,
+                            output_manager=output_manager,
+                            tables_dir=tables_dir,
+                            equip=equip,
+                            current_batch_time=batch_time,
+                            sensor_data=score if 'score' in locals() else None,
+                        )
+                        if metrics:
+                            Console.info(
+                                "[ENHANCED_FORECAST] "
+                                f"RUL={metrics.get('rul_hours', 0.0):.1f}h, "
+                                f"MaxFailProb={metrics.get('max_failure_probability', 0.0)*100:.1f}%, "
+                                f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
+                                f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
+                            )
+                            # Write retrain metadata (ACM_RunMetadata)
+                            try:
+                                if getattr(output_manager, 'sql_client', None):
+                                    from core.run_metadata_writer import write_retrain_metadata
+                                    write_retrain_metadata(
+                                        sql_client=output_manager.sql_client,
+                                        run_id=str(run_id),
+                                        equip_id=int(equip_id),
+                                        equip_name=str(equip),
+                                        retrain_decision=bool(metrics.get('retrain_needed', False)),
+                                        retrain_reason=str(metrics.get('retrain_reason', 'N/A')),
+                                        forecast_state_version=int(metrics.get('forecast_state_version', 0)),
+                                        model_age_batches=None,
+                                        forecast_rmse=metrics.get('forecast_rmse'),
+                                        forecast_mae=metrics.get('forecast_mae'),
+                                        forecast_mape=metrics.get('forecast_mape'),
+                                    )
+                            except Exception as e:
+                                Console.warn(f"[RUN_META] Failed to write ACM_RunMetadata (file-mode block): {e}")
+                    except Exception as e:
+                        Console.warn(f"[ENHANCED_FORECAST] Enhanced forecasting failed: {e}")
+                except Exception as e:
+                    Console.warn(f"[OUTPUTS] Output generation failed: {e}")
+
+                # File mode path exits here (finally still runs, no SQL finalize executed).
+                run_completion_time = datetime.now()
+                _maybe_write_run_meta_json(locals())
+                return
 
         # ---------- SQL MODE: WRITE ARTIFACTS ----------
         

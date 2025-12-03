@@ -23,6 +23,40 @@ except ImportError as e:
     # If logger import fails, something is seriously wrong - fail fast
     raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Robust StandardScaler with variance floor
+# ──────────────────────────────────────────────────────────────────────────────
+class RobustStandardScaler(StandardScaler):
+    """StandardScaler with variance floor to prevent division-by-zero explosions.
+    
+    Prevents catastrophic Z-score spikes (±100σ) when batch variance collapses.
+    Critical fix for batch continuity: per-batch standardization on narrow slices
+    can create near-zero variance, exploding Z-scores at batch boundaries.
+    
+    Parameters
+    ----------
+    epsilon : float, default=1e-6
+        Minimum allowed standard deviation. Values below this are clamped.
+    """
+    def __init__(self, epsilon=1e-6, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+    
+    def fit(self, X, y=None):
+        super().fit(X, y)
+        if self.with_std and hasattr(self, 'scale_') and self.scale_ is not None:  # type: ignore[attr-defined]
+            # Floor scale_ to prevent division by near-zero variance
+            # This prevents Z-scores >100 when variance collapses
+            self.scale_ = np.maximum(self.scale_, self.epsilon)
+        return self
+    
+    def partial_fit(self, X, y=None):
+        super().partial_fit(X, y)
+        if self.with_std and hasattr(self, 'scale_') and self.scale_ is not None:  # type: ignore[attr-defined]
+            self.scale_ = np.maximum(self.scale_, self.epsilon)
+        return self
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Mahalanobis
 # ──────────────────────────────────────────────────────────────────────────────
@@ -144,8 +178,9 @@ class PCASubspaceDetector:
 
     def __init__(self, pca_cfg: Dict[str, Any] | None = None):
         self.cfg: Dict[str, Any] = (pca_cfg or {})
-        self.scaler = StandardScaler(with_mean=True, with_std=True)
-        self.pca: Optional[PCA] = None
+        # Use RobustStandardScaler to prevent variance collapse
+        self.scaler = RobustStandardScaler(epsilon=1e-6, with_mean=True, with_std=True)
+        self.pca: Optional[PCA] | Any = None  # Allow IncrementalPCA too
 
         self.keep_cols: List[str] = []
         self.col_medians: Optional[pd.Series] = None
@@ -196,14 +231,14 @@ class PCASubspaceDetector:
         # Incremental path (CPU only)
         if self.cfg.get("incremental", False):
             from sklearn.decomposition import IncrementalPCA
-            self.pca = IncrementalPCA(
+            self.pca = IncrementalPCA(  # type: ignore[assignment]
                 n_components=k,
                 batch_size=max(256, int(self.cfg.get("batch_size", 4096))),
             )
             # partial_fit in batches
-            bs = self.pca.batch_size or 256
+            bs = self.pca.batch_size or 256  # type: ignore[attr-defined]
             for i in range(0, n_samples, bs):
-                self.pca.partial_fit(Xs[i:i+bs])
+                self.pca.partial_fit(Xs[i:i+bs])  # type: ignore[attr-defined]
         else:
             # Default batch path
             self.pca = PCA(n_components=k, svd_solver="full", random_state=17)
