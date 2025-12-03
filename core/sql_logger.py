@@ -28,7 +28,7 @@ class SqlLogSink:
                 WHERE object_id = OBJECT_ID(N'dbo.{self.table}') AND name = N'{column}'
             )
             BEGIN
-                ALTER TABLE dbo.{self.table} ADD {column} {definition};
+                ALTER TABLE dbo.{self.table} ADD [{column}] {definition};
             END
             """
         )
@@ -49,15 +49,17 @@ class SqlLogSink:
                         RunID NVARCHAR(64) NULL,
                         EquipID INT NULL,
                         LoggedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                        LoggedLocal DATETIMEOFFSET NULL,
+                        LoggedLocalNaive DATETIME2 NULL,
                         Level NVARCHAR(16) NOT NULL,
                         Module NVARCHAR(128) NULL,
                         EventType NVARCHAR(32) NULL,
                         Stage NVARCHAR(64) NULL,
                         StepName NVARCHAR(128) NULL,
                         DurationMs FLOAT NULL,
-                        RowCount INT NULL,
-                        ColCount INT NULL,
-                        WindowSize INT NULL,
+                        [RowCount] INT NULL,
+                        [ColCount] INT NULL,
+                        [WindowSize] INT NULL,
                         BatchStart DATETIME2 NULL,
                         BatchEnd DATETIME2 NULL,
                         BaselineStart DATETIME2 NULL,
@@ -88,6 +90,8 @@ class SqlLogSink:
             self._ensure_column(cur, "DataQualityValue", "FLOAT NULL")
             self._ensure_column(cur, "LeakageFlag", "BIT NULL")
             self._ensure_column(cur, "ParamsJson", "NVARCHAR(MAX) NULL")
+            self._ensure_column(cur, "LoggedLocal", "DATETIMEOFFSET NULL")
+            self._ensure_column(cur, "LoggedLocalNaive", "DATETIME2 NULL")
             cur.close()
             try:
                 if hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
@@ -152,6 +156,13 @@ class SqlLogSink:
                 body_tokens = message_body.strip().split()
                 if body_tokens:
                     step_name = body_tokens[0]
+            
+            # Derive stage from step_name if it contains dots (e.g., "outputs.comprehensive_analytics" -> "outputs")
+            if not stage and step_name and "." in step_name:
+                stage = step_name.split(".")[0]
+            # Fallback: use event_type as stage if we still don't have one
+            elif not stage and event_type:
+                stage = event_type.lower()
 
         # Simple duration parse from message suffix (e.g., "0.123s")
         if duration_ms is None:
@@ -259,6 +270,19 @@ class SqlLogSink:
     def __call__(self, record: Dict[str, Any]) -> None:
         """Insert a log record into SQL (best-effort, no exceptions raised)."""
         try:
+            # Skip ephemeral progress messages (heartbeats, spinners)
+            context = record.get("context") or {}
+            if isinstance(context, dict) and context.get("skip_sql"):
+                return
+            
+            # Skip unstructured narrative messages (indented sub-logs, parameter dumps)
+            message = str(record.get("message", ""))
+            if message.startswith("  ") or (not message.startswith("[") and message.strip()):
+                # Skip indented sub-logs or messages without tags that aren't warnings/errors
+                level = record.get("level", "INFO")
+                if level not in ("WARNING", "ERROR", "CRITICAL"):
+                    return
+            
             logged_at = record.get("timestamp")
             if isinstance(logged_at, str):
                 try:
@@ -267,22 +291,28 @@ class SqlLogSink:
                     logged_at = None
             if logged_at is None:
                 logged_at = datetime.utcnow()
-            context = record.get("context") or {}
+            logged_local = datetime.now().astimezone()
+            logged_local_naive = logged_local.replace(tzinfo=None)
             context_json = json.dumps(context, ensure_ascii=True, default=str) if context else None
             message = str(record.get("message", ""))[:4000]
-            module = record.get("module")
             structured = self._extract_structured_fields(record)
+            module = record.get("module")
+            # Fallback: if module inference failed (shows utils.logger), use parsed tag/stage/step
+            if (module is None or module == "utils.logger"):
+                module = structured.get("event_type") or structured.get("stage") or structured.get("step_name") or module
             cur = self.sql_client.cursor()
             cur.execute(
                 f"""
                 INSERT INTO dbo.{self.table}
-                (RunID, EquipID, LoggedAt, Level, Module, EventType, Stage, StepName, DurationMs, RowCount, ColCount, WindowSize, BatchStart, BatchEnd, BaselineStart, BaselineEnd, DataQualityMetric, DataQualityValue, LeakageFlag, ParamsJson, Message, Context)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (RunID, EquipID, LoggedAt, LoggedLocal, LoggedLocalNaive, Level, Module, EventType, Stage, StepName, DurationMs, [RowCount], [ColCount], WindowSize, BatchStart, BatchEnd, BaselineStart, BaselineEnd, DataQualityMetric, DataQualityValue, LeakageFlag, ParamsJson, Message, Context)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.run_id,
                     self.equip_id,
                     logged_at,
+                    logged_local,
+                    logged_local_naive,
                     record.get("level"),
                     module,
                     structured["event_type"],
@@ -311,9 +341,10 @@ class SqlLogSink:
                         self.sql_client.conn.commit()
             except Exception:
                 pass
-        except Exception:
-            # Never raise from a log sink
-            pass
+        except Exception as exc:
+            # Never raise from a log sink, but print to stderr for diagnostics
+            import sys
+            print(f"[SQL_LOG_SINK_ERROR] Failed to log to SQL: {exc}", file=sys.stderr)
 
     def close(self) -> None:
         """Compatibility shim; nothing to close."""

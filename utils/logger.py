@@ -420,7 +420,7 @@ class Heartbeat:
         if not self._enabled:
             return self
         
-        Console.info(f"[..] {self.label} ...")
+        Console.info(f"[..] {self.label} ...", skip_sql=True)
         self._started = True
         self._thr.start()
         return self
@@ -435,7 +435,7 @@ class Heartbeat:
             self._thr.join(timeout=0.1)
         
         took = time.perf_counter() - self._t0
-        Console.ok(f"[OK] {self.label} done in {took:.2f}s")
+        Console.ok(f"[OK] {self.label} done in {took:.2f}s", skip_sql=True)
     
     def _run(self) -> None:
         """Background thread that updates progress."""
@@ -446,7 +446,7 @@ class Heartbeat:
             nxt = f" | next: {self.next_hint}" if self.next_hint else ""
             
             spinner_char = self._spinner[i % len(self._spinner)]
-            Console.info(f"[..] {spinner_char} {self.label}{eta}{nxt}")
+            Console.info(f"[..] {spinner_char} {self.label}{eta}{nxt}", skip_sql=True)
             i += 1
 
 
