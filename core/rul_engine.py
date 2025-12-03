@@ -1060,7 +1060,7 @@ def compute_rul(
     future_timestamps = pd.date_range(
         start=current_time,
         periods=n_future_steps + 1,
-        freq=f"{sampling_interval_hours}H"
+        freq=f"{sampling_interval_hours}h"
     )[1:]  # Exclude current time
     
     Console.info(f"[RUL] Forecasting {n_future_steps} steps ({cfg.max_forecast_hours:.1f} hours)")
@@ -1156,6 +1156,16 @@ def compute_rul_multipath(
         - dominant_path: Which path was used ("trajectory", "conservative", or "optimistic")
     """
     Console.info("[RUL-Multipath] Computing RUL via multiple paths...")
+
+    def _hours_delta(ts_val, current):
+        """Return hours between two timestamps, robust to pandas Series/arrays."""
+        ts_scalar = pd.to_datetime(ts_val)
+        current_scalar = pd.to_datetime(current)
+        delta = ts_scalar - current_scalar
+        # If delta is a Series/array, take first element
+        if hasattr(delta, "__len__") and not isinstance(delta, (pd.Timestamp, datetime)):
+            delta = delta.iloc[0] if hasattr(delta, "iloc") else delta[0]
+        return delta.total_seconds() / 3600.0
     
     # Path 1: Trajectory crossing (mean forecast < threshold) - Expected RUL (50th percentile)
     rul_trajectory = None
@@ -1165,7 +1175,7 @@ def compute_rul_multipath(
         ]
         if not trajectory_crossing.empty:
             t1 = trajectory_crossing.iloc[0]["Timestamp"]
-            rul_trajectory = (t1 - current_time).total_seconds() / 3600
+            rul_trajectory = _hours_delta(t1, current_time)
             Console.info(f"[RUL-Multipath] Trajectory crossing (mean) at {t1}, RUL={rul_trajectory:.1f}h")
         else:
             Console.info("[RUL-Multipath] No trajectory crossing within forecast horizon")
@@ -1178,7 +1188,7 @@ def compute_rul_multipath(
         ]
         if not conservative_crossing.empty:
             t2 = conservative_crossing.iloc[0]["Timestamp"]
-            rul_conservative = (t2 - current_time).total_seconds() / 3600
+            rul_conservative = _hours_delta(t2, current_time)
             Console.info(f"[RUL-Multipath] Conservative crossing (CI_Lower) at {t2}, RUL={rul_conservative:.1f}h")
         else:
             Console.info("[RUL-Multipath] No conservative crossing within forecast horizon")
@@ -1191,7 +1201,7 @@ def compute_rul_multipath(
         ]
         if not optimistic_crossing.empty:
             t3 = optimistic_crossing.iloc[0]["Timestamp"]
-            rul_optimistic = (t3 - current_time).total_seconds() / 3600
+            rul_optimistic = _hours_delta(t3, current_time)
             Console.info(f"[RUL-Multipath] Optimistic crossing (CI_Upper) at {t3}, RUL={rul_optimistic:.1f}h")
         else:
             Console.info("[RUL-Multipath] No optimistic crossing within forecast horizon")
@@ -1659,6 +1669,14 @@ def build_maintenance_recommendation(
             urgency = "MEDIUM"
         action += " (poor data quality - improve sensor coverage)"
     
+    # Calculate maintenance windows based on RUL
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    earliest_maintenance = now + timedelta(hours=max(0, rul_hours - 48))  # 48h before expected failure
+    preferred_window_start = now + timedelta(hours=max(0, rul_hours - 72))  # 72h before
+    preferred_window_end = now + timedelta(hours=rul_hours)  # At expected failure time
+    failure_prob_at_window_end = min(1.0, max(0.0, 1.0 - (rul_hours / max(rul_hours, 168))))  # Higher prob as RUL decreases
+    
     recommendation = {
         "RunID": run_id,
         "EquipID": equip_id,
@@ -1667,6 +1685,11 @@ def build_maintenance_recommendation(
         "RUL_Hours": rul_hours,
         "Confidence": confidence,
         "DataQuality": data_quality,
+        "EarliestMaintenance": earliest_maintenance,
+        "PreferredWindowStart": preferred_window_start,
+        "PreferredWindowEnd": preferred_window_end,
+        "FailureProbAtWindowEnd": failure_prob_at_window_end,
+        "Comment": None,  # Optional field
     }
     
     df = pd.DataFrame([recommendation])

@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
 from utils.logger import Console
+from utils.detector_labels import get_detector_label, format_culprit_label
 
 
 def parse_culprits_string(culprits_str: str) -> List[Dict[str, Any]]:
@@ -127,6 +128,11 @@ def write_episode_culprits(
                 detector_type = culprit["detector"]
                 sensor_name = culprit["sensor"]
                 rank = culprit["rank"]
+                # Human-readable label (include sensor when available)
+                if sensor_name:
+                    detector_label = format_culprit_label(f"{detector_type}({sensor_name})")
+                else:
+                    detector_label = get_detector_label(detector_type)
                 
                 # Contribution percentage not available from culprits string
                 # Would need to be computed from scores dataframe in future enhancement
@@ -135,7 +141,7 @@ def write_episode_culprits(
                 records.append((
                     run_id,
                     episode_id,
-                    detector_type,
+                    detector_label,
                     sensor_name,
                     contribution_pct,
                     rank
@@ -233,10 +239,11 @@ def compute_detector_contributions(
                 # Extract sensor name from detector column if available
                 # (Future enhancement: link detector to specific sensor)
                 sensor_name = None
+                detector_label = get_detector_label(detector)
                 
                 records.append({
                     "episode_id": int(episode_id),
-                    "detector": detector,
+                    "detector": detector_label,
                     "sensor": sensor_name,
                     "contribution_pct": float(contrib_pct),
                     "rank": rank

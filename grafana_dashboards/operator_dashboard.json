@@ -1015,7 +1015,7 @@
             "uid": "bdyo5lzrp2xfka"
           },
           "format": "table",
-          "rawSql": "WITH LatestOMR AS (\n  SELECT TOP 1 Timestamp\n  FROM ACM_OMRTimeline\n  WHERE EquipID = $equipment\n    AND $__timeFilter(Timestamp)\n  ORDER BY Timestamp DESC\n)\nSELECT TOP 10\n  SUBSTRING(SensorName, 1, 30) AS Sensor,\n  ABS(OMR_Z) AS [Anomaly Score]\nFROM ACM_OMRContributionsLong\nWHERE EquipID = $equipment\n  AND Timestamp = (SELECT Timestamp FROM LatestOMR)\nORDER BY ABS(OMR_Z) DESC",
+          "rawSql": "WITH LatestOMR AS (\n  SELECT TOP 1 Timestamp\n  FROM ACM_OMRTimeline\n  WHERE EquipID = $equipment\n    AND $__timeFilter(Timestamp)\n  ORDER BY Timestamp DESC\n)\nSELECT TOP 10\n  SUBSTRING(SensorName, 1, 30) AS Sensor,\n  ABS(OMR_Z) AS [Baseline Anomaly Score]\nFROM ACM_OMRContributionsLong\nWHERE EquipID = $equipment\n  AND Timestamp = (SELECT Timestamp FROM LatestOMR)\nORDER BY ABS(OMR_Z) DESC",
           "refId": "A"
         }
       ],

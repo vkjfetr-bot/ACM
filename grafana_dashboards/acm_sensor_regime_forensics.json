@@ -305,7 +305,7 @@
             "uid": "${datasource}"
           },
           "format": "time_series",
-          "rawSql": "SELECT Timestamp AS time, fused AS value, 'fused' AS metric FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, ar1_z, 'ar1_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_spe_z, 'pca_spe_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_t2_z, 'pca_t2_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, gmm_z, 'gmm_z' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
+          "rawSql": "SELECT Timestamp AS time, fused AS value, 'Fused Health Score' AS metric FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, ar1_z, 'Time-Series Anomaly (AR1)' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_spe_z, 'Correlation Break (PCA-SPE)' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, pca_t2_z, 'Multivariate Outlier (PCA-T²)' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, gmm_z, 'Density Anomaly (GMM)' FROM ACM_Scores_Wide_Latest WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
           "refId": "A"
         }
       ],
@@ -448,7 +448,7 @@
             "uid": "${datasource}"
           },
           "format": "table",
-          "rawSql": "WITH LatestOMR AS (\n  SELECT TOP 1 Timestamp\n  FROM ACM_OMRContributionsLong\n  WHERE EquipID = $equipment\n  ORDER BY Timestamp DESC\n)\nSELECT TOP 15\n  Timestamp,\n  SensorName,\n  ABS(OMR_Z) AS OMR_Z,\n  Value,\n  Rank() OVER (ORDER BY ABS(OMR_Z) DESC) AS RankPos\nFROM ACM_OMRContributionsLong\nWHERE EquipID = $equipment\n  AND Timestamp = (SELECT Timestamp FROM LatestOMR)\nORDER BY ABS(OMR_Z) DESC",
+          "rawSql": "WITH LatestOMR AS (\n  SELECT TOP 1 Timestamp\n  FROM ACM_OMRContributionsLong\n  WHERE EquipID = $equipment\n  ORDER BY Timestamp DESC\n)\nSELECT TOP 15\n  Timestamp,\n  SensorName,\n  ABS(OMR_Z) AS [Baseline Anomaly Score],\n  Value,\n  Rank() OVER (ORDER BY ABS(OMR_Z) DESC) AS RankPos\nFROM ACM_OMRContributionsLong\nWHERE EquipID = $equipment\n  AND Timestamp = (SELECT Timestamp FROM LatestOMR)\nORDER BY ABS(OMR_Z) DESC",
           "refId": "A"
         }
       ],

@@ -216,36 +216,16 @@ def should_retrain(
         if rmse > error_threshold:
             return True, f"Forecast accuracy degraded (RMSE={rmse:.2f} > {error_threshold})"
     
-    # Check drift (FOR-CODE-02: Non-fatal SQL query - warn and continue)
-    try:
-        cur = sql_client.cursor()
-        cur.execute("""
-            SELECT AVG(DriftValue) as AvgDrift
-            FROM (
-                SELECT TOP 5 DriftValue
-                FROM dbo.ACM_DriftMetrics
-                WHERE EquipID = ?
-                ORDER BY Timestamp DESC
-            ) recent
-        """, (equip_id,))
-        row = cur.fetchone()
-        cur.close()
-        
-        if row and row[0] is not None:
-            avg_drift = float(row[0])
-            if avg_drift > drift_threshold:
-                return True, f"Drift spike detected (avg={avg_drift:.2f} > {drift_threshold})"
-    except Exception as e:
-        # FOR-CODE-02: Non-fatal data condition - log and continue without drift check
-        Console.warn(f"[FORECAST] Failed to check drift: {e}")
+    # Drift check disabled - ACM_DriftMetrics table not yet implemented
+    # TODO: Enable when drift metrics table is created and populated
     
-    # Check anomaly energy spike (FOR-CODE-02: Non-fatal SQL query - warn and continue)
+    # Check anomaly energy spike using simpler aggregate (FOR-CODE-02: Non-fatal SQL query - warn and continue)
     try:
         cur = sql_client.cursor()
         cur.execute("""
             SELECT 
-                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY AnomalyEnergy) as P95,
-                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY AnomalyEnergy) as Median
+                MAX(AnomalyEnergy) as MaxEnergy,
+                AVG(AnomalyEnergy) as AvgEnergy
             FROM (
                 SELECT TOP 100 
                     SUM(POWER(CAST(fused AS FLOAT), 2)) as AnomalyEnergy
@@ -259,10 +239,10 @@ def should_retrain(
         cur.close()
         
         if row and row[0] is not None and row[1] is not None:
-            p95 = float(row[0])
-            median = float(row[1])
-            if median > 0 and p95 > energy_threshold * median:
-                return True, f"Anomaly energy spike (P95={p95:.2f} > {energy_threshold}x median)"
+            max_energy = float(row[0])
+            avg_energy = float(row[1])
+            if avg_energy > 0 and max_energy > energy_threshold * avg_energy:
+                return True, f"Anomaly energy spike (Max={max_energy:.2f} > {energy_threshold}x avg)"
     except Exception as e:
         # FOR-CODE-02: Non-fatal data condition - log and continue without energy check
         Console.warn(f"[FORECAST] Failed to check anomaly energy: {e}")
@@ -1242,6 +1222,7 @@ def run_enhanced_forecasting_sql(
             "ForecastStd": std_error,
             "ForecastStdHorizon": forecast_stds,
             "Method": "ExponentialSmoothing",
+            "LastUpdate": datetime.now(),
         })
         if regime_label is not None:
             health_forecast_df["RegimeLabel"] = regime_label
@@ -1251,7 +1232,7 @@ def run_enhanced_forecasting_sql(
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] Health forecasting failed: {e}")
         # Empty DataFrame with correct schema for SQL compatibility
-        health_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "ForecastStdHorizon", "Method"])
+        health_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "ForecastStdHorizon", "Method", "LastUpdate"])
         forecast_values = []
         forecast_stds = []
         forecast_timestamps = pd.DatetimeIndex([])
@@ -1278,6 +1259,11 @@ def run_enhanced_forecasting_sql(
                 "ThresholdUsed": failure_threshold,
                 "Method": "GaussianTail",
             })
+            # Ensure all required columns exist with proper dtypes
+            if "ThresholdUsed" not in failure_prob_df.columns:
+                failure_prob_df["ThresholdUsed"] = float(failure_threshold)
+            if "Method" not in failure_prob_df.columns:
+                failure_prob_df["Method"] = "GaussianTail"
             if regime_label is not None:
                 failure_prob_df["RegimeLabel"] = regime_label
             
@@ -1778,6 +1764,15 @@ def run_and_persist_enhanced_forecasting(
 
         sql_table = ef_sql_map.get(logical_name)
         csv_name = ef_csv_map.get(logical_name, f"{logical_name}.csv")
+        
+        # DEBUG: Log columns and Method values before write
+        if sql_table == "ACM_FailureForecast_TS":
+            Console.info(f"[DEBUG] Before write_dataframe: columns={list(df_to_write.columns)}")
+            if "Method" in df_to_write.columns:
+                Console.info(f"[DEBUG] Method column dtype={df_to_write['Method'].dtype}, nulls={df_to_write['Method'].isna().sum()}, first 5 values={list(df_to_write['Method'].head())}")
+            else:
+                Console.warn(f"[DEBUG] Method column MISSING from df_to_write!")
+        
         output_manager.write_dataframe(
             df_to_write,
             tables_dir / csv_name,

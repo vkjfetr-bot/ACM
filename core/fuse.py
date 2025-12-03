@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from utils.logger import Console
+from utils.detector_labels import format_culprit_label
 
 import numpy as np
 import pandas as pd
@@ -633,14 +634,17 @@ class Fuser:
                     primary_detector = name
 
             # For multivariate models, find the top contributing sensor
-            culprits = primary_detector
+            culprits_raw = primary_detector
             if 'pca' in primary_detector or 'mhal' in primary_detector:
                 # Simple attribution: find sensor with max mean value in the episode window
                 episode_features = original_features.iloc[s:e+1]
                 top_feature = episode_features.mean().idxmax()
                 culprit_sensor = Fuser._get_base_sensor(str(top_feature))
-                culprits = f"{primary_detector}({culprit_sensor})"
+                culprits_raw = f"{primary_detector}({culprit_sensor})"
 
+            # Format culprit with human-readable label
+            culprits = format_culprit_label(culprits_raw, use_short=False)
+            
             # Calculate fused score statistics for the episode
             episode_fused = x[s:e+1]
             peak_fused_z = float(np.nanmax(episode_fused)) if len(episode_fused) > 0 else 0.0

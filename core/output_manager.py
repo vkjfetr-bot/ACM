@@ -37,6 +37,8 @@ from utils.timestamp_utils import (
     normalize_index
 )
 
+from utils.detector_labels import get_detector_label, format_culprit_label
+
 from utils.logger import Console, Heartbeat
 
 # whitelist of SQL tables we will write to (defined early so class methods can use it)
@@ -468,7 +470,10 @@ class OutputManager:
                 'DetectorType': 'UNKNOWN', 'ClipZ': AnalyticsConstants.DEFAULT_CLIP_Z
             },
             'ACM_CulpritHistory': {
-                'StartTimestamp': 'ts', 'EndTimestamp': 'ts', 'DurationHours': 0.0, 'Culprits': 'unknown'
+                'StartTimestamp': 'ts',
+                'EndTimestamp': 'ts',
+                'DurationHours': 0.0,
+                'PrimaryDetector': 'unknown'
             },
             'ACM_EpisodeMetrics': {
                 'TotalEpisodes': 0, 'TotalDurationHours': 0.0, 'AvgDurationHours': 0.0, 'MedianDurationHours': 0.0,
@@ -490,6 +495,12 @@ class OutputManager:
             },
             'ACM_EnhancedMaintenanceRecommendation': {
                 'UrgencyScore': 0.0, 'MaintenanceRequired': 0
+            },
+            'ACM_MaintenanceRecommendation': {
+                'Action': 'unspecified', 'Urgency': 'LOW', 'RUL_Hours': 0.0, 'Confidence': 0.0,
+                'DataQuality': 'UNKNOWN', 'EarliestMaintenance': 'ts',
+                'PreferredWindowStart': 'ts', 'PreferredWindowEnd': 'ts',
+                'FailureProbAtWindowEnd': 0.0
             },
             'ACM_RecommendedActions': {
                 'Action': 'unspecified'
@@ -530,10 +541,10 @@ class OutputManager:
             },
             'ACM_HealthForecast_TS': {
                 'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
-                'Method': 'ExponentialSmoothing', 'LastUpdate': 'ts'
+                'Method': 'ExponentialSmoothing', 'LastUpdate': 'ts', 'CiLower': 0.0, 'CiUpper': 0.0
             },
             'ACM_FailureForecast_TS': {
-                'Timestamp': 'ts', 'FailureProb': 0.0, 'ThresholdUsed': 0.0,
+                'Timestamp': 'ts', 'FailureProb': 0.0, 'ThresholdUsed': 50.0,
                 'Method': 'GaussianTail'
             },
             'ACM_FailureHazard_TS': {
@@ -542,11 +553,11 @@ class OutputManager:
             },
             'ACM_DetectorForecast_TS': {
                 'Timestamp': 'ts', 'DetectorType': 'UNKNOWN', 'ForecastZ': 0.0,
-                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialSmoothing'
+                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialDecay', 'CiLower': 0.0, 'CiUpper': 0.0
             },
             'ACM_SensorForecast_TS': {
                 'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'ForecastValue': 0.0,
-                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialSmoothing'
+                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'LinearTrend', 'CiLower': 0.0, 'CiUpper': 0.0
             },
             'ACM_RUL_Summary': {
                 'RUL_Hours': 0.0, 'Method': 'Multipath', 'LastUpdate': 'ts'
@@ -1226,8 +1237,19 @@ class OutputManager:
                     if add_created_at:
                         sql_df["CreatedAt"] = pd.Timestamp.now().tz_localize(None)
                     
-                    # Bulk insert with batching
-                    inserted = self._bulk_insert_sql(sql_table, sql_df)
+                    # FORECAST-UPSERT-05: Route forecast tables to MERGE upsert methods
+                    if sql_table == "ACM_HealthForecast_TS":
+                        inserted = self._upsert_health_forecast_ts(sql_df)
+                    elif sql_table == "ACM_FailureForecast_TS":
+                        inserted = self._upsert_failure_forecast_ts(sql_df)
+                    elif sql_table == "ACM_DetectorForecast_TS":
+                        inserted = self._upsert_detector_forecast_ts(sql_df)
+                    elif sql_table == "ACM_SensorForecast_TS":
+                        inserted = self._upsert_sensor_forecast_ts(sql_df)
+                    else:
+                        # Bulk insert with batching for all other tables
+                        inserted = self._bulk_insert_sql(sql_table, sql_df)
+                    
                     result['sql_written'] = inserted > 0
                     if result['sql_written']: 
                         self.stats['sql_writes'] += 1
@@ -1254,6 +1276,72 @@ class OutputManager:
             self._artifact_cache[cache_key] = df
         
         return result
+
+    def write_table(self, table_name: str, df: pd.DataFrame, delete_existing: bool = False) -> int:
+        """Generic SQL table writer with RunID/EquipID injection, defaults, and upsert routing."""
+        if not self._check_sql_health() or df is None or df.empty:
+            return 0
+        try:
+            sql_df = df.copy()
+            now = pd.Timestamp.now().tz_localize(None)
+
+            # Inject metadata
+            if 'RunID' not in sql_df.columns:
+                sql_df['RunID'] = self.run_id
+            if 'EquipID' not in sql_df.columns:
+                sql_df['EquipID'] = self.equip_id or 0
+
+            # Apply required defaults/repairs
+            sql_df, _ = self._apply_sql_required_defaults(table_name, sql_df, allow_repair=True)
+
+            # Fill common fields when present
+            if 'Method' in sql_df.columns:
+                sql_df['Method'] = sql_df['Method'].fillna('default')
+            if 'LastUpdate' in sql_df.columns:
+                sql_df['LastUpdate'] = pd.to_datetime(sql_df['LastUpdate']).dt.tz_localize(None).fillna(now)
+            if 'EarliestMaintenance' in sql_df.columns:
+                sql_df['EarliestMaintenance'] = pd.to_datetime(sql_df['EarliestMaintenance']).dt.tz_localize(None).fillna(now)
+            if 'PreferredWindowStart' in sql_df.columns:
+                sql_df['PreferredWindowStart'] = pd.to_datetime(sql_df['PreferredWindowStart']).dt.tz_localize(None).fillna(now)
+            if 'PreferredWindowEnd' in sql_df.columns:
+                sql_df['PreferredWindowEnd'] = pd.to_datetime(sql_df['PreferredWindowEnd']).dt.tz_localize(None).fillna(now)
+
+            # Normalize types/nulls for SQL
+            sql_df = self._prepare_dataframe_for_sql(sql_df)
+
+            # Optional delete-existing by RunID (+EquipID when available)
+            if delete_existing and self.sql_client is not None and self.run_id:
+                try:
+                    with self.sql_client.cursor() as cur:
+                        if 'EquipID' in sql_df.columns and self.equip_id is not None:
+                            cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0)))
+                        else:
+                            cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,))
+                        if hasattr(self.sql_client, "commit"):
+                            self.sql_client.commit()
+                        elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                            if not getattr(self.sql_client.conn, "autocommit", True):
+                                self.sql_client.conn.commit()
+                except Exception as del_ex:
+                    Console.warn(f"[OUTPUT] delete_existing failed for {table_name}: {del_ex}")
+
+            # Route known upsert tables
+            if table_name == "ACM_HealthForecast_TS":
+                return self._upsert_health_forecast_ts(sql_df)
+            if table_name == "ACM_FailureForecast_TS":
+                return self._upsert_failure_forecast_ts(sql_df)
+            if table_name == "ACM_DetectorForecast_TS":
+                return self._upsert_detector_forecast_ts(sql_df)
+            if table_name == "ACM_SensorForecast_TS":
+                return self._upsert_sensor_forecast_ts(sql_df)
+            if table_name == "ACM_PCA_Metrics":
+                return self._upsert_pca_metrics(sql_df)
+
+            # Default: bulk insert
+            return self._bulk_insert_sql(table_name, sql_df)
+        except Exception as e:
+            Console.warn(f"[OUTPUT] write_table failed for {table_name}: {e}")
+            return 0
 
     def _apply_sql_required_defaults(self, table_name: str, df: pd.DataFrame, allow_repair: bool = True) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Fill required columns with safe defaults to satisfy NOT NULL constraints.
@@ -1324,7 +1412,8 @@ class OutputManager:
         repair_info['missing_fields'] = missing_fields
         
         if filled:
-            Console.warn(f"[SCHEMA] {table_name}: applied defaults {filled}")
+            # Debug-level only - applying defaults is expected behavior, not a warning
+            pass  # Console.debug(f"[SCHEMA] {table_name}: applied defaults {filled}")
         if not allow_repair and repair_info['repairs_needed']:
             Console.warn(f"[SCHEMA] {table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}")
             
@@ -1838,11 +1927,373 @@ class OutputManager:
                 Console.warn("[OUTPUT] write_pca_metrics called without pca_detector or df")
                 return 0
             
-            # Expected columns vary - just pass through with metadata
-            return self._bulk_insert_sql('ACM_PCA_Metrics', sql_df)
+            # Use MERGE upsert to handle duplicate keys gracefully
+            return self._upsert_pca_metrics(sql_df)
             
         except Exception as e:
             Console.warn(f"[OUTPUT] write_pca_metrics failed: {e}")
+            return 0
+
+    def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
+        """Upsert PCA metrics by deleting existing RunID+EquipID entries first, then inserting all new rows.
+        
+        Primary key is (RunID, EquipID) ONLY. Each run can have multiple rows with different MetricType/ComponentName.
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            
+            # Get unique RunID+EquipID pairs
+            run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
+            
+            # DELETE existing rows for all RunID+EquipID combinations (prevents PK collisions)
+            for _, pair in run_equip_pairs.iterrows():
+                cursor.execute(
+                    "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?",
+                    (pair['RunID'], pair['EquipID'])
+                )
+            conn.commit()
+            
+            # INSERT all new rows
+            row_count = 0
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                component = row.get('ComponentName', 'PCA')
+                metric_type = row['MetricType']
+                value = row['Value']
+                timestamp = row.get('Timestamp', datetime.now())
+                
+                insert_sql = """
+                INSERT INTO ACM_PCA_Metrics (RunID, EquipID, ComponentName, MetricType, Value, Timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """
+                cursor.execute(insert_sql, (run_id, equip_id, component, metric_type, value, timestamp))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_pca_metrics failed: {e}")
+            return 0
+    
+    def _upsert_health_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-01: Upsert health forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, Timestamp), so update if exists.
+        Schema: RunID, EquipID, Timestamp, ForecastHealth, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        # Ensure all required columns exist with defaults before upsert
+        df = df.copy()
+        if 'Method' not in df.columns:
+            df['Method'] = 'ExponentialSmoothing'
+        if 'ForecastStd' not in df.columns:
+            df['ForecastStd'] = 0.0
+        
+        # Fill any NaN values in critical columns
+        df['Method'] = df['Method'].fillna('ExponentialSmoothing')
+        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                # Extract columns that match SQL schema
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                timestamp = row['Timestamp']
+                forecast_health = row.get('ForecastHealth', 0.0)
+                ci_lower = row.get('CiLower', 0.0)
+                ci_upper = row.get('CiUpper', 0.0)
+                forecast_std = row.get('ForecastStd', 0.0)
+                method = row.get('Method', 'ExponentialSmoothing')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(forecast_health):
+                    forecast_health = 0.0
+                if pd.isna(ci_lower):
+                    ci_lower = 0.0
+                if pd.isna(ci_upper):
+                    ci_upper = 0.0
+                if pd.isna(forecast_std):
+                    forecast_std = 0.0
+                if pd.isna(method):
+                    method = 'ExponentialSmoothing'
+                    
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                # MERGE upsert: update if key exists, insert otherwise
+                merge_sql = """
+                MERGE INTO ACM_HealthForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET ForecastHealth = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, Timestamp, ForecastHealth, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause params
+                    run_id, equip_id, timestamp,
+                    # UPDATE params
+                    forecast_health, ci_lower, ci_upper, forecast_std, method,
+                    # INSERT params
+                    run_id, equip_id, timestamp, forecast_health, ci_lower, ci_upper, forecast_std, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_health_forecast_ts failed: {e}")
+            return 0
+    
+    def _upsert_failure_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-02: Upsert failure forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, Timestamp), so update if exists.
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        # Always make a copy to avoid modifying original and ensure Method column exists
+        df = df.copy()
+        
+        # Ensure all required columns exist with defaults before upsert
+        if 'Method' not in df.columns:
+            df['Method'] = 'GaussianTail'
+        if 'ThresholdUsed' not in df.columns:
+            df['ThresholdUsed'] = 70.0
+        
+        # Fill any NaN values in Method column
+        df['Method'] = df['Method'].fillna('GaussianTail')
+        df['ThresholdUsed'] = df['ThresholdUsed'].fillna(70.0)
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                timestamp = row['Timestamp']
+                failure_prob = row.get('FailureProb', 0.0)
+                threshold_used = row.get('ThresholdUsed', 70.0)
+                method = row.get('Method', 'GaussianTail')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(method):
+                    method = 'GaussianTail'
+                if pd.isna(threshold_used):
+                    threshold_used = 70.0
+                if pd.isna(failure_prob):
+                    failure_prob = 0.0
+                    
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                merge_sql = """
+                MERGE INTO ACM_FailureForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET FailureProb = ?, ThresholdUsed = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, Timestamp, FailureProb, ThresholdUsed, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause
+                    run_id, equip_id, timestamp,
+                    # UPDATE
+                    failure_prob, threshold_used, method,
+                    # INSERT
+                    run_id, equip_id, timestamp, failure_prob, threshold_used, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_failure_forecast_ts failed: {e}")
+            return 0
+    
+    def _upsert_detector_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-03: Upsert detector forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, DetectorName, Timestamp), so update if exists.
+        Schema: RunID, EquipID, DetectorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        # Ensure all required columns exist with defaults before upsert
+        df = df.copy()
+        if 'Method' not in df.columns:
+            df['Method'] = 'AR1'
+        if 'ForecastStd' not in df.columns:
+            df['ForecastStd'] = 0.0
+        
+        # Fill any NaN values in critical columns
+        df['Method'] = df['Method'].fillna('AR1')
+        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
+        if 'DetectorName' in df.columns:
+            df['DetectorName'] = df['DetectorName'].fillna('UNKNOWN')
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                detector_name = row['DetectorName']
+                timestamp = row['Timestamp']
+                forecast_value = row.get('ForecastValue', 0.0)
+                ci_lower = row.get('CiLower', 0.0)
+                ci_upper = row.get('CiUpper', 0.0)
+                forecast_std = row.get('ForecastStd', 0.0)
+                method = row.get('Method', 'AR1')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(forecast_value):
+                    forecast_value = 0.0
+                if pd.isna(ci_lower):
+                    ci_lower = 0.0
+                if pd.isna(ci_upper):
+                    ci_upper = 0.0
+                if pd.isna(forecast_std):
+                    forecast_std = 0.0
+                if pd.isna(method):
+                    method = 'AR1'
+                if pd.isna(detector_name):
+                    detector_name = 'UNKNOWN'
+                    
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                merge_sql = """
+                MERGE INTO ACM_DetectorForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS DetectorName, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.DetectorName = source.DetectorName AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET ForecastValue = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, DetectorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause
+                    run_id, equip_id, detector_name, timestamp,
+                    # UPDATE
+                    forecast_value, ci_lower, ci_upper, forecast_std, method,
+                    # INSERT
+                    run_id, equip_id, detector_name, timestamp, forecast_value, ci_lower, ci_upper, forecast_std, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_detector_forecast_ts failed: {e}")
+            return 0
+    
+    def _upsert_sensor_forecast_ts(self, df: pd.DataFrame) -> int:
+        """
+        FORECAST-UPSERT-04: Upsert sensor forecast time series using MERGE.
+        
+        Primary key is (RunID, EquipID, SensorName, Timestamp), so update if exists.
+        Schema: RunID, EquipID, SensorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        """
+        if df.empty or self.sql_client is None:
+            return 0
+        
+        # Ensure all required columns exist with defaults before upsert
+        df = df.copy()
+        if 'Method' not in df.columns:
+            df['Method'] = 'AR1'
+        if 'ForecastStd' not in df.columns:
+            df['ForecastStd'] = 0.0
+        
+        # Fill any NaN values in critical columns
+        df['Method'] = df['Method'].fillna('AR1')
+        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
+        if 'SensorName' in df.columns:
+            df['SensorName'] = df['SensorName'].fillna('UNKNOWN')
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            row_count = 0
+            
+            for _, row in df.iterrows():
+                run_id = row['RunID']
+                equip_id = row['EquipID']
+                sensor_name = row['SensorName']
+                timestamp = row['Timestamp']
+                forecast_value = row.get('ForecastValue', 0.0)
+                ci_lower = row.get('CiLower', 0.0)
+                ci_upper = row.get('CiUpper', 0.0)
+                forecast_std = row.get('ForecastStd', 0.0)
+                method = row.get('Method', 'AR1')
+                
+                # Ensure no NaN values are passed as None to SQL
+                if pd.isna(forecast_value):
+                    forecast_value = 0.0
+                if pd.isna(ci_lower):
+                    ci_lower = 0.0
+                if pd.isna(ci_upper):
+                    ci_upper = 0.0
+                if pd.isna(forecast_std):
+                    forecast_std = 0.0
+                if pd.isna(method):
+                    method = 'AR1'
+                if pd.isna(sensor_name):
+                    sensor_name = 'UNKNOWN'
+                    
+                created_at = row.get('CreatedAt', datetime.now())
+                
+                merge_sql = """
+                MERGE INTO ACM_SensorForecast_TS AS target
+                USING (SELECT ? AS RunID, ? AS EquipID, ? AS SensorName, ? AS Timestamp) AS source
+                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.SensorName = source.SensorName AND target.Timestamp = source.Timestamp)
+                WHEN MATCHED THEN
+                    UPDATE SET ForecastValue = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
+                WHEN NOT MATCHED THEN
+                    INSERT (RunID, EquipID, SensorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """
+                cursor.execute(merge_sql, (
+                    # ON clause
+                    run_id, equip_id, sensor_name, timestamp,
+                    # UPDATE
+                    forecast_value, ci_lower, ci_upper, forecast_std, method,
+                    # INSERT
+                    run_id, equip_id, sensor_name, timestamp, forecast_value, ci_lower, ci_upper, forecast_std, method, created_at
+                ))
+                row_count += cursor.rowcount
+            
+            conn.commit()
+            return row_count
+            
+        except Exception as e:
+            Console.warn(f"[OUTPUT] _upsert_sensor_forecast_ts failed: {e}")
             return 0
     
     def write_run_stats(self, stats_data: Dict[str, Any]) -> int:
@@ -2660,11 +3111,14 @@ class OutputManager:
         else:
             contributions = (latest_scores / total * 100).round(2)
         
-        return pd.DataFrame({
+        df = pd.DataFrame({
             'DetectorType': contributions.index,
             'ContributionPct': contributions.values,
             'ZScore': latest_scores.values
         }).sort_values('ContributionPct', ascending=False)
+        # Human-readable detector labels for dashboards
+        df['DetectorType'] = df['DetectorType'].apply(lambda c: get_detector_label(str(c)))
+        return df
     
     def _generate_contrib_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Generate historical sensor contributions over time."""
@@ -2687,6 +3141,7 @@ class OutputManager:
         long_df.rename(columns={idx_col: 'Timestamp'}, inplace=True)
         long_df['Timestamp'] = normalize_timestamp_series(long_df['Timestamp'])
         long_df['ContributionPct'] = long_df['ContributionPct'].round(2)
+        long_df['DetectorType'] = long_df['DetectorType'].apply(lambda c: get_detector_label(str(c)))
         return long_df[['Timestamp', 'DetectorType', 'ContributionPct']]
     
     def _generate_defect_summary(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
@@ -3117,6 +3572,26 @@ class OutputManager:
         detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
         if len(detector_cols) < 2:
             return pd.DataFrame({'DetectorA': [], 'DetectorB': [], 'PearsonR': []})
+
+        def _pair_hint(label_a: str, label_b: str) -> str:
+            labels = (label_a + " " + label_b).lower()
+            has_baseline = "baseline" in labels or "omr" in labels
+            has_corr = "correlation" in labels or "pca" in labels or "density" in labels or "isolationforest" in labels
+            has_spike = "time-series" in labels or "ar1" in labels
+            has_distance = "distance" in labels or "mahal" in labels
+            if has_baseline and has_corr:
+                return "Health baseline moving with a pattern change"
+            if has_baseline and has_spike:
+                return "Health baseline tracking repeated spikes"
+            if has_corr and has_distance:
+                return "Regime/cluster shift across many sensors"
+            if has_corr and has_spike:
+                return "Transient spikes align with pattern change"
+            if has_spike:
+                return "Temporal spikes seen by both detectors"
+            if has_baseline:
+                return "Overall health shifting with another detector"
+            return "Detectors reacting together; check shared cause"
         
         correlations = []
         for i, det_a in enumerate(detector_cols):
@@ -3131,9 +3606,11 @@ class OutputManager:
                     r = sa.corr(sb)
                     r = 0.0 if pd.isna(r) else float(round(r, 4))
                 correlations.append({
-                    'DetectorA': det_a,
-                    'DetectorB': det_b,
-                    'PearsonR': r
+                    'DetectorA': get_detector_label(str(det_a)),
+                    'DetectorB': get_detector_label(str(det_b)),
+                    'PearsonR': r,
+                    'PairLabel': f"{get_detector_label(str(det_a))} <-> {get_detector_label(str(det_b))}",
+                    'DisturbanceHint': _pair_hint(get_detector_label(str(det_a)), get_detector_label(str(det_b)))
                 })
         
         return pd.DataFrame(correlations)
@@ -3152,7 +3629,7 @@ class OutputManager:
             saturation_pct = (values >= clip_z).mean() * 100
             
             row = {
-                'DetectorType': detector,
+                'DetectorType': get_detector_label(str(detector)),
                 'MeanZ': round(values.mean(), 4),
                 'StdZ': round(values.std(), 4),
                 'P95Z': round(values.quantile(0.95), 4),
@@ -3612,74 +4089,55 @@ class OutputManager:
                 episode_mask = (scores_df.index >= start_dt) & (scores_df.index <= end_dt)
                 episode_data = scores_df.loc[episode_mask, detector_cols]
                 
-                if episode_data.empty:
-                    # Fallback to basic attribution
-                    culprits = episode.get('culprits', 'unknown')
-                    culprit_history.append({
-                        'StartTimestamp': self._safe_single_timestamp(start_ts),
-                        'EndTimestamp': self._safe_single_timestamp(end_ts),
-                        'DurationHours': round(duration_hours, 1),
-                        'PrimaryDetector': str(culprits),
-                        'WeightedContribution': None,
-                        'LeadMeanZ': None,
-                        'DuringMeanZ': None,
-                        'LagMeanZ': None
-                    })
-                    continue
-                
-                # Compute weighted contributions for each detector
+                # Compute weighted contributions for each detector (allow empty -> None)
                 contributions = {}
                 for col in detector_cols:
                     if col in episode_data.columns:
-                        mean_z = episode_data[col].mean()
+                        mean_z = episode_data[col].abs().mean()
                         weight = default_weights.get(col, 1.0)
                         contributions[col] = mean_z * weight
                 
                 # Rank by contribution
                 ranked = sorted(contributions.items(), key=lambda x: x[1], reverse=True)
-                primary_detector = ranked[0][0].replace('_z', '') if ranked else 'unknown'
-                weighted_contrib = round(ranked[0][1], 2) if ranked else 0.0
+                primary_detector_code = ranked[0][0] if ranked else 'unknown'
+                primary_detector_label = get_detector_label(primary_detector_code, use_short=False) if ranked else 'Unknown'
+                weighted_contrib = round(ranked[0][1], 2) if ranked else None
                 
                 # Lead/lag temporal context (1 hour before and after, or 10 samples)
                 lead_window = 10
                 lag_window = 10
                 
-                # Get indices
-                episode_start_idx = scores_df.index.get_loc(episode_mask.idxmax()) if episode_mask.any() else 0
-                episode_end_idx = len(scores_df) - 1 - scores_df.index[::-1].get_loc(episode_mask[::-1].idxmax()) if episode_mask.any() else len(scores_df) - 1
+                # Get indices (episode_mask is boolean array, find first/last True)
+                if episode_mask.any():
+                    episode_start_idx = int(episode_mask.argmax())  # first True
+                    episode_end_idx = len(episode_mask) - 1 - int(episode_mask[::-1].argmax())  # last True
+                else:
+                    episode_start_idx = 0
+                    episode_end_idx = len(scores_df) - 1
                 
                 lead_start = max(0, episode_start_idx - lead_window)
                 lag_end = min(len(scores_df), episode_end_idx + lag_window + 1)
                 
                 # Compute lead/lag means for the primary detector
-                lead_mean = scores_df.iloc[lead_start:episode_start_idx][primary_detector + '_z'].mean() if episode_start_idx > lead_start else np.nan
-                during_mean = episode_data[primary_detector + '_z'].mean()
-                lag_mean = scores_df.iloc[episode_end_idx+1:lag_end][primary_detector + '_z'].mean() if lag_end > episode_end_idx + 1 else np.nan
+                lead_mean = scores_df.iloc[lead_start:episode_start_idx][primary_detector_code].abs().mean() if episode_start_idx > lead_start else None
+                during_mean = episode_data[primary_detector_code].abs().mean() if not episode_data.empty else None
+                lag_mean = scores_df.iloc[episode_end_idx+1:lag_end][primary_detector_code].abs().mean() if lag_end > episode_end_idx + 1 else None
                 
                 culprit_history.append({
                     'StartTimestamp': self._safe_single_timestamp(start_ts),
                     'EndTimestamp': self._safe_single_timestamp(end_ts),
                     'DurationHours': round(duration_hours, 1),
-                    'PrimaryDetector': primary_detector,
+                    'PrimaryDetector': primary_detector_label,
                     'WeightedContribution': weighted_contrib,
-                    'LeadMeanZ': round(lead_mean, 2) if not pd.isna(lead_mean) else None,
-                    'DuringMeanZ': round(during_mean, 2) if not pd.isna(during_mean) else None,
-                    'LagMeanZ': round(lag_mean, 2) if not pd.isna(lag_mean) else None
+                    'LeadMeanZ': round(lead_mean, 2) if lead_mean is not None else None,
+                    'DuringMeanZ': round(during_mean, 2) if during_mean is not None else None,
+                    'LagMeanZ': round(lag_mean, 2) if lag_mean is not None else None
                 })
                 
             except Exception as e:
                 # Fallback to basic attribution on error
-                culprits = episode.get('culprits', 'unknown')
-                culprit_history.append({
-                    'StartTimestamp': self._safe_single_timestamp(start_ts),
-                    'EndTimestamp': self._safe_single_timestamp(end_ts),
-                    'DurationHours': round(duration_hours, 1),
-                    'PrimaryDetector': str(culprits),
-                    'WeightedContribution': None,
-                    'LeadMeanZ': None,
-                    'DuringMeanZ': None,
-                    'LagMeanZ': None
-                })
+                Console.warn(f"[CULPRITS] Failed to compute culprit history for {start_ts}-{end_ts}: {e}")
+                continue
         
         return pd.DataFrame(culprit_history)
     
@@ -3701,12 +4159,17 @@ class OutputManager:
             culprits = episode.get('culprits', 'unknown')
             if pd.isna(culprits) or culprits == '':
                 culprits = 'unknown'
+            culprits_label = format_culprit_label(str(culprits)) if culprits else 'Unknown'
             
             culprit_history.append({
                 'StartTimestamp': self._safe_single_timestamp(start_ts),
                 'EndTimestamp': self._safe_single_timestamp(end_ts) if end_ts and not pd.isna(end_ts) else None,
                 'DurationHours': round(duration_hours, 1) if duration_hours else None,
-                'Culprits': str(culprits) if culprits != 'unknown' else None
+                'PrimaryDetector': culprits_label if culprits != 'unknown' else 'Unknown',
+                'WeightedContribution': None,
+                'LeadMeanZ': None,
+                'DuringMeanZ': None,
+                'LagMeanZ': None
             })
         
         return pd.DataFrame(culprit_history)
@@ -3830,15 +4293,13 @@ class OutputManager:
             if duration_h == 0.0 and 'duration_s' in episode:
                 duration_h = episode['duration_s'] / 3600.0
             
-            # Dominant sensor from culprits
+            # Dominant sensor from culprits (already formatted with human-readable labels by fuse.py)
             culprits_str = episode.get('culprits', '')
             dominant_sensor = 'Unknown'
             if culprits_str and isinstance(culprits_str, str):
-                # Parse culprits format: "sensor1(0.85), sensor2(0.12)"
-                culprits_list = culprits_str.split(',')
-                if culprits_list:
-                    first_culprit = culprits_list[0].strip()
-                    dominant_sensor = first_culprit.split('(')[0].strip() if '(' in first_culprit else first_culprit
+                # Culprits are already human-readable from format_culprit_label()
+                # Examples: "Density Anomaly (GMM)", "Correlation Break (PCA-SPE) → DEMO.SIM.FSAB"
+                dominant_sensor = culprits_str.strip() if culprits_str.strip() else 'Unknown'
             
             # Severity and reason
             severity = episode.get('severity', 'MEDIUM')
