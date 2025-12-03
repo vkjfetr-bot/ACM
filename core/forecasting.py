@@ -47,6 +47,9 @@ import json
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
+from scipy.optimize import minimize
+from sklearn.model_selection import TimeSeriesSplit
+from statsmodels.tsa.api import VAR
 
 from utils.logger import Console  # type: ignore
 # FOR-DQ-02: Use centralized timestamp normalization
@@ -368,21 +371,34 @@ def should_retrain(
     max_hours_between_retrain = float(forecast_cfg.get("max_hours_between_retrain", 168.0))
     if current_batch_time is None:
         current_batch_time = datetime.now()
+    # P2-FIX-3.4: Enhanced retrain diagnostics (internal)
+    # We keep the existing return signature but add more transparent checks
+    # via Console logging; future refactor can return diagnostics dict.
+    diagnostics: Dict[str, Any] = {"checks_performed": [], "checks_failed": [], "checks_skipped": []}
+    diagnostics["checks_performed"].append("state_presence")
     
     # No prior state always triggers retrain
     if prev_state is None:
+        diagnostics["checks_failed"].append("no_previous_state")
+        Console.info("[RETRAIN] no_previous_state")
         return True, "No prior forecast state (cold start)"
     
     # Check data hash change (disable in continuous sliding-window mode to avoid perpetual retrain)
     hash_check_enabled = bool(forecast_cfg.get("enable_hash_check", not forecast_cfg.get("enable_continuous", True)))
+    diagnostics["checks_performed"].append("data_hash")
     if hash_check_enabled and current_data_hash:
         if prev_state.training_data_hash != current_data_hash:
+            diagnostics["checks_failed"].append("data_hash")
+            Console.info("[RETRAIN] data_changed")
             return True, f"Training data changed (hash mismatch)"
 
     # Check forecast accuracy degradation (if provided by caller)
+    diagnostics["checks_performed"].append("performance")
     if forecast_quality:
         rmse = float(forecast_quality.get("rmse", 0.0) or 0.0)
         if rmse > error_threshold:
+            diagnostics["checks_failed"].append("performance")
+            Console.info(f"[RETRAIN] performance_degraded_rmse_{rmse:.2f}")
             return True, f"Forecast accuracy degraded (RMSE={rmse:.2f} > {error_threshold})"
     
     # Drift check disabled - ACM_DriftMetrics table not yet implemented
@@ -411,6 +427,8 @@ def should_retrain(
             max_energy = float(row[0])
             avg_energy = float(row[1])
             if avg_energy > 0 and max_energy > energy_threshold * avg_energy:
+                diagnostics["checks_failed"].append("anomaly_energy_spike")
+                Console.info("[RETRAIN] anomaly_energy_spike")
                 return True, f"Anomaly energy spike (Max={max_energy:.2f} > {energy_threshold}x avg)"
     except Exception as e:
         # FOR-CODE-02: Non-fatal data condition - log and continue without energy check
@@ -422,6 +440,8 @@ def should_retrain(
             last_retrain_ts = datetime.fromisoformat(prev_state.last_retrain_time)
             hours_since = (current_batch_time - last_retrain_ts).total_seconds() / 3600.0
             if hours_since > max_hours_between_retrain:
+                diagnostics["checks_failed"].append("time_based")
+                Console.info("[RETRAIN] scheduled_time_based")
                 return True, f"Scheduled retrain ({hours_since:.0f}h since last > {max_hours_between_retrain}h limit)"
     except Exception as e:
         Console.warn(f"[FORECAST] Failed to evaluate time-based retrain: {e}")
@@ -975,8 +995,89 @@ class AR1Detector:
         inst = cls(payload.get("cfg"))
         inst.phimap = dict(payload.get("phimap", {}))
         inst.sdmap = dict(payload.get("sdmap", {}))
-        inst._is_fitted = True
-        return inst
+
+
+# ============================================================================
+# P3-FIX-4.3: Outlier detection helper before forecasting
+# ============================================================================
+
+def detect_and_remove_outliers(series: pd.Series, z_thresh: float = 4.0) -> pd.Series:
+    """
+    Simple z-score based outlier removal to stabilise exponential smoothing.
+
+    Args:
+        series: Input time series
+        z_thresh: Z-score threshold for outlier detection
+
+    Returns:
+        Series with extreme outliers replaced by median.
+    """
+    s = series.astype(float).copy()
+    if s.size == 0:
+        return s
+    med = float(np.nanmedian(s))
+    std = float(np.nanstd(s))
+    if not np.isfinite(std) or std < 1e-6:
+        return s.fillna(med)
+    z = (s - med) / std
+    mask = np.abs(z) > z_thresh
+    s[mask] = med
+    return s.fillna(med)
+
+
+# ============================================================================
+# P2-FIX-3.1: Adaptive hyperparameter optimisation for Holt
+# ============================================================================
+
+def adaptive_exponential_smoothing(
+    series: pd.Series,
+    initial_alpha: float = 0.3,
+    initial_beta: float = 0.2,
+) -> Tuple[float, float]:
+    """
+    Find optimal α, β for Holt's method via time-series CV.
+    """
+    y = series.astype(float).to_numpy()
+    n = len(y)
+    if n < MIN_FORECAST_SAMPLES:
+        return initial_alpha, initial_beta
+
+    tscv = TimeSeriesSplit(n_splits=max(2, min(5, n // 20)))
+
+    def objective(params: np.ndarray) -> float:
+        alpha, beta = params
+        alpha = float(np.clip(alpha, 0.01, 0.99))
+        beta = float(np.clip(beta, 0.01, 0.99))
+        errors: List[float] = []
+        for train_idx, val_idx in tscv.split(y):
+            train = y[train_idx]
+            val = y[val_idx]
+            if len(train) < MIN_FORECAST_SAMPLES or len(val) == 0:
+                continue
+            # Simple Holt update loop
+            level = float(train[0])
+            trend = float(train[1] - train[0]) if len(train) > 1 else 0.0
+            for i in range(1, len(train)):
+                prev_level = level
+                prev_trend = trend
+                level = alpha * float(train[i]) + (1 - alpha) * (prev_level + prev_trend)
+                trend = beta * (level - prev_level) + (1 - beta) * prev_trend
+            # Predict next len(val) points
+            preds = np.array([level + (h+1) * trend for h in range(len(val))], dtype=float)
+            mse = float(np.mean((val - preds) ** 2))
+            errors.append(mse)
+        if not errors:
+            return 1e6
+        return float(np.mean(errors))
+
+    result = minimize(
+        objective,
+        x0=np.array([initial_alpha, initial_beta], dtype=float),
+        bounds=[(0.01, 0.99), (0.01, 0.99)],
+        method="L-BFGS-B",
+    )
+    alpha_opt, beta_opt = result.x
+    return float(alpha_opt), float(beta_opt)
 
 
 # ============================================================================
@@ -1358,6 +1459,8 @@ def run_enhanced_forecasting_sql(
     try:
         # Prepare series (median imputation to align with ACM standards)
         health_values = pd.Series(health_series, copy=True).astype(float)
+        # P3-FIX-4.3: outlier handling before smoothing
+        health_values = detect_and_remove_outliers(health_values)
         median_val = float(np.nanmedian(health_values)) if health_values.size else 0.0
         if not np.isfinite(median_val):
             median_val = 0.0
@@ -1379,6 +1482,13 @@ def run_enhanced_forecasting_sql(
                 level = float(lvl_prev)
             if tr_prev is not None and np.isfinite(tr_prev):
                 trend = float(tr_prev)
+        # P2-FIX-3.1: adapt alpha/beta when sufficient history and enabled
+        if bool(forecast_cfg.get("enable_adaptive_smoothing", True)) and n >= max(MIN_FORECAST_SAMPLES, 30):
+            try:
+                alpha, beta = adaptive_exponential_smoothing(health_values, initial_alpha=alpha, initial_beta=beta)
+                Console.info(f"[FORECAST] Adaptive smoothing params: alpha={alpha:.2f}, beta={beta:.2f}")
+            except Exception as _e:
+                Console.warn(f"[FORECAST] Adaptive smoothing failed: {_e}")
         level_history: List[float] = [level]
         trend_history: List[float] = [trend]
         forecast_errors: List[float] = []
@@ -1615,31 +1725,63 @@ def run_enhanced_forecasting_sql(
                 # Sort by magnitude - top active detectors
                 top_detectors = sorted(detector_scores.items(), key=lambda x: x[1], reverse=True)[:10]
                 
-                # Generate forecast for top detectors
+                # Generate AR(1)-based forecast for top detectors (P3-FIX-4.1)
                 detector_forecast_rows = []
-                decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
-                max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
-                det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
                 horizons = np.arange(1, len(forecast_timestamps) + 1, dtype=float)
-                decay = np.exp(-decay_rate * horizons)
                 for detector_name, z_score in top_detectors:
-                    base = float(np.clip(z_score, 0.0, max_detector_z))
-                    proj = np.clip(base * decay, 0.0, max_detector_z)
-                    ci_lower = np.maximum(0.0, proj - det_ci_hw)
-                    ci_upper = np.minimum(max_detector_z, proj + det_ci_hw)
+                    # Build detector history series
+                    hist = df_scores[detector_name + "_z"].astype(float).dropna()
+                    recent = hist.tail(168)
+                    if len(recent) < 10:
+                        # fallback exponential decay
+                        decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
+                        max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
+                        det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
+                        decay = np.exp(-decay_rate * horizons)
+                        base = float(np.clip(z_score, 0.0, max_detector_z))
+                        proj = np.clip(base * decay, 0.0, max_detector_z)
+                        ci_lower = np.maximum(0.0, proj - det_ci_hw)
+                        ci_upper = np.minimum(max_detector_z, proj + det_ci_hw)
+                    else:
+                        x = recent.to_numpy(dtype=float)
+                        if len(x) < 2 or np.allclose(x, x[0]):
+                            decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
+                            max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
+                            det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
+                            decay = np.exp(-decay_rate * horizons)
+                            base = float(np.clip(z_score, 0.0, max_detector_z))
+                            proj = np.clip(base * decay, 0.0, max_detector_z)
+                            ci_lower = np.maximum(0.0, proj - det_ci_hw)
+                            ci_upper = np.minimum(max_detector_z, proj + det_ci_hw)
+                        else:
+                            phi = float(np.corrcoef(x[:-1], x[1:])[0, 1])
+                            phi = float(np.clip(phi, 0.0, 0.99))
+                            mu = float(np.mean(x) * (1.0 - phi))
+                            sigma = float(np.std(x[1:] - phi * x[:-1])) or 1e-6
+                            proj = []
+                            ci_lower = []
+                            ci_upper = []
+                            x_t = x[-1]
+                            for h in range(1, len(forecast_timestamps) + 1):
+                                x_t = phi * x_t + mu
+                                var_h = sigma**2 * (1 - phi**(2 * h)) / (1 - phi**2)
+                                std_h = float(np.sqrt(max(var_h, 0.0)))
+                                proj.append(float(x_t))
+                                ci_lower.append(float(x_t - 1.96 * std_h))
+                                ci_upper.append(float(x_t + 1.96 * std_h))
                     detector_forecast_rows.extend([
                         {
                             "RunID": run_id,
                             "EquipID": equip_id,
                             "Timestamp": ts,
-                            "DetectorName": detector_name,  # e.g., 'pca_spe', 'cusum', 'gmm'
+                            "DetectorName": detector_name,
                             "ForecastValue": float(pv),
                             "CI_Lower": float(cl),
                             "CI_Upper": float(cu),
                             "CiLower": float(cl),
                             "CiUpper": float(cu),
                             "ForecastStd": None,
-                            "Method": "ExponentialDecay",
+                            "Method": "DetectorAR1",
                             "RegimeLabel": regime_label,
                             "FusedZ": float(fused_val) if pd.notna(fused_val) else None,
                         }
