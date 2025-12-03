@@ -136,6 +136,124 @@ def ensure_equipid_int(equip_id: Any) -> int:
 # Continuous Forecasting Helpers (FORECAST-STATE-02, 03)
 # ============================================================================
 
+def cumulative_prob_to_hazard(
+    cum_prob_series: pd.Series,
+    dt_hours_vec: np.ndarray
+) -> np.ndarray:
+    """
+    P0-FIX-1.3: Convert cumulative failure probability F(t) to discrete hazard λ(t).
+    
+    Correct discrete hazard formula:
+        λ(t) = [F(t) - F(t-1)] / [(1 - F(t-1)) * dt]
+    
+    Where:
+        - F(t) is cumulative failure probability (monotonic, 0 to 1)
+        - λ(t) is instantaneous hazard rate (failures per unit time)
+        - dt is time interval between observations
+    
+    Args:
+        cum_prob_series: Cumulative failure probabilities F(t)
+        dt_hours_vec: Time intervals (hours) for each step
+        
+    Returns:
+        Array of hazard rates λ(t)
+    """
+    F = cum_prob_series.to_numpy(copy=True)
+    n = len(F)
+
+    # Enforce monotonic cumulative probabilities
+    F = np.maximum.accumulate(F)
+    F = np.clip(F, 0.0, 1.0)
+
+    lambda_rate = np.zeros(n, dtype=float)
+
+    if n == 0:
+        return lambda_rate
+
+    # First point: treat as if hazard over first dt
+    if F[0] < 1:
+        lambda_rate[0] = -np.log(max(1e-9, 1 - F[0])) / max(1e-6, dt_hours_vec[0])
+    else:
+        lambda_rate[0] = 10.0  # Sentinel for near-certain failure
+
+    # Subsequent points: use incremental formula
+    for i in range(1, n):
+        dF = F[i] - F[i - 1]
+        S_prev = 1.0 - F[i - 1]
+
+        if S_prev > 1e-9 and dt_hours_vec[i] > 0:
+            lambda_rate[i] = dF / (S_prev * dt_hours_vec[i])
+        else:
+            lambda_rate[i] = 10.0
+
+    return lambda_rate
+
+
+def estimate_rul_monte_carlo(
+    forecast_mean: np.ndarray,
+    forecast_std: np.ndarray,
+    failure_threshold: float,
+    n_simulations: int = 1000
+) -> Dict[str, float]:
+    """
+    P0-FIX-1.4: Monte Carlo RUL with full uncertainty quantification.
+    
+    Simulates many forecast trajectories using the forecast distribution,
+    counts threshold crossings, and returns RUL distribution statistics.
+    
+    Args:
+        forecast_mean: Array of forecast means for each horizon
+        forecast_std: Array of forecast standard deviations for each horizon
+        failure_threshold: Health value considered as failure
+        n_simulations: Number of Monte Carlo samples
+        
+    Returns:
+        Dictionary with RUL statistics:
+            - rul_median: 50th percentile RUL (hours)
+            - rul_mean: Expected RUL (hours)
+            - rul_p10: 10th percentile (optimistic)
+            - rul_p90: 90th percentile (pessimistic)
+            - rul_std: Standard deviation of RUL
+            - failure_probability: Probability of failure within forecast horizon
+    """
+    n_steps = len(forecast_mean)
+    if n_steps == 0:
+        return {
+            "rul_median": float("nan"),
+            "rul_mean": float("nan"),
+            "rul_p10": float("nan"),
+            "rul_p90": float("nan"),
+            "rul_std": float("nan"),
+            "failure_probability": 0.0,
+        }
+
+    rul_samples: List[float] = []
+
+    for _ in range(n_simulations):
+        # Generate random trajectory
+        trajectory = np.random.normal(forecast_mean, forecast_std)
+        # Find first crossing of failure threshold
+        crossings = np.where(trajectory < failure_threshold)[0]
+
+        if len(crossings) > 0:
+            rul = float(crossings[0] + 1)  # +1 for 1-indexed hours
+        else:
+            rul = float(n_steps + 10)  # Beyond horizon
+
+        rul_samples.append(rul)
+
+    rul_arr = np.asarray(rul_samples, dtype=float)
+
+    return {
+        "rul_median": float(np.median(rul_arr)),
+        "rul_mean": float(np.mean(rul_arr)),
+        "rul_p10": float(np.percentile(rul_arr, 10)),
+        "rul_p90": float(np.percentile(rul_arr, 90)),
+        "rul_std": float(np.std(rul_arr)),
+        "failure_probability": float(np.mean(rul_arr <= n_steps)),
+    }
+
+
 def compute_data_hash(df: pd.DataFrame) -> str:
     """
     Compute SHA256 hash of DataFrame for change detection using binary serialization.
@@ -487,10 +605,9 @@ def smooth_failure_probability_hazard(
         dt_vec = np.array([dt_hours])
     dt_vec = np.insert(dt_vec, 0, dt_vec[0] if dt_vec.size else dt_hours)
     
-    # Convert probability to hazard rate (clip to avoid log(0))
-    p_clipped = new_probability_series.clip(1e-9, 1 - 1e-9)
-    p_np = p_clipped.to_numpy(dtype=float, copy=False)
-    lambda_raw_np = -np.log(1 - p_np) / dt_vec
+    # P0-FIX-1.3: Convert cumulative probability to hazard rate using correct formula
+    # Use cumulative_prob_to_hazard helper (incremental dF / S_prev approach)
+    lambda_raw_np = cumulative_prob_to_hazard(new_probability_series, dt_vec)
     df_result["HazardRaw"] = lambda_raw_np
     
     # EWMA smoothing with previous baseline
@@ -1142,7 +1259,8 @@ def run_enhanced_forecasting_sql(
         
         # Initialize Holt's linear trend components
         level = float(health_values.iloc[0])
-        trend = float(health_values.iloc[1] - health_values.iloc[0]) if n > 1 else 0.0
+        # P0-FIX-1.1: Initial trend must be per-hour (divide by dt_hours)
+        trend = float(health_values.iloc[1] - health_values.iloc[0]) / dt_hours if n > 1 else 0.0
         # Warm-start from previous smoothing params when available and no retrain requested
         if not retrain_needed and prev_smoothing_params:
             lvl_prev = prev_smoothing_params.get("estimated_level")
@@ -1200,9 +1318,13 @@ def run_enhanced_forecasting_sql(
         for h in range(1, forecast_hours + 1):
             forecast_val = level + h * trend
             forecast_val = max(health_min, min(health_max, forecast_val))  # Clamp to configured scale
-            # Variance growth approximation for Holt's method
-            var_mult = np.sqrt(1.0 + (alpha ** 2) * h + (beta ** 2) * (h ** 2))
-            horizon_std = std_error * var_mult
+            # P0-FIX-1.2: Correct variance multiplier for Holt's Linear Trend
+            # Formula: 1 + (h-1) * [α² + αβh + β²h(h+1)/2]
+            if h <= 1:
+                var_mult = 1.0
+            else:
+                var_mult = 1.0 + (h - 1) * (alpha**2 + alpha * beta * h + beta**2 * h * (h + 1) / 2)
+            horizon_std = std_error * np.sqrt(var_mult)
             ci_width = 1.96 * horizon_std
             forecast_values.append(forecast_val)
             forecast_stds.append(horizon_std)
@@ -1300,40 +1422,43 @@ def run_enhanced_forecasting_sql(
         hazard_df = pd.DataFrame()
         max_failure_prob = 0.0
 
-    # --- 3. RUL Estimation (probabilistic first-passage approximation) ---
+    # --- 3. RUL Estimation (P0-FIX-1.4: Monte Carlo with uncertainty quantification) ---
     try:
         base_time = health_series.index[-1] if len(health_series) else pd.Timestamp.now()
         rul_hours = float(forecast_hours + 24)  # default buffer fallback
+        rul_stats: Dict[str, float] = {}
 
-        def _rul_from_cdf(timestamps: pd.Series, cdf: np.ndarray) -> Tuple[float, float]:
-            cdf = np.clip(cdf, 0.0, 1.0)
-            cdf = np.maximum.accumulate(cdf)
-            deltas = np.diff(np.concatenate(([0.0], cdf)))
-            hours = (pd.to_datetime(timestamps) - base_time).total_seconds() / 3600.0
-            hours = np.maximum(hours, 0.0)
-            first_cross = next((h for h, p in zip(hours, cdf) if p >= 0.5), float(forecast_hours + 24))
-            expected = float(np.sum(deltas * hours)) if deltas.size else float(forecast_hours + 24)
-            return first_cross, expected
-
-        if not hazard_df.empty and "FailureProb" in hazard_df.columns:
-            rul_cross, rul_exp = _rul_from_cdf(hazard_df["Timestamp"], hazard_df["FailureProb"].to_numpy(copy=False))
-            rul_hours = rul_cross if rul_cross is not None else rul_exp
-            Console.info(f"[FORECAST] RUL (hazard-based): {rul_hours:.1f}h")
-        elif len(forecast_values) > 0 and len(failure_prob_df) > 0:
-            rul_cross, rul_exp = _rul_from_cdf(failure_prob_df["Timestamp"], failure_prob_df["FailureProb"].to_numpy(copy=False))
-            rul_hours = rul_cross if rul_cross is not None else rul_exp
-            Console.info(f"[FORECAST] RUL (probabilistic tail): {rul_hours:.1f}h")
-        elif len(forecast_values) > 0:
-            for h, fh in enumerate(forecast_values, 1):
-                if fh < failure_threshold:
-                    rul_hours = float(h)
-                    break
+        # P0-FIX-1.4: Use Monte Carlo to get full RUL distribution
+        if len(forecast_values) > 0 and len(forecast_stds) > 0:
+            rul_stats = estimate_rul_monte_carlo(
+                forecast_mean=np.array(forecast_values),
+                forecast_std=np.array(forecast_stds),
+                failure_threshold=failure_threshold,
+                n_simulations=1000
+            )
+            rul_hours = rul_stats.get("rul_median", float(forecast_hours + 24))
+            Console.info(
+                f"[FORECAST] RUL (Monte Carlo): "
+                f"median={rul_stats.get('rul_median', 0):.1f}h, "
+                f"P10={rul_stats.get('rul_p10', 0):.1f}h, "
+                f"P90={rul_stats.get('rul_p90', 0):.1f}h, "
+                f"failure_prob={rul_stats.get('failure_probability', 0)*100:.1f}%"
+            )
         else:
-            rul_hours = 168.0  # Default 1 week
+            # Fallback: simple threshold crossing
+            if len(forecast_values) > 0:
+                for h, fh in enumerate(forecast_values, 1):
+                    if fh < failure_threshold:
+                        rul_hours = float(h)
+                        break
+            else:
+                rul_hours = 168.0  # Default 1 week
+            Console.info(f"[FORECAST] RUL (deterministic fallback): {rul_hours:.1f}h")
             
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] RUL estimation failed: {e}")
         rul_hours = 168.0
+        rul_stats = {}
 
     # --- 4A. Detector Attribution (Active Detectors) ---
     # Forecast detector Z-score trends (PCA, CUSUM, GMM, IForest, etc.)
