@@ -254,35 +254,86 @@ def estimate_rul_monte_carlo(
     }
 
 
+def estimate_failure_probability_empirical(
+    forecast_mean: float,
+    forecast_std: float,
+    failure_threshold: float,
+    residual_history: np.ndarray,
+    n_samples: int = 10000,
+) -> float:
+    """
+    P1-FIX-2.3: Non-parametric failure probability using empirical residual distribution.
+    
+    Instead of assuming Gaussian errors, bootstrap from actual residual history
+    to capture skewness, heavy tails, and other non-Gaussian features.
+    
+    Args:
+        forecast_mean: Point forecast
+        forecast_std: Forecast standard deviation (from model)
+        failure_threshold: Health value considered as failure
+        residual_history: Array of historical forecast errors
+        n_samples: Number of bootstrap samples
+        
+    Returns:
+        Probability that forecast falls below failure threshold
+    """
+    residual_history = np.asarray(residual_history, dtype=float)
+    residual_history = residual_history[np.isfinite(residual_history)]
+    
+    # Fallback to Gaussian if insufficient history
+    if residual_history.size < 10:
+        z = (failure_threshold - forecast_mean) / max(forecast_std, 1e-6)
+        return float(norm.cdf(z))
+
+    # Compute scale factor to match forecast_std
+    res_std = residual_history.std()
+    if res_std <= 0:
+        res_std = 1.0
+
+    # Bootstrap: sample residuals, scale to match forecast uncertainty, add to mean
+    sampled_residuals = np.random.choice(residual_history, size=n_samples, replace=True)
+    scaled_residuals = sampled_residuals * (forecast_std / res_std)
+    forecast_samples = forecast_mean + scaled_residuals
+
+    # Compute empirical failure probability
+    failure_prob = np.mean(forecast_samples < failure_threshold)
+    return float(failure_prob)
+
+
 def compute_data_hash(df: pd.DataFrame) -> str:
     """
-    Compute SHA256 hash of DataFrame for change detection using binary serialization.
+    P1-FIX-2.4: Stable hash using sorted index + key columns only.
     
-    More efficient than CSV serialization; maintains same semantics (hash changes when data changes).
+    Focus on Timestamp and HealthIndex to avoid spurious retraining from:
+    - Column reordering
+    - Floating point noise in non-critical columns
+    - Metadata changes
+    
+    Only material data changes (timestamps or health values) trigger new hash.
     """
     try:
-        # Sort columns for determinism and hash per-dtype to avoid object-array instability
-        sorted_cols = sorted(df.columns)
-        parts: List[bytes] = []
-        schema = []
-        for col in sorted_cols:
-            series = df[col]
-            dtype_str = str(series.dtype)
-            schema.append((col, dtype_str))
-            if pd.api.types.is_numeric_dtype(series):
-                vals = series.astype("float64").to_numpy(copy=False)
-                parts.append(vals.tobytes())
-            elif pd.api.types.is_datetime64_any_dtype(series):
-                vals = series.view("int64").to_numpy(copy=False)
-                parts.append(vals.tobytes())
-            else:
-                vals = series.astype("string").fillna("").to_numpy(copy=False)
-                parts.append("||".join(vals).encode())
-        schema_bytes = str(schema).encode()
-        payload = b"".join(parts) + schema_bytes
-        return hashlib.sha256(payload).hexdigest()[:16]
+        key_cols = ["Timestamp", "HealthIndex"]
+        
+        # Check if key columns exist, fallback to all columns if not
+        available_keys = [c for c in key_cols if c in df.columns]
+        if not available_keys:
+            # Fallback: use all columns if standard keys missing
+            available_keys = sorted(df.columns)
+        
+        # Sort by timestamp for deterministic ordering
+        df_sorted = df[available_keys].copy()
+        if "Timestamp" in df_sorted.columns:
+            df_sorted = df_sorted.sort_values("Timestamp").reset_index(drop=True)
+        
+        # Round health values to 6 decimal places to ignore float noise
+        if "HealthIndex" in df_sorted.columns:
+            df_sorted["HealthIndex"] = df_sorted["HealthIndex"].astype(float).round(6)
+        
+        # Use JSON serialization for stability (column order preserved)
+        json_bytes = df_sorted.to_json(orient="records", date_format="iso").encode("utf-8")
+        return hashlib.sha256(json_bytes).hexdigest()[:16]
     except Exception as e:
-        Console.warn(f"[FORECAST] Failed to compute data hash: {e}")
+        Console.warn(f"[FORECAST] Hash computation failed: {e}")
         return ""
 
 
@@ -458,7 +509,7 @@ def compute_forecast_quality(
         if merged.empty or len(merged) < 2:
             return {"rmse": 0.0, "mae": 0.0, "mape": 0.0}
         
-        # Compute error metrics
+        # P1-FIX-2.1: Comprehensive forecast quality metrics
         y_true = merged["HealthIndex"].values
         y_pred = merged["ForecastHealth"].values
         
@@ -466,6 +517,7 @@ def compute_forecast_quality(
         squared_errors = errors ** 2
         abs_errors = np.abs(errors)
         
+        # Basic metrics
         rmse = float(np.sqrt(np.mean(squared_errors)))
         mae = float(np.mean(abs_errors))
         
@@ -476,7 +528,46 @@ def compute_forecast_quality(
         else:
             mape = 0.0
         
-        return {"rmse": rmse, "mae": mae, "mape": mape}
+        # 1. Bias (systematic over/under-prediction)
+        bias = float(np.mean(errors))
+        
+        # 2. Coverage of 95% CI (forecast calibration)
+        if {"CI_Lower", "CI_Upper"}.issubset(merged.columns):
+            in_ci = (
+                (merged["HealthIndex"] >= merged["CI_Lower"]) &
+                (merged["HealthIndex"] <= merged["CI_Upper"])
+            )
+            coverage_95 = float(in_ci.mean())
+            interval_width = float((merged["CI_Upper"] - merged["CI_Lower"]).mean())
+        else:
+            coverage_95 = 0.0
+            interval_width = 0.0
+        
+        # 3. Directional accuracy (trend prediction quality)
+        if len(merged) >= 2:
+            actual_trend = merged["HealthIndex"].diff().dropna()
+            forecast_trend = merged["ForecastHealth"].diff().dropna()
+            # Align indices for comparison
+            common_idx = actual_trend.index.intersection(forecast_trend.index)
+            if len(common_idx) > 0:
+                directional_accuracy = float(
+                    (np.sign(actual_trend.loc[common_idx]) == np.sign(forecast_trend.loc[common_idx])).mean()
+                )
+            else:
+                directional_accuracy = 0.0
+        else:
+            directional_accuracy = 0.0
+        
+        return {
+            "rmse": rmse,
+            "mae": mae,
+            "mape": mape,
+            "bias": bias,
+            "coverage_95": coverage_95,
+            "interval_width": interval_width,
+            "directional_accuracy": directional_accuracy,
+            "n_samples": float(len(merged)),
+        }
         
     except Exception as e:
         # FOR-CODE-02: Non-fatal data condition - log and return safe defaults
@@ -526,10 +617,29 @@ def merge_forecast_horizons(
         on="Timestamp", how="outer", suffixes=("_prev", "_new")
     ).sort_values("Timestamp")
     
-    # Calculate temporal blend weights
-    dt_hours = (merged["Timestamp"] - current_time).dt.total_seconds() / 3600
-    w_new = 1.0 - np.exp(-dt_hours / blend_tau_hours)
-    w_prev = np.exp(-dt_hours / blend_tau_hours)
+    # P1-FIX-2.2: Improved temporal blending with recency + horizon-aware weights
+    # Get forecast age (time since previous forecast was created)
+    # Assume prev_horizon has a CreatedAt or use first timestamp as proxy
+    if "CreatedAt" in prev_future.columns and not prev_future["CreatedAt"].isna().all():
+        prev_forecast_time = prev_future["CreatedAt"].iloc[0]
+    else:
+        # Fallback: estimate as blend_tau_hours before current_time
+        prev_forecast_time = current_time - pd.Timedelta(hours=blend_tau_hours)
+    
+    prev_age_hours = (current_time - prev_forecast_time).total_seconds() / 3600.0
+    
+    # Recency weight: older forecasts decay exponentially
+    recency_weight = np.exp(-prev_age_hours / blend_tau_hours)
+    
+    # Horizon weight: far-future points have more uncertainty
+    horizon_hours = (merged["Timestamp"] - current_time).dt.total_seconds() / 3600.0
+    horizon_hours = np.maximum(horizon_hours, 0.0)
+    horizon_weight = 1.0 / (1.0 + horizon_hours / 24.0)
+    
+    # Combined weight for previous forecast
+    w_prev = recency_weight * horizon_weight
+    w_prev = np.clip(w_prev, 0.0, 0.9)  # Ensure new forecast dominates
+    w_new = 1.0 - w_prev
     
     # FOR-PERF-02: Vectorized blending for all forecast columns
     # FOR-MERGE-01: Preserve NaN masks, prefer non-null values over treating missing as zero
@@ -1367,10 +1477,29 @@ def run_enhanced_forecasting_sql(
             # Use per-horizon stds when available, fallback to global std_error
             horizon_stds = list(np.asarray(health_forecast_df.get("ForecastStdHorizon", [std_error] * len(forecast_values))))
             
+            # P1-FIX-2.3: Support empirical failure probability mode
+            failure_prob_mode = forecast_cfg.get("failure_prob_mode", "gaussian")
+            
+            # Get residual history for empirical mode
+            residual_history = np.array(forecast_errors) if forecast_errors else np.array([])
+            
             for fh, fh_std in zip(forecast_values, horizon_stds):
                 spread = max(float(fh_std), 1e-3)
-                z = (failure_threshold - fh) / spread
-                prob = float(norm.cdf(z))  # Probability health is below threshold
+                
+                if failure_prob_mode == "empirical" and len(residual_history) >= 10:
+                    # Use empirical distribution of residuals
+                    prob = estimate_failure_probability_empirical(
+                        forecast_mean=fh,
+                        forecast_std=spread,
+                        failure_threshold=failure_threshold,
+                        residual_history=residual_history,
+                        n_samples=10000
+                    )
+                else:
+                    # Default Gaussian assumption
+                    z = (failure_threshold - fh) / spread
+                    prob = float(norm.cdf(z))
+                
                 failure_probs.append(min(1.0, max(0.0, prob)))
             
             failure_prob_df = pd.DataFrame({
