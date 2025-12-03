@@ -1938,6 +1938,13 @@ class OutputManager:
                 sql_df = pd.DataFrame(metrics_rows)
             # Legacy style: use provided dataframe
             elif df is not None:
+                # Legacy path: DataFrame must have ComponentName and MetricType columns
+                if 'ComponentName' not in df.columns or 'MetricType' not in df.columns:
+                    Console.warn(
+                        "[OUTPUT] write_pca_metrics legacy path requires ComponentName and MetricType columns. "
+                        "Provided DataFrame has columns: " + str(list(df.columns))
+                    )
+                    return 0
                 sql_df = df.copy()
             else:
                 Console.warn("[OUTPUT] write_pca_metrics called without pca_detector or df")
@@ -1951,12 +1958,20 @@ class OutputManager:
             return 0
 
     def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
-        """Upsert PCA metrics by deleting existing RunID+EquipID entries first, then bulk inserting all new rows.
+        """Upsert PCA metrics using DELETE by full PK scope to prevent data loss.
         
-        Primary key is (RunID, EquipID) - shared across all metrics for that run+equipment.
-        FIX: Use executemany for bulk insert to avoid multiple commits and PK violations.
+        Primary key is (RunID, EquipID, ComponentName, MetricType).
+        CRITICAL: Delete only specific metric types being updated to prevent data loss.
+        This method may be called multiple times per run with different metric types.
         """
         if df.empty or self.sql_client is None:
+            return 0
+        
+        # Validate required columns for PK matching
+        required_cols = ['RunID', 'EquipID', 'ComponentName', 'MetricType']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            Console.warn(f"[OUTPUT] _upsert_pca_metrics missing required columns: {missing_cols}")
             return 0
         
         try:
@@ -1964,14 +1979,25 @@ class OutputManager:
             cursor = conn.cursor()
             
             # Get unique RunID+EquipID pairs
-            run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
+            # Get unique (RunID, EquipID, ComponentName, MetricType) tuples to delete
+            pk_tuples = df[['RunID', 'EquipID', 'ComponentName', 'MetricType']].drop_duplicates()
             
-            # DELETE existing rows for all RunID+EquipID combinations (prevents PK collisions)
-            for _, pair in run_equip_pairs.iterrows():
-                cursor.execute(
-                    "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?",
-                    (pair['RunID'], pair['EquipID'])
-                )
+            # DELETE existing rows by full PK scope (prevents data loss + PK collisions)
+            deleted_count = 0
+            for _, row in pk_tuples.iterrows():
+                try:
+                    cursor.execute("""
+                        DELETE FROM ACM_PCA_Metrics 
+                        WHERE RunID = ? AND EquipID = ? AND ComponentName = ? AND MetricType = ?
+                        """,
+                        (row['RunID'], row['EquipID'], row['ComponentName'], row['MetricType'])
+                    )
+                    deleted_count += cursor.rowcount
+                except Exception as del_err:
+                    Console.warn(f"[OUTPUT] DELETE failed for {row['ComponentName']}/{row['MetricType']}: {del_err}")
+            
+            if deleted_count > 0:
+                Console.info(f"[OUTPUT] Deleted {deleted_count} existing PCA metric rows before upsert")
             
             # Prepare bulk insert data
             insert_sql = """
