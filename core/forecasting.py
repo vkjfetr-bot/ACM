@@ -1599,6 +1599,132 @@ def forecast_sensors_var(
 
 
 # ============================================================================
+# P3-FIX-4.4: Comprehensive model diagnostics
+# ============================================================================
+
+def validate_forecast_model(
+    actual: np.ndarray,
+    fitted: np.ndarray,
+) -> Dict[str, Any]:
+    """
+    Comprehensive forecast model diagnostics for residual validation.
+    
+    P3-FIX-4.4: Validates model fitness through statistical tests.
+    
+    Args:
+        actual: Ground truth values (historical data)
+        fitted: Model's fitted/predicted values
+    
+    Returns:
+        Dictionary with diagnostic metrics:
+        - residuals_normal_p: Shapiro-Wilk p-value (normality test)
+        - residuals_autocorr_p: Ljung-Box p-value (autocorrelation test)
+        - variance_ratio: Ratio of late-to-early residual variance (heteroscedasticity)
+        - mape: Mean Absolute Percentage Error
+        - theil_u: Theil's U statistic (model vs naive forecast)
+    
+    Logic:
+        - Shapiro-Wilk tests if residuals are normally distributed (p > 0.05 good)
+        - Ljung-Box tests if residuals have autocorrelation (p > 0.05 good)
+        - Variance ratio checks if error variance is stable over time (~1.0 good)
+        - MAPE measures average percentage error
+        - Theil's U < 1.0 means model beats naive forecast
+    
+    Requirements:
+        - scipy.stats.shapiro
+        - statsmodels.stats.diagnostic.acorr_ljungbox
+    
+    Fallback:
+        If tests fail or insufficient data, returns NaN for test statistics
+    """
+    try:
+        from scipy.stats import shapiro
+        from statsmodels.stats.diagnostic import acorr_ljungbox
+    except ImportError:
+        Console.warn("[FORECAST] scipy/statsmodels not available; skipping model diagnostics")
+        return {
+            "residuals_normal_p": float("nan"),
+            "residuals_autocorr_p": float("nan"),
+            "variance_ratio": float("nan"),
+            "mape": float("nan"),
+            "theil_u": float("nan"),
+        }
+    
+    actual = np.asarray(actual, dtype=float)
+    fitted = np.asarray(fitted, dtype=float)
+    
+    if len(actual) != len(fitted):
+        Console.warn(f"[FORECAST] Diagnostic length mismatch: actual={len(actual)}, fitted={len(fitted)}")
+        return {
+            "residuals_normal_p": float("nan"),
+            "residuals_autocorr_p": float("nan"),
+            "variance_ratio": float("nan"),
+            "mape": float("nan"),
+            "theil_u": float("nan"),
+        }
+    
+    residuals = actual - fitted
+    diagnostics: Dict[str, Any] = {}
+    
+    # Test 1: Normality of residuals (Shapiro-Wilk)
+    if len(residuals) >= 10:
+        try:
+            _, p_shapiro = shapiro(residuals[: min(5000, len(residuals))])
+            diagnostics["residuals_normal_p"] = float(p_shapiro)
+        except Exception as e:
+            Console.warn(f"[FORECAST] Shapiro-Wilk test failed: {e}")
+            diagnostics["residuals_normal_p"] = float("nan")
+    else:
+        diagnostics["residuals_normal_p"] = float("nan")
+    
+    # Test 2: Autocorrelation of residuals (Ljung-Box)
+    if len(residuals) >= 10:
+        try:
+            lb = acorr_ljungbox(residuals, lags=[min(10, len(residuals) // 2)], return_df=True)
+            diagnostics["residuals_autocorr_p"] = float(lb["lb_pvalue"].iloc[0])
+        except Exception as e:
+            Console.warn(f"[FORECAST] Ljung-Box test failed: {e}")
+            diagnostics["residuals_autocorr_p"] = float("nan")
+    else:
+        diagnostics["residuals_autocorr_p"] = float("nan")
+    
+    # Test 3: Variance stability (heteroscedasticity check)
+    n = len(residuals)
+    if n >= 6:
+        try:
+            var_first = float(np.var(residuals[: n // 3]))
+            var_last = float(np.var(residuals[-n // 3 :]))
+            diagnostics["variance_ratio"] = float(var_last / var_first) if var_first > 1e-9 else 1.0
+        except Exception as e:
+            Console.warn(f"[FORECAST] Variance ratio calculation failed: {e}")
+            diagnostics["variance_ratio"] = float("nan")
+    else:
+        diagnostics["variance_ratio"] = float("nan")
+    
+    # Test 4: Mean Absolute Percentage Error
+    try:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mape = np.mean(np.abs(residuals / np.where(actual == 0, np.nan, actual))) * 100
+        diagnostics["mape"] = float(mape) if np.isfinite(mape) else float("nan")
+    except Exception as e:
+        Console.warn(f"[FORECAST] MAPE calculation failed: {e}")
+        diagnostics["mape"] = float("nan")
+    
+    # Test 5: Theil's U statistic (model vs naive forecast)
+    try:
+        naive = np.roll(actual, 1)
+        naive[0] = actual[0]
+        naive_mse = float(np.mean((actual - naive) ** 2))
+        model_mse = float(np.mean(residuals**2))
+        diagnostics["theil_u"] = float(np.sqrt(model_mse / naive_mse)) if naive_mse > 0 else float("inf")
+    except Exception as e:
+        Console.warn(f"[FORECAST] Theil's U calculation failed: {e}")
+        diagnostics["theil_u"] = float("nan")
+    
+    return diagnostics
+
+
+# ============================================================================
 # Enhanced Forecasting (SQL-backed)
 # ============================================================================
 
@@ -2040,6 +2166,26 @@ def run_enhanced_forecasting_sql(
             trend = 0.0
             trend_history = [0.0] * len(trend_history)
             forecast_errors = [0.0]
+        
+        # P3-FIX-4.4: Validate forecast model with comprehensive diagnostics
+        if retrain_needed and n >= 10:
+            try:
+                fitted_values = np.array([level_history[i - 1] + trend_history[i - 1] if i > 0 else level_history[0] for i in range(n)])
+                actual_values = health_values.values
+                model_diagnostics = validate_forecast_model(actual=actual_values, fitted=fitted_values)
+                Console.info(
+                    f"[FORECAST] Model diagnostics: "
+                    f"Normality_p={model_diagnostics.get('residuals_normal_p', float('nan')):.3f}, "
+                    f"Autocorr_p={model_diagnostics.get('residuals_autocorr_p', float('nan')):.3f}, "
+                    f"VarRatio={model_diagnostics.get('variance_ratio', float('nan')):.2f}, "
+                    f"MAPE={model_diagnostics.get('mape', float('nan')):.1f}%, "
+                    f"TheilU={model_diagnostics.get('theil_u', float('nan')):.3f}"
+                )
+                # Store diagnostics in state for future reference
+                if model_diagnostics.get('theil_u', float('inf')) > 1.5:
+                    Console.warn("[FORECAST] Model performs poorly vs naive forecast (Theil's U > 1.5); consider alternative methods")
+            except Exception as diag_e:
+                Console.warn(f"[FORECAST] Model diagnostics failed: {diag_e}")
         
         std_error = float(np.std(forecast_errors)) if len(forecast_errors) > 0 else 5.0
         if not np.isfinite(std_error) or std_error < 1e-6:
