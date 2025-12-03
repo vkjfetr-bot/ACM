@@ -1388,7 +1388,8 @@ class OutputManager:
             return df, repair_info
             
         out = df.copy()
-        sentinel_ts = pd.Timestamp(year=1900, month=1, day=1)
+        # CRIT-04: Use current local-naive timestamp instead of 1900-01-01
+        sentinel_ts = pd.Timestamp.now().tz_localize(None)
         filled = {}
         missing_fields = []
         
@@ -1555,7 +1556,8 @@ class OutputManager:
                     # Use pandas notnull() to avoid NaN before checking absolute value
                     valid_mask = pd.notnull(df_clean[col])
                     if valid_mask.any():
-                        extreme_mask = valid_mask & (df_clean[col].abs() > 1e100)
+                        # CRIT-06: Lower extreme threshold to 1e38 for SQL safety
+                        extreme_mask = valid_mask & (df_clean[col].abs() > 1e38)
                         if extreme_mask.any():
                             Console.warn(f"[OUTPUT] Replacing {extreme_mask.sum()} extreme float values in {table_name}.{col}")
                             df_clean.loc[extreme_mask, col] = None
