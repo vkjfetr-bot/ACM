@@ -47,6 +47,9 @@ class CUSUMDetector:
     def fit(self, x: np.ndarray) -> "CUSUMDetector":
         self.mean = np.nanmean(x)
         self.std = np.nanstd(x)
+        # DRIFT-AUDIT-01: Guard against non-finite mean (e.g., all-NaN input)
+        if not np.isfinite(self.mean):
+            self.mean = 0.0
         if not np.isfinite(self.std) or self.std < 1e-9:
             self.std = 1.0
         return self
@@ -54,6 +57,8 @@ class CUSUMDetector:
     def score(self, x: np.ndarray) -> np.ndarray:
         scores = np.zeros_like(x, dtype=np.float32)
         x_norm = (x - self.mean) / self.std
+        # DRIFT-AUDIT-02: Handle NaN/inf in normalized values to prevent accumulation errors
+        x_norm = np.nan_to_num(x_norm, nan=0.0, posinf=0.0, neginf=0.0)
         for i, val in enumerate(x_norm):
             self.sum_pos = max(0.0, self.sum_pos + val - self.drift)
             self.sum_neg = max(0.0, self.sum_neg - val - self.drift)
