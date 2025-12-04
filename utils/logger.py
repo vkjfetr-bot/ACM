@@ -1,5 +1,5 @@
 # utils/logger.py
-"""Enhanced logging system for ACM V8.
+"""Enhanced logging system for ACM.
 
 Provides a unified logging interface with support for:
 - Multiple log levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)

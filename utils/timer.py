@@ -1,5 +1,5 @@
 # utils/timer.py
-"""Performance timing utilities for ACM V8.
+"""Performance timing utilities for ACM.
 
 Provides section-based timing with automatic summary at exit.
 Integrates with the enhanced logging system.

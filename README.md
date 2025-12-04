@@ -1,8 +1,19 @@
-# ACM V8 - Autonomous Asset Condition Monitoring
+# ACM V9 - Autonomous Asset Condition Monitoring
 
-ACM V8 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, and flexible outputs so that engineers can understand what is changing, when it started, and which sensors or regimes are responsible.
+ACM V9 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, and flexible outputs so that engineers can understand what is changing, when it started, and which sensors or regimes are responsible.
+
+**Current Version:** v9.0.0 - Production Release
 
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
+
+### v9.0.0 Release Highlights
+- **Detector Label Consistency (CRIT-04)**: All detectors now use standardized human-readable format ("Multivariate Outlier (PCA-T²)") across all outputs and dashboards
+- **Database Cleanup**: Removed 9 unused/backup tables; reduced from 85 to 79 total tables
+- **Equipment Standardization**: All 26 runs use consistent equipment codes aligned with Equipment master table
+- **Run Completion Tracking**: All runs have valid CompletedAt timestamps; 4 incomplete runs marked with NOOP status
+- **Procedure Fixes**: Fixed usp_ACM_FinalizeRun to properly reference ACM_Runs table
+- **Enhanced Testing**: Comprehensive validation suite with 30+ unit tests and 8 SQL validation checks
+- **Professional Versioning**: Implemented semantic versioning (v9.0.0) with proper git tag management
 
 ## What ACM is
 
