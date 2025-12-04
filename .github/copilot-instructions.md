@@ -1,9 +1,26 @@
-# ACM Copilot Guardrails (current)
+# ACM Copilot Guardrails (v9.0.0)
 
-- **Mission**: keep the ACM pipeline healthy
+## PRIMARY DIRECTIVES
+- **Mission**: Keep the ACM pipeline healthy and production-ready
+- **Knowledge Base**: ALWAYS consult and reference these canonical documents:
+  - `README.md` - Primary product overview, features, running ACM
+  - `docs/ACM_SYSTEM_OVERVIEW.md` - Complete architectural walkthrough, module map, workflows
+  - `docs/SOURCE_CONTROL_PRACTICES.md` - Git workflow, branching, versioning, release management
+  - `utils/version.py` - Current version info and release notes
+  - Other relevant docs under `docs/` for specific topics (OMR_DETECTOR.md, COLDSTART_MODE.md, etc.)
+  
+- **Documentation Policy**: CRITICAL RULE
+  - DO NOT create new explainer documents, guides, reports, or markdown files UNLESS EXPLICITLY REQUESTED
+  - DO NOT auto-generate changelogs, task lists, or process documents
+  - DO NOT create summary documents for routine changes
+  - Reference existing knowledge base instead - update existing docs if needed
+  - Only update README when explicitly asked to document new features
+  - Update ONLY when user specifically requests documentation updates
+
 - **Modes**: file-mode reads `data/*.csv`; SQL-mode uses `configs/sql_connection.ini` via `core/sql_client.SQLClient`. File-mode must stay working before SQL-path changes ship. DO NOT USE FILE MODE EVER!!!!!!!!
 - **Batch mode**: run `python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --start-from-beginning` (adjust args as needed). This command sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM`; do not set them in code.
 - **No emojis ever** in code, comments, tests, or generated content.
+- **Version Management**: ACM is at v9.0.0 with centralized versioning in `utils/version.py`. When implementing changes, increment version number only when explicitly requested; follow semantic versioning (MAJOR.MINOR.PATCH).
 
 ## Core contracts
 - **Config**: `utils/config_dict.ConfigDict` loads cascading `configs/config_table.csv` (global `*` rows overridden by equipment rows). Keep dot-path access intact (e.g., `cfg['fusion']['weights']['omr_z']`).
@@ -42,13 +59,84 @@
 - Never commit artifacts/logs/secrets; respect `.gitignore`.
 - Prefer review for all changes; merge only when checks are green and approvals are in. If self-merging is allowed, still require passing checks.
 
-## Discoverability quick-links
-- **System overview**: `docs/ACM_SYSTEM_OVERVIEW.md`; analytics flow: `docs/Analytics Backbone.md`.
-- **Coldstart**: `docs/COLDSTART_MODE.md`; **OMR**: `docs/OMR_DETECTOR.md`; **Batch SQL audit**: `docs/BATCH_MODE_SQL_AUDIT.md`.
-- **Schema reference**: `docs/sql/SQL_SCHEMA_REFERENCE.md`; **Grafana**: `grafana_dashboards/README.md` + dashboards under `grafana_dashboards/*.json`.
-- **Run helpers**: `python scripts/sql_batch_runner.py ...`, `scripts/run_file_mode.ps1`, `scripts/sql/verify_acm_connection.py`.
-- **Core modules**: entry `core/acm_main.py`; writes `core/output_manager.py`; detectors/fusion/regimes/drift under `core/` (omr.py, correlation.py, outliers.py, fuse.py, regimes.py, drift.py); episodes `core/episode_culprits_writer.py`; run metadata `core/run_metadata_writer.py`; config loader `utils/config_dict.py`.
-- **Search tips**: `rg "ALLOWED_TABLES" core`, `rg "run_pipeline" core`, `rg "ACM_" scripts docs core`, `rg --files -g "*.sql" scripts/sql`.
+## Discoverability & Knowledge Base Quick-Links
+
+### CANONICAL DOCUMENTS (Always consult first)
+- **README.md**: Product overview, setup, features, running ACM
+- **docs/ACM_SYSTEM_OVERVIEW.md**: Architecture, module map, data flow, detector heads, configuration
+- **docs/SOURCE_CONTROL_PRACTICES.md**: Branching strategy, versioning, commit conventions, release process
+- **utils/version.py**: Current version (v9.0.0), release notes, version helpers
+
+### TECHNICAL DOCUMENTATION
+- **Detector System**: `docs/OMR_DETECTOR.md` (Overall Model Residual), detector label consistency
+- **Batch Operations**: `docs/BATCH_MODE_SQL_AUDIT.md`, `docs/BATCH_MODE_WAVE_PATTERN_FIX.md`
+- **Coldstart**: `docs/COLDSTART_MODE.md` (cold-start strategy for sparse data)
+- **SQL Integration**: `docs/SQL_BATCH_RUNNER.md`, `docs/SQL_BATCH_QUICK_REF.md`
+- **Schema Reference**: `docs/sql/SQL_SCHEMA_REFERENCE.md` (table definitions)
+- **Grafana**: `grafana_dashboards/README.md` + dashboards under `grafana_dashboards/*.json`
+- **Analytics**: `docs/Analytics Backbone.md` (detector fusion, episodes, regimes)
+
+### OPERATIONAL COMMANDS & SCRIPTS
+- **Entry point**: `python -m core.acm_main --equip <EQUIP>`
+- **Batch runner**: `python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440`
+- **SQL verification**: `python scripts/sql/verify_acm_connection.py`
+- **Schema export**: `python scripts/sql/export_schema_doc.py --output docs/sql/SQL_SCHEMA_REFERENCE.md`
+- **Config sync**: `python scripts/sql/populate_acm_config.py`
+- **File mode helper**: `scripts/run_file_mode.ps1`
+
+### CORE MODULES (Always check existing implementation before adding new code)
+- **Orchestrator**: `core/acm_main.py`
+- **I/O Hub**: `core/output_manager.py` (all CSV/PNG/SQL writes)
+- **Detectors**: `core/omr.py`, `core/correlation.py`, `core/outliers.py`, `core/fast_features.py`
+- **Analytics**: `core/fuse.py` (fusion), `core/regimes.py`, `core/drift.py`, `core/episode_culprits_writer.py`
+- **RUL/Forecast**: `core/rul_engine.py`, `core/forecasting.py`
+- **Utilities**: `utils/config_dict.py` (config loader), `utils/version.py` (versioning)
+- **SQL**: `core/sql_client.py`, `core/smart_coldstart.py`
+
+### CODE SEARCH TIPS
+- `rg "ALLOWED_TABLES" core` - Find output table allowlist
+- `rg "run_pipeline" core` - Locate pipeline orchestration
+- `rg "ACM_" scripts docs core` - Find ACM-prefixed constants
+- `rg --files -g "*.sql" scripts/sql` - Find SQL scripts
+
+## Documentation Discipline (STRICT)
+
+### DO NOT CREATE NEW DOCUMENTS UNLESS EXPLICITLY REQUESTED
+This is a critical rule to maintain a clean, maintainable knowledge base:
+
+**PROHIBITED WITHOUT EXPLICIT REQUEST**:
+- ❌ New markdown files for analysis, reports, or summaries
+- ❌ Auto-generated changelogs or task lists
+- ❌ Process documents or workflow guides (unless asked)
+- ❌ "Status report" or "analysis" documents for routine work
+- ❌ Feature summaries or refactoring documentation
+- ❌ Temporary guides or quick-reference cards
+
+**ALLOWED/ENCOURAGED**:
+- ✅ Update README.md when user explicitly requests documentation
+- ✅ Update ACM_SYSTEM_OVERVIEW.md with architectural changes (when explicitly requested)
+- ✅ Update SOURCE_CONTROL_PRACTICES.md with new processes (when explicitly requested)
+- ✅ Add inline code comments and docstrings (encouraged for clarity)
+- ✅ Update existing docs/ files when explicitly requested
+- ✅ Create ONLY when user says "create a document", "write a guide", "document this", etc.
+
+**REFERENCE INSTEAD OF CREATING**:
+- User asks for analysis? → Reference relevant section of README or SYSTEM_OVERVIEW
+- User needs guidance? → Reference docs/SOURCE_CONTROL_PRACTICES.md
+- User wants status? → Report based on code/git/test results, not new docs
+- User needs summary? → Provide inline in response, don't create document
+
+**EXAMPLE ANTI-PATTERNS**:
+- ❌ User: "Fix the detector labels" → Agent creates "DETECTOR_LABEL_FIX_REPORT.md"
+- ❌ User: "What's the architecture?" → Agent creates "ARCHITECTURE_SUMMARY.md"
+- ❌ User: "Update to v9" → Agent creates "V9_MIGRATION_GUIDE.md"
+- ❌ Agent auto-creates changelogs, task lists, or work summaries
+
+**PROPER BEHAVIOR**:
+- ✅ User: "Fix detector labels" → Fix code, reference README, don't create doc
+- ✅ User: "What's the architecture?" → Reference docs/ACM_SYSTEM_OVERVIEW.md
+- ✅ User: "Update to v9" → Update code/version, reference existing docs
+- ✅ Report status/analysis inline in response
 
 ## Config sync discipline
 - When `configs/config_table.csv` changes, run `python scripts/sql/populate_acm_config.py` to sync `ACM_Config` in SQL.
