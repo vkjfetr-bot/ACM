@@ -396,8 +396,13 @@ class TestSmoothTransitions:
         labels = np.array([0, 0, 1, 2, 2, 2, 2])  # label 1 has only 1 sample
         result = regimes.smooth_transitions(labels, min_dwell_samples=2)
         
-        # The single-sample label 1 should be merged
-        assert result[2] != 1 or labels[2] == 1 and labels[3] == 1  # Either merged or unchanged
+        # The single-sample label 1 should be merged with a neighbor.
+        # After merging, index 2 should no longer be 1, or the function
+        # decided not to merge (which is also valid behavior).
+        label_at_idx2_changed = result[2] != 1
+        original_was_valid_segment = labels[2] == 1 and labels[3] == 1
+        assert label_at_idx2_changed or original_was_valid_segment, \
+            "Single-sample segment should be merged or already meet dwell requirement"
 
     def test_time_based_dwell(self):
         """Test minimum dwell based on time duration."""
@@ -464,8 +469,9 @@ class TestDetectTransientStates:
         # Should detect transient around the transition point
         transition_idx = 50
         nearby = states[transition_idx-5:transition_idx+5]
-        assert any(s in ['transient', 'startup', 'shutdown'] for s in nearby), \
-            "Should detect transient near regime change"
+        transient_states = ['transient', 'startup', 'shutdown']
+        has_transient_near_change = any(s in transient_states for s in nearby)
+        assert has_transient_near_change, "Should detect transient near regime change"
 
     def test_disabled_detection(self):
         """Test that disabled detection returns all steady."""
@@ -571,7 +577,8 @@ class TestLabelFunction:
         train_basis, score_basis, basis_meta = regimes.build_feature_basis(
             train_features, score_features, None, None, None, cfg
         )
-        train_hash = int(pd.util.hash_pandas_object(train_basis, index=True).sum())
+        # Use deterministic hash for test reproducibility
+        train_hash = regimes._stable_int_hash(train_basis.to_numpy(dtype=float, copy=False))
         
         # Create context
         ctx = {
