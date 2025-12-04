@@ -1,6 +1,17 @@
-# ACM V8 - System Handbook
+# ACM V9 - System Handbook
 
-This handbook is a complete, implementation-level walkthrough of ACM V8 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
+This handbook is a complete, implementation-level walkthrough of ACM V9 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
+
+**Current Version:** v9.0.0 - Production Release
+
+### v9.0.0 Major Changes from v8.2.0
+- **Detector Label Standardization**: Fixed `extract_dominant_sensor()` to preserve full detector labels ("Multivariate Outlier (PCA-T²)") instead of truncating to sensor names or codes
+- **Database Hygiene**: Removed migration backup tables (PCA_Components_BACKUP, RunLog_BACKUP, Runs_BACKUP) and 6 unused feature tables (Drift_TS, Enhanced*, Forecast_QualityMetrics)
+- **Equipment Data Integrity**: Standardized equipment names across all runs; all 26 runs now reference consistent equipment codes
+- **Run Completion**: All runs have valid CompletedAt timestamps; incomplete runs marked with NOOP status and zero duration
+- **Stored Procedure Fix**: usp_ACM_FinalizeRun now correctly references ACM_Runs table with proper column mappings
+- **Comprehensive Testing**: Added 30+ Python unit tests and 8 SQL validation checks covering all P0 fixes
+- **Version Management**: Implemented semantic versioning with v9.0.0 tag and proper release management practices
 
 ---
 

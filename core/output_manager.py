@@ -3346,7 +3346,7 @@ class OutputManager:
         sensor_context: Optional[Dict[str, Any]] = None
     ) -> List[Path]:
         """
-        Chart generation disabled (deprecated in v8.1.0).
+        Chart generation disabled (deprecated in v8.1.0, removed in v9.0.0).
         
         Charts have been removed for SQL-only mode performance optimization.
         Use Grafana dashboards querying SQL tables for visualizations.

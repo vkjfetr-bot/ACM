@@ -1,5 +1,5 @@
 # utils/sql_config.py
-# === ACM V8 SQL Edition ===
+# === ACM SQL Edition ===
 # Purpose: Read equipment configuration from SQL database with CSV fallback
 #
 # Usage:
