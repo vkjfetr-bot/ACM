@@ -1,21 +1,19 @@
 # core/acm_main.py
 from __future__ import annotations
 
-import hashlib
 import argparse
-import sys
+import hashlib
 import json
-import time
-import threading
-from datetime import datetime
 import os
-from typing import Any, Dict, List, Tuple, Optional, Sequence
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
-import joblib
-import uuid
 
 # --- import guard to support both `python -m core.acm_main` and `python core\acm_main.py`
 try:
@@ -735,6 +733,63 @@ def _sql_finalize_run(cli: Any, run_id: str, outcome: str, rows_read: int, rows_
             pass
 
 # =======================
+
+
+def _build_scores_wide(frame: pd.DataFrame) -> pd.DataFrame:
+    """Build wide-format scores DataFrame for SQL persistence.
+    
+    Extracts ACM detector z-scores from the scoring frame and prefixes
+    column names with 'ACM_' for Grafana clarity.
+    
+    Args:
+        frame: Scoring DataFrame with detector z-score columns
+        
+    Returns:
+        DataFrame with ACM-prefixed columns for SQL writes
+    """
+    out = pd.DataFrame(index=frame.index)
+    # Mapping of source column -> ACM-prefixed name
+    col_map = {
+        "fused": "ACM_fused",
+        "pca_spe_z": "ACM_pca_spe_z",
+        "pca_t2_z": "ACM_pca_t2_z",
+        "mhal_z": "ACM_mhal_z",
+        "iforest_z": "ACM_iforest_z",
+        "gmm_z": "ACM_gmm_z",
+        "river_hst_z": "ACM_river_hst_z",
+    }
+    for src_col, acm_col in col_map.items():
+        if src_col in frame.columns:
+            out[acm_col] = frame[src_col]
+    return out
+
+
+def _get_column_description(col: str) -> str:
+    """Get semantic description for a score column.
+    
+    Args:
+        col: Column name from the scores DataFrame
+        
+    Returns:
+        Human-readable description of the column's meaning
+    """
+    # Static column descriptions for known columns
+    static_descriptions = {
+        "fused": "Weighted fusion of all detector z-scores",
+        "alert_level": "Alert severity: NORMAL, CAUTION, or FAULT",
+        "alert_mode": "Alert mode based on threshold exceedance",
+        "regime_label": "Operating regime cluster label (0-based)",
+        "regime_state": "Regime health state: healthy, suspect, or critical",
+        "episode_id": "Episode identifier for anomaly periods (NaN outside episodes)",
+    }
+    if col in static_descriptions:
+        return static_descriptions[col]
+    # Pattern-based descriptions
+    if col.endswith("_raw"):
+        return f"Raw anomaly score from {col.replace('_raw', '')} detector"
+    if col.endswith("_z"):
+        return f"Calibrated z-score from {col.replace('_z', '')} detector"
+    return f"Column {col}"
 
 
 def main() -> None:
@@ -3629,53 +3684,29 @@ def main() -> None:
                     try:
                         output_manager.write_scores(frame, run_dir, enable_sql=(SQL_MODE or dual_mode))
                         
-                        # Generate schema.json descriptor for scores.csv
-                        try:
-                            schema_path = run_dir / "schema.json"
-                            schema_dict = {
-                                "file": "scores.csv",
-                                "description": "ACM anomaly scores with detector outputs and fusion results",
-                                "timestamp_column": "index" if frame.index.name is None else frame.index.name,
-                                "columns": []
-                            }
-                            
-                            # Document each column with name, dtype, and description
-                            for col in frame.columns:
-                                col_info = {
-                                    "name": str(col),
-                                    "dtype": str(frame[col].dtype),
-                                    "nullable": bool(frame[col].isnull().any())
+                        # Generate schema.json descriptor for scores.csv (file mode only)
+                        if not SQL_MODE:
+                            try:
+                                schema_path = run_dir / "schema.json"
+                                schema_dict = {
+                                    "file": "scores.csv",
+                                    "description": "ACM anomaly scores with detector outputs and fusion results",
+                                    "timestamp_column": "index" if frame.index.name is None else frame.index.name,
+                                    "columns": [
+                                        {
+                                            "name": str(col),
+                                            "dtype": str(frame[col].dtype),
+                                            "nullable": bool(frame[col].isnull().any()),
+                                            "description": _get_column_description(col),
+                                        }
+                                        for col in frame.columns
+                                    ],
                                 }
-                                
-                                # Add semantic descriptions based on column name patterns
-                                if col.endswith("_raw"):
-                                    col_info["description"] = f"Raw anomaly score from {col.replace('_raw', '')} detector"
-                                elif col.endswith("_z"):
-                                    col_info["description"] = f"Calibrated z-score from {col.replace('_z', '')} detector"
-                                elif col == "fused":
-                                    col_info["description"] = "Weighted fusion of all detector z-scores"
-                                elif col == "alert_level":
-                                    col_info["description"] = "Alert severity: NORMAL, CAUTION, or FAULT"
-                                elif col == "alert_mode":
-                                    col_info["description"] = "Alert mode based on threshold exceedance"
-                                elif col == "regime_label":
-                                    col_info["description"] = "Operating regime cluster label (0-based)"
-                                elif col == "regime_state":
-                                    col_info["description"] = "Regime health state: healthy, suspect, or critical"
-                                elif col == "episode_id":
-                                    col_info["description"] = "Episode identifier for anomaly periods (NaN outside episodes)"
-                                else:
-                                    col_info["description"] = f"Column {col}"
-                                
-                                schema_dict["columns"].append(col_info)
-                            
-                            # Write schema.json with pretty formatting
-                            if not SQL_MODE:
                                 with schema_path.open("w", encoding="utf-8") as sf:
                                     json.dump(schema_dict, sf, indent=2, ensure_ascii=False)
                                 Console.info(f"[ART] {schema_path}")
-                        except Exception as se:
-                            Console.warn(f"[IO] Failed to write schema.json: {se}")
+                            except Exception as se:
+                                Console.warn(f"[IO] Failed to write schema.json: {se}")
                             
                     except Exception as we:
                         Console.warn(f"[IO] Failed to write scores via OutputManager: {we}")
@@ -4055,59 +4086,24 @@ def main() -> None:
 
         # === SQL-SPECIFIC ARTIFACT WRITING (BATCHED TRANSACTION) ===
         # Batch all SQL writes in a single transaction to prevent connection pool exhaustion
+        rows_scores = 0
         if sql_client:
             with T.section("sql.batch_writes"):
                 try:
                     Console.info("[SQL] Starting batched artifact writes...")
-                    
-                    # 1) ScoresTS: write fused + calibrated z streams (as sensors)
-                    rows_scores = 0
-                    out_scores_wide = pd.DataFrame(index=frame.index)
-                    # Name them explicitly to keep clarity in Grafana
-                    if "fused" in frame.columns:       out_scores_wide["ACM_fused"] = frame["fused"]
-                    if "pca_spe_z" in frame.columns:   out_scores_wide["ACM_pca_spe_z"] = frame["pca_spe_z"]
-                    if "pca_t2_z" in frame.columns:    out_scores_wide["ACM_pca_t2_z"] = frame["pca_t2_z"]
-                    if "mhal_z" in frame.columns:      out_scores_wide["ACM_mhal_z"] = frame["mhal_z"]
-                    if "iforest_z" in frame.columns:   out_scores_wide["ACM_iforest_z"] = frame["iforest_z"]
-                    if "gmm_z" in frame.columns:       out_scores_wide["ACM_gmm_z"] = frame["gmm_z"]
-                    if "river_hst_z" in frame.columns: out_scores_wide["ACM_river_hst_z"] = frame["river_hst_z"]
-
+                    out_scores_wide = _build_scores_wide(frame)
                     if len(out_scores_wide.columns):
                         with T.section("sql.scores.melt"):
-                            long_scores = output_manager.melt_scores_long(out_scores_wide, equip_id=equip_id, run_id=run_id or "", source="ACM")
+                            long_scores = output_manager.melt_scores_long(
+                                out_scores_wide, equip_id=equip_id, run_id=run_id or "", source="ACM"
+                            )
                         with T.section("sql.scores.write"):
                             rows_scores = output_manager.write_scores_ts(long_scores, run_id or "")
-                        
                 except Exception as e:
-                    Console.warn(f"[SQL] Batched SQL writes failed, continuing with individual writes: {e}")
+                    Console.warn(f"[SQL] Batched SQL writes failed: {e}")
                     rows_scores = 0
         else:
             Console.info("[SQL] No SQL client available, skipping SQL writes")
-            rows_scores = 0
-            
-        # Fallback to individual writes if batching not available
-        if sql_client and rows_scores == 0:
-            # 1) ScoresTS: write fused + calibrated z streams (as sensors)
-            with T.section("sql.scores.individual"):
-                rows_scores = 0
-                try:
-                    out_scores_wide = pd.DataFrame(index=frame.index)
-                    # Name them explicitly to keep clarity in Grafana
-                    if "fused" in frame.columns:       out_scores_wide["ACM_fused"] = frame["fused"]
-                    if "pca_spe_z" in frame.columns:   out_scores_wide["ACM_pca_spe_z"] = frame["pca_spe_z"]
-                    if "pca_t2_z" in frame.columns:    out_scores_wide["ACM_pca_t2_z"] = frame["pca_t2_z"]
-                    if "mhal_z" in frame.columns:      out_scores_wide["ACM_mhal_z"] = frame["mhal_z"]
-                    if "iforest_z" in frame.columns:   out_scores_wide["ACM_iforest_z"] = frame["iforest_z"]
-                    if "gmm_z" in frame.columns:       out_scores_wide["ACM_gmm_z"] = frame["gmm_z"]
-                    if "river_hst_z" in frame.columns: out_scores_wide["ACM_river_hst_z"] = frame["river_hst_z"]
-
-                    if len(out_scores_wide.columns):
-                        with T.section("sql.scores.melt"):
-                            long_scores = output_manager.melt_scores_long(out_scores_wide, equip_id=equip_id, run_id=run_id or "", source="ACM")
-                        with T.section("sql.scores.write"):
-                            rows_scores = output_manager.write_scores_ts(long_scores, run_id or "")
-                except Exception as e:
-                    Console.warn(f"[SQL] ScoresTS write skipped: {e}")
 
         # 2) DriftTS (if drift_z exists) — method from config
         rows_drift = 0
