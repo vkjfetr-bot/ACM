@@ -22,7 +22,7 @@
         "hide": false,
         "iconColor": "#dc2626",
         "name": "Episodes",
-        "rawQuery": "SELECT StartTimestamp as time, CONCAT('Episode: ', PrimaryDetector, ' (', CAST(DurationHours as VARCHAR), 'h)') as text, 'Episode' as tags FROM ACM_CulpritHistory WHERE EquipID = $equipment AND StartTimestamp >= $__timeFrom() AND StartTimestamp <= $__timeTo()",
+        "rawQuery": "SELECT peak_timestamp as time, CONCAT('Episode: ', dominant_sensor, ' (', CAST(duration_h as VARCHAR), 'h)') as text, 'Episode' as tags FROM ACM_EpisodeDiagnostics WHERE EquipID = $equipment AND peak_timestamp >= $__timeFrom() AND peak_timestamp <= $__timeTo()",
         "tagKeys": "Episode"
       }
     ]
@@ -392,7 +392,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(*) as ActiveEpisodes FROM ACM_CulpritHistory WHERE EquipID = $equipment AND $__timeFilter(StartTimestamp)",
+          "rawSql": "SELECT COUNT(*) as ActiveEpisodes FROM ACM_EpisodeDiagnostics WHERE EquipID = $equipment AND $__timeFilter(peak_timestamp)",
           "refId": "A"
         }
       ],
@@ -2317,7 +2317,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  TOP 30 StartTimestamp,\r\n  EndTimestamp,\r\n  PrimaryDetector AS Culprit,\r\n  DurationHours as Duration,\r\n  WeightedContribution AS Contribution,\r\n  DuringMeanZ AS AvgZScore\r\nFROM\r\n  ACM_CulpritHistory\r\nWHERE\r\n  EquipID = $equipment\r\nORDER BY\r\n  StartTimestamp DESC,\r\n  WeightedContribution DESC",
+          "rawSql": "SELECT\r\n  TOP 30 peak_timestamp as StartTimestamp,\r\n  DATEADD(HOUR, duration_h, peak_timestamp) as EndTimestamp,\r\n  dominant_sensor AS Culprit,\r\n  duration_h as Duration,\r\n  severity AS Contribution,\r\n  avg_z AS AvgZScore\r\nFROM\r\n  ACM_EpisodeDiagnostics\r\nWHERE\r\n  EquipID = $equipment\r\nORDER BY\r\n  peak_timestamp DESC,\r\n  severity DESC",
           "refId": "A",
           "sql": {
             "columns": [

@@ -1337,27 +1337,26 @@ def main() -> None:
                             
                             # SQL mode: ACM_DataQuality bulk insert
                             elif sql_client and SQL_MODE:
-                                timestamp_now = pd.Timestamp.now()
                                 insert_records = [
                                     (
                                         run_id,
                                         int(equip_id),
                                         "data_quality",
-                                        rec["sensor_name"],
+                                        "OK",  # CheckResult: default OK unless issues detected
+                                        rec["sensor"],
                                         rec.get("train_count", 0),
                                         rec.get("train_nulls", 0),
                                         rec.get("train_null_pct", 0.0),
                                         rec.get("score_count", 0),
                                         rec.get("score_nulls", 0),
-                                        rec.get("score_null_pct", 0.0),
-                                        timestamp_now
+                                        rec.get("score_null_pct", 0.0)
                                     )
                                     for rec in records
                                 ]
                                 insert_sql = """
                                     INSERT INTO dbo.ACM_DataQuality 
-                                    (RunID, EquipID, CheckName, sensor, train_count, train_nulls, train_null_pct, 
-                                     score_count, score_nulls, score_null_pct, Timestamp)
+                                    (RunID, EquipID, CheckName, CheckResult, sensor, train_count, train_nulls, train_null_pct, 
+                                     score_count, score_nulls, score_null_pct)
                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """
                                 try:

@@ -22,7 +22,7 @@
         "hide": false,
         "iconColor": "#dc2626",
         "name": "Episodes",
-        "rawQuery": "SELECT StartTimestamp as time, CONCAT('Episode: ', PrimaryDetector, ' (', CAST(DurationHours as VARCHAR), 'h)') as text, 'Episode' as tags FROM ACM_CulpritHistory WHERE EquipID = $equipment AND StartTimestamp >= $__timeFrom() AND StartTimestamp <= $__timeTo()",
+        "rawQuery": "SELECT peak_timestamp as time, CONCAT('Episode: ', dominant_sensor, ' (', CAST(duration_h as VARCHAR), 'h)') as text, 'Episode' as tags FROM ACM_EpisodeDiagnostics WHERE EquipID = $equipment AND peak_timestamp >= $__timeFrom() AND peak_timestamp <= $__timeTo()",
         "tagKeys": "Episode"
       },
       {
@@ -422,7 +422,7 @@
         {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(*) as ActiveEpisodes\n           FROM ACM_CulpritHistory \n           WHERE EquipID = $equipment \n           AND $__timeFilter(StartTimestamp)",
+          "rawSql": "SELECT COUNT(*) as ActiveEpisodes\n           FROM ACM_EpisodeDiagnostics \n           WHERE EquipID = $equipment \n           AND $__timeFilter(peak_timestamp)",
           "refId": "A"
         }
       ],

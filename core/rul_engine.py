@@ -895,11 +895,11 @@ class RULModel:
         for i, name in enumerate(model_names):
             model_key = name.lower()
             if model_key == "ar1":
-                raw_weights[i] = self.learning_state.ar1.weight
+                raw_weights[i] = self.learning_state.ar1_metrics.weight
             elif model_key == "exponential":
-                raw_weights[i] = self.learning_state.exp.weight
+                raw_weights[i] = self.learning_state.exp_metrics.weight
             elif model_key == "weibull":
-                raw_weights[i] = self.learning_state.weibull.weight
+                raw_weights[i] = self.learning_state.weibull_metrics.weight
 
         # Apply minimum weight floor
         min_weight = self.cfg.min_model_weight

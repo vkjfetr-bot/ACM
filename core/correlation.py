@@ -43,16 +43,16 @@ class RobustStandardScaler(StandardScaler):
         super().__init__(**kwargs)
         self.epsilon = epsilon
     
-    def fit(self, X, y=None):
-        super().fit(X, y)
+    def fit(self, X, y=None, sample_weight=None):
+        super().fit(X, y, sample_weight)
         if self.with_std and hasattr(self, 'scale_') and self.scale_ is not None:  # type: ignore[attr-defined]
             # Floor scale_ to prevent division by near-zero variance
             # This prevents Z-scores >100 when variance collapses
             self.scale_ = np.maximum(self.scale_, self.epsilon)
         return self
     
-    def partial_fit(self, X, y=None):
-        super().partial_fit(X, y)
+    def partial_fit(self, X, y=None, sample_weight=None):
+        super().partial_fit(X, y, sample_weight)
         if self.with_std and hasattr(self, 'scale_') and self.scale_ is not None:  # type: ignore[attr-defined]
             self.scale_ = np.maximum(self.scale_, self.epsilon)
         return self

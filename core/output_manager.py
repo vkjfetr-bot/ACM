@@ -47,35 +47,32 @@ from utils.logger import Console, Heartbeat
 ALLOWED_TABLES = {
     'ACM_Scores_Wide','ACM_Episodes','ACM_EpisodesQC',
     'ACM_HealthTimeline','ACM_RegimeTimeline',
-    'ACM_RegimeSummary','ACM_RegimeFeatureImportance','ACM_RegimeTransitions',
-    'ACM_ContributionCurrent','ACM_ContributionTimeline',
+    'ACM_RegimeTransitions','ACM_ContributionCurrent','ACM_ContributionTimeline',
     'ACM_DriftSeries','ACM_ThresholdCrossings',
     'ACM_AlertAge','ACM_SensorRanking','ACM_RegimeOccupancy',
     'ACM_HealthHistogram','ACM_RegimeStability',
     'ACM_DefectSummary','ACM_DefectTimeline','ACM_SensorDefects',
     'ACM_HealthZoneByPeriod','ACM_SensorAnomalyByPeriod',
     'ACM_DetectorCorrelation','ACM_CalibrationSummary',
-    'ACM_RegimeTransitions','ACM_RegimeDwellStats',
-    'ACM_DriftEvents','ACM_CulpritHistory','ACM_EpisodeMetrics',
-    'ACM_EpisodeDiagnostics',
+    'ACM_RegimeDwellStats','ACM_DriftEvents','ACM_EpisodeMetrics',
+    'ACM_EpisodeDiagnostics','ACM_EpisodeCulprits',
     'ACM_DataQuality',
     'ACM_Scores_Long','ACM_Drift_TS',
     'ACM_Anomaly_Events','ACM_Regime_Episodes',
     'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
-    'ACM_Run_Stats', 'ACM_SinceWhen',
+    'ACM_Run_Stats','ACM_SinceWhen',
     'ACM_SensorHotspots','ACM_SensorHotspotTimeline',
     # Forecasting & RUL tables
     'ACM_HealthForecast_TS','ACM_FailureForecast_TS',
     'ACM_RUL_TS','ACM_RUL_Summary','ACM_RUL_Attribution',
     'ACM_DetectorForecast_TS','ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
     'ACM_EnhancedFailureProbability_TS','ACM_FailureCausation',
-    'ACM_EnhancedMaintenanceRecommendation','ACM_RecommendedActions',
+    'ACM_EnhancedMaintenanceRecommendation',
     'ACM_SensorNormalized_TS',
-    'ACM_OMRContributions','ACM_OMRContributionsLong','ACM_FusionQuality','ACM_FusionQualityReport',
+    'ACM_OMRContributionsLong','ACM_FusionQualityReport',
     'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
     'ACM_OMR_Diagnostics','ACM_Forecast_QualityMetrics',
-    'ACM_HealthDistributionOverTime','ACM_ChartGenerationLog',
-    'ACM_FusionMetrics',
+    'ACM_HealthDistributionOverTime',
     # Continuous forecasting enhancements
     'ACM_HealthForecast_Continuous','ACM_FailureHazard_TS',
     # Adaptive threshold metadata
@@ -1252,7 +1249,20 @@ class OutputManager:
                     
                     # Apply column mapping if provided
                     if sql_columns:
+                        # First, select only columns that are in the mapping (source columns)
+                        mapped_source_cols = [col for col in sql_columns.keys() if col in sql_df.columns]
+                        Console.info(f"[DEBUG_MAP] sql_columns.keys()={list(sql_columns.keys())}")
+                        Console.info(f"[DEBUG_MAP] sql_df.columns={list(sql_df.columns)}")
+                        Console.info(f"[DEBUG_MAP] mapped_source_cols={mapped_source_cols}")
+                        if not sql_df.empty:
+                            Console.info(f"[DEBUG_MAP] First row before filter: {sql_df.iloc[0].to_dict()}")
+                        sql_df = sql_df[mapped_source_cols]
+                        if not sql_df.empty:
+                            Console.info(f"[DEBUG_MAP] First row after filter: {sql_df.iloc[0].to_dict()}")
+                        # Then rename to target SQL column names
                         sql_df = sql_df.rename(columns=sql_columns)
+                        if not sql_df.empty:
+                            Console.info(f"[DEBUG_MAP] First row after rename: {sql_df.iloc[0].to_dict()}")
                     
                     # Add metadata columns (required for all SQL tables)
                     # Preserve existing RunID if already present (e.g., hazard table with truncated ID)
@@ -1545,6 +1555,11 @@ class OutputManager:
 
             # only insert columns that actually exist in the table
             columns = [c for c in df.columns if c in table_cols]
+            Console.info(f"[DEBUG_BULK] table={table_name}, df.columns={list(df.columns)}")
+            Console.info(f"[DEBUG_BULK] table={table_name}, table_cols={list(table_cols)[:20]}")  # First 20
+            Console.info(f"[DEBUG_BULK] table={table_name}, columns (filtered)={columns}")
+            if not df.empty:
+                Console.info(f"[DEBUG_BULK] First row values: {df.iloc[0].to_dict()}")
             cols_str = ", ".join(f"[{c}]" for c in columns)
             placeholders = ", ".join(["?"] * len(columns))
             insert_sql = f"INSERT INTO dbo.[{table_name}] ({cols_str}) VALUES ({placeholders})"
@@ -1743,23 +1758,65 @@ class OutputManager:
     def _generate_episode_diagnostics(self, episodes_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Create per-episode diagnostics rows with timestamps and severity label.
         Returns DataFrame for ACM_EpisodeDiagnostics.
+        
+        NOTE: This is a DUPLICATE write that happens AFTER write_episodes().
+        We must use the EXACT same column names and extract the SAME values to avoid overwriting good data with UNKNOWN.
         """
-        cols = ["RunID","EquipID","EpisodeID","PeakTimestamp","Severity","PeakZ"]
+        # Use lowercase column names to match write_episodes output
+        cols = ["episode_id", "peak_timestamp", "dominant_sensor", "duration_h", "severity", "avg_z", "peak_z"]
         if episodes_df is None or len(episodes_df) == 0:
             return pd.DataFrame(columns=cols)
+        
         rows = []
         for i, ep in episodes_df.iterrows():
-            _ts_val = ep.get("peak_timestamp") or ep.get("PeakTimestamp")
+            # Extract timestamp
+            _ts_val = ep.get("peak_timestamp") or ep.get("PeakTimestamp") or ep.get("start_ts")
             ts = pd.to_datetime(_ts_val) if _ts_val is not None else pd.NaT
-            peak_z = float(ep.get("PeakZ", 0.0))
-            severity = "CRITICAL" if peak_z >= 6 else ("HIGH" if peak_z >= 4 else ("MEDIUM" if peak_z >= 2 else "LOW"))
+            
+            # Extract peak_z (try multiple column names)
+            peak_z = float(ep.get("peak_z", ep.get("peak_fused_z", ep.get("PeakZ", 0.0))))
+            
+            # Calculate severity from peak_z
+            if pd.isna(peak_z):
+                severity = "UNKNOWN"
+            elif peak_z >= 6:
+                severity = "CRITICAL"
+            elif peak_z >= 4:
+                severity = "HIGH"
+            elif peak_z >= 2:
+                severity = "MEDIUM"
+            else:
+                severity = "LOW"
+            
+            # Extract dominant_sensor from culprits
+            dominant_sensor = ep.get("dominant_sensor", "UNKNOWN")
+            if dominant_sensor == "UNKNOWN" and "culprits" in ep:
+                culprit_str = ep["culprits"]
+                if pd.notna(culprit_str) and culprit_str != '':
+                    # culprits field already contains formatted label from format_culprit_label()
+                    # e.g., "Multivariate Outlier (PCA-T²)" or "Multivariate Outlier (PCA-T²) → SensorName"
+                    # Extract just the detector label (before " → " if sensor attribution exists)
+                    if ' → ' in str(culprit_str):
+                        dominant_sensor = str(culprit_str).split(' → ')[0].strip()
+                    else:
+                        dominant_sensor = str(culprit_str).strip()
+            
+            # Extract avg_z
+            avg_z = float(ep.get("avg_z", ep.get("avg_fused_z", 0.0)))
+            
+            # Calculate duration_h from duration_s if needed
+            duration_h = ep.get("duration_h", ep.get("duration_hours", 0.0))
+            if duration_h == 0.0 and "duration_s" in ep:
+                duration_h = float(ep["duration_s"]) / 3600.0
+            
             rows.append({
-                "RunID": self.run_id,
-                "EquipID": int(self.equip_id or 0),
-                "EpisodeID": int(ep.get("EpisodeID", i)),
-                "PeakTimestamp": ts,
-                "Severity": severity,
-                "PeakZ": peak_z,
+                "episode_id": int(ep.get("episode_id", ep.get("EpisodeID", i))),
+                "peak_timestamp": ts,
+                "dominant_sensor": dominant_sensor,
+                "duration_h": duration_h,
+                "severity": severity,
+                "avg_z": avg_z,
+                "peak_z": peak_z,
             })
         return pd.DataFrame(rows)
 
@@ -1772,7 +1829,11 @@ class OutputManager:
         df = omr_contributions.copy()
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index, errors="coerce")
-        df = df.reset_index().rename(columns={"index":"Timestamp"})
+        # Reset index - preserve original index name or use 'index'
+        df = df.reset_index()
+        # Rename first column (the old index) to 'Timestamp' regardless of its original name
+        if df.columns[0] != 'Timestamp':
+            df = df.rename(columns={df.columns[0]: 'Timestamp'})
         value_cols = [c for c in df.columns if c.endswith("_contrib")] or [c for c in df.columns if c not in ["Timestamp"]]
         long = df.melt(id_vars=["Timestamp"], var_name="Sensor", value_name="Contribution")
         long["Sensor"] = long["Sensor"].astype(str).str.replace("_contrib","", regex=False)
@@ -2624,6 +2685,11 @@ class OutputManager:
         # Prepare episodes for output
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
         
+        # DEBUG: Log episode DataFrame columns and first row
+        Console.info(f"[EPISODES] DEBUG: Columns={list(episodes_for_output.columns)}")
+        if not episodes_for_output.empty:
+            Console.info(f"[EPISODES] DEBUG: First episode={episodes_for_output.iloc[0].to_dict()}")
+        
         # SCHEMA-FIX: Individual episodes go to ACM_EpisodeDiagnostics (not ACM_Episodes which is run-level summary)
         sql_table = "ACM_EpisodeDiagnostics" if enable_sql else None
         episode_columns = {
@@ -2631,7 +2697,7 @@ class OutputManager:
             'peak_fused_z': 'peak_z',
             'peak_timestamp': 'peak_timestamp', 
             'duration_hours': 'duration_h',
-            'culprits': 'dominant_sensor',
+            'dominant_sensor': 'dominant_sensor',  # Already extracted from culprits
             'severity': 'severity',
             'avg_fused_z': 'avg_z',
             'min_health_index': 'min_health_index'
@@ -2655,12 +2721,49 @@ class OutputManager:
         elif 'regime' in episodes_for_output.columns:
             episodes_for_output['MaxRegimeLabel'] = episodes_for_output['regime']
         
+        # Extract dominant sensor from culprits field
+        # culprits format: "Detector (Sensor Name)" or "Detector"
+        if 'culprits' in episodes_for_output.columns:
+            def extract_dominant_sensor(culprit_str):
+                if pd.isna(culprit_str) or culprit_str == '':
+                    return 'UNKNOWN'
+                # culprits field already contains formatted label from format_culprit_label()
+                # e.g., "Multivariate Outlier (PCA-T²)" or "Multivariate Outlier (PCA-T²) → SensorName"
+                # Extract just the detector label (before " → " if sensor attribution exists)
+                if ' → ' in str(culprit_str):
+                    return str(culprit_str).split(' → ')[0].strip()
+                else:
+                    return str(culprit_str).strip()
+            episodes_for_output['dominant_sensor'] = episodes_for_output['culprits'].apply(extract_dominant_sensor)
+        else:
+            episodes_for_output['dominant_sensor'] = 'UNKNOWN'
+        
+        # ALWAYS recalculate severity from peak_fused_z (overrides any pre-existing severity like 'info')
+        if 'peak_fused_z' in episodes_for_output.columns:
+            def calculate_severity(peak_z):
+                if pd.isna(peak_z):
+                    return 'UNKNOWN'
+                if peak_z >= 6:
+                    return 'CRITICAL'
+                elif peak_z >= 4:
+                    return 'HIGH'
+                elif peak_z >= 2:
+                    return 'MEDIUM'
+                else:
+                    return 'LOW'
+            episodes_for_output['severity'] = episodes_for_output['peak_fused_z'].apply(calculate_severity)
+        elif 'severity' not in episodes_for_output.columns:
+            episodes_for_output['severity'] = 'UNKNOWN'
+        
         # Add defaults for SQL
         if enable_sql:
-            if 'severity' not in episodes_for_output.columns:
-                episodes_for_output['severity'] = 'MEDIUM'
             if 'status' not in episodes_for_output.columns:
                 episodes_for_output['status'] = 'CLOSED'
+        
+        # DEBUG: Show what we're writing  
+        Console.info(f"[EPISODES] DEBUG: Columns before write={list(episodes_for_output.columns)}")
+        if not episodes_for_output.empty:
+            Console.info(f"[EPISODES] DEBUG: First row before write: severity={episodes_for_output.iloc[0].get('severity')}, peak_z={episodes_for_output.iloc[0].get('peak_fused_z')}, dominant={episodes_for_output.iloc[0].get('dominant_sensor')}")
         
         result = self.write_dataframe(
             episodes_for_output,
