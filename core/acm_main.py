@@ -44,7 +44,12 @@ from core.omr import OMRDetector  # OMR-02: Overall Model Residual
 from core.output_manager import OutputManager
 from core.sql_logger import SqlLogSink
 # Import run metadata writer
-from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
+from core.run_metadata_writer import (
+    extract_data_quality_score,
+    extract_run_metadata_from_scores,
+    write_retrain_metadata,
+    write_run_metadata,
+)
 from core.episode_culprits_writer import write_episode_culprits_enhanced
 
 # SQL client (optional; only used in SQL mode)
@@ -790,6 +795,17 @@ def _get_column_description(col: str) -> str:
     if col.endswith("_z"):
         return f"Calibrated z-score from {col.replace('_z', '')} detector"
     return f"Column {col}"
+
+
+# RUL table SQL name to CSV filename mapping (used in RUL persistence)
+_RUL_TABLE_CSV_NAMES: Dict[str, str] = {
+    "ACM_HealthForecast_TS": "health_forecast_ts.csv",
+    "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
+    "ACM_RUL_TS": "rul_timeseries.csv",
+    "ACM_RUL_Summary": "rul_summary.csv",
+    "ACM_RUL_Attribution": "rul_attribution.csv",
+    "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
+}
 
 
 def main() -> None:
@@ -3892,14 +3908,7 @@ def main() -> None:
                             for sql_name, df in rul_tables.items():
                                 if df is None or df.empty:
                                     continue
-                                csv_name = {
-                                    "ACM_HealthForecast_TS": "health_forecast_ts.csv",
-                                    "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
-                                    "ACM_RUL_TS": "rul_timeseries.csv",
-                                    "ACM_RUL_Summary": "rul_summary.csv",
-                                    "ACM_RUL_Attribution": "rul_attribution.csv",
-                                    "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
-                                }.get(sql_name, f"{sql_name}.csv")
+                                csv_name = _RUL_TABLE_CSV_NAMES.get(sql_name, f"{sql_name}.csv")
                                 out_path = tables_dir / csv_name
                                 output_manager.write_dataframe(
                                     df,
@@ -3942,7 +3951,6 @@ def main() -> None:
                             # Write retrain metadata (ACM_RunMetadata)
                             try:
                                 if getattr(output_manager, 'sql_client', None):
-                                    from core.run_metadata_writer import write_retrain_metadata
                                     write_retrain_metadata(
                                         sql_client=output_manager.sql_client,
                                         run_id=str(run_id),
@@ -4012,14 +4020,7 @@ def main() -> None:
                     for sql_name, df in rul_tables.items():
                         if df is None or df.empty:
                             continue
-                        csv_name = {
-                            "ACM_HealthForecast_TS": "health_forecast_ts.csv",
-                            "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
-                            "ACM_RUL_TS": "rul_timeseries.csv",
-                            "ACM_RUL_Summary": "rul_summary.csv",
-                            "ACM_RUL_Attribution": "rul_attribution.csv",
-                            "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
-                        }.get(sql_name, f"{sql_name}.csv")
+                        csv_name = _RUL_TABLE_CSV_NAMES.get(sql_name, f"{sql_name}.csv")
                         out_path = tables_dir / csv_name
                         output_manager.write_dataframe(
                             df,
@@ -4065,7 +4066,6 @@ def main() -> None:
                 # Write retrain metadata (ACM_RunMetadata)
                 try:
                     if getattr(output_manager, 'sql_client', None):
-                        from core.run_metadata_writer import write_retrain_metadata
                         write_retrain_metadata(
                             sql_client=output_manager.sql_client,
                             run_id=str(run_id),
