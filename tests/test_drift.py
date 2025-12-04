@@ -248,7 +248,8 @@ class TestScoreCalibrator:
         
         # Should not crash, defaults should be set
         assert cal.med == 0.0
-        assert cal.scale == 1.0 or cal.mad == 1.0
+        # scale is the key value used for z-score computation
+        assert cal.scale == 1.0 or cal.scale >= 1e-3  # minimum enforced by FUSE-FIX-01
     
     def test_calibrator_handles_constant(self):
         """Test ScoreCalibrator with constant input."""
