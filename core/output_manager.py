@@ -62,19 +62,19 @@ ALLOWED_TABLES = {
     'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
     'ACM_Run_Stats','ACM_SinceWhen',
     'ACM_SensorHotspots','ACM_SensorHotspotTimeline',
-    # Forecasting & RUL tables
-    'ACM_HealthForecast_TS','ACM_FailureForecast_TS',
-    'ACM_RUL_TS','ACM_RUL_Summary','ACM_RUL_Attribution',
-    'ACM_DetectorForecast_TS','ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
-    'ACM_EnhancedFailureProbability_TS','ACM_FailureCausation',
-    'ACM_EnhancedMaintenanceRecommendation',
-    'ACM_SensorNormalized_TS',
+    # v10.0.0 Forecasting & RUL tables (consolidated from 12→4 tables)
+    'ACM_HealthForecast',        # Replaces ACM_HealthForecast_TS, ACM_HealthForecast_Continuous
+    'ACM_FailureForecast',       # Replaces ACM_FailureForecast_TS, ACM_FailureHazard_TS, ACM_EnhancedFailureProbability_TS
+    'ACM_RUL',                   # Replaces ACM_RUL_TS, ACM_RUL_Summary, ACM_RUL_Attribution
+    'ACM_ForecastingState',      # New: persistent model state with optimistic locking
+    # Adaptive configuration (v10.0.0)
+    'ACM_AdaptiveConfig',        # New: per-equipment and global config with auto-tuning
+    # Other detector-level tables (unchanged)
+    'ACM_DetectorForecast_TS','ACM_SensorNormalized_TS',
     'ACM_OMRContributionsLong','ACM_FusionQualityReport',
     'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
     'ACM_OMR_Diagnostics','ACM_Forecast_QualityMetrics',
     'ACM_HealthDistributionOverTime',
-    # Continuous forecasting enhancements
-    'ACM_HealthForecast_Continuous','ACM_FailureHazard_TS',
     # Adaptive threshold metadata
     'ACM_ThresholdMetadata'
 }
@@ -544,35 +544,27 @@ class OutputManager:
                 'FusedMean': 0.0, 'FusedP90': 0.0
             },
             'ACM_DailyFusedProfile': {
-                'ProfileDate': 'ts', 'DayOfWeek': 0, 'Hour': 0, 'FusedMean': 0.0, 'FusedP90': 0.0,
+                'ProfileDate': 'date', 'DayOfWeek': 0, 'Hour': 0, 'FusedMean': 0.0, 'FusedP90': 0.0,
                 'FusedP95': 0.0, 'RecordCount': 0
             },
             'ACM_HealthForecast_Continuous': {
                 'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
                 'SourceRunID': 'UNKNOWN', 'EquipID': 0, 'MergeWeight': 0.0
             },
-            'ACM_HealthForecast_TS': {
+            'ACM_HealthForecast': {
                 'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
-                'Method': 'ExponentialSmoothing', 'LastUpdate': 'ts', 'CiLower': 0.0, 'CiUpper': 0.0
+                'Method': 'ExponentialSmoothing'
             },
-            'ACM_FailureForecast_TS': {
+            'ACM_FailureForecast': {
                 'Timestamp': 'ts', 'FailureProb': 0.0, 'ThresholdUsed': 50.0,
                 'Method': 'GaussianTail'
             },
-            'ACM_FailureHazard_TS': {
-                'Timestamp': 'ts', 'HazardRaw': 0.0, 'HazardSmooth': 0.0,
-                'Method': 'EWMA'
-            },
-            'ACM_DetectorForecast_TS': {
-                'Timestamp': 'ts', 'DetectorType': 'UNKNOWN', 'ForecastZ': 0.0,
-                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'ExponentialDecay', 'CiLower': 0.0, 'CiUpper': 0.0
-            },
-            'ACM_SensorForecast_TS': {
+            'ACM_SensorForecast': {
                 'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'ForecastValue': 0.0,
-                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'LinearTrend', 'CiLower': 0.0, 'CiUpper': 0.0
+                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'LinearTrend'
             },
-            'ACM_RUL_Summary': {
-                'RUL_Hours': 0.0, 'Method': 'Multipath', 'LastUpdate': 'ts'
+            'ACM_RUL': {
+                'RUL_Hours': 0.0, 'Method': 'Multipath'
             },
             'ACM_RUL_TS': {
                 'Timestamp': 'ts', 'RUL_Hours': 0.0, 'Method': 'Multipath'
@@ -1300,15 +1292,15 @@ class OutputManager:
                         except Exception as del_ex:
                             Console.warn(f"[OUTPUT] Pre-delete failed for {sql_table}: {del_ex}")
 
-                    # FORECAST-UPSERT-05: Route forecast tables to MERGE upsert methods
-                    if sql_table == "ACM_HealthForecast_TS":
-                        inserted = self._upsert_health_forecast_ts(sql_df)
-                    elif sql_table == "ACM_FailureForecast_TS":
-                        inserted = self._upsert_failure_forecast_ts(sql_df)
-                    elif sql_table == "ACM_DetectorForecast_TS":
-                        inserted = self._upsert_detector_forecast_ts(sql_df)
-                    elif sql_table == "ACM_SensorForecast_TS":
-                        inserted = self._upsert_sensor_forecast_ts(sql_df)
+                    # FORECAST-UPSERT-05: Route forecast tables to MERGE upsert methods (v10 schema)
+                    if sql_table == "ACM_HealthForecast":
+                        inserted = self._upsert_health_forecast(sql_df)
+                    elif sql_table == "ACM_FailureForecast":
+                        inserted = self._upsert_failure_forecast(sql_df)
+                    elif sql_table == "ACM_SensorForecast":
+                        inserted = self._upsert_sensor_forecast(sql_df)
+                    elif sql_table == "ACM_RUL":
+                        inserted = self._bulk_insert_sql(sql_table, sql_df)  # RUL uses standard insert
                     else:
                         # Bulk insert with batching for all other tables
                         inserted = self._bulk_insert_sql(sql_table, sql_df)
@@ -1388,15 +1380,13 @@ class OutputManager:
                 except Exception as del_ex:
                     Console.warn(f"[OUTPUT] delete_existing failed for {table_name}: {del_ex}")
 
-            # Route known upsert tables
-            if table_name == "ACM_HealthForecast_TS":
-                return self._upsert_health_forecast_ts(sql_df)
-            if table_name == "ACM_FailureForecast_TS":
-                return self._upsert_failure_forecast_ts(sql_df)
-            if table_name == "ACM_DetectorForecast_TS":
-                return self._upsert_detector_forecast_ts(sql_df)
-            if table_name == "ACM_SensorForecast_TS":
-                return self._upsert_sensor_forecast_ts(sql_df)
+            # Route known upsert tables (v10 schema)
+            if table_name == "ACM_HealthForecast":
+                return self._upsert_health_forecast(sql_df)
+            if table_name == "ACM_FailureForecast":
+                return self._upsert_failure_forecast(sql_df)
+            if table_name == "ACM_SensorForecast":
+                return self._upsert_sensor_forecast(sql_df)
             if table_name == "ACM_PCA_Metrics":
                 return self._upsert_pca_metrics(sql_df)
 
@@ -1437,12 +1427,15 @@ class OutputManager:
         out = df.copy()
         # CRIT-04: Use current local-naive timestamp instead of 1900-01-01
         sentinel_ts = pd.Timestamp.now().tz_localize(None)
+        sentinel_date = sentinel_ts.date()
         filled = {}
         missing_fields = []
         
         for col, default in req.items():
             if default == 'ts':
                 val = sentinel_ts
+            elif default == 'date':
+                val = sentinel_date
             else:
                 val = default
                 
@@ -1733,27 +1726,76 @@ class OutputManager:
         return pd.DataFrame(rows)
 
     def _generate_episode_metrics(self, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """Compute simple episode-level metrics: duration, peak_z, area.
-        Returns DataFrame for ACM_EpisodeMetrics.
+        """Compute RUN-LEVEL episode summary statistics for ACM_EpisodeMetrics table.
+        Returns a single-row DataFrame with aggregate metrics across all episodes in this run.
         """
         if episodes_df is None or len(episodes_df) == 0:
-            return pd.DataFrame(columns=["RunID","EquipID","EpisodeID","DurationMinutes","PeakZ","Area"])
-        out = []
+            return pd.DataFrame([{
+                "RunID": self.run_id,
+                "EquipID": int(self.equip_id or 0),
+                "TotalEpisodes": 0,
+                "TotalDurationHours": 0.0,
+                "AvgDurationHours": 0.0,
+                "MedianDurationHours": 0.0,
+                "MaxDurationHours": 0.0,
+                "MinDurationHours": 0.0,
+                "RatePerDay": 0.0,
+                "MeanInterarrivalHours": 0.0
+            }])
+        
+        # Calculate duration in hours for each episode
+        durations = []
+        interarrivals = []
         for i, ep in episodes_df.iterrows():
             _start_val = ep.get("start_timestamp") or ep.get("StartTime")
             _end_val = ep.get("end_timestamp") or ep.get("EndTime")
             start = pd.to_datetime(_start_val) if _start_val is not None else pd.NaT
             end = pd.to_datetime(_end_val) if _end_val is not None else pd.NaT
-            dur_min = float(((end - start).total_seconds()/60.0) if (isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp)) else 0.0)
-            out.append({
-                "RunID": self.run_id,
-                "EquipID": int(self.equip_id or 0),
-                "EpisodeID": int(ep.get("EpisodeID", i)),
-                "DurationMinutes": dur_min,
-                "PeakZ": float(ep.get("PeakZ", 0.0)),
-                "Area": float(ep.get("Area", 0.0)),
-            })
-        return pd.DataFrame(out)
+            if isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp):
+                dur_hours = (end - start).total_seconds() / 3600.0
+                durations.append(dur_hours)
+        
+        # Calculate interarrival times (time between episode starts)
+        starts = []
+        for i, ep in episodes_df.iterrows():
+            _start_val = ep.get("start_timestamp") or ep.get("StartTime")
+            start = pd.to_datetime(_start_val) if _start_val is not None else pd.NaT
+            if isinstance(start, pd.Timestamp):
+                starts.append(start)
+        if len(starts) > 1:
+            starts_sorted = sorted(starts)
+            for i in range(1, len(starts_sorted)):
+                interarrival_hours = (starts_sorted[i] - starts_sorted[i-1]).total_seconds() / 3600.0
+                interarrivals.append(interarrival_hours)
+        
+        # Compute statistics
+        total_eps = len(episodes_df)
+        total_dur_h = sum(durations) if durations else 0.0
+        avg_dur_h = np.mean(durations) if durations else 0.0
+        median_dur_h = np.median(durations) if durations else 0.0
+        max_dur_h = max(durations) if durations else 0.0
+        min_dur_h = min(durations) if durations else 0.0
+        mean_interarrival_h = np.mean(interarrivals) if interarrivals else 0.0
+        
+        # Calculate rate per day (episodes per 24 hours)
+        rate_per_day = 0.0
+        if len(starts) >= 2:
+            time_span_hours = (max(starts) - min(starts)).total_seconds() / 3600.0
+            if time_span_hours > 0:
+                rate_per_day = (total_eps / time_span_hours) * 24.0
+        
+        return pd.DataFrame([{
+            "RunID": self.run_id,
+            "EquipID": int(self.equip_id or 0),
+            "TotalEpisodes": int(total_eps),
+            "TotalDurationHours": round(total_dur_h, 2),
+            "AvgDurationHours": round(avg_dur_h, 2),
+            "MedianDurationHours": round(median_dur_h, 2),
+            "MaxDurationHours": round(max_dur_h, 2),
+            "MinDurationHours": round(min_dur_h, 2),
+            "RatePerDay": round(rate_per_day, 3),
+            "MeanInterarrivalHours": round(mean_interarrival_h, 2)
+        }])
 
     def _generate_episode_diagnostics(self, episodes_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Create per-episode diagnostics rows with timestamps and severity label.
@@ -1822,10 +1864,10 @@ class OutputManager:
 
     def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame) -> pd.DataFrame:
         """Melt OMR contributions wide DataFrame to long format.
-        Expected input columns end with '_contrib'; outputs columns: Timestamp, Sensor, Contribution.
+        Expected input columns end with '_contrib'; outputs columns: Timestamp, SensorName, ContributionScore, ContributionPct.
         """
         if omr_contributions is None or len(omr_contributions) == 0:
-            return pd.DataFrame(columns=["Timestamp","Sensor","Contribution","RunID","EquipID"])
+            return pd.DataFrame(columns=["Timestamp","SensorName","ContributionScore","ContributionPct","OMR_Z","RunID","EquipID"])
         df = omr_contributions.copy()
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index, errors="coerce")
@@ -1835,8 +1877,24 @@ class OutputManager:
         if df.columns[0] != 'Timestamp':
             df = df.rename(columns={df.columns[0]: 'Timestamp'})
         value_cols = [c for c in df.columns if c.endswith("_contrib")] or [c for c in df.columns if c not in ["Timestamp"]]
-        long = df.melt(id_vars=["Timestamp"], var_name="Sensor", value_name="Contribution")
-        long["Sensor"] = long["Sensor"].astype(str).str.replace("_contrib","", regex=False)
+        long = df.melt(id_vars=["Timestamp"], var_name="SensorName", value_name="ContributionScore")
+        long["SensorName"] = long["SensorName"].astype(str).str.replace("_contrib","", regex=False)
+        
+        # Calculate ContributionPct: percentage of total contribution at each timestamp
+        long["ContributionPct"] = 0.0
+        if not long.empty and "ContributionScore" in long.columns:
+            # Group by timestamp and calculate percentage
+            long["ContributionPct"] = long.groupby("Timestamp")["ContributionScore"].transform(
+                lambda x: (x / x.sum() * 100) if x.sum() != 0 else 0.0
+            )
+        
+        # Add OMR_Z from scores_df if available
+        long["OMR_Z"] = 0.0
+        if scores_df is not None and "omr_z" in scores_df.columns:
+            # Merge OMR_Z values by timestamp
+            omr_z_map = scores_df.set_index(scores_df.index)["omr_z"].to_dict()
+            long["OMR_Z"] = long["Timestamp"].map(omr_z_map).fillna(0.0)
+        
         long["RunID"] = self.run_id
         long["EquipID"] = int(self.equip_id or 0)
         return long
@@ -2292,155 +2350,33 @@ class OutputManager:
                     pass
             return 0
     
-    def _upsert_health_forecast_ts(self, df: pd.DataFrame) -> int:
+    def _upsert_health_forecast(self, df: pd.DataFrame) -> int:
         """
-        FORECAST-UPSERT-01: Upsert health forecast time series using MERGE.
-        
-        Primary key is (RunID, EquipID, Timestamp), so update if exists.
-        Schema: RunID, EquipID, Timestamp, ForecastHealth, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        FORECAST-WRITE-01: Write health forecast using bulk insert.
+        v10 schema: ACM_HealthForecast has (RunID, EquipID, Timestamp, ForecastHealth, CI_Lower, CI_Upper, Method, CreatedAt)
         """
         if df.empty or self.sql_client is None:
             return 0
         
-        # Ensure all required columns exist with defaults before upsert
-        df = df.copy()
-        if 'Method' not in df.columns:
-            df['Method'] = 'ExponentialSmoothing'
-        if 'ForecastStd' not in df.columns:
-            df['ForecastStd'] = 0.0
-        
-        # Fill any NaN values in critical columns
-        df['Method'] = df['Method'].fillna('ExponentialSmoothing')
-        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
-        
         try:
-            conn = self.sql_client.conn
-            cursor = conn.cursor()
-            row_count = 0
-            
-            for _, row in df.iterrows():
-                # Extract columns that match SQL schema
-                run_id = row['RunID']
-                equip_id = row['EquipID']
-                timestamp = row['Timestamp']
-                forecast_health = row.get('ForecastHealth', 0.0)
-                ci_lower = row.get('CiLower', 0.0)
-                ci_upper = row.get('CiUpper', 0.0)
-                forecast_std = row.get('ForecastStd', 0.0)
-                method = row.get('Method', 'ExponentialSmoothing')
-                
-                # Ensure no NaN values are passed as None to SQL
-                if pd.isna(forecast_health):
-                    forecast_health = 0.0
-                if pd.isna(ci_lower):
-                    ci_lower = 0.0
-                if pd.isna(ci_upper):
-                    ci_upper = 0.0
-                if pd.isna(forecast_std):
-                    forecast_std = 0.0
-                if pd.isna(method):
-                    method = 'ExponentialSmoothing'
-                    
-                created_at = row.get('CreatedAt', datetime.now())
-                
-                # MERGE upsert: update if key exists, insert otherwise
-                merge_sql = """
-                MERGE INTO ACM_HealthForecast_TS AS target
-                USING (SELECT ? AS RunID, ? AS EquipID, ? AS Timestamp) AS source
-                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.Timestamp = source.Timestamp)
-                WHEN MATCHED THEN
-                    UPDATE SET ForecastHealth = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
-                WHEN NOT MATCHED THEN
-                    INSERT (RunID, EquipID, Timestamp, ForecastHealth, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """
-                cursor.execute(merge_sql, (
-                    # ON clause params
-                    run_id, equip_id, timestamp,
-                    # UPDATE params
-                    forecast_health, ci_lower, ci_upper, forecast_std, method,
-                    # INSERT params
-                    run_id, equip_id, timestamp, forecast_health, ci_lower, ci_upper, forecast_std, method, created_at
-                ))
-                row_count += cursor.rowcount
-            
-            conn.commit()
-            return row_count
-            
+            # Bulk insert is standard for forecast tables in v10
+            return self._bulk_insert_sql('ACM_HealthForecast', df)
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_health_forecast_ts failed: {e}")
+            Console.warn(f"[OUTPUT] _upsert_health_forecast failed: {e}")
             return 0
     
-    def _upsert_failure_forecast_ts(self, df: pd.DataFrame) -> int:
+    def _upsert_failure_forecast(self, df: pd.DataFrame) -> int:
         """
-        FORECAST-UPSERT-02: Upsert failure forecast time series using MERGE.
-        
-        Primary key is (RunID, EquipID, Timestamp), so update if exists.
+        FORECAST-WRITE-02: Write failure forecast using bulk insert.
+        v10 schema: ACM_FailureForecast has (RunID, EquipID, Timestamp, FailureProb, ThresholdUsed, Method, CreatedAt)
         """
         if df.empty or self.sql_client is None:
             return 0
         
-        # Always make a copy to avoid modifying original and ensure Method column exists
-        df = df.copy()
-        
-        # Ensure all required columns exist with defaults before upsert
-        if 'Method' not in df.columns:
-            df['Method'] = 'GaussianTail'
-        if 'ThresholdUsed' not in df.columns:
-            df['ThresholdUsed'] = 70.0
-        
-        # Fill any NaN values in Method column
-        df['Method'] = df['Method'].fillna('GaussianTail')
-        df['ThresholdUsed'] = df['ThresholdUsed'].fillna(70.0)
-        
         try:
-            conn = self.sql_client.conn
-            cursor = conn.cursor()
-            row_count = 0
-            
-            for _, row in df.iterrows():
-                run_id = row['RunID']
-                equip_id = row['EquipID']
-                timestamp = row['Timestamp']
-                failure_prob = row.get('FailureProb', 0.0)
-                threshold_used = row.get('ThresholdUsed', 70.0)
-                method = row.get('Method', 'GaussianTail')
-                
-                # Ensure no NaN values are passed as None to SQL
-                if pd.isna(method):
-                    method = 'GaussianTail'
-                if pd.isna(threshold_used):
-                    threshold_used = 70.0
-                if pd.isna(failure_prob):
-                    failure_prob = 0.0
-                    
-                created_at = row.get('CreatedAt', datetime.now())
-                
-                merge_sql = """
-                MERGE INTO ACM_FailureForecast_TS AS target
-                USING (SELECT ? AS RunID, ? AS EquipID, ? AS Timestamp) AS source
-                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.Timestamp = source.Timestamp)
-                WHEN MATCHED THEN
-                    UPDATE SET FailureProb = ?, ThresholdUsed = ?, Method = ?
-                WHEN NOT MATCHED THEN
-                    INSERT (RunID, EquipID, Timestamp, FailureProb, ThresholdUsed, Method, CreatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?);
-                """
-                cursor.execute(merge_sql, (
-                    # ON clause
-                    run_id, equip_id, timestamp,
-                    # UPDATE
-                    failure_prob, threshold_used, method,
-                    # INSERT
-                    run_id, equip_id, timestamp, failure_prob, threshold_used, method, created_at
-                ))
-                row_count += cursor.rowcount
-            
-            conn.commit()
-            return row_count
-            
+            return self._bulk_insert_sql('ACM_FailureForecast', df)
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_failure_forecast_ts failed: {e}")
+            Console.warn(f"[OUTPUT] _upsert_failure_forecast failed: {e}")
             return 0
     
     def _upsert_detector_forecast_ts(self, df: pd.DataFrame) -> int:
@@ -2526,86 +2462,18 @@ class OutputManager:
             Console.warn(f"[OUTPUT] _upsert_detector_forecast_ts failed: {e}")
             return 0
     
-    def _upsert_sensor_forecast_ts(self, df: pd.DataFrame) -> int:
+    def _upsert_sensor_forecast(self, df: pd.DataFrame) -> int:
         """
-        FORECAST-UPSERT-04: Upsert sensor forecast time series using MERGE.
-        
-        Primary key is (RunID, EquipID, SensorName, Timestamp), so update if exists.
-        Schema: RunID, EquipID, SensorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt
+        FORECAST-WRITE-04: Write sensor forecast using bulk insert.
+        v10 schema: ACM_SensorForecast has (RunID, EquipID, SensorName, Timestamp, ForecastValue, CI_Lower, CI_Upper, Method, CreatedAt)
         """
         if df.empty or self.sql_client is None:
             return 0
         
-        # Ensure all required columns exist with defaults before upsert
-        df = df.copy()
-        if 'Method' not in df.columns:
-            df['Method'] = 'AR1'
-        if 'ForecastStd' not in df.columns:
-            df['ForecastStd'] = 0.0
-        
-        # Fill any NaN values in critical columns
-        df['Method'] = df['Method'].fillna('AR1')
-        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
-        if 'SensorName' in df.columns:
-            df['SensorName'] = df['SensorName'].fillna('UNKNOWN')
-        
         try:
-            conn = self.sql_client.conn
-            cursor = conn.cursor()
-            row_count = 0
-            
-            for _, row in df.iterrows():
-                run_id = row['RunID']
-                equip_id = row['EquipID']
-                sensor_name = row['SensorName']
-                timestamp = row['Timestamp']
-                forecast_value = row.get('ForecastValue', 0.0)
-                ci_lower = row.get('CiLower', 0.0)
-                ci_upper = row.get('CiUpper', 0.0)
-                forecast_std = row.get('ForecastStd', 0.0)
-                method = row.get('Method', 'AR1')
-                
-                # Ensure no NaN values are passed as None to SQL
-                if pd.isna(forecast_value):
-                    forecast_value = 0.0
-                if pd.isna(ci_lower):
-                    ci_lower = 0.0
-                if pd.isna(ci_upper):
-                    ci_upper = 0.0
-                if pd.isna(forecast_std):
-                    forecast_std = 0.0
-                if pd.isna(method):
-                    method = 'AR1'
-                if pd.isna(sensor_name):
-                    sensor_name = 'UNKNOWN'
-                    
-                created_at = row.get('CreatedAt', datetime.now())
-                
-                merge_sql = """
-                MERGE INTO ACM_SensorForecast_TS AS target
-                USING (SELECT ? AS RunID, ? AS EquipID, ? AS SensorName, ? AS Timestamp) AS source
-                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.SensorName = source.SensorName AND target.Timestamp = source.Timestamp)
-                WHEN MATCHED THEN
-                    UPDATE SET ForecastValue = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
-                WHEN NOT MATCHED THEN
-                    INSERT (RunID, EquipID, SensorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """
-                cursor.execute(merge_sql, (
-                    # ON clause
-                    run_id, equip_id, sensor_name, timestamp,
-                    # UPDATE
-                    forecast_value, ci_lower, ci_upper, forecast_std, method,
-                    # INSERT
-                    run_id, equip_id, sensor_name, timestamp, forecast_value, ci_lower, ci_upper, forecast_std, method, created_at
-                ))
-                row_count += cursor.rowcount
-            
-            conn.commit()
-            return row_count
-            
+            return self._bulk_insert_sql('ACM_SensorForecast', df)
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_sensor_forecast_ts failed: {e}")
+            Console.warn(f"[OUTPUT] _upsert_sensor_forecast failed: {e}")
             return 0
     
     def write_run_stats(self, stats_data: Dict[str, Any]) -> int:
@@ -2925,7 +2793,6 @@ class OutputManager:
                             tables_dir / "omr_contributions_long.csv",
                             sql_table="ACM_OMRContributionsLong" if force_sql else None,
                             add_created_at=True,
-                            sql_columns={"Sensor": "SensorName"},
                             non_numeric_cols={"SensorName"}
                         )
                         table_count += 1
@@ -3317,6 +3184,26 @@ class OutputManager:
                                     except Exception:
                                         return 'OK'
                                 dq_df['CheckResult'] = dq_df.apply(_derive_result, axis=1)
+                            
+                            # Add required SQL columns that may be missing
+                            if 'RunID' not in dq_df.columns:
+                                dq_df['RunID'] = self.current_run_id
+                            if 'EquipID' not in dq_df.columns:
+                                dq_df['EquipID'] = self.equip_id
+                            
+                            # Rename 'sensor' to 'sensor' (already correct in table schema)
+                            # Select only the columns the table expects
+                            expected_cols = [
+                                'sensor', 'train_count', 'train_nulls', 'train_null_pct', 'train_std',
+                                'train_longest_gap', 'train_flatline_span', 'train_min_ts', 'train_max_ts',
+                                'score_count', 'score_nulls', 'score_null_pct', 'score_std',
+                                'score_longest_gap', 'score_flatline_span', 'score_min_ts', 'score_max_ts',
+                                'interp_method', 'sampling_secs', 'notes', 'RunID', 'EquipID', 'CheckName', 'CheckResult'
+                            ]
+                            # Keep only columns that exist in both dq_df and expected_cols
+                            cols_to_keep = [c for c in expected_cols if c in dq_df.columns]
+                            dq_df = dq_df[cols_to_keep]
+                            
                             result = self.write_dataframe(
                                 dq_df,
                                 data_quality_path,
@@ -4465,7 +4352,8 @@ class OutputManager:
             occ = float(cnt / total * 100.0) if total > 0 else 0.0
             stats.append({
                 'RegimeLabel': lab_int,
-                'OccupancyPct': round(occ, 2),
+                'RecordCount': int(cnt),
+                'Percentage': round(occ, 2),
                 'AvgDwellSeconds': round(avg_dwell, 1) if np.isfinite(avg_dwell) else None,
                 'FusedMean': fused_mean,
                 'FusedP90': fused_p90,

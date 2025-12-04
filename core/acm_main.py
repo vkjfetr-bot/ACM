@@ -22,15 +22,17 @@ try:
     # import ONLY core modules relatively
     from . import regimes, drift, fuse
     from . import correlation, outliers, river_models  # New modules
-    from . import forecasting  # CONSOLIDATED: replaces forecast, enhanced_forecasting, enhanced_forecasting_sql
+    from . import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
     from . import fast_features
+    from .forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from . import storage  # Use output_manager instead
 except ImportError:
     import pathlib
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
     from core import regimes, drift, fuse
     from core import correlation, outliers, river_models
-    from core import forecasting  # CONSOLIDATED: replaces forecast, enhanced_forecasting, enhanced_forecasting_sql
+    from core import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
+    from core.forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from core import storage  # Use output_manager instead
     try:
         from core import fast_features
@@ -654,59 +656,47 @@ def _calculate_adaptive_thresholds(
 
 def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str, pd.Timestamp, pd.Timestamp, int]:
     """
-    Calls dbo.usp_ACM_StartRun using the current stored-proc signature.
+    Start a run by inserting into ACM_Runs table.
+    No stored procedure - direct Python SQL for simpler parameter handling.
     """
+    import uuid
+    
     equip_id = _get_equipment_id(equip_code)
-    stage = cfg.get("runtime", {}).get("stage", "score")
-    version = cfg.get("runtime", {}).get("version", "v5.0.0")
-    config_hash = cfg.get("hash", "")
-    trigger = "timer"
     tick_minutes = cfg.get("runtime", {}).get("tick_minutes", 30)
-
+    config_hash = cfg.get("hash", "")
+    
     default_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=tick_minutes)
-
-    tsql = """
-    DECLARE @RunID UNIQUEIDENTIFIER, @WS DATETIME2(3), @WE DATETIME2(3), @EID INT;
-    EXEC dbo.usp_ACM_StartRun
-        @EquipID = ?,
-        @Stage = ?,
-        @TickMinutes = ?,
-        @DefaultStartUtc = ?,
-        @Version = ?,
-        @ConfigHash = ?,
-        @TriggerReason = ?,
-        @RunID = @RunID OUTPUT,
-        @WindowStartEntryDateTime = @WS OUTPUT,
-        @WindowEndEntryDateTime = @WE OUTPUT,
-        @EquipIDOut = @EID OUTPUT;
-    SELECT CONVERT(varchar(36), @RunID) AS RunID, @WS AS WindowStart, @WE AS WindowEnd, @EID AS EquipID;
-    """
+    
+    # Generate RunID
+    run_id = str(uuid.uuid4())
+    window_start = default_start
+    window_end = default_start + pd.Timedelta(minutes=tick_minutes)
+    now = pd.Timestamp.utcnow()
 
     cur = cli.cursor()
     try:
-        Console.info(f"[DEBUG] Calling usp_ACM_StartRun (stage={stage}, tick={tick_minutes})")
+        Console.info(f"[DEBUG] Starting run RunID={run_id} (tick={tick_minutes})")
+        
+        # For idempotent re-runs, delete any prior run with same RunID
+        # This handles both forecast tables and ACM_Runs cleanup (v10 consolidated tables)
+        cur.execute("DELETE FROM dbo.ACM_HealthForecast WHERE RunID = ?", (run_id,))
+        cur.execute("DELETE FROM dbo.ACM_FailureForecast WHERE RunID = ?", (run_id,))
+        cur.execute("DELETE FROM dbo.ACM_RUL WHERE RunID = ?", (run_id,))
+        cur.execute("DELETE FROM dbo.ACM_Runs WHERE RunID = ?", (run_id,))
+        
+        # Direct INSERT into ACM_Runs instead of stored procedure
         cur.execute(
-            tsql,
-        (
-            equip_id,
-            stage,
-            tick_minutes,
-            default_start,
-            version,
-            config_hash,
-            trigger,
-        ),
+            """
+            SET QUOTED_IDENTIFIER ON;
+            INSERT INTO dbo.ACM_Runs (RunID, EquipID, StartedAt, ConfigSignature)
+            VALUES (?, ?, ?, ?)
+            """,
+            (run_id, equip_id, now, config_hash)
         )
-        row = cur.fetchone()
-        if not row or row[0] is None:
-            raise RuntimeError("usp_ACM_StartRun did not return a RunID.")
-        run_id = str(row[0])
-        window_start = pd.to_datetime(row[1]) if row[1] is not None else default_start
-        window_end = pd.to_datetime(row[2]) if row[2] is not None else window_start + pd.Timedelta(minutes=tick_minutes)
-        equip_id_out = int(row[3]) if row[3] is not None else 0
+        
         cli.conn.commit()
-        Console.info(f"[RUN] Started RunID={run_id} window=[{window_start},{window_end}) equip='{equip_code}' EquipID={equip_id_out}")
-        return run_id, window_start, window_end, equip_id_out
+        Console.info(f"[RUN] Started RunID={run_id} window=[{window_start},{window_end}) equip='{equip_code}' EquipID={equip_id}")
+        return run_id, window_start, window_end, equip_id
     except Exception as exc:
         try:
             cli.conn.rollback()
@@ -718,15 +708,28 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
         cur.close()
 
 def _sql_finalize_run(cli: Any, run_id: str, outcome: str, rows_read: int, rows_written: int, err_json: Optional[str] = None) -> None:
-    params = {
-        "RunID": run_id,
-        "Outcome": outcome,
-        "RowsRead": rows_read,
-        "RowsWritten": rows_written,
-        "ErrorJSON": err_json
-    }
+    """
+    Finalize a run by updating ACM_Runs with completion status.
+    Uses direct SQL to bypass stored procedure QUOTED_IDENTIFIER issues.
+    """
     try:
-        cli.call_proc("dbo.usp_ACM_FinalizeRun", params)
+        cur = cli.cursor()
+        try:
+            cur.execute(
+                """
+                SET QUOTED_IDENTIFIER ON;
+                UPDATE dbo.ACM_Runs
+                SET CompletedAt = GETUTCDATE(),
+                    TrainRowCount = COALESCE(?, TrainRowCount),
+                    ScoreRowCount = COALESCE(?, ScoreRowCount),
+                    ErrorMessage = COALESCE(?, ErrorMessage)
+                WHERE RunID = ?
+                """,
+                (rows_read, rows_written, err_json, run_id)
+            )
+            cli.conn.commit()
+        finally:
+            cur.close()
     except Exception as e:
         # Environments may lack FinalizeRun proc/tables; do not fail the pipeline
         try:
@@ -3844,40 +3847,47 @@ def main() -> None:
                     # The legacy quick-forecast is replaced by the full enhanced forecasting
                     # module which runs after analytics generation and provides richer outputs.
 
-                    # === RUL + SQL surfacing of forecast ===
+                    # === RUL + FORECASTING (v10.0.0 Unified Engine) ===
                     try:
-                        # STACK-01: Unified RUL estimation via forecasting module
-                        rul_tables = forecasting.estimate_rul(
-                            tables_dir=tables_dir,
-                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                            run_id=str(run_id) if run_id is not None else None,
-                            config=cfg,
+                        # v10.0.0: Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
+                        Console.info("[FORECAST] Running unified forecasting engine (v10.0.0)")
+                        forecast_engine = ForecastEngine(
                             sql_client=getattr(output_manager, "sql_client", None),
                             output_manager=output_manager,
+                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                            run_id=str(run_id) if run_id is not None else None,
+                            config=cfg
                         )
-                        if rul_tables:
-                            Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables")
-                            enable_sql_rul = getattr(output_manager, "sql_client", None) is not None
-                            for sql_name, df in rul_tables.items():
-                                if df is None or df.empty:
-                                    continue
-                                csv_name = {
-                                    "ACM_HealthForecast_TS": "health_forecast_ts.csv",
-                                    "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
-                                    "ACM_RUL_TS": "rul_timeseries.csv",
-                                    "ACM_RUL_Summary": "rul_summary.csv",
-                                    "ACM_RUL_Attribution": "rul_attribution.csv",
-                                    "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
-                                }.get(sql_name, f"{sql_name}.csv")
-                                out_path = tables_dir / csv_name
-                                output_manager.write_dataframe(
-                                    df,
-                                    out_path,
-                                    sql_table=sql_name if enable_sql_rul else None,
-                                    add_created_at="CreatedAt" not in df.columns,
-                                )
+                        
+                        forecast_results = forecast_engine.run_forecast()
+                        
+                        if forecast_results.get('success'):
+                            Console.info(
+                                f"[FORECAST] RUL P50={forecast_results['rul_p50']:.1f}h, "
+                                f"P10={forecast_results['rul_p10']:.1f}h, P90={forecast_results['rul_p90']:.1f}h"
+                            )
+                            Console.info(f"[FORECAST] Top sensors: {forecast_results['top_sensors']}")
+                            Console.info(f"[FORECAST] Wrote tables: {', '.join(forecast_results['tables_written'])}")
+                        else:
+                            Console.warn(f"[FORECAST] Forecast failed: {forecast_results.get('error', 'Unknown error')}")
+                            
                     except Exception as e:
-                        Console.warn(f"[RUL] RUL estimation failed: {e}")
+                        Console.warn(f"[FORECAST] Unified forecasting engine failed: {e}")
+                        # Fallback to legacy forecasting (backward compatibility)
+                        try:
+                            Console.info("[FORECAST] Falling back to legacy forecasting module")
+                            rul_tables = forecasting.estimate_rul(
+                                tables_dir=tables_dir,
+                                equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                                run_id=str(run_id) if run_id is not None else None,
+                                config=cfg,
+                                sql_client=getattr(output_manager, "sql_client", None),
+                                output_manager=output_manager,
+                            )
+                            if rul_tables:
+                                Console.info(f"[FORECAST-LEGACY] Generated {len(rul_tables)} RUL/forecast tables")
+                        except Exception as e2:
+                            Console.warn(f"[FORECAST-LEGACY] Legacy forecasting also failed: {e2}")
 
                     # === ENHANCED FORECASTING ===
                     try:
@@ -3964,40 +3974,47 @@ def main() -> None:
                 except Exception as e:
                     Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
 
-            # === RUL + SQL surfacing of forecast (SQL mode) ===
+            # === RUL + FORECASTING (v10.0.0 Unified Engine - SQL Mode) ===
             try:
-                # STACK-01: Unified RUL estimation via forecasting module
-                rul_tables = forecasting.estimate_rul(
-                    tables_dir=tables_dir,
-                    equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                    run_id=str(run_id) if run_id is not None else None,
-                    config=cfg,
+                # v10.0.0: Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
+                Console.info("[FORECAST] Running unified forecasting engine (v10.0.0 - SQL mode)")
+                forecast_engine = ForecastEngine(
                     sql_client=getattr(output_manager, "sql_client", None),
                     output_manager=output_manager,
+                    equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                    run_id=str(run_id) if run_id is not None else None,
+                    config=cfg
                 )
-                if rul_tables:
-                    Console.info(f"[RUL] Generated {len(rul_tables)} RUL/forecast tables (SQL mode)")
-                    enable_sql_rul = getattr(output_manager, "sql_client", None) is not None
-                    for sql_name, df in rul_tables.items():
-                        if df is None or df.empty:
-                            continue
-                        csv_name = {
-                            "ACM_HealthForecast_TS": "health_forecast_ts.csv",
-                            "ACM_FailureForecast_TS": "failure_forecast_ts.csv",
-                            "ACM_RUL_TS": "rul_timeseries.csv",
-                            "ACM_RUL_Summary": "rul_summary.csv",
-                            "ACM_RUL_Attribution": "rul_attribution.csv",
-                            "ACM_MaintenanceRecommendation": "maintenance_recommendation.csv",
-                        }.get(sql_name, f"{sql_name}.csv")
-                        out_path = tables_dir / csv_name
-                        output_manager.write_dataframe(
-                            df,
-                            out_path,
-                            sql_table=sql_name if enable_sql_rul else None,
-                            add_created_at="CreatedAt" not in df.columns,
-                        )
+                
+                forecast_results = forecast_engine.run_forecast()
+                
+                if forecast_results.get('success'):
+                    Console.info(
+                        f"[FORECAST] RUL P50={forecast_results['rul_p50']:.1f}h, "
+                        f"P10={forecast_results['rul_p10']:.1f}h, P90={forecast_results['rul_p90']:.1f}h"
+                    )
+                    Console.info(f"[FORECAST] Top sensors: {forecast_results['top_sensors']}")
+                    Console.info(f"[FORECAST] Wrote tables: {', '.join(forecast_results['tables_written'])}")
+                else:
+                    Console.warn(f"[FORECAST] Forecast failed: {forecast_results.get('error', 'Unknown error')}")
+                    
             except Exception as e:
-                Console.warn(f"[RUL] RUL estimation (SQL mode) failed: {e}")
+                Console.warn(f"[FORECAST] Unified forecasting engine (SQL mode) failed: {e}")
+                # Fallback to legacy forecasting (backward compatibility)
+                try:
+                    Console.info("[FORECAST] Falling back to legacy forecasting module (SQL mode)")
+                    rul_tables = forecasting.estimate_rul(
+                        tables_dir=tables_dir,
+                        equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                        run_id=str(run_id) if run_id is not None else None,
+                        config=cfg,
+                        sql_client=getattr(output_manager, "sql_client", None),
+                        output_manager=output_manager,
+                    )
+                    if rul_tables:
+                        Console.info(f"[FORECAST-LEGACY] Generated {len(rul_tables)} RUL/forecast tables")
+                except Exception as e2:
+                    Console.warn(f"[FORECAST-LEGACY] Legacy forecasting also failed: {e2}")
 
         except Exception as e:
             Console.warn(f"[OUTPUTS] Comprehensive analytics generation failed: {e}")

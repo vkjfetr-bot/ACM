@@ -1838,7 +1838,7 @@ def run_enhanced_forecasting_sql(
                 keep_runs = 30
             keep_runs = max(1, min(int(keep_runs), 1000))
             cur = sql_client.cursor()
-            for table_name in ("ACM_HealthForecast_TS", "ACM_FailureForecast_TS"):
+            for table_name in ("ACM_HealthForecast", "ACM_FailureForecast"):
                 cur.execute(f"""
                     WITH RankedRuns AS (
                         SELECT RunID,
@@ -2886,12 +2886,12 @@ def run_and_persist_enhanced_forecasting(
         return metrics
 
     ef_sql_map = {
-        "health_forecast_ts": "ACM_HealthForecast_TS",
-        "failure_forecast_ts": "ACM_FailureForecast_TS",
-        "failure_hazard_ts": "ACM_FailureHazard_TS",
-        "detector_forecast_ts": "ACM_DetectorForecast_TS",
-        "sensor_forecast_ts": "ACM_SensorForecast_TS",
-        "rul_summary": "ACM_RUL_Summary",
+        "health_forecast_ts": "ACM_HealthForecast",
+        "failure_forecast_ts": "ACM_FailureForecast",
+        "failure_hazard_ts": "ACM_FailureForecast",
+        "detector_forecast_ts": "ACM_FailureForecast",
+        "sensor_forecast_ts": "ACM_SensorForecast",
+        "rul_summary": "ACM_RUL",
     }
     ef_csv_map = {
         "health_forecast_ts": "health_forecast.csv",
@@ -2924,7 +2924,7 @@ def run_and_persist_enhanced_forecasting(
         csv_name = ef_csv_map.get(logical_name, f"{logical_name}.csv")
         
         # DEBUG: Log columns and Method values before write
-        if sql_table == "ACM_FailureForecast_TS":
+        if sql_table == "ACM_FailureForecast":
             Console.info(f"[DEBUG] Before write_dataframe: columns={list(df_to_write.columns)}")
             if "Method" in df_to_write.columns:
                 Console.info(f"[DEBUG] Method column dtype={df_to_write['Method'].dtype}, nulls={df_to_write['Method'].isna().sum()}, first 5 values={list(df_to_write['Method'].head())}")

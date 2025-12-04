@@ -17,7 +17,7 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "9.0.0"
+__version__ = "10.0.0"
 __version_date__ = "2025-12-04"
 __version_author__ = "ACM Development Team"
 
@@ -88,7 +88,128 @@ def format_version_for_output(context=""):
     return get_version_string()
 
 
-# v9.0.0 Release Notes (from v8.2.0)
+# v10.0.0 Release Notes (from v9.0.0)
+RELEASE_NOTES_V10 = """
+ACM v10.0.0 - MAJOR RELEASE: Unified Forecasting Architecture (2025-12-04)
+
+BREAKING CHANGES:
+  ⚠ Forecasting system completely refactored into 8 specialized modules
+  ⚠ 11 forecast tables consolidated to 4 new tables
+  ⚠ File-mode forecast output removed (SQL-only operation)
+  ⚠ SQL schema changes require migration scripts
+  ⚠ No backward compatibility with v9 forecast tables
+
+ARCHITECTURE OVERHAUL:
+  ✓ Eliminated 2943 lines of duplicate logic between forecasting.py and rul_engine.py
+  ✓ Created 8 focused modules (total ~2130 lines, -28% code):
+    - health_tracker.py (250 lines): HealthTimeline with quality checks
+    - degradation_model.py (320 lines): BaseDegradationModel, LinearTrendModel
+    - failure_probability.py (180 lines): Pure probability/survival/hazard functions
+    - rul_estimator.py (280 lines): Monte Carlo RUL with confidence
+    - state_manager.py (450 lines): ForecastingState, AdaptiveConfigManager
+    - forecast_engine.py (380 lines): 12-step orchestration pipeline
+    - sensor_attribution.py (120 lines): Sensor ranking and contributions
+    - metrics.py (150 lines): Forecast error and RUL accuracy tracking
+
+SQL SCHEMA CONSOLIDATION:
+  ✓ Dropped 12 old forecast tables:
+    - ACM_HealthForecast_TS, ACM_FailureForecast_TS, ACM_RUL_TS
+    - ACM_RUL_Summary, ACM_SensorForecast_TS, ACM_MaintenanceRecommendation
+    - ACM_EnhancedFailureProbability_TS, ACM_FailureCausation
+    - ACM_EnhancedMaintenanceRecommendation, ACM_RecommendedActions
+    - ACM_HealthForecast_Continuous, ACM_FailureHazard_TS
+  ✓ Created 4 new tables:
+    - ACM_HealthForecast (RunID, EquipID, Timestamp, ForecastHealth, CI, Method)
+    - ACM_FailureForecast (RunID, EquipID, Timestamp, FailureProb, Survival, Hazard)
+    - ACM_RUL (RunID, EquipID, RUL_Hours, P10/P50/P90, Confidence, TopSensors)
+    - ACM_ForecastingState (EquipID, StateVersion, ModelState, RowVersion for locking)
+
+ADAPTIVE CONFIGURATION SYSTEM:
+  ✓ New ACM_AdaptiveConfig table with per-equipment and global configs
+  ✓ Research-backed parameter bounds with citations:
+    - alpha [0.05, 0.95]: Hyndman & Athanasopoulos 2018
+    - beta [0.01, 0.30]: Hyndman & Athanasopoulos 2018
+    - training_window_hours [72, 720]: NIST SP 1225
+    - failure_threshold [40.0, 80.0]: ISO 13381-1:2015
+    - confidence_min [0.50, 0.95]: Agresti & Coull 1998
+    - monte_carlo_simulations [500, 5000]: Saxena et al. 2008
+  ✓ Auto-tuning based on data volume (>10K rows threshold), not batch count
+  ✓ Grid search optimization for alpha/beta per equipment
+  ✓ Adaptive window adjustment for data quality (SPARSE/GAPPY/FLAT/NOISY)
+
+PRODUCTION SCALE (1000 EQUIPMENT):
+  ✓ Optimistic concurrency control with ROWVERSION for state writes
+  ✓ Retry logic with exponential backoff (50ms, 200ms, 800ms)
+  ✓ Connection pooling: MinPoolSize=10, MaxPoolSize=100
+  ✓ Query hints: NOLOCK for reads, ROWLOCK+UPDLOCK for state writes
+  ✓ Partition-ready indexes on (EquipID, RunID, Timestamp)
+  ✓ Stress tested with 100 equipment parallel (50 workers)
+
+MIGRATION SCRIPTS:
+  ✓ Forward: scripts/sql/migrations/60_consolidate_forecast_tables_v10.sql
+  ✓ Rollback: scripts/sql/migrations/60_rollback_to_v9.sql (restores v9 schema)
+  ✓ Adaptive config: scripts/sql/migrations/61_adaptive_config_v10.sql
+  ✓ Migration time: Schema <5 minutes, full data re-run ~45 minutes
+
+TESTING REQUIREMENTS:
+  ✓ Mandatory multi-equipment parallel test:
+    python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-batches 10 --start-from-beginning --max-workers 2
+  ✓ Validation checks:
+    - Both equipment complete 10 batches SUCCESS (zero NOOP)
+    - All 4 new tables populated with forecast data
+    - RUL stable or decreasing (not increasing >10%)
+    - StateVersion increments correctly (1→10)
+    - Retention keeps exactly last 5 runs
+    - Zero ERROR logs in ACM_RunLogs
+    - Optimistic lock retries <3 per equipment
+
+REMOVED FUNCTIONALITY:
+  ✗ File-mode forecast CSV/PNG output (SQL-only now)
+  ✗ Dual-write mode (no compatibility layer)
+  ✗ Legacy forecasting.py functions: estimate_rul_monte_carlo, should_retrain, blend_forecast
+  ✗ Legacy rul_engine.py module (archived to core/archive/v9_rul_engine.py)
+  ✗ Config table forecasting section (migrated to ACM_AdaptiveConfig)
+
+DATA PRESERVATION:
+  ✓ FD_FAN equipment data fully preserved
+  ✓ GAS_TURBINE equipment data fully preserved
+  ✓ All other equipment historical data untouched
+  ✓ Analytics backbone unchanged (detectors, scores, episodes, regimes)
+
+DEPLOYMENT CHECKLIST:
+  1. Backup production ACM database
+  2. Verify equipment data counts pre-migration
+  3. Run 60_consolidate_forecast_tables_v10.sql
+  4. Run 61_adaptive_config_v10.sql
+  5. Deploy v10.0.0 code to app server
+  6. Run smoke test: --equip FD_FAN --max-batches 10
+  7. Monitor first 24hrs for errors and auto-tuning
+  8. Verify Grafana dashboards showing RUL/forecasts
+  9. If critical issues: run 60_rollback_to_v9.sql + checkout v9.0.0
+
+ROLLBACK PROCEDURE:
+  1. sqlcmd -i scripts/sql/migrations/60_rollback_to_v9.sql (restores 12 tables)
+  2. git checkout v9.0.0
+  3. Redeploy v9.0.0 code
+  4. Rollback time: <5 minutes schema, ~45 minutes data re-run
+
+NEXT VERSION (v10.1.0 planned):
+  - ExponentialDecayModel and WeibullModel degradation models
+  - ROC curve analysis for optimal failure threshold selection
+  - Multi-armed bandit for alpha auto-tuning (Thompson Sampling)
+  - Partition routing for state write contention reduction
+
+VERSION HISTORY:
+  v9.0.0 → v10.0.0: Unified forecasting architecture, 11→4 tables, adaptive config, 1000-equipment scale
+  v8.2.0 → v9.0.0: Major production release with P0 fixes
+  v7.x: Legacy versions (archived)
+
+AUTHOR: ACM Development Team
+DATE: 2025-12-04
+GIT_TAG: v10.0.0 (to be created after merge)
+"""
+
+# v9.0.0 Release Notes (archived)
 RELEASE_NOTES = """
 ACM v9.0.0 - Major Production Release (2025-12-04)
 
