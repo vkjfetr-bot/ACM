@@ -5,7 +5,7 @@ Score fusion, calibration (global or per-regime), and episode detection.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 from utils.logger import Console
 from utils.detector_labels import format_culprit_label
 
@@ -110,13 +110,31 @@ def tune_detector_weights(
             try:
                 fused_dt_index = pd.DatetimeIndex(fused_index)
             except Exception:
-                fused_dt_index = pd.to_datetime(fused_index)
+                fused_dt_index = pd.to_datetime(cast(Any, fused_index))
+
+            # Normalize tz to avoid tz-aware/naive comparison errors
+            try:
+                if getattr(fused_dt_index, "tz", None) is not None:
+                    fused_dt_index = fused_dt_index.tz_localize(None)
+            except Exception:
+                pass
 
             positive_mask = np.zeros(n_total, dtype=bool)
             for _, episode_row in episodes_df.iterrows():
-                start_ts = pd.to_datetime(episode_row.get("start_ts"), errors="coerce")
-                end_ts = pd.to_datetime(episode_row.get("end_ts"), errors="coerce")
+                start_raw = episode_row.get("start_ts")
+                end_raw = episode_row.get("end_ts")
+                start_ts = pd.to_datetime(cast(Any, start_raw), errors="coerce")
+                end_ts = pd.to_datetime(cast(Any, end_raw), errors="coerce")
+
+                # Drop timezone to match fused_dt_index
+                if isinstance(start_ts, pd.Timestamp) and start_ts.tzinfo is not None:
+                    start_ts = start_ts.tz_localize(None)
+                if isinstance(end_ts, pd.Timestamp) and end_ts.tzinfo is not None:
+                    end_ts = end_ts.tz_localize(None)
+
                 if pd.isna(start_ts) or pd.isna(end_ts):
+                    continue
+                if end_ts < start_ts:
                     continue
                 if end_ts < fused_dt_index[0] or start_ts > fused_dt_index[-1]:
                     continue
@@ -318,16 +336,18 @@ def tune_detector_weights(
                 fused_clean = fused_signal[mask]
                 
                 corr, p_value = pearsonr(det_clean, fused_clean)
-                correlations[detector_name] = abs(corr) if np.isfinite(corr) else 0.0
+                corr_f = float(np.asarray(corr, dtype=float).item())
+                p_val_f = float(np.asarray(p_value, dtype=float).item())
+                correlations[detector_name] = abs(corr_f) if np.isfinite(corr_f) else 0.0
                 
                 diagnostics["detector_metrics"][detector_name] = {
-                    "pearson_r": float(corr),
-                    "abs_r": float(abs(corr)),
-                    "p_value": float(p_value),
+                    "pearson_r": corr_f,
+                    "abs_r": float(abs(corr_f)),
+                    "p_value": p_val_f,
                     "n_samples": n_valid,
                     "status": "ok",
                     "metric_type": "abs_correlation",
-                    "metric_value": float(abs(corr))
+                    "metric_value": float(abs(corr_f))
                 }
             except Exception as e:
                 Console.warn(f"[TUNE] {detector_name}: correlation failed - {e}")
@@ -532,10 +552,15 @@ class Fuser:
 
     @staticmethod
     def _zscore(s: np.ndarray) -> np.ndarray:
-        mu = np.nanmean(s)
-        sd = np.nanstd(s)
-        sd = sd if sd > 1e-9 else 1.0
-        return (s - mu) / sd
+        s = np.asarray(s, dtype=float)
+        mask = np.isfinite(s)
+        if not mask.any():
+            return np.zeros_like(s, dtype=float)
+        mu = float(np.nanmean(s))
+        sd = float(np.nanstd(s))
+        sd = sd if np.isfinite(sd) and sd > 1e-9 else 1.0
+        z = (s - mu) / sd
+        return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
 
     @staticmethod
     def _get_base_sensor(feature_name: str) -> str:
@@ -555,12 +580,20 @@ class Fuser:
         if missing:
             Console.info(f"[FUSE] {len(missing)} detector(s) absent at fusion time: {missing}")
         
-        n = None
-        zs = {}
+        lengths = []
+        zs: Dict[str, np.ndarray] = {}
         for k in keys:
-            arr = np.asarray(list(streams[k]), dtype=float)
-            n = len(arr) if n is None else n
+            arr = np.asarray(streams[k], dtype=float)
+            lengths.append(len(arr))
             zs[k] = self._zscore(arr)
+        n = min(lengths) if lengths else 0
+        if len(original_features.index) > 0:
+            n = min(n, len(original_features.index))
+        if n == 0:
+            return pd.Series(dtype=float)
+
+        # Truncate to common length to avoid shape mismatches
+        zs = {k: v[:n] for k, v in zs.items()}
         wsum = sum(self.weights.get(k, 0.0) for k in keys)
         if wsum <= 0:
             w = {k: 1.0 / len(keys) for k in keys}
@@ -573,26 +606,43 @@ class Fuser:
 
     def detect_episodes(self, series: pd.Series, streams: Dict[str, np.ndarray], original_features: pd.DataFrame) -> pd.DataFrame:
         """CUSUM-like episode builder on z-series."""
-        x = series.values.astype(float)
-        mu = np.nanmean(x)
-        sd = np.nanstd(x)
-        sd = sd if sd > 1e-9 else 1.0
+        if len(series) == 0:
+            return pd.DataFrame()
+
+        x = np.asarray(series, dtype=float)
+        finite_mask = np.isfinite(x)
+        if not finite_mask.any():
+            return pd.DataFrame()
+
+        mu = float(np.nanmean(x))
+        if not np.isfinite(mu):
+            mu = 0.0
+        sd = float(np.nanstd(x))
+        if not np.isfinite(sd) or sd <= 1e-9:
+            sd = 1.0
         k = self.ep.k_sigma * sd
         h = self.ep.h_sigma * sd
 
         s_pos = 0.0
         active = False
-        start = None
+        start: Optional[int] = None
         episodes = []
         for i, xi in enumerate(x):
             s_pos = max(0.0, s_pos + (xi - mu - k))
+            if active and s_pos <= 0.0:
+                active = False
+                start = None
+                continue
             if (not active) and s_pos > 0:
                 active = True
                 start = i
             if active and s_pos > h:
                 # close episode
                 end = i
-                if end - start + 1 >= self.ep.min_len:
+                if start is None:
+                    start = i
+                length = end - start + 1
+                if length >= self.ep.min_len:
                     episodes.append((start, end))
                 s_pos = 0.0
                 active = False
@@ -609,26 +659,43 @@ class Fuser:
             else:
                 merged.append([s, e])
 
-        # Use the original DatetimeIndex to get real timestamps
-        idx = series.index if isinstance(series.index, pd.DatetimeIndex) else pd.to_datetime(series.index)
+        raw_idx = series.index
+        has_dt_index = isinstance(raw_idx, pd.DatetimeIndex)
+        idx = raw_idx
+        if not has_dt_index:
+            try:
+                inferred_type = getattr(raw_idx, "inferred_type", "") or ""
+                if "date" in inferred_type:
+                    dt_idx = pd.to_datetime(raw_idx, errors="coerce")
+                    if isinstance(dt_idx, pd.DatetimeIndex) and not dt_idx.isna().all():
+                        idx = dt_idx
+                        has_dt_index = True
+            except Exception:
+                pass
+
         rows = []
         for i, (s, e) in enumerate(merged):
             start_ts = idx[max(0, s)]
             end_ts = idx[min(len(idx) - 1, e)]
-            duration_s = (end_ts - start_ts).total_seconds() if pd.notna(start_ts) and pd.notna(end_ts) else 0.0
+            if has_dt_index and pd.notna(start_ts) and pd.notna(end_ts):
+                duration_s = (end_ts - start_ts).total_seconds()
+            else:
+                duration_s = float(e - s + 1)
             
-            # Filter out short-duration episodes
-            if duration_s < self.ep.min_duration_s:
+            # Filter out short-duration episodes (only when real timestamps are available)
+            if has_dt_index and duration_s < self.ep.min_duration_s:
                 continue
             
             # --- Culprit Attribution Logic ---
             episode_streams = {k: v[s:e+1] for k, v in streams.items()}
             
             # Find the detector with the highest mean score during the episode
-            max_mean_score = -1
+            max_mean_score = -np.inf
             primary_detector = "unknown"
             for name, scores in episode_streams.items():
                 mean_score = np.nanmean(scores)
+                if not np.isfinite(mean_score):
+                    continue
                 if mean_score > max_mean_score:
                     max_mean_score = mean_score
                     primary_detector = name
@@ -638,9 +705,15 @@ class Fuser:
             if 'pca' in primary_detector or 'mhal' in primary_detector:
                 # Simple attribution: find sensor with max mean value in the episode window
                 episode_features = original_features.iloc[s:e+1]
-                top_feature = episode_features.mean().idxmax()
-                culprit_sensor = Fuser._get_base_sensor(str(top_feature))
-                culprits_raw = f"{primary_detector}({culprit_sensor})"
+                top_feature: Optional[str] = None
+                if not episode_features.empty:
+                    feature_means = episode_features.select_dtypes(include=[np.number]).mean()
+                    feature_means = feature_means.dropna()
+                    if not feature_means.empty:
+                        top_feature = str(feature_means.idxmax())
+                if top_feature:
+                    culprit_sensor = Fuser._get_base_sensor(top_feature)
+                    culprits_raw = f"{primary_detector}({culprit_sensor})"
 
             # Format culprit with human-readable label
             culprits = format_culprit_label(culprits_raw, use_short=False)

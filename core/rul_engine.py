@@ -298,8 +298,8 @@ def load_sensor_hotspots(
         Console.warn(f"[RUL] No sensor hotspots found for EquipID={equip_id}, RunID={run_id}")
         return pd.DataFrame()
 
-    # Derive required columns when legacy schema omits them
-    if "FailureContribution" not in df.columns:
+    # Derive required columns when legacy schema omits them OR when columns have NULL values
+    if "FailureContribution" not in df.columns or df["FailureContribution"].isna().any():
         abs_vals = pd.to_numeric(df.get("MaxAbsZ"), errors="coerce").abs().fillna(0.0)
         total = abs_vals.sum()
         if total > 0:
@@ -309,7 +309,7 @@ def load_sensor_hotspots(
         else:
             df["FailureContribution"] = 0.0
 
-    if "ZScoreAtFailure" not in df.columns:
+    if "ZScoreAtFailure" not in df.columns or df["ZScoreAtFailure"].isna().any():
         z_source = df.get("MaxSignedZ")
         if z_source is None or (hasattr(z_source, "isna") and z_source.isna().all()):
             z_source = df.get("LatestSignedZ")
@@ -317,7 +317,7 @@ def load_sensor_hotspots(
             z_source = pd.Series([0.0] * len(df))
         df["ZScoreAtFailure"] = pd.to_numeric(z_source, errors="coerce").fillna(0.0)
 
-    if "AlertCount" not in df.columns:
+    if "AlertCount" not in df.columns or df["AlertCount"].isna().any():
         alerts = df.get("AboveAlertCount")
         if alerts is None:
             alerts = pd.Series([0] * len(df))
@@ -429,15 +429,17 @@ def load_learning_state(sql_client: Optional[Any], equip_id: int) -> LearningSta
             (equip_id,)
         )
         row = cur.fetchone()
-        cur.close()
         
         if row:
+            # Read column names BEFORE closing cursor
             col_names = [desc[0] for desc in cur.description]
+            cur.close()
             row_dict = dict(zip(col_names, row))
             state = LearningState.from_sql_dict(equip_id, row_dict)
             Console.info(f"[RUL-Learn] Loaded learning state for EquipID={equip_id}")
             return state
         else:
+            cur.close()
             Console.info(f"[RUL-Learn] No learning state found for EquipID={equip_id}; using defaults")
             return LearningState(equip_id=equip_id)
             
@@ -893,11 +895,11 @@ class RULModel:
         for i, name in enumerate(model_names):
             model_key = name.lower()
             if model_key == "ar1":
-                raw_weights[i] = self.learning_state.ar1.weight
+                raw_weights[i] = self.learning_state.ar1_metrics.weight
             elif model_key == "exponential":
-                raw_weights[i] = self.learning_state.exp.weight
+                raw_weights[i] = self.learning_state.exp_metrics.weight
             elif model_key == "weibull":
-                raw_weights[i] = self.learning_state.weibull.weight
+                raw_weights[i] = self.learning_state.weibull_metrics.weight
 
         # Apply minimum weight floor
         min_weight = self.cfg.min_model_weight

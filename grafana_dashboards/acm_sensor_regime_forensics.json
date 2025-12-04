@@ -317,7 +317,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Episode culprit history with weighted contribution. Source: ACM_CulpritHistory.",
+      "description": "Episode diagnostics with severity and duration. Source: ACM_EpisodeDiagnostics.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -352,7 +352,7 @@
             "uid": "${datasource}"
           },
           "format": "table",
-          "rawSql": "SELECT TOP 30\n  StartTimestamp,\n  EndTimestamp,\n  PrimaryDetector,\n  WeightedContribution,\n  LeadMeanZ,\n  DuringMeanZ,\n  LagMeanZ\nFROM ACM_CulpritHistory\nWHERE EquipID = $equipment\n  AND $__timeFilter(StartTimestamp)\nORDER BY StartTimestamp DESC",
+          "rawSql": "SELECT TOP 30\n  peak_timestamp as StartTimestamp,\n  DATEADD(HOUR, duration_h, peak_timestamp) as EndTimestamp,\n  dominant_sensor as PrimaryDetector,\n  severity as WeightedContribution,\n  peak_z as LeadMeanZ,\n  avg_z as DuringMeanZ,\n  min_health_index as LagMeanZ\nFROM ACM_EpisodeDiagnostics\nWHERE EquipID = $equipment\n  AND $__timeFilter(peak_timestamp)\nORDER BY peak_timestamp DESC",
           "refId": "A"
         }
       ],

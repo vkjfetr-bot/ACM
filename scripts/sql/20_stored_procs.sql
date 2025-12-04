@@ -120,12 +120,11 @@ CREATE PROCEDURE dbo.usp_ACM_FinalizeRun
 AS
 BEGIN
     SET NOCOUNT ON;
-    UPDATE dbo.RunLog
-    SET Outcome = @Outcome,
-        EndEntryDateTime = SYSUTCDATETIME(),
-        RowsRead = COALESCE(@RowsRead, RowsRead),
-        RowsWritten = COALESCE(@RowsWritten, RowsWritten),
-        ErrorJSON = COALESCE(@ErrorJSON, ErrorJSON)
+    UPDATE dbo.ACM_Runs
+    SET CompletedAt = SYSUTCDATETIME(),
+        TrainRowCount = COALESCE(@RowsRead, TrainRowCount),
+        ScoreRowCount = COALESCE(@RowsWritten, ScoreRowCount),
+        ErrorMessage = COALESCE(@ErrorJSON, ErrorMessage)
     WHERE RunID = @RunID;
 END
 GO

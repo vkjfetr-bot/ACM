@@ -14,6 +14,7 @@ consistent behavior for all output operations.
 """
 
 from __future__ import annotations
+# pyright: reportGeneralTypeIssues=false
 
 import json
 import time
@@ -21,12 +22,13 @@ import math
 import threading
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Dict, Any, List, Optional, Union, Tuple, TypeVar, Callable
+from typing import Dict, Any, List, Optional, Union, Tuple, TypeVar, Callable, cast
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
+import warnings
 from datetime import datetime, timezone
 
 # FOR-DQ-02: Use centralized timestamp normalization
@@ -45,35 +47,32 @@ from utils.logger import Console, Heartbeat
 ALLOWED_TABLES = {
     'ACM_Scores_Wide','ACM_Episodes','ACM_EpisodesQC',
     'ACM_HealthTimeline','ACM_RegimeTimeline',
-    'ACM_RegimeSummary','ACM_RegimeFeatureImportance','ACM_RegimeTransitions',
-    'ACM_ContributionCurrent','ACM_ContributionTimeline',
+    'ACM_RegimeTransitions','ACM_ContributionCurrent','ACM_ContributionTimeline',
     'ACM_DriftSeries','ACM_ThresholdCrossings',
     'ACM_AlertAge','ACM_SensorRanking','ACM_RegimeOccupancy',
     'ACM_HealthHistogram','ACM_RegimeStability',
     'ACM_DefectSummary','ACM_DefectTimeline','ACM_SensorDefects',
     'ACM_HealthZoneByPeriod','ACM_SensorAnomalyByPeriod',
     'ACM_DetectorCorrelation','ACM_CalibrationSummary',
-    'ACM_RegimeTransitions','ACM_RegimeDwellStats',
-    'ACM_DriftEvents','ACM_CulpritHistory','ACM_EpisodeMetrics',
-    'ACM_EpisodeDiagnostics',
+    'ACM_RegimeDwellStats','ACM_DriftEvents','ACM_EpisodeMetrics',
+    'ACM_EpisodeDiagnostics','ACM_EpisodeCulprits',
     'ACM_DataQuality',
     'ACM_Scores_Long','ACM_Drift_TS',
     'ACM_Anomaly_Events','ACM_Regime_Episodes',
     'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
-    'ACM_Run_Stats', 'ACM_SinceWhen',
+    'ACM_Run_Stats','ACM_SinceWhen',
     'ACM_SensorHotspots','ACM_SensorHotspotTimeline',
     # Forecasting & RUL tables
     'ACM_HealthForecast_TS','ACM_FailureForecast_TS',
     'ACM_RUL_TS','ACM_RUL_Summary','ACM_RUL_Attribution',
     'ACM_DetectorForecast_TS','ACM_SensorForecast_TS','ACM_MaintenanceRecommendation',
     'ACM_EnhancedFailureProbability_TS','ACM_FailureCausation',
-    'ACM_EnhancedMaintenanceRecommendation','ACM_RecommendedActions',
+    'ACM_EnhancedMaintenanceRecommendation',
     'ACM_SensorNormalized_TS',
-    'ACM_OMRContributions','ACM_OMRContributionsLong','ACM_FusionQuality','ACM_FusionQualityReport',
+    'ACM_OMRContributionsLong','ACM_FusionQualityReport',
     'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
     'ACM_OMR_Diagnostics','ACM_Forecast_QualityMetrics',
-    'ACM_HealthDistributionOverTime','ACM_ChartGenerationLog',
-    'ACM_FusionMetrics',
+    'ACM_HealthDistributionOverTime',
     # Continuous forecasting enhancements
     'ACM_HealthForecast_Continuous','ACM_FailureHazard_TS',
     # Adaptive threshold metadata
@@ -251,7 +250,17 @@ def _native_cadence_secs(idx: pd.DatetimeIndex) -> float:
     if len(idx) < 2:
         return float('inf')
     diffs = idx.to_series().diff().dropna()
-    return diffs.median().total_seconds()
+    # Handle pandas Timedelta median vs numeric
+    med = diffs.median()
+    try:
+        # Timedelta has total_seconds()
+        return float(getattr(med, "total_seconds", lambda: float(med))())
+    except Exception:
+        try:
+            import numpy as np
+            return float(np.median(diffs))
+        except Exception:
+            return float('inf')
 
 def _check_cadence(idx: pd.DatetimeIndex, sampling_secs: Optional[int], jitter_ratio: float = 0.05) -> bool:
     """Check if timestamps have regular cadence."""
@@ -275,7 +284,8 @@ def _resample(df: pd.DataFrame, sampling_secs: int, interp_method: str = "linear
     df_resampled = df.reindex(regular_idx)
     if interp_method != "none":
         max_gap_periods = max_gap_secs // sampling_secs
-        df_resampled = df_resampled.interpolate(method=interp_method, limit=max_gap_periods, limit_direction='both')
+        # Cast method to Any to satisfy type-checkers across pandas versions
+        df_resampled = df_resampled.interpolate(method=cast(Any, interp_method), limit=max_gap_periods, limit_direction='both')
     if strict:
         fill_ratio = df_resampled.isnull().sum().sum() / (len(df_resampled) * len(df_resampled.columns))
         if fill_ratio > max_fill_ratio:
@@ -286,7 +296,9 @@ def _read_csv_with_peek(path: Union[str, Path], ts_col_hint: Optional[str], engi
     """Read CSV and auto-detect timestamp column."""
     path = Path(path)
     try:
-        df = pd.read_csv(path, engine=engine)
+        # Ensure engine is one of accepted options for pandas
+        _engine = engine if engine in {None, 'c', 'python', 'pyarrow', 'python-fwf'} else None
+        df = pd.read_csv(path, engine=cast(Any, _engine))
     except Exception as e:
         raise ValueError(f"Failed to read CSV {path}: {e}")
     if df.empty:
@@ -787,11 +799,16 @@ class OutputManager:
 
         # Cadence check + guardrails
         hb = Heartbeat("Cadence check / resample / fill small gaps", next_hint="finalize", eta_hint=15).start()
-        cad_ok_train = _check_cadence(train.index, sampling_secs)
-        cad_ok_score = _check_cadence(score.index, sampling_secs)
+        # Ensure type stability for indexes
+        train.index = pd.DatetimeIndex(train.index)
+        score.index = pd.DatetimeIndex(score.index)
+        train.index = pd.DatetimeIndex(train.index)
+        score.index = pd.DatetimeIndex(score.index)
+        cad_ok_train = _check_cadence(cast(pd.DatetimeIndex, train.index), sampling_secs)
+        cad_ok_score = _check_cadence(cast(pd.DatetimeIndex, score.index), sampling_secs)
         cadence_ok = bool(cad_ok_train and cad_ok_score)
 
-        native_train = _native_cadence_secs(train.index)
+        native_train = _native_cadence_secs(cast(pd.DatetimeIndex, train.index))
         if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
             Console.warn(f"[WARN] Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) — skipping to avoid upsample.")
             sampling_secs = None
@@ -806,12 +823,14 @@ class OutputManager:
         will_resample = allow_resample and (not cadence_ok) and (sampling_secs is not None)
         if will_resample:
             span_secs = (train.index[-1].value - train.index[0].value) / 1e9 if len(train.index) else 0.0
-            approx_rows = int(span_secs / max(1.0, float(sampling_secs))) + 1
+            safe_sampling = float(sampling_secs) if sampling_secs is not None else 1.0
+            approx_rows = int(span_secs / max(1.0, safe_sampling)) + 1
             if len(train) and approx_rows > explode_guard_factor * len(train):
                 Console.warn(f"[WARN] Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.")
                 will_resample = False
 
         if will_resample:
+            assert sampling_secs is not None
             train = _resample(train, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
             score = _resample(score, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
             train = train.astype(np.float32)
@@ -872,7 +891,9 @@ class OutputManager:
         # Pass EquipmentName directly - SP will resolve to correct data table (e.g., FD_FAN_Data)
         hb = Heartbeat("Calling usp_ACM_GetHistorianData_TEMP", next_hint="parse results", eta_hint=5).start()
         try:
-            cur = self.sql_client.cursor()
+            if self.sql_client is None:
+                raise ValueError("[DATA] SQL mode requested but no SQL client available")
+            cur = cast(Any, self.sql_client).cursor()
             # Pass EquipmentName to stored procedure (SP resolves to {EquipmentName}_Data table)
             cur.execute(
                 "EXEC dbo.usp_ACM_GetHistorianData_TEMP @StartTime=?, @EndTime=?, @EquipmentName=?",
@@ -1010,11 +1031,11 @@ class OutputManager:
         max_fill_ratio = float(_cfg_get(data_cfg, "max_fill_ratio", _cfg_get(cfg, "runtime.max_fill_ratio", 0.20)))
         
         hb = Heartbeat("Cadence check / resample / fill small gaps", next_hint="finalize", eta_hint=8).start()
-        cad_ok_train = _check_cadence(train.index, sampling_secs)
-        cad_ok_score = _check_cadence(score.index, sampling_secs)
+        cad_ok_train = _check_cadence(cast(pd.DatetimeIndex, train.index), sampling_secs)
+        cad_ok_score = _check_cadence(cast(pd.DatetimeIndex, score.index), sampling_secs)
         cadence_ok = bool(cad_ok_train and cad_ok_score)
         
-        native_train = _native_cadence_secs(train.index)
+        native_train = _native_cadence_secs(cast(pd.DatetimeIndex, train.index))
         if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
             Console.warn(f"[WARN] Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) — skipping to avoid upsample.")
             sampling_secs = None
@@ -1029,19 +1050,21 @@ class OutputManager:
         will_resample = allow_resample and (not cadence_ok) and (sampling_secs is not None)
         if will_resample:
             span_secs = (train.index[-1].value - train.index[0].value) / 1e9 if len(train.index) else 0.0
-            approx_rows = int(span_secs / max(1.0, float(sampling_secs))) + 1
+            safe_sampling = float(sampling_secs) if sampling_secs is not None else 1.0
+            approx_rows = int(span_secs / max(1.0, safe_sampling)) + 1
             if len(train) and approx_rows > explode_guard_factor * len(train):
                 Console.warn(f"[WARN] Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.")
                 will_resample = False
-        
+
         if will_resample:
+            assert sampling_secs is not None
             train = _resample(train, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
             score = _resample(score, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
             train = train.astype(np.float32)
             score = score.astype(np.float32)
             cadence_ok = True
         hb.stop()
-        
+
         meta = DataMeta(
             timestamp_col=ts_col,
             cadence_ok=cadence_ok,
@@ -1092,7 +1115,7 @@ class OutputManager:
             except Exception:
                 pass
     
-    def _prepare_dataframe_for_sql(self, df: pd.DataFrame, non_numeric_cols: set = None) -> pd.DataFrame:
+    def _prepare_dataframe_for_sql(self, df: pd.DataFrame, non_numeric_cols: Optional[set] = None) -> pd.DataFrame:
         """Prepare DataFrame for SQL insertion with proper type coercion."""
         if df.empty:
             return df
@@ -1100,14 +1123,22 @@ class OutputManager:
         out = df.copy()
         non_numeric_cols = non_numeric_cols or set()
 
-        # Timestamps → UTC naive
+        # Timestamps → UTC naive and strip microseconds (floor to seconds) for SQL
         for col in out.columns:
             if pd.api.types.is_datetime64_any_dtype(out[col]):
-                out[col] = pd.to_datetime(out[col]).dt.tz_localize(None)
+                ts_series = pd.to_datetime(out[col], errors='coerce')
+                ts_series = ts_series.dt.tz_localize(None)
+                # Floor to whole seconds using lowercase 's' (Pandas FutureWarning fix)
+                ts_series = ts_series.dt.floor('s')
+                # Convert to native Python datetime objects to avoid SQL Server microsecond overflow
+                # Suppress FutureWarning - we're intentionally using np.array() wrapper
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', message='.*to_pydatetime.*', category=FutureWarning)
+                    out[col] = np.array(ts_series.dt.to_pydatetime())
 
         # Count infs before replace
         num_only = out.select_dtypes(include=[np.number])
-        inf_count = (np.isinf(num_only)).to_numpy().sum() if not num_only.empty else 0
+        inf_count = np.isinf(num_only.values).sum() if not num_only.empty else 0
         if inf_count > 0:
             Console.warn(f"[OUTPUT] Replaced {int(inf_count)} Inf/-Inf values with None for SQL compatibility")
 
@@ -1218,7 +1249,20 @@ class OutputManager:
                     
                     # Apply column mapping if provided
                     if sql_columns:
+                        # First, select only columns that are in the mapping (source columns)
+                        mapped_source_cols = [col for col in sql_columns.keys() if col in sql_df.columns]
+                        Console.info(f"[DEBUG_MAP] sql_columns.keys()={list(sql_columns.keys())}")
+                        Console.info(f"[DEBUG_MAP] sql_df.columns={list(sql_df.columns)}")
+                        Console.info(f"[DEBUG_MAP] mapped_source_cols={mapped_source_cols}")
+                        if not sql_df.empty:
+                            Console.info(f"[DEBUG_MAP] First row before filter: {sql_df.iloc[0].to_dict()}")
+                        sql_df = sql_df[mapped_source_cols]
+                        if not sql_df.empty:
+                            Console.info(f"[DEBUG_MAP] First row after filter: {sql_df.iloc[0].to_dict()}")
+                        # Then rename to target SQL column names
                         sql_df = sql_df.rename(columns=sql_columns)
+                        if not sql_df.empty:
+                            Console.info(f"[DEBUG_MAP] First row after rename: {sql_df.iloc[0].to_dict()}")
                     
                     # Add metadata columns (required for all SQL tables)
                     # Preserve existing RunID if already present (e.g., hazard table with truncated ID)
@@ -1228,6 +1272,9 @@ class OutputManager:
                         sql_df["EquipID"] = self.equip_id or 0
                     # OUT-17: Apply per-table required NOT NULL defaults with repair policy
                     sql_df, repair_info = self._apply_sql_required_defaults(sql_table, sql_df, allow_repair)
+                    # MED-02: Log what was repaired for observability
+                    if repair_info.get('repairs_needed'):
+                        Console.debug(f"[SCHEMA] Applied defaults to {sql_table}: {repair_info.get('missing_fields')}")
                     
                     # OUT-17: Block write if repairs needed but not allowed
                     if not allow_repair and repair_info['repairs_needed']:
@@ -1237,6 +1284,22 @@ class OutputManager:
                     if add_created_at:
                         sql_df["CreatedAt"] = pd.Timestamp.now().tz_localize(None)
                     
+                    # Special-case: avoid PK collisions for maintenance recommendation by deleting existing
+                    if sql_table == "ACM_MaintenanceRecommendation" and self.sql_client is not None:
+                        try:
+                            with self.sql_client.cursor() as cur:
+                                cur.execute(
+                                    "DELETE FROM dbo.[ACM_MaintenanceRecommendation] WHERE RunID = ? AND EquipID = ?",
+                                    (self.run_id, int(self.equip_id or 0))
+                                )
+                                if hasattr(self.sql_client, "commit"):
+                                    self.sql_client.commit()
+                                elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                                    if not getattr(self.sql_client.conn, "autocommit", True):
+                                        self.sql_client.conn.commit()
+                        except Exception as del_ex:
+                            Console.warn(f"[OUTPUT] Pre-delete failed for {sql_table}: {del_ex}")
+
                     # FORECAST-UPSERT-05: Route forecast tables to MERGE upsert methods
                     if sql_table == "ACM_HealthForecast_TS":
                         inserted = self._upsert_health_forecast_ts(sql_df)
@@ -1372,7 +1435,8 @@ class OutputManager:
             return df, repair_info
             
         out = df.copy()
-        sentinel_ts = pd.Timestamp(year=1900, month=1, day=1)
+        # CRIT-04: Use current local-naive timestamp instead of 1900-01-01
+        sentinel_ts = pd.Timestamp.now().tz_localize(None)
         filled = {}
         missing_fields = []
         
@@ -1429,7 +1493,9 @@ class OutputManager:
             return 0
 
         inserted = 0
-        cursor_factory = lambda: self.sql_client.cursor()
+        if self.sql_client is None:
+            return 0
+        cursor_factory = lambda: cast(Any, self.sql_client).cursor()
 
         # Optional: skip if the table doesn't exist (avoids noisy logs on dev DBs)
         exists = self._table_exists_cache.get(table_name)
@@ -1466,41 +1532,34 @@ class OutputManager:
                     cols_all = set(_get_table_columns(cursor_factory, table_name))
                     self._table_columns_cache[table_name] = cols_all
                     table_cols = cols_all
-            # NOTE: DELETE before INSERT removed - unnecessary since RunID is unique per run
-            # Each pipeline execution generates a new RunID, so no duplicate data exists
-            # Keeping this comment for historical context about the upsert pattern
-            # if "RunID" in df.columns and self.run_id and "RunID" in table_cols:
-            #     # Prefer scoping by (RunID, EquipID) when possible
-            #     if "EquipID" in df.columns and "EquipID" in table_cols and self.equip_id is not None:
-            #         rows_deleted = cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0))).rowcount
-            #         if rows_deleted > 0:
-            #             Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
-            #     else:
-            #         rows_deleted = cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,)).rowcount
-            #         if rows_deleted > 0:
-            #             Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}")
-
-            # RUL-UPSERT: Proactively delete existing rows for current RunID to avoid PK violations
+            # CRIT-01/HIGH-02: Standardize DELETE-before-INSERT for tables keyed by RunID
+            # Apply for all tables with RunID in schema, scoped by EquipID when available.
             try:
-                if table_name in { 'ACM_RUL_TS', 'ACM_RUL_Summary', 'ACM_RUL_Attribution' }:
-                    if 'RunID' in table_cols and self.run_id:
-                        if 'EquipID' in table_cols and self.equip_id is not None:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?",
-                                (self.run_id, int(self.equip_id or 0))
-                            ).rowcount
-                        else:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?",
-                                (self.run_id,)
-                            ).rowcount
-                        if rows_deleted and rows_deleted > 0:
-                            Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
+                if "RunID" in table_cols and self.run_id:
+                    if "EquipID" in table_cols and self.equip_id is not None:
+                        rows_deleted = cur.execute(
+                            f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?",
+                            (self.run_id, int(self.equip_id or 0))
+                        ).rowcount
+                    else:
+                        rows_deleted = cur.execute(
+                            f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?",
+                            (self.run_id,)
+                        ).rowcount
+                    if rows_deleted and rows_deleted > 0:
+                        Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
             except Exception as del_ex:
-                Console.warn(f"[OUTPUT] Pre-delete for {table_name} failed (RunID={self.run_id}, EquipID={self.equip_id}): {del_ex}")
+                Console.warn(f"[OUTPUT] Standard pre-delete for {table_name} failed: {del_ex}")
+
+            # Note: RUL tables are already covered by standardized pre-delete above.
 
             # only insert columns that actually exist in the table
             columns = [c for c in df.columns if c in table_cols]
+            Console.info(f"[DEBUG_BULK] table={table_name}, df.columns={list(df.columns)}")
+            Console.info(f"[DEBUG_BULK] table={table_name}, table_cols={list(table_cols)[:20]}")  # First 20
+            Console.info(f"[DEBUG_BULK] table={table_name}, columns (filtered)={columns}")
+            if not df.empty:
+                Console.info(f"[DEBUG_BULK] First row values: {df.iloc[0].to_dict()}")
             cols_str = ", ".join(f"[{c}]" for c in columns)
             placeholders = ", ".join(["?"] * len(columns))
             insert_sql = f"INSERT INTO dbo.[{table_name}] ({cols_str}) VALUES ({placeholders})"
@@ -1521,8 +1580,11 @@ class OutputManager:
                     try:
                         # Try standard format first, then let pandas infer
                         df_clean[col] = pd.to_datetime(df_clean[col], format='mixed', errors='coerce')
-                        if hasattr(df_clean[col].dtype, 'tz') and df_clean[col].dtype.tz is not None:
+                        try:
+                            # Drop timezone info if present
                             df_clean[col] = df_clean[col].dt.tz_localize(None)
+                        except Exception:
+                            pass
                         # Log if any conversions failed
                         null_count = df_clean[col].isna().sum()
                         if null_count > 0:
@@ -1539,7 +1601,8 @@ class OutputManager:
                     # Use pandas notnull() to avoid NaN before checking absolute value
                     valid_mask = pd.notnull(df_clean[col])
                     if valid_mask.any():
-                        extreme_mask = valid_mask & (df_clean[col].abs() > 1e100)
+                        # CRIT-06: Lower extreme threshold to 1e38 for SQL safety
+                        extreme_mask = valid_mask & (df_clean[col].abs() > 1e38)
                         if extreme_mask.any():
                             Console.warn(f"[OUTPUT] Replacing {extreme_mask.sum()} extreme float values in {table_name}.{col}")
                             df_clean.loc[extreme_mask, col] = None
@@ -1641,6 +1704,218 @@ class OutputManager:
         long["Source"] = source
         long["RunID"] = run_id
         return long
+
+    # ==================== MISSING ANALYTICS GENERATORS (MED-03..MED-09) ====================
+
+    def _generate_culprit_history(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
+        """Extract culprit sensors per episode with basic scoring.
+        Returns DataFrame suitable for ACM_CulpritHistory: RunID, EquipID, EpisodeID, Sensor, Contribution.
+        """
+        if episodes_df is None or len(episodes_df) == 0:
+            return pd.DataFrame(columns=["RunID","EquipID","EpisodeID","Sensor","Contribution"])  
+        rows = []
+        for i, ep in episodes_df.iterrows():
+            ep_id = ep.get("EpisodeID", i)
+            sensors = ep.get("CulpritSensors") or ep.get("Sensors") or []
+            if isinstance(sensors, str):
+                try:
+                    sensors = [s.strip() for s in sensors.split(',') if s.strip()]
+                except Exception:
+                    sensors = []
+            for s in sensors:
+                rows.append({
+                    "RunID": self.run_id,
+                    "EquipID": int(self.equip_id or 0),
+                    "EpisodeID": int(ep_id),
+                    "Sensor": str(s),
+                    "Contribution": float(ep.get("PeakZ", 0.0))
+                })
+        return pd.DataFrame(rows)
+
+    def _generate_episode_metrics(self, episodes_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute simple episode-level metrics: duration, peak_z, area.
+        Returns DataFrame for ACM_EpisodeMetrics.
+        """
+        if episodes_df is None or len(episodes_df) == 0:
+            return pd.DataFrame(columns=["RunID","EquipID","EpisodeID","DurationMinutes","PeakZ","Area"])
+        out = []
+        for i, ep in episodes_df.iterrows():
+            _start_val = ep.get("start_timestamp") or ep.get("StartTime")
+            _end_val = ep.get("end_timestamp") or ep.get("EndTime")
+            start = pd.to_datetime(_start_val) if _start_val is not None else pd.NaT
+            end = pd.to_datetime(_end_val) if _end_val is not None else pd.NaT
+            dur_min = float(((end - start).total_seconds()/60.0) if (isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp)) else 0.0)
+            out.append({
+                "RunID": self.run_id,
+                "EquipID": int(self.equip_id or 0),
+                "EpisodeID": int(ep.get("EpisodeID", i)),
+                "DurationMinutes": dur_min,
+                "PeakZ": float(ep.get("PeakZ", 0.0)),
+                "Area": float(ep.get("Area", 0.0)),
+            })
+        return pd.DataFrame(out)
+
+    def _generate_episode_diagnostics(self, episodes_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Create per-episode diagnostics rows with timestamps and severity label.
+        Returns DataFrame for ACM_EpisodeDiagnostics.
+        
+        NOTE: This is a DUPLICATE write that happens AFTER write_episodes().
+        We must use the EXACT same column names and extract the SAME values to avoid overwriting good data with UNKNOWN.
+        """
+        # Use lowercase column names to match write_episodes output
+        cols = ["episode_id", "peak_timestamp", "dominant_sensor", "duration_h", "severity", "avg_z", "peak_z"]
+        if episodes_df is None or len(episodes_df) == 0:
+            return pd.DataFrame(columns=cols)
+        
+        rows = []
+        for i, ep in episodes_df.iterrows():
+            # Extract timestamp
+            _ts_val = ep.get("peak_timestamp") or ep.get("PeakTimestamp") or ep.get("start_ts")
+            ts = pd.to_datetime(_ts_val) if _ts_val is not None else pd.NaT
+            
+            # Extract peak_z (try multiple column names)
+            peak_z = float(ep.get("peak_z", ep.get("peak_fused_z", ep.get("PeakZ", 0.0))))
+            
+            # Calculate severity from peak_z
+            if pd.isna(peak_z):
+                severity = "UNKNOWN"
+            elif peak_z >= 6:
+                severity = "CRITICAL"
+            elif peak_z >= 4:
+                severity = "HIGH"
+            elif peak_z >= 2:
+                severity = "MEDIUM"
+            else:
+                severity = "LOW"
+            
+            # Extract dominant_sensor from culprits
+            dominant_sensor = ep.get("dominant_sensor", "UNKNOWN")
+            if dominant_sensor == "UNKNOWN" and "culprits" in ep:
+                culprit_str = ep["culprits"]
+                if pd.notna(culprit_str) and culprit_str != '':
+                    # culprits field already contains formatted label from format_culprit_label()
+                    # e.g., "Multivariate Outlier (PCA-T²)" or "Multivariate Outlier (PCA-T²) → SensorName"
+                    # Extract just the detector label (before " → " if sensor attribution exists)
+                    if ' → ' in str(culprit_str):
+                        dominant_sensor = str(culprit_str).split(' → ')[0].strip()
+                    else:
+                        dominant_sensor = str(culprit_str).strip()
+            
+            # Extract avg_z
+            avg_z = float(ep.get("avg_z", ep.get("avg_fused_z", 0.0)))
+            
+            # Calculate duration_h from duration_s if needed
+            duration_h = ep.get("duration_h", ep.get("duration_hours", 0.0))
+            if duration_h == 0.0 and "duration_s" in ep:
+                duration_h = float(ep["duration_s"]) / 3600.0
+            
+            rows.append({
+                "episode_id": int(ep.get("episode_id", ep.get("EpisodeID", i))),
+                "peak_timestamp": ts,
+                "dominant_sensor": dominant_sensor,
+                "duration_h": duration_h,
+                "severity": severity,
+                "avg_z": avg_z,
+                "peak_z": peak_z,
+            })
+        return pd.DataFrame(rows)
+
+    def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame) -> pd.DataFrame:
+        """Melt OMR contributions wide DataFrame to long format.
+        Expected input columns end with '_contrib'; outputs columns: Timestamp, Sensor, Contribution.
+        """
+        if omr_contributions is None or len(omr_contributions) == 0:
+            return pd.DataFrame(columns=["Timestamp","Sensor","Contribution","RunID","EquipID"])
+        df = omr_contributions.copy()
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, errors="coerce")
+        # Reset index - preserve original index name or use 'index'
+        df = df.reset_index()
+        # Rename first column (the old index) to 'Timestamp' regardless of its original name
+        if df.columns[0] != 'Timestamp':
+            df = df.rename(columns={df.columns[0]: 'Timestamp'})
+        value_cols = [c for c in df.columns if c.endswith("_contrib")] or [c for c in df.columns if c not in ["Timestamp"]]
+        long = df.melt(id_vars=["Timestamp"], var_name="Sensor", value_name="Contribution")
+        long["Sensor"] = long["Sensor"].astype(str).str.replace("_contrib","", regex=False)
+        long["RunID"] = self.run_id
+        long["EquipID"] = int(self.equip_id or 0)
+        return long
+
+    def _generate_regime_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute simple regime statistics: counts and dwell (approx by consecutive runs).
+        Returns DataFrame for ACM_RegimeStats.
+        """
+        if scores_df is None or len(scores_df) == 0 or "regime_label" not in scores_df.columns:
+            return pd.DataFrame(columns=["RunID","EquipID","RegimeLabel","Count"])
+        regimes = pd.to_numeric(scores_df["regime_label"], errors="coerce")
+        regimes = regimes.dropna().astype(int)
+        counts = regimes.value_counts().sort_index()
+        out = []
+        for label, cnt in counts.items():
+            out.append({"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "RegimeLabel": int(cast(Any, label)), "Count": int(cast(Any, cnt))})
+        return pd.DataFrame(out)
+
+    def _generate_daily_fused_profile(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Aggregate fused scores by date for daily profiling.
+        Returns DataFrame for ACM_DailyFusedProfile: ProfileDate, AvgFusedScore, MaxFusedScore, MinFusedScore, SampleCount.
+        """
+        if scores_df is None or len(scores_df) == 0 or "fused" not in scores_df.columns:
+            return pd.DataFrame(columns=["RunID","EquipID","ProfileDate","AvgFusedScore","MaxFusedScore","MinFusedScore","SampleCount"])
+        
+        idx = pd.to_datetime(scores_df.index, errors="coerce")
+        fused = pd.to_numeric(scores_df["fused"], errors="coerce")
+        
+        # Group by date
+        df = pd.DataFrame({"Date": idx.date, "FusedZ": fused})
+        grp = df.groupby("Date", dropna=True)["FusedZ"].agg(
+            AvgFusedScore='mean',
+            MaxFusedScore='max',
+            MinFusedScore='min',
+            SampleCount='count'
+        ).reset_index().rename(columns={"Date": "ProfileDate"})
+        
+        grp["RunID"] = self.run_id
+        grp["EquipID"] = int(self.equip_id or 0)
+        return grp[["RunID","EquipID","ProfileDate","AvgFusedScore","MaxFusedScore","MinFusedScore","SampleCount"]]
+
+    def _generate_health_histogram(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Bin health index into 10-point buckets (0-100).
+        Returns DataFrame for ACM_HealthHistogram: BinStart, BinEnd, Count.
+        """
+        if scores_df is None or len(scores_df) == 0:
+            return pd.DataFrame(columns=["RunID","EquipID","BinStart","BinEnd","Count"])
+        fused = pd.to_numeric(scores_df["fused"], errors="coerce")
+        health = 100.0 / (1.0 + fused**2) if fused is not None else pd.Series([], dtype=float)
+        bins = list(range(0, 101, 10))
+        cats = pd.cut(health, bins=bins, include_lowest=True, right=False)
+        counts = cats.value_counts().sort_index()
+        rows = []
+        for interval, cnt in counts.items():
+            try:
+                start = int(getattr(interval, 'left', 0))
+                end = int(getattr(interval, 'right', 0))
+            except Exception:
+                start, end = 0, 0
+            rows.append({"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "BinStart": start, "BinEnd": end, "Count": int(cnt)})
+        return pd.DataFrame(rows)
+
+    def _generate_alert_age(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """Compute time since first alert crossing based on fused z threshold (default 3.0).
+        Returns DataFrame for ACM_AlertAge with a single row per run.
+        """
+        threshold = 3.0
+        cols = ["RunID","EquipID","FirstAlert","LastAlert","AlertAgeHours"]
+        if scores_df is None or len(scores_df) == 0 or "fused" not in scores_df.columns:
+            return pd.DataFrame([{c: None for c in cols}])
+        idx = pd.to_datetime(scores_df.index, errors="coerce")
+        fused = pd.to_numeric(scores_df["fused"], errors="coerce")
+        alert_mask = fused >= threshold
+        if not alert_mask.any():
+            return pd.DataFrame([{"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "FirstAlert": None, "LastAlert": None, "AlertAgeHours": 0.0}])
+        first_ts = idx[alert_mask].min()
+        last_ts = idx[alert_mask].max()
+        age_hours = float((last_ts - first_ts).total_seconds()/3600.0) if (isinstance(first_ts, pd.Timestamp) and isinstance(last_ts, pd.Timestamp)) else 0.0
+        return pd.DataFrame([{"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "FirstAlert": first_ts, "LastAlert": last_ts, "AlertAgeHours": age_hours}])
 
     # ==================== SPECIALIZED SQL WRITE FUNCTIONS ====================
     # These replace all the scattered write functions from data_io.py, storage.py, 
@@ -1922,6 +2197,13 @@ class OutputManager:
                 sql_df = pd.DataFrame(metrics_rows)
             # Legacy style: use provided dataframe
             elif df is not None:
+                # Legacy path: DataFrame must have ComponentName and MetricType columns
+                if 'ComponentName' not in df.columns or 'MetricType' not in df.columns:
+                    Console.warn(
+                        "[OUTPUT] write_pca_metrics legacy path requires ComponentName and MetricType columns. "
+                        "Provided DataFrame has columns: " + str(list(df.columns))
+                    )
+                    return 0
                 sql_df = df.copy()
             else:
                 Console.warn("[OUTPUT] write_pca_metrics called without pca_detector or df")
@@ -1935,11 +2217,20 @@ class OutputManager:
             return 0
 
     def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
-        """Upsert PCA metrics by deleting existing RunID+EquipID entries first, then inserting all new rows.
+        """Upsert PCA metrics using DELETE by full PK scope to prevent data loss.
         
-        Primary key is (RunID, EquipID) ONLY. Each run can have multiple rows with different MetricType/ComponentName.
+        Primary key is (RunID, EquipID, ComponentName, MetricType).
+        CRITICAL: Delete only specific metric types being updated to prevent data loss.
+        This method may be called multiple times per run with different metric types.
         """
         if df.empty or self.sql_client is None:
+            return 0
+        
+        # Validate required columns for PK matching
+        required_cols = ['RunID', 'EquipID', 'ComponentName', 'MetricType']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            Console.warn(f"[OUTPUT] _upsert_pca_metrics missing required columns: {missing_cols}")
             return 0
         
         try:
@@ -1947,38 +2238,58 @@ class OutputManager:
             cursor = conn.cursor()
             
             # Get unique RunID+EquipID pairs
-            run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
+            # Get unique (RunID, EquipID, ComponentName, MetricType) tuples to delete
+            pk_tuples = df[['RunID', 'EquipID', 'ComponentName', 'MetricType']].drop_duplicates()
             
-            # DELETE existing rows for all RunID+EquipID combinations (prevents PK collisions)
-            for _, pair in run_equip_pairs.iterrows():
-                cursor.execute(
-                    "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?",
-                    (pair['RunID'], pair['EquipID'])
-                )
-            conn.commit()
+            # DELETE existing rows by full PK scope (prevents data loss + PK collisions)
+            deleted_count = 0
+            for _, row in pk_tuples.iterrows():
+                try:
+                    cursor.execute("""
+                        DELETE FROM ACM_PCA_Metrics 
+                        WHERE RunID = ? AND EquipID = ? AND ComponentName = ? AND MetricType = ?
+                        """,
+                        (row['RunID'], row['EquipID'], row['ComponentName'], row['MetricType'])
+                    )
+                    deleted_count += cursor.rowcount
+                except Exception as del_err:
+                    Console.warn(f"[OUTPUT] DELETE failed for {row['ComponentName']}/{row['MetricType']}: {del_err}")
             
-            # INSERT all new rows
-            row_count = 0
+            if deleted_count > 0:
+                Console.info(f"[OUTPUT] Deleted {deleted_count} existing PCA metric rows before upsert")
+            
+            # Prepare bulk insert data
+            insert_sql = """
+            INSERT INTO ACM_PCA_Metrics (RunID, EquipID, ComponentName, MetricType, Value, Timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+            
+            # Build list of tuples for bulk insert
+            rows_to_insert = []
             for _, row in df.iterrows():
-                run_id = row['RunID']
-                equip_id = row['EquipID']
-                component = row.get('ComponentName', 'PCA')
-                metric_type = row['MetricType']
-                value = row['Value']
-                timestamp = row.get('Timestamp', datetime.now())
-                
-                insert_sql = """
-                INSERT INTO ACM_PCA_Metrics (RunID, EquipID, ComponentName, MetricType, Value, Timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """
-                cursor.execute(insert_sql, (run_id, equip_id, component, metric_type, value, timestamp))
-                row_count += cursor.rowcount
+                rows_to_insert.append((
+                    row['RunID'],
+                    row['EquipID'],
+                    row.get('ComponentName', 'PCA'),
+                    row['MetricType'],
+                    row['Value'],
+                    row.get('Timestamp', datetime.now())
+                ))
+            
+            # Bulk insert all rows in one transaction
+            if rows_to_insert:
+                cursor.executemany(insert_sql, rows_to_insert)
             
             conn.commit()
-            return row_count
+            return len(rows_to_insert)
             
         except Exception as e:
             Console.warn(f"[OUTPUT] _upsert_pca_metrics failed: {e}")
+            if self.sql_client and self.sql_client.conn:
+                try:
+                    self.sql_client.conn.rollback()
+                except:
+                    pass
             return 0
     
     def _upsert_health_forecast_ts(self, df: pd.DataFrame) -> int:
@@ -2151,7 +2462,8 @@ class OutputManager:
         
         # Fill any NaN values in critical columns
         df['Method'] = df['Method'].fillna('AR1')
-        df['ForecastStd'] = df['ForecastStd'].fillna(0.0)
+        # Avoid FutureWarning for silent downcasting by ensuring float dtype before fillna
+        df['ForecastStd'] = pd.to_numeric(df['ForecastStd'], errors='coerce').astype(float).fillna(0.0)
         if 'DetectorName' in df.columns:
             df['DetectorName'] = df['DetectorName'].fillna('UNKNOWN')
         
@@ -2373,6 +2685,11 @@ class OutputManager:
         # Prepare episodes for output
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
         
+        # DEBUG: Log episode DataFrame columns and first row
+        Console.info(f"[EPISODES] DEBUG: Columns={list(episodes_for_output.columns)}")
+        if not episodes_for_output.empty:
+            Console.info(f"[EPISODES] DEBUG: First episode={episodes_for_output.iloc[0].to_dict()}")
+        
         # SCHEMA-FIX: Individual episodes go to ACM_EpisodeDiagnostics (not ACM_Episodes which is run-level summary)
         sql_table = "ACM_EpisodeDiagnostics" if enable_sql else None
         episode_columns = {
@@ -2380,7 +2697,7 @@ class OutputManager:
             'peak_fused_z': 'peak_z',
             'peak_timestamp': 'peak_timestamp', 
             'duration_hours': 'duration_h',
-            'culprits': 'dominant_sensor',
+            'dominant_sensor': 'dominant_sensor',  # Already extracted from culprits
             'severity': 'severity',
             'avg_fused_z': 'avg_z',
             'min_health_index': 'min_health_index'
@@ -2404,12 +2721,49 @@ class OutputManager:
         elif 'regime' in episodes_for_output.columns:
             episodes_for_output['MaxRegimeLabel'] = episodes_for_output['regime']
         
+        # Extract dominant sensor from culprits field
+        # culprits format: "Detector (Sensor Name)" or "Detector"
+        if 'culprits' in episodes_for_output.columns:
+            def extract_dominant_sensor(culprit_str):
+                if pd.isna(culprit_str) or culprit_str == '':
+                    return 'UNKNOWN'
+                # culprits field already contains formatted label from format_culprit_label()
+                # e.g., "Multivariate Outlier (PCA-T²)" or "Multivariate Outlier (PCA-T²) → SensorName"
+                # Extract just the detector label (before " → " if sensor attribution exists)
+                if ' → ' in str(culprit_str):
+                    return str(culprit_str).split(' → ')[0].strip()
+                else:
+                    return str(culprit_str).strip()
+            episodes_for_output['dominant_sensor'] = episodes_for_output['culprits'].apply(extract_dominant_sensor)
+        else:
+            episodes_for_output['dominant_sensor'] = 'UNKNOWN'
+        
+        # ALWAYS recalculate severity from peak_fused_z (overrides any pre-existing severity like 'info')
+        if 'peak_fused_z' in episodes_for_output.columns:
+            def calculate_severity(peak_z):
+                if pd.isna(peak_z):
+                    return 'UNKNOWN'
+                if peak_z >= 6:
+                    return 'CRITICAL'
+                elif peak_z >= 4:
+                    return 'HIGH'
+                elif peak_z >= 2:
+                    return 'MEDIUM'
+                else:
+                    return 'LOW'
+            episodes_for_output['severity'] = episodes_for_output['peak_fused_z'].apply(calculate_severity)
+        elif 'severity' not in episodes_for_output.columns:
+            episodes_for_output['severity'] = 'UNKNOWN'
+        
         # Add defaults for SQL
         if enable_sql:
-            if 'severity' not in episodes_for_output.columns:
-                episodes_for_output['severity'] = 'MEDIUM'
             if 'status' not in episodes_for_output.columns:
                 episodes_for_output['status'] = 'CLOSED'
+        
+        # DEBUG: Show what we're writing  
+        Console.info(f"[EPISODES] DEBUG: Columns before write={list(episodes_for_output.columns)}")
+        if not episodes_for_output.empty:
+            Console.info(f"[EPISODES] DEBUG: First row before write: severity={episodes_for_output.iloc[0].get('severity')}, peak_z={episodes_for_output.iloc[0].get('peak_fused_z')}, dominant={episodes_for_output.iloc[0].get('dominant_sensor')}")
         
         result = self.write_dataframe(
             episodes_for_output,
@@ -2824,8 +3178,8 @@ class OutputManager:
                     top_n = int((cfg.get('output', {}) or {}).get('sensor_hotspot_top_n', 25))
 
                     sensor_hotspots_df = self._generate_sensor_hotspots_table(
-                        sensor_zscores,
-                        sensor_values,
+                        sensor_zscores if sensor_zscores is not None else pd.DataFrame(),
+                        sensor_values if sensor_values is not None else pd.DataFrame(),
                         sensor_train_mean,
                         sensor_train_std,
                         warn_threshold,
@@ -2846,10 +3200,10 @@ class OutputManager:
                     try:
                         norm_top_n = int((cfg.get('output', {}) or {}).get('sensor_normalized_top_n', 20) or 20)
                         sensor_norm_df = self._generate_sensor_normalized_ts(
-                            sensor_values=sensor_values,
+                            sensor_values=sensor_values if sensor_values is not None else pd.DataFrame(),
                             sensor_train_mean=sensor_train_mean,
                             sensor_train_std=sensor_train_std,
-                            sensor_zscores=sensor_zscores,
+                            sensor_zscores=sensor_zscores if sensor_zscores is not None else pd.DataFrame(),
                             episodes_df=episodes_df,
                             warn_z=warn_threshold,
                             alert_z=alert_threshold,
@@ -2868,7 +3222,7 @@ class OutputManager:
                         Console.warn(f"[ANALYTICS] Sensor normalized timeline skipped: {e}")
 
                     sensor_timeline_df = self._generate_sensor_hotspot_timeline(
-                        sensor_zscores,
+                        sensor_zscores if sensor_zscores is not None else pd.DataFrame(),
                         sensor_values,
                         warn_threshold,
                         alert_threshold,
@@ -3028,6 +3382,180 @@ class OutputManager:
                 return timestamp.strftime('%Y-%m-%d %H:%M:%S')
         except (AttributeError, ValueError, TypeError):
             return str(timestamp)
+        def _generate_health_histogram(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+            """Generate a health histogram distribution for fused scores.
+            Outputs columns required by `ACM_HealthHistogram` with safe defaults.
+            """
+            if scores_df is None or scores_df.empty:
+                return pd.DataFrame(columns=["RunID", "EquipID", "HealthBin", "RecordCount", "Percentage"])
+
+            df = scores_df.copy()
+            # Health proxy: prefer 'health' (0-100), else derive from fused_z
+            if 'health' in df.columns:
+                health = pd.to_numeric(df['health'], errors='coerce').clip(lower=0, upper=100).fillna(0)
+            elif 'fused' in df.columns:
+                # Map fused (higher worse) to health percent (higher better)
+                fused = pd.to_numeric(df['fused'], errors='coerce').fillna(0)
+                # Simple sigmoid-style mapping to 0..100
+                health = (100.0 / (1.0 + fused.clip(lower=0)))
+            else:
+                health = pd.Series([100.0] * len(df))
+
+            bins = [0,10,20,30,40,50,60,70,80,90,100]
+            labels = ['0-10','10-20','20-30','30-40','40-50','50-60','60-70','70-80','80-90','90-100']
+            binned = pd.cut(health, bins=bins, labels=labels, include_lowest=True)
+            counts = binned.value_counts(dropna=False).reindex(labels, fill_value=0).reset_index()
+            counts.columns = ['HealthBin', 'RecordCount']
+            total = float(counts['RecordCount'].sum()) or 1.0
+            counts['Percentage'] = (counts['RecordCount'] / total).astype(float)
+            counts['RunID'] = self.run_id
+            counts['EquipID'] = int(self.equip_id or 0)
+            return counts[['RunID','EquipID','HealthBin','RecordCount','Percentage']]
+
+        def _generate_regime_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+            """Compact regime stats for dashboards: occupancy and dwell approximations."""
+            if scores_df is None or scores_df.empty:
+                return pd.DataFrame(columns=["RunID","EquipID","RegimeLabel","OccupancyPct","AvgDwellSeconds","FusedMean","FusedP90"])
+
+            df = scores_df.copy()
+            regime_col = 'regime_label' if 'regime_label' in df.columns else None
+            if regime_col is None:
+                # Fallback to single regime
+                df['regime_label'] = 0
+                regime_col = 'regime_label'
+
+            # Occupancy
+            occ = df.groupby(regime_col).size().reset_index(name='Count')
+            total = float(len(df)) or 1.0
+            occ['OccupancyPct'] = (occ['Count'] / total).astype(float)
+
+            # Dwell approximation via consecutive runs
+            runs = []
+            prev = None
+            run_len = 0
+            for r in df[regime_col].tolist():
+                if prev is None or r == prev:
+                    run_len += 1
+                else:
+                    runs.append((prev, run_len))
+                    run_len = 1
+                prev = r
+            if prev is not None:
+                runs.append((prev, run_len))
+            dwell_df = pd.DataFrame(runs, columns=[regime_col, 'DwellSamples'])
+            dwell_stats = dwell_df.groupby(regime_col)['DwellSamples'].mean().reset_index(name='AvgDwellSamples')
+            # Convert samples to seconds if cadence known; default 1800s (30 min)
+            cadence_seconds = 1800.0
+            dwell_stats['AvgDwellSeconds'] = (dwell_stats['AvgDwellSamples'] * cadence_seconds).astype(float)
+
+            # Fused stats per regime (if available)
+            fused_mean = pd.DataFrame()
+            if 'fused' in df.columns:
+                fused_mean = df.groupby(regime_col)['fused'].agg(['mean']).reset_index().rename(columns={'mean':'FusedMean'})
+                fused_p90 = df.groupby(regime_col)['fused'].quantile(0.90).reset_index().rename(columns={'fused':'FusedP90'})
+                fused_mean = fused_mean.merge(fused_p90, on=regime_col, how='left')
+            else:
+                fused_mean[regime_col] = occ[regime_col]
+                fused_mean['FusedMean'] = 0.0
+                fused_mean['FusedP90'] = 0.0
+
+            out = occ.merge(dwell_stats[[regime_col,'AvgDwellSeconds']], on=regime_col, how='left').merge(
+                fused_mean[[regime_col,'FusedMean','FusedP90']], on=regime_col, how='left')
+            out.rename(columns={regime_col:'RegimeLabel', 'Count':'RecordCount'}, inplace=True)
+            out['RunID'] = self.run_id
+            out['EquipID'] = int(self.equip_id or 0)
+            return out[['RunID','EquipID','RegimeLabel','OccupancyPct','AvgDwellSeconds','FusedMean','FusedP90']]
+
+        def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame) -> pd.DataFrame:
+            """Long-form OMR contributions: per-sensor contribution timeline.
+            Expects columns in omr_contributions to be sensor names and values are contribution scores.
+            """
+            if omr_contributions is None or omr_contributions.empty:
+                return pd.DataFrame(columns=["RunID","EquipID","Timestamp","SensorName","ContributionScore","ContributionPct","OMR_Z"])
+
+            index_ts = None
+            if 'Timestamp' in scores_df.columns:
+                index_ts = pd.to_datetime(scores_df['Timestamp'], errors='coerce')
+            else:
+                # derive from index if datetime-like
+                try:
+                    index_ts = pd.to_datetime(scores_df.index, errors='coerce')
+                except Exception:
+                    index_ts = pd.Series([pd.NaT] * len(scores_df))
+
+            rows = []
+            # If contributions are wide (columns as sensors)
+            if len(omr_contributions.columns):
+                for sensor in omr_contributions.columns:
+                    vals = pd.to_numeric(omr_contributions[sensor], errors='coerce').fillna(0.0)
+                    for i, v in enumerate(vals.tolist()):
+                        ts = index_ts.iloc[i] if index_ts is not None and i < len(index_ts) else pd.NaT
+                        rows.append([
+                            self.run_id,
+                            int(self.equip_id or 0),
+                            ts,
+                            sensor,
+                            float(v),
+                            float(0.0),
+                            float(scores_df['omr_z'].iloc[i]) if 'omr_z' in scores_df.columns and i < len(scores_df) else 0.0
+                        ])
+            out = pd.DataFrame(rows, columns=["RunID","EquipID","Timestamp","SensorName","ContributionScore","ContributionPct","OMR_Z"])
+            return out
+    
+    
+    
+    
+    
+    
+    def _generate_regime_stability(self, scores_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate regime stability metrics (transition frequency, dwell time).
+        
+        Returns DataFrame with stability indicators.
+        """
+        if scores_df.empty or 'regime_label' not in scores_df.columns:
+            return pd.DataFrame(columns=['RunID', 'EquipID', 'Period', 'TransitionCount', 'AvgDwellTime', 'StabilityScore'])
+        
+        # Ensure timestamp
+        if 'Timestamp' in scores_df.columns:
+            ts_col = pd.to_datetime(scores_df['Timestamp'], errors='coerce')
+        else:
+            try:
+                ts_col = pd.to_datetime(scores_df.index, errors='coerce')
+            except Exception:
+                return pd.DataFrame(columns=['RunID', 'EquipID', 'Period', 'TransitionCount', 'AvgDwellTime', 'StabilityScore'])
+        
+        df = scores_df.copy()
+        df['Timestamp'] = ts_col
+        df['regime'] = df['regime_label'].fillna(-1)
+        
+        # Count transitions
+        transitions = (df['regime'] != df['regime'].shift()).sum() - 1  # -1 to exclude first row
+        
+        # Calculate average dwell time (hours)
+        if len(df) > 1:
+            total_time = (df['Timestamp'].max() - df['Timestamp'].min()).total_seconds() / 3600.0
+            avg_dwell = total_time / max(1, transitions)
+        else:
+            avg_dwell = 0.0
+        
+        # Stability score (inverse of transition frequency)
+        stability = 100.0 / (1.0 + transitions / max(1, len(df)))
+        
+        # Include MetricName to satisfy NOT NULL column requirement in ACM_RegimeStability
+        result = pd.DataFrame({
+            'RunID': [self.run_id],
+            'EquipID': [int(self.equip_id or 0)],
+            'MetricName': ['RegimeStability'],
+            # Use StabilityScore as MetricValue to satisfy NOT NULL schema and be meaningful
+            'MetricValue': [float(stability)],
+            'Period': ['full_window'],
+            'TransitionCount': [transitions],
+            'AvgDwellTime': [avg_dwell],
+            'StabilityScore': [stability]
+        })
+        
+        return result
     
     
     def _generate_episode_severity_mapping(self, episodes_df: pd.DataFrame) -> Dict[str, Any]:
@@ -3094,7 +3622,7 @@ class OutputManager:
         return pd.DataFrame({
             'Timestamp': ts_values,
             'RegimeLabel': regimes.to_list(),
-            'RegimeState': scores_df.get('regime_state', 'unknown').astype(str).to_list()
+            'RegimeState': (scores_df['regime_state'].astype(str).to_list() if 'regime_state' in scores_df.columns else [str('unknown')] * len(scores_df))
         })
     
     def _generate_contrib_now(self, scores_df: pd.DataFrame) -> pd.DataFrame:
@@ -3169,7 +3697,7 @@ class OutputManager:
         detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
         if detector_cols:
             latest_scores = scores_df[detector_cols].iloc[-1].abs()
-            worst_sensor = latest_scores.idxmax().replace('_z', '')
+            worst_sensor = str(latest_scores.idxmax()).replace('_z', '')
         else:
             worst_sensor = "Unknown"
         
@@ -3195,13 +3723,13 @@ class OutputManager:
         health_index = _health_index(scores_df['fused'])
         zones = pd.cut(health_index, bins=[0, 70, 85, 100], labels=['ALERT', 'WATCH', 'GOOD'])
         
-        # Find zone transitions
-        zone_changes = zones != zones.shift()
-        transitions = []
+        # Find peaks above threshold
+        peaks = zones != zones.shift()
+        peak_events = []
         
         zones_shifted = zones.shift()
         
-        for idx in scores_df[zone_changes].index:
+        for idx in scores_df[peaks].index:
             from_zone_val = zones_shifted.loc[idx]
             # Handle scalar value properly
             try:
@@ -3217,11 +3745,11 @@ class OutputManager:
             try:
                 if 'fused' in scores_df.columns:
                     val = scores_df.loc[idx, 'fused']
-                    fused_val = round(float(val), 4) if pd.notna(val) else 0.0
+                    fused_val = round(float(cast(Any, val)), 4) if (val is not None and pd.notna(val)) else 0.0
             except Exception:
                 fused_val = 0.0
 
-            transitions.append({
+            peak_events.append({
                 'Timestamp': ts_naive,
                 'EventType': 'ZONE_CHANGE',
                 'FromZone': from_zone,
@@ -3232,7 +3760,7 @@ class OutputManager:
                 'FusedZ': fused_val if fused_val is not None else 0.0
             })
         
-        return pd.DataFrame(transitions)
+        return pd.DataFrame(peak_events)
     
     def _generate_sensor_defects(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Generate per-sensor defect analysis."""
@@ -3291,14 +3819,15 @@ class OutputManager:
         health_index = _health_index(scores_df['fused'])
         zones = pd.cut(health_index, bins=[0, 70, 85, 100], labels=['ALERT', 'WATCH', 'GOOD'])
 
-        daily_zones = pd.DataFrame({'date': scores_df.index.date, 'zone': zones})
+        idx_dates = pd.to_datetime(scores_df.index, errors='coerce')
+        daily_zones = pd.DataFrame({'date': idx_dates.to_series().dt.date, 'zone': zones})
         zone_summary = daily_zones.groupby(['date', 'zone'], observed=False).size().unstack(fill_value=0)
         totals = zone_summary.sum(axis=1)
 
         rows = []
         for date, counts in zone_summary.iterrows():
-            period_start = pd.Timestamp(date).to_pydatetime()
-            total_points = int(totals.loc[date]) if date in totals.index else 0
+            period_start = pd.Timestamp(str(date)).to_pydatetime()
+            total_points = int(cast(Any, totals.get(date, 0)))
             for hz in ['GOOD', 'WATCH', 'ALERT']:
                 cnt = int(counts.get(hz, 0))
                 pct = (cnt / total_points * 100.0) if total_points > 0 else 0.0
@@ -3319,14 +3848,14 @@ class OutputManager:
         results = []
         
         # Group by day
-        daily_data = scores_df.groupby(scores_df.index.date)
+        daily_data = scores_df.groupby(pd.to_datetime(scores_df.index, errors='coerce').to_series().dt.date)
         
         for date, day_data in daily_data:
             for detector in detector_cols:
                 values = day_data[detector].abs()
                 anomaly_rate = (values > 2.0).mean() * 100
                 # PeriodStart: start of the day (tz-naive) to satisfy SQL NOT NULL
-                period_start = pd.Timestamp(date).to_pydatetime()
+                period_start = pd.Timestamp(str(date)).to_pydatetime()
                 
                 results.append({
                     'Date': str(date),  # For CSV readability
@@ -3487,8 +4016,8 @@ class OutputManager:
                 except Exception:
                     latest_value = sensor_values[sensor].iloc[-1]
 
-            train_mean_val = float(train_mean.get(sensor)) if isinstance(train_mean, pd.Series) and sensor in train_mean.index else None
-            train_std_val = float(train_std.get(sensor)) if isinstance(train_std, pd.Series) and sensor in train_std.index else None
+            train_mean_val = (float(cast(Any, train_mean.get(sensor))) if isinstance(train_mean, pd.Series) and sensor in train_mean.index and pd.notna(train_mean.get(sensor)) else None)
+            train_std_val = (float(cast(Any, train_std.get(sensor))) if isinstance(train_std, pd.Series) and sensor in train_std.index and pd.notna(train_std.get(sensor)) else None)
 
             records.append({
                 'SensorName': sensor,
@@ -3498,8 +4027,8 @@ class OutputManager:
                 'MaxSignedZ': round(max_signed, 4),
                 'LatestAbsZ': round(latest_abs, 4),
                 'LatestSignedZ': round(latest_signed, 4),
-                'ValueAtPeak': float(value_at_peak) if value_at_peak is not None and pd.notna(value_at_peak) else None,
-                'LatestValue': float(latest_value) if latest_value is not None and pd.notna(latest_value) else None,
+                'ValueAtPeak': (float(cast(Any, value_at_peak)) if value_at_peak is not None and pd.notna(value_at_peak) else None),
+                'LatestValue': (float(cast(Any, latest_value)) if latest_value is not None and pd.notna(latest_value) else None),
                 'TrainMean': train_mean_val,
                 'TrainStd': train_std_val,
                 'AboveWarnCount': above_warn,
@@ -3540,11 +4069,13 @@ class OutputManager:
             for rank, (sensor, abs_val) in enumerate(top.items(), start=1):
                 if pd.isna(abs_val) or abs_val < warn_z:
                     continue
-                signed_z = sensor_zscores.at[ts, sensor]
+                ts_key = (pd.Timestamp(str(cast(Any, ts))) if not isinstance(ts, pd.Timestamp) else ts)
+                sensor_key = str(sensor)
+                signed_z = sensor_zscores.at[ts_key, sensor_key]
                 value = None
                 if sensor_values is not None and sensor in sensor_values.columns:
                     try:
-                        value = sensor_values.at[ts, sensor]
+                        value = sensor_values.at[ts_key, sensor_key]
                     except Exception:
                         value = sensor_values[sensor].reindex([ts]).iloc[-1]
                 level = 'ALERT' if abs_val >= alert_z else 'WARN'
@@ -3553,8 +4084,8 @@ class OutputManager:
                     'SensorName': sensor,
                     'Rank': rank,
                     'AbsZ': round(float(abs_val), 4),
-                    'SignedZ': round(float(signed_z), 4) if pd.notna(signed_z) else None,
-                    'Value': float(value) if value is not None and pd.notna(value) else None,
+                    'SignedZ': (round(float(cast(Any, signed_z)), 4) if signed_z is not None and pd.notna(signed_z) else None),
+                    'Value': (float(cast(Any, value)) if value is not None and pd.notna(value) else None),
                     'Level': level
                 })
 
@@ -3724,7 +4255,8 @@ class OutputManager:
             in_segment = False
             segment_start = None
             
-            for idx, is_peak in peaks.items():
+            for idx in peaks.index:
+                is_peak = peaks.loc[idx]
                 if is_peak and not in_segment:
                     segment_start = idx
                     in_segment = True
@@ -3775,8 +4307,8 @@ class OutputManager:
                 'Timestamp': normalize_timestamp_scalar(idx),
                 'DetectorType': 'fused',
                 'Threshold': threshold,
-                'ZScore': round(scores_df.loc[idx, 'fused'], 4),
-                'Direction': 'up' if scores_df.loc[idx, 'fused'] > threshold else 'down'
+                'ZScore': round(float(cast(Any, scores_df.loc[idx, 'fused'])), 4),
+                'Direction': 'up' if float(cast(Any, scores_df.loc[idx, 'fused'])) > threshold else 'down'
             })
         
         return pd.DataFrame(crossings)
@@ -3824,7 +4356,7 @@ class OutputManager:
             })
 
         ep_count = int(len(episodes_df))
-        durations_h = pd.to_numeric(episodes_df.get('duration_hours'), errors='coerce') if 'duration_hours' in episodes_df.columns else pd.Series([], dtype=float)
+        durations_h = (pd.to_numeric(episodes_df['duration_hours'], errors='coerce') if 'duration_hours' in episodes_df.columns else pd.Series([], dtype=float))
         median_minutes = float(np.nanmedian(durations_h) * 60.0) if len(durations_h) else 0.0
 
         # Coverage: fraction of timeline covered by episodes (approx using start/end)
@@ -3847,7 +4379,7 @@ class OutputManager:
         else:
             coverage_pct = 0.0
 
-        fused = pd.to_numeric(scores_df.get('fused'), errors='coerce') if 'fused' in scores_df.columns else pd.Series(dtype=float)
+        fused = (pd.to_numeric(scores_df['fused'], errors='coerce') if 'fused' in scores_df.columns else pd.Series(dtype=float))
         if len(fused):
             time_in_alert_pct = float((fused > 2.0).mean() * 100.0)
             max_fused = float(np.nanmax(fused))
@@ -3902,509 +4434,12 @@ class OutputManager:
             return pd.DataFrame({'RegimeLabel': [], 'RecordCount': [], 'Percentage': []})
 
         counts = regimes.value_counts().sort_index()
-        total = int(len(regimes))
-
-        occupancy = pd.DataFrame({
-            'RegimeLabel': counts.index.to_list(),
-            'RecordCount': counts.values.astype(int)
-        })
-        occupancy['Percentage'] = (occupancy['RecordCount'] / total * 100.0).round(2)
-        return occupancy
-    
-    def _generate_health_histogram(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate health index distribution histogram."""
-        health_index = _health_index(scores_df['fused'])
-        bins = np.arange(0, 101, 10)
-        hist, bin_edges = np.histogram(health_index, bins=bins)
-        
-        histogram_data = []
-        for i in range(len(hist)):
-            bin_label = f"{int(bin_edges[i])}-{int(bin_edges[i+1])}"
-            histogram_data.append({
-                'HealthBin': bin_label,
-                'RecordCount': hist[i],
-                'Percentage': round(hist[i] / len(health_index) * 100, 2)
-            })
-        
-        return pd.DataFrame(histogram_data)
-    
-    def _generate_alert_age(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate alert age tracking using segmented zones."""
-        # Build a tz-naive Python datetime list aligned to rows for robust math and ODBC
-        ts_series = normalize_timestamp_series(scores_df.index)
-        # Convert to Python datetime objects (fix pandas FutureWarning)
-        ts_values = [ts.to_pydatetime() for ts in ts_series]
-        hi = _health_index(scores_df['fused'])
-        zones = pd.cut(
-            hi,
-            bins=[0, AnalyticsConstants.HEALTH_ALERT_THRESHOLD, AnalyticsConstants.HEALTH_WATCH_THRESHOLD, 100],
-            labels=['ALERT','WATCH','GOOD']
-        )
-        res = []
-        for z in ['ALERT','WATCH','GOOD']:
-            mask = zones.eq(z)
-            if not mask.any():
-                continue
-            cuts = mask.ne(mask.shift()).cumsum()
-            groups = cuts[mask].groupby(cuts[mask]).groups
-            for _, idx in groups.items():
-                # Convert label index to positional index to avoid tz-awareness mismatches
-                pos = scores_df.index.get_indexer(idx)
-                if len(pos) == 0:
-                    continue
-                i0, i1 = int(pos.min()), int(pos.max())
-                start = ts_values[i0]
-                end = ts_values[i1]
-                res.append({
-                    'AlertZone': z,
-                    'StartTimestamp': start,
-                    'DurationHours': round((end - start).total_seconds()/3600, 2),
-                    'RecordCount': int(i1 - i0 + 1)
-                })
-        if not res:
-            return pd.DataFrame({
-                'AlertZone': ['NONE'],
-                'StartTimestamp': [ts_values[0] if ts_values else None],
-                'DurationHours': [0.0],
-                'RecordCount': [0]
-            })
-        df = pd.DataFrame(res)
-        # Aggregate to one row per zone to satisfy PK (RunID, EquipID, AlertZone)
-        try:
-            agg = (df.groupby('AlertZone', as_index=False)
-                     .agg(StartTimestamp=('StartTimestamp', 'min'),
-                          DurationHours=('DurationHours', 'sum'),
-                          RecordCount=('RecordCount', 'sum')))
-            return agg
-        except Exception:
-            return df
-    
-    def _generate_regime_stability(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime stability and churn metrics.
-
-        Outputs columns aligned to SQL schema: MetricName, MetricValue.
-        """
-        regime_changes = (scores_df['regime_label'] != scores_df['regime_label'].shift()).sum()
-        total_points = len(scores_df)
-
-        # Calculate dwell times
-        regime_runs = []
-        current_regime = scores_df['regime_label'].iloc[0]
-        run_start = 0
-
-        for i, regime in enumerate(scores_df['regime_label']):
-            if regime != current_regime:
-                regime_runs.append({'regime': current_regime, 'duration': i - run_start})
-                current_regime = regime
-                run_start = i
-
-        # Add final run
-        regime_runs.append({'regime': current_regime, 'duration': len(scores_df) - run_start})
-
-        if regime_runs:
-            avg_duration = float(np.mean([r['duration'] for r in regime_runs]))
-            median_duration = float(np.median([r['duration'] for r in regime_runs]))
-        else:
-            avg_duration = float(total_points)
-            median_duration = float(total_points)
-
-        # Guard against divide-by-zero (shouldn't happen with non-empty frame)
-        churn_rate = float(round((regime_changes / total_points) * 100, 2)) if total_points > 0 else 0.0
-
-        return pd.DataFrame({
-            'MetricName': ['churn_rate', 'total_transitions', 'avg_dwell_periods', 'median_dwell_periods'],
-            'MetricValue': [
-                churn_rate,
-                float(regime_changes),
-                float(round(avg_duration, 1)),
-                float(round(median_duration, 1))
-            ]
-        })
-    
-    def _generate_culprit_history(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Generate enhanced culprit sensor history from episodes.
-        Includes lead/lag temporal context and contribution-weighted ranking.
-        """
-        culprit_history = []
-        
-        # Detector columns available for analysis
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        if not detector_cols:
-            # Fallback to basic implementation
-            return self._generate_culprit_history_basic(scores_df, episodes_df)
-        
-        # Standard fusion weights (from fuse.py defaults)
-        default_weights = {
-            'ar1_z': 1.5,
-            'pca_spe_z': 1.0,
-            'pca_t2_z': 0.8,
-            'mhal_z': 1.2,
-            'iforest_z': 1.0,
-            'gmm_z': 0.9
-        }
-        
-        for _, episode in episodes_df.iterrows():
-            # Use actual column names from episodes.csv
-            start_ts = episode.get('start_ts', episode.get('start_time', episode.get('timestamp', None)))
-            end_ts = episode.get('end_ts', episode.get('end_time', None))
-            
-            if start_ts is None:
-                continue
-                
-            # Calculate duration
-            if end_ts is not None and not pd.isna(end_ts):
-                try:
-                    if isinstance(start_ts, str):
-                        start_time = pd.to_datetime(start_ts)
-                    else:
-                        start_time = start_ts
-                    
-                    if isinstance(end_ts, str):
-                        end_time = pd.to_datetime(end_ts)
-                    else:
-                        end_time = end_ts
-                        
-                    duration_hours = (end_time - start_time).total_seconds() / 3600
-                except Exception:
-                    duration_hours = 0.0
-            else:
-                # Use duration_s if available, or duration_hours
-                duration_s = episode.get('duration_s', 0)
-                duration_hours_col = episode.get('duration_hours', 0)
-                if duration_s and not pd.isna(duration_s):
-                    duration_hours = duration_s / 3600
-                elif duration_hours_col and not pd.isna(duration_hours_col):
-                    duration_hours = duration_hours_col
-                else:
-                    duration_hours = 0.0
-            
-            # Find episode window in scores_df
-            try:
-                # Convert to datetime for comparison
-                start_dt = pd.to_datetime(start_ts) if not isinstance(start_ts, pd.Timestamp) else start_ts
-                end_dt = pd.to_datetime(end_ts) if not isinstance(end_ts, pd.Timestamp) else end_ts
-                
-                # Get episode mask
-                episode_mask = (scores_df.index >= start_dt) & (scores_df.index <= end_dt)
-                episode_data = scores_df.loc[episode_mask, detector_cols]
-                
-                # Compute weighted contributions for each detector (allow empty -> None)
-                contributions = {}
-                for col in detector_cols:
-                    if col in episode_data.columns:
-                        mean_z = episode_data[col].abs().mean()
-                        weight = default_weights.get(col, 1.0)
-                        contributions[col] = mean_z * weight
-                
-                # Rank by contribution
-                ranked = sorted(contributions.items(), key=lambda x: x[1], reverse=True)
-                primary_detector_code = ranked[0][0] if ranked else 'unknown'
-                primary_detector_label = get_detector_label(primary_detector_code, use_short=False) if ranked else 'Unknown'
-                weighted_contrib = round(ranked[0][1], 2) if ranked else None
-                
-                # Lead/lag temporal context (1 hour before and after, or 10 samples)
-                lead_window = 10
-                lag_window = 10
-                
-                # Get indices (episode_mask is boolean array, find first/last True)
-                if episode_mask.any():
-                    episode_start_idx = int(episode_mask.argmax())  # first True
-                    episode_end_idx = len(episode_mask) - 1 - int(episode_mask[::-1].argmax())  # last True
-                else:
-                    episode_start_idx = 0
-                    episode_end_idx = len(scores_df) - 1
-                
-                lead_start = max(0, episode_start_idx - lead_window)
-                lag_end = min(len(scores_df), episode_end_idx + lag_window + 1)
-                
-                # Compute lead/lag means for the primary detector
-                lead_mean = scores_df.iloc[lead_start:episode_start_idx][primary_detector_code].abs().mean() if episode_start_idx > lead_start else None
-                during_mean = episode_data[primary_detector_code].abs().mean() if not episode_data.empty else None
-                lag_mean = scores_df.iloc[episode_end_idx+1:lag_end][primary_detector_code].abs().mean() if lag_end > episode_end_idx + 1 else None
-                
-                culprit_history.append({
-                    'StartTimestamp': self._safe_single_timestamp(start_ts),
-                    'EndTimestamp': self._safe_single_timestamp(end_ts),
-                    'DurationHours': round(duration_hours, 1),
-                    'PrimaryDetector': primary_detector_label,
-                    'WeightedContribution': weighted_contrib,
-                    'LeadMeanZ': round(lead_mean, 2) if lead_mean is not None else None,
-                    'DuringMeanZ': round(during_mean, 2) if during_mean is not None else None,
-                    'LagMeanZ': round(lag_mean, 2) if lag_mean is not None else None
-                })
-                
-            except Exception as e:
-                # Fallback to basic attribution on error
-                Console.warn(f"[CULPRITS] Failed to compute culprit history for {start_ts}-{end_ts}: {e}")
-                continue
-        
-        return pd.DataFrame(culprit_history)
-    
-    def _generate_culprit_history_basic(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """Basic fallback for culprit history when detector columns unavailable."""
-        culprit_history = []
-        
-        for _, episode in episodes_df.iterrows():
-            start_ts = episode.get('start_ts', episode.get('start_time', episode.get('timestamp', None)))
-            end_ts = episode.get('end_ts', episode.get('end_time', None))
-            
-            if start_ts is None:
-                continue
-            
-            # Calculate duration
-            duration_s = episode.get('duration_s', 0)
-            duration_hours = duration_s / 3600 if duration_s else 0.0
-            
-            culprits = episode.get('culprits', 'unknown')
-            if pd.isna(culprits) or culprits == '':
-                culprits = 'unknown'
-            culprits_label = format_culprit_label(str(culprits)) if culprits else 'Unknown'
-            
-            culprit_history.append({
-                'StartTimestamp': self._safe_single_timestamp(start_ts),
-                'EndTimestamp': self._safe_single_timestamp(end_ts) if end_ts and not pd.isna(end_ts) else None,
-                'DurationHours': round(duration_hours, 1) if duration_hours else None,
-                'PrimaryDetector': culprits_label if culprits != 'unknown' else 'Unknown',
-                'WeightedContribution': None,
-                'LeadMeanZ': None,
-                'DuringMeanZ': None,
-                'LagMeanZ': None
-            })
-        
-        return pd.DataFrame(culprit_history)
-    
-    def _generate_episode_metrics(self, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate episode-level statistical metrics."""
-        if episodes_df.empty:
-            return pd.DataFrame({
-                'TotalEpisodes': [0],
-                'TotalDurationHours': [0],
-                'AvgDurationHours': [0],
-                'MedianDurationHours': [0],
-                'MaxDurationHours': [0],
-                'MinDurationHours': [0],
-                'RatePerDay': [0],
-                'MeanInterarrivalHours': [0]
-            })
-        
-        total_episodes = len(episodes_df)
-        
-        # Calculate durations for episodes using actual column names
-        durations = []
-        
-        for _, episode in episodes_df.iterrows():
-            # Use actual column names from episodes.csv
-            start_ts = episode.get('start_ts', episode.get('start_time', episode.get('timestamp', None)))
-            end_ts = episode.get('end_ts', episode.get('end_time', None))
-            
-            duration_hours = 0.0
-            
-            # Try to get duration from various sources
-            if start_ts is not None and end_ts is not None and not pd.isna(end_ts):
-                try:
-                    if isinstance(start_ts, str):
-                        start_time = pd.to_datetime(start_ts)
-                    else:
-                        start_time = start_ts
-                    
-                    if isinstance(end_ts, str):
-                        end_time = pd.to_datetime(end_ts)
-                    else:
-                        end_time = end_ts
-                        
-                    duration_hours = (end_time - start_time).total_seconds() / 3600
-                except Exception:
-                    duration_hours = 0.0
-            
-            # Fallback to duration columns
-            if duration_hours == 0.0:
-                duration_s = episode.get('duration_s', 0)
-                duration_hours_col = episode.get('duration_hours', 0)
-                if duration_s and not pd.isna(duration_s):
-                    duration_hours = duration_s / 3600
-                elif duration_hours_col and not pd.isna(duration_hours_col):
-                    duration_hours = duration_hours_col
-            
-            if duration_hours > 0:
-                durations.append(duration_hours)
-        
-        if durations:
-            total_duration = sum(durations)
-            avg_duration = total_duration / len(durations)
-            median_duration = pd.Series(durations).median()
-            max_duration = max(durations)
-            min_duration = min(durations)
-        else:
-            total_duration = avg_duration = median_duration = max_duration = min_duration = 0.0
-        
-        # Calculate rate per day and interarrival time
-        if total_episodes > 1 and durations:
-            # Estimate observation period from episode spans
-            observation_days = max(30, total_duration / 24)  # At least 30 days or span of episodes
-            rate_per_day = total_episodes / observation_days
-            mean_interarrival_hours = total_duration / (total_episodes - 1) if total_episodes > 1 else 0
-        else:
-            rate_per_day = total_episodes / 30.0  # Default 30-day observation
-            mean_interarrival_hours = 0
-        
-        return pd.DataFrame({
-            'TotalEpisodes': [total_episodes],
-            'TotalDurationHours': [round(total_duration, 1)],
-            'AvgDurationHours': [round(avg_duration, 1)],
-            'MedianDurationHours': [round(median_duration, 1)],
-            'MaxDurationHours': [round(max_duration, 1)],
-            'MinDurationHours': [round(min_duration, 1)],
-            'RatePerDay': [round(rate_per_day, 3)],
-            'MeanInterarrivalHours': [round(mean_interarrival_hours, 1)]
-        })
-    
-    def _generate_episode_diagnostics(self, episodes_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Generate per-episode diagnostic metrics for troubleshooting and severity analysis.
-        
-        Returns detailed diagnostics for each episode including:
-        - Peak z-score and timestamp
-        - Duration in hours
-        - Dominant contributing sensor
-        - Severity level and reason
-        - Average z-score and minimum health index
-        """
-        if episodes_df.empty:
-            return pd.DataFrame(columns=[
-                'episode_id', 'peak_z', 'peak_timestamp', 'duration_h', 
-                'dominant_sensor', 'severity', 'severity_reason', 
-                'avg_z', 'min_health_index'
-            ])
-        
-        diagnostics = []
-        
-        for _, episode in episodes_df.iterrows():
-            episode_id = episode.get('episode_id', episode.name)
-            
-            # Extract metrics from episode (already computed in write_episodes)
-            peak_z = episode.get('peak_fused_z', episode.get('peak_z', 0.0))
-            peak_ts = episode.get('peak_timestamp', episode.get('start_ts', ''))
-            avg_z = episode.get('avg_fused_z', episode.get('avg_z', 0.0))
-            min_health = episode.get('min_health_index', _health_index(peak_z))
-            
-            # Duration in hours
-            duration_h = episode.get('duration_hours', 0.0)
-            if duration_h == 0.0 and 'duration_s' in episode:
-                duration_h = episode['duration_s'] / 3600.0
-            
-            # Dominant sensor from culprits (already formatted with human-readable labels by fuse.py)
-            culprits_str = episode.get('culprits', '')
-            dominant_sensor = 'Unknown'
-            if culprits_str and isinstance(culprits_str, str):
-                # Culprits are already human-readable from format_culprit_label()
-                # Examples: "Density Anomaly (GMM)", "Correlation Break (PCA-SPE) → DEMO.SIM.FSAB"
-                dominant_sensor = culprits_str.strip() if culprits_str.strip() else 'Unknown'
-            
-            # Severity and reason
-            severity = episode.get('severity', 'MEDIUM')
-            
-            # Generate severity reason based on metrics
-            if peak_z >= 3.0:
-                severity_reason = f"Extreme anomaly (z={peak_z:.1f})"
-            elif peak_z >= 2.5:
-                severity_reason = f"High anomaly (z={peak_z:.1f})"
-            elif duration_h >= 24:
-                severity_reason = f"Extended duration ({duration_h:.1f}h)"
-            elif duration_h >= 4:
-                severity_reason = f"Moderate duration ({duration_h:.1f}h)"
-            else:
-                severity_reason = f"Brief anomaly ({duration_h:.1f}h, z={peak_z:.1f})"
-            
-            diagnostics.append({
-                'episode_id': episode_id,
-                'peak_z': round(peak_z, 3),
-                'peak_timestamp': peak_ts,
-                'duration_h': round(duration_h, 2),
-                'dominant_sensor': dominant_sensor,
-                'severity': severity,
-                'severity_reason': severity_reason,
-                'avg_z': round(avg_z, 3),
-                'min_health_index': round(min_health, 2)
-            })
-        
-        return pd.DataFrame(diagnostics)
-
-
-    # -------------------- Dashboard-oriented helpers (appended) --------------------
-
-    def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contribs: pd.DataFrame) -> pd.DataFrame:
-        """Long-format OMR contributions with per-timestamp percentage and OMR z.
-
-        Columns: Timestamp, Sensor, ContributionScore, ContributionPct, OMR_Z
-        """
-        if omr_contribs is None or omr_contribs.empty:
-            return pd.DataFrame(columns=["Timestamp", "Sensor", "ContributionScore", "ContributionPct", "OMR_Z"])  # empty schema
-
-        wide = omr_contribs.reindex(scores_df.index).copy()
-        wide = wide.apply(pd.to_numeric, errors='coerce').fillna(0.0)
-        totals = wide.sum(axis=1)
-        tmp = wide.reset_index()
-        idx_col = tmp.columns[0]
-        long = tmp.melt(id_vars=idx_col, var_name='Sensor', value_name='ContributionScore')
-        long.rename(columns={idx_col: 'Timestamp'}, inplace=True)
-        # Compute percentage safely
-        total_map = totals.to_dict()
-        def _pct(ts, val):
-            t = total_map.get(ts, 0.0)
-            return float(val) / t * 100.0 if t and np.isfinite(t) else 0.0
-        long['ContributionPct'] = [
-            _pct(ts, v) for ts, v in zip(pd.to_datetime(long['Timestamp']), long['ContributionScore'])
-        ]
-        # Attach OMR z when available
-        if 'omr_z' in scores_df.columns:
-            omr_map = pd.to_numeric(scores_df['omr_z'], errors='coerce').to_dict()
-            long['OMR_Z'] = [float(omr_map.get(pd.to_datetime(ts), np.nan)) for ts in long['Timestamp']]
-        else:
-            long['OMR_Z'] = np.nan
-        # Normalize timestamp to naive string for CSV
-        long['Timestamp'] = normalize_timestamp_series(long['Timestamp']).astype(str)
-        long['ContributionScore'] = pd.to_numeric(long['ContributionScore'], errors='coerce').fillna(0.0)
-        long['ContributionPct'] = pd.to_numeric(long['ContributionPct'], errors='coerce').fillna(0.0).clip(0.0, 100.0)
-        return long[['Timestamp', 'Sensor', 'ContributionScore', 'ContributionPct', 'OMR_Z']]
-
-    def _generate_daily_fused_profile(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Aggregate fused z by hour and weekday for simple dashboards."""
-        if 'fused' not in scores_df.columns or scores_df.empty:
-            return pd.DataFrame(columns=['ProfileDate','DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count'])
-        idx = pd.to_datetime(scores_df.index)
-        series = pd.to_numeric(scores_df['fused'], errors='coerce')
-        df = pd.DataFrame({'fused': series, 'DayOfWeek': idx.dayofweek, 'Hour': idx.hour})
-        df = df.dropna(subset=['fused'])
-        if df.empty:
-            return pd.DataFrame(columns=['ProfileDate','DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count'])
-        # Group using explicit columns to prevent duplicate index-name collisions during reset_index
-        grp = df.groupby(['DayOfWeek', 'Hour'])['fused']
-        out = grp.agg(FusedMean='mean',
-                      FusedP90=lambda s: np.nanpercentile(s, 90),
-                      FusedP95=lambda s: np.nanpercentile(s, 95),
-                      Count='count').reset_index()
-        out['DayOfWeek'] = out['DayOfWeek'].astype(int)
-        out['Hour'] = out['Hour'].astype(int)
-        out['Count'] = out['Count'].astype(int)
-        # Derive a ProfileDate representative of this run window (use earliest timestamp date if available)
-        profile_date = pd.to_datetime(idx.min()).normalize() if len(idx) else pd.Timestamp.now().normalize()
-        out['ProfileDate'] = profile_date
-        return out[['ProfileDate','DayOfWeek', 'Hour', 'FusedMean', 'FusedP90', 'FusedP95', 'Count']]
-
-    def _generate_regime_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Compact per-regime summary table."""
-        if 'regime_label' not in scores_df.columns or scores_df.empty:
-            return pd.DataFrame(columns=['RegimeLabel', 'OccupancyPct', 'AvgDwellSeconds', 'FusedMean', 'FusedP90'])
-        idx = pd.DatetimeIndex(scores_df.index)
-        labels = pd.to_numeric(scores_df['regime_label'], errors='coerce')
-        counts = labels.value_counts(dropna=True)
         total = counts.sum() if len(counts) else 0
         # Dwell approximation
         runs = []
         cur = None
         start = None
-        for ts, lab in zip(idx, labels):
+        for ts, lab in zip(scores_df.index, regimes):
             if pd.isna(lab):
                 continue
             if cur is None:
@@ -4413,13 +4448,13 @@ class OutputManager:
             if lab != cur:
                 runs.append((int(cur), (ts - start).total_seconds()))
                 cur, start = lab, ts
-        if cur is not None and start is not None and len(idx):
-            runs.append((int(cur), (idx[-1] - start).total_seconds()))
+        if cur is not None and start is not None and len(scores_df.index):
+            runs.append((int(cur), (scores_df.index[-1] - start).total_seconds()))
         dwell = pd.DataFrame(runs, columns=['RegimeLabel', 'DwellSeconds']) if runs else pd.DataFrame(columns=['RegimeLabel', 'DwellSeconds'])
         stats = []
         for lab, cnt in counts.items():
             try:
-                lab_int = int(lab)
+                lab_int = int(str(lab))
             except Exception:
                 continue
             sel = scores_df['regime_label'] == lab
@@ -4514,7 +4549,7 @@ class OutputManager:
     def _generate_omr_timeline(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
         """Generate OMR timeline with weight annotation when available."""
         ts_values = normalize_timestamp_series(scores_df.index).to_list()
-        omr_series = pd.to_numeric(scores_df.get('omr_z'), errors='coerce') if 'omr_z' in scores_df.columns else pd.Series(dtype=float)
+        omr_series = (pd.to_numeric(scores_df['omr_z'], errors='coerce') if 'omr_z' in scores_df.columns else pd.Series(dtype=float))
         try:
             weights = (cfg.get('fusion', {}) or {}).get('weights', {})
             omr_weight = float(weights.get('omr_z', weights.get('omr', 0.0)))
@@ -4765,13 +4800,4 @@ class OutputManager:
         except Exception as e:
             Console.error(f"Failed to read threshold metadata: {e}")
             return None
-
-def create_output_manager(sql_client=None, run_id: str = None, equip_id: int = None, **kwargs) -> OutputManager:
-    """Factory function for creating OutputManager instances."""
-    return OutputManager(
-        sql_client=sql_client,
-        run_id=run_id,
-        equip_id=equip_id,
-        **kwargs
-    )
 

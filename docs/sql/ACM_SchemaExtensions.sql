@@ -145,7 +145,7 @@ AS
 BEGIN
     SET NOCOUNT ON;
     
-    DECLARE @CutoffTime DATETIME2(3) = DATEADD(HOUR, -@RetentionHours, GETUTCDATE());
+    DECLARE @CutoffTime DATETIME2(3) = DATEADD(HOUR, -@RetentionHours, GETDATE());
     DECLARE @RowsDeleted INT = 0;
     
     -- Time-based cleanup

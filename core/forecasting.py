@@ -1455,7 +1455,7 @@ def forecast_by_regime(
                 trend = beta * (level - prev_level) + (1 - beta) * prev_trend
             
             # Generate forecast
-            forecast_values = np.array([level + (h + 1) * trend for h in range(horizon)], dtype=float)
+            forecast_values = np.array([level + (horizon + h) * trend for h in range(horizon)], dtype=float)
             
             # Compute variance (P0-FIX-1.2: 1 + h + h^2/2 multiplier for Holt)
             residuals = values[1:] - (alpha * values[:-1] + (1 - alpha) * (level + trend))
@@ -2397,6 +2397,12 @@ def run_enhanced_forecasting_sql(
     # Forecast detector Z-score trends (PCA, CUSUM, GMM, IForest, etc.)
     detector_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "DetectorName", "ForecastValue", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "Method", "RegimeLabel", "FusedZ"])
     detector_state: Dict[str, Any] = {}
+    
+    # Initialize detector forecast defaults at function scope (FIX: prevent UnboundLocalError)
+    decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
+    max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
+    det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
+    
     try:
         if df_scores is not None and not df_scores.empty:
             latest_scores = df_scores.iloc[-1]
@@ -2423,9 +2429,6 @@ def run_enhanced_forecasting_sql(
                 detector_forecast_rows = []
                 horizons = np.arange(1, len(forecast_timestamps) + 1, dtype=float)
                 # Initialize detector forecast defaults (P0-FIX: scope issue)
-                decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
-                max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
-                det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))
                 for detector_name, z_score in top_detectors:
                     # Build detector history series
                     hist = df_scores[detector_name + "_z"].astype(float).dropna()

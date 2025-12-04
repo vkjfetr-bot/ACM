@@ -16,6 +16,41 @@ import json
 from utils.logger import Console
 
 
+def _ensure_table(sql_client) -> None:
+    """Create ACM_ConfigHistory if missing (best-effort, no raise)."""
+    try:
+        cur = sql_client.cursor()
+        cur.execute(
+            """
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.ACM_ConfigHistory') AND type = N'U'
+            )
+            BEGIN
+                CREATE TABLE dbo.ACM_ConfigHistory (
+                    ID BIGINT IDENTITY(1,1) PRIMARY KEY,
+                    Timestamp DATETIME2(3) NOT NULL CONSTRAINT DF_ACM_ConfigHistory_Timestamp DEFAULT SYSUTCDATETIME(),
+                    EquipID INT NOT NULL,
+                    ParameterPath NVARCHAR(256) NOT NULL,
+                    OldValue NVARCHAR(MAX) NULL,
+                    NewValue NVARCHAR(MAX) NULL,
+                    ChangedBy NVARCHAR(64) NULL,
+                    ChangeReason NVARCHAR(256) NULL,
+                    RunID NVARCHAR(64) NULL
+                );
+            END
+            """
+        )
+        try:
+            sql_client.conn.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            Console.warn(f"[CONFIG_HIST] Failed to ensure ACM_ConfigHistory table: {e}")
+        except Exception:
+            pass
+
+
 def write_config_change(
     sql_client,
     equip_id: int,
@@ -46,6 +81,7 @@ def write_config_change(
     if sql_client is None:
         Console.warn("[CONFIG_HIST] No SQL client provided, skipping ACM_ConfigHistory write")
         return False
+    _ensure_table(sql_client)
     
     try:
         # Serialize complex values to JSON
@@ -127,6 +163,7 @@ def write_config_changes_bulk(
     if sql_client is None:
         Console.warn("[CONFIG_HIST] No SQL client provided, skipping bulk write")
         return False
+    _ensure_table(sql_client)
     
     if not changes:
         return True

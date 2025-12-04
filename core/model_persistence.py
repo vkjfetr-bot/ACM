@@ -4,11 +4,11 @@ Model Versioning & Persistence Module
 Manages trained model storage, versioning, and loading with cold-start resolution.
 
 Architecture:
-- artifacts/{EQUIP}/models/v{N}/*.joblib - Versioned model artifacts
-- artifacts/{EQUIP}/models/v{N}/manifest.json - Model metadata
+- SQL-ONLY MODE: All models stored in dbo.ModelRegistry table
+- No filesystem artifacts - models serialized to VARBINARY(MAX) in SQL
 - Config tracks active model version
 - Auto-increments version on retraining
-- Loads cached models on cold-start
+- Loads cached models on cold-start from SQL
 
 Models persisted:
 - AR1: fitted parameters (alpha, sigma)
@@ -348,154 +348,127 @@ class RegimeState:
 
 def save_regime_state(state: RegimeState, artifact_root: Path, equip: str, sql_client=None) -> None:
     """
-    Save RegimeState to filesystem and optionally SQL.
+    Save RegimeState to SQL (SQL-ONLY MODE).
     
     Args:
         state: RegimeState object to persist
-        artifact_root: Root artifacts directory
-        equip: Equipment name
-        sql_client: Optional SQL client for dual persistence
+        artifact_root: IGNORED - kept for API compatibility
+        equip: Equipment name (for logging)
+        sql_client: SQL client (REQUIRED)
     """
-    # Filesystem persistence
-    if artifact_root.name == equip:
-        state_dir = artifact_root / "models"
-    else:
-        state_dir = artifact_root / equip / "models"
-    
-    state_dir.mkdir(parents=True, exist_ok=True)
-    state_file = state_dir / "regime_state.json"
+    if sql_client is None:
+        Console.error("[REGIME_STATE] SQL client required for SQL-only mode")
+        return
     
     try:
-        with open(state_file, "w") as f:
-            json.dump(state.to_dict(), f, indent=2)
-        Console.info(f"[REGIME_STATE] Saved state v{state.state_version} to {state_file}")
+        cur = sql_client.cursor()
+        
+        # Upsert into ACM_RegimeState
+        cur.execute("""
+            MERGE INTO dbo.ACM_RegimeState AS target
+            USING (SELECT ? AS EquipID, ? AS StateVersion) AS source
+            ON target.EquipID = source.EquipID AND target.StateVersion = source.StateVersion
+            WHEN MATCHED THEN
+                UPDATE SET
+                    NumClusters = ?,
+                    ClusterCentersJson = ?,
+                    ScalerMeanJson = ?,
+                    ScalerScaleJson = ?,
+                    PCAComponentsJson = ?,
+                    PCAExplainedVarianceJson = ?,
+                    NumPCAComponents = ?,
+                    SilhouetteScore = ?,
+                    QualityOk = ?,
+                    LastTrainedTime = ?,
+                    ConfigHash = ?,
+                    RegimeBasisHash = ?
+            WHEN NOT MATCHED THEN
+                INSERT (EquipID, StateVersion, NumClusters, ClusterCentersJson,
+                        ScalerMeanJson, ScalerScaleJson, PCAComponentsJson,
+                        PCAExplainedVarianceJson, NumPCAComponents, SilhouetteScore,
+                        QualityOk, LastTrainedTime, ConfigHash, RegimeBasisHash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (
+            state.equip_id, state.state_version,  # MERGE match
+            state.n_clusters, state.cluster_centers_json,
+            state.scaler_mean_json, state.scaler_scale_json,
+            state.pca_components_json, state.pca_explained_variance_json,
+            state.n_pca_components, state.silhouette_score, state.quality_ok,
+            state.last_trained_time, state.config_hash, state.regime_basis_hash,  # UPDATE values
+            state.equip_id, state.state_version, state.n_clusters,
+            state.cluster_centers_json, state.scaler_mean_json,
+            state.scaler_scale_json, state.pca_components_json,
+            state.pca_explained_variance_json, state.n_pca_components,
+            state.silhouette_score, state.quality_ok,
+            state.last_trained_time, state.config_hash, state.regime_basis_hash  # INSERT values
+        ))
+        
+        if not sql_client.conn.autocommit:
+            sql_client.conn.commit()
+        
+        Console.info(f"[REGIME_STATE] Saved state v{state.state_version} to ACM_RegimeState (EquipID={state.equip_id})")
     except Exception as e:
-        Console.warn(f"[REGIME_STATE] Failed to save state to filesystem: {e}")
-    
-    # SQL persistence (optional, dual-write)
-    if sql_client is not None:
-        try:
-            cur = sql_client.cursor()
-            
-            # Upsert into ACM_RegimeState
-            cur.execute("""
-                MERGE INTO dbo.ACM_RegimeState AS target
-                USING (SELECT ? AS EquipID, ? AS StateVersion) AS source
-                ON target.EquipID = source.EquipID AND target.StateVersion = source.StateVersion
-                WHEN MATCHED THEN
-                    UPDATE SET
-                        NumClusters = ?,
-                        ClusterCentersJson = ?,
-                        ScalerMeanJson = ?,
-                        ScalerScaleJson = ?,
-                        PCAComponentsJson = ?,
-                        PCAExplainedVarianceJson = ?,
-                        NumPCAComponents = ?,
-                        SilhouetteScore = ?,
-                        QualityOk = ?,
-                        LastTrainedTime = ?,
-                        ConfigHash = ?,
-                        RegimeBasisHash = ?
-                WHEN NOT MATCHED THEN
-                    INSERT (EquipID, StateVersion, NumClusters, ClusterCentersJson,
-                            ScalerMeanJson, ScalerScaleJson, PCAComponentsJson,
-                            PCAExplainedVarianceJson, NumPCAComponents, SilhouetteScore,
-                            QualityOk, LastTrainedTime, ConfigHash, RegimeBasisHash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """, (
-                state.equip_id, state.state_version,  # MERGE match
-                state.n_clusters, state.cluster_centers_json,
-                state.scaler_mean_json, state.scaler_scale_json,
-                state.pca_components_json, state.pca_explained_variance_json,
-                state.n_pca_components, state.silhouette_score, state.quality_ok,
-                state.last_trained_time, state.config_hash, state.regime_basis_hash,  # UPDATE values
-                state.equip_id, state.state_version, state.n_clusters,
-                state.cluster_centers_json, state.scaler_mean_json,
-                state.scaler_scale_json, state.pca_components_json,
-                state.pca_explained_variance_json, state.n_pca_components,
-                state.silhouette_score, state.quality_ok,
-                state.last_trained_time, state.config_hash, state.regime_basis_hash  # INSERT values
-            ))
-            
-            if not sql_client.conn.autocommit:
-                sql_client.conn.commit()
-            
-            Console.info(f"[REGIME_STATE] Saved state v{state.state_version} to ACM_RegimeState (EquipID={state.equip_id})")
-        except Exception as e:
-            Console.warn(f"[REGIME_STATE] Failed to save state to SQL: {e}")
+        Console.warn(f"[REGIME_STATE] Failed to save state to SQL: {e}")
 
 
 def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] = None, sql_client=None) -> Optional[RegimeState]:
     """
-    Load latest RegimeState from filesystem or SQL.
+    Load latest RegimeState from SQL (SQL-ONLY MODE).
     
     Args:
-        artifact_root: Root artifacts directory
-        equip: Equipment name
-        equip_id: Equipment ID (required for SQL loading)
-        sql_client: Optional SQL client to load from database
+        artifact_root: IGNORED - kept for API compatibility
+        equip: Equipment name (for logging)
+        equip_id: Equipment ID (REQUIRED)
+        sql_client: SQL client (REQUIRED)
     
     Returns:
         RegimeState object or None if not found
     """
-    # Try SQL first if available
-    if sql_client is not None and equip_id is not None:
-        try:
-            cur = sql_client.cursor()
-            cur.execute("""
-                SELECT TOP 1
-                    EquipID, StateVersion, NumClusters, ClusterCentersJson,
-                    ScalerMeanJson, ScalerScaleJson, PCAComponentsJson,
-                    PCAExplainedVarianceJson, NumPCAComponents, SilhouetteScore,
-                    QualityOk, LastTrainedTime, ConfigHash, RegimeBasisHash
-                FROM dbo.ACM_RegimeState
-                WHERE EquipID = ?
-                ORDER BY StateVersion DESC
-            """, (equip_id,))
-            
-            row = cur.fetchone()
-            cur.close()
-            
-            if row:
-                state = RegimeState(
-                    equip_id=row[0],
-                    state_version=row[1],
-                    n_clusters=int(row[2]) if row[2] is not None else 0,
-                    cluster_centers_json=row[3] or "[]",
-                    scaler_mean_json=row[4] or "[]",
-                    scaler_scale_json=row[5] or "[]",
-                    pca_components_json=row[6] or "[]",
-                    pca_explained_variance_json=row[7] or "[]",
-                    n_pca_components=int(row[8]) if row[8] is not None else 0,
-                    silhouette_score=float(row[9]) if row[9] is not None else 0.0,
-                    quality_ok=bool(row[10]) if row[10] is not None else False,
-                    last_trained_time=row[11].isoformat() if row[11] else datetime.now(timezone.utc).isoformat(),
-                    config_hash=row[12] or "",
-                    regime_basis_hash=row[13] or ""
-                )
-                Console.info(f"[REGIME_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
-                return state
-        except Exception as e:
-            Console.warn(f"[REGIME_STATE] Failed to load state from SQL: {e}")
-    
-    # Fallback to filesystem
-    if artifact_root.name == equip:
-        state_file = artifact_root / "models" / "regime_state.json"
-    else:
-        state_file = artifact_root / equip / "models" / "regime_state.json"
-    
-    if not state_file.exists():
-        Console.info(f"[REGIME_STATE] No existing state found at {state_file}")
+    if sql_client is None or equip_id is None:
+        Console.error("[REGIME_STATE] SQL client and equip_id required for SQL-only mode")
         return None
     
     try:
-        with open(state_file, "r") as f:
-            data = json.load(f)
-        state = RegimeState.from_dict(data)
-        Console.info(f"[REGIME_STATE] Loaded state v{state.state_version} from {state_file}")
-        return state
+        cur = sql_client.cursor()
+        cur.execute("""
+            SELECT TOP 1
+                EquipID, StateVersion, NumClusters, ClusterCentersJson,
+                ScalerMeanJson, ScalerScaleJson, PCAComponentsJson,
+                PCAExplainedVarianceJson, NumPCAComponents, SilhouetteScore,
+                QualityOk, LastTrainedTime, ConfigHash, RegimeBasisHash
+            FROM dbo.ACM_RegimeState
+            WHERE EquipID = ?
+            ORDER BY StateVersion DESC
+        """, (equip_id,))
+        
+        row = cur.fetchone()
+        cur.close()
+        
+        if row:
+            state = RegimeState(
+                equip_id=row[0],
+                state_version=row[1],
+                n_clusters=int(row[2]) if row[2] is not None else 0,
+                cluster_centers_json=row[3] or "[]",
+                scaler_mean_json=row[4] or "[]",
+                scaler_scale_json=row[5] or "[]",
+                pca_components_json=row[6] or "[]",
+                pca_explained_variance_json=row[7] or "[]",
+                n_pca_components=int(row[8]) if row[8] is not None else 0,
+                silhouette_score=float(row[9]) if row[9] is not None else 0.0,
+                quality_ok=bool(row[10]) if row[10] is not None else False,
+                last_trained_time=row[11].isoformat() if row[11] else datetime.now(timezone.utc).isoformat(),
+                config_hash=row[12] or "",
+                regime_basis_hash=row[13] or ""
+            )
+            Console.info(f"[REGIME_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
+            return state
+        else:
+            Console.info(f"[REGIME_STATE] No existing state found in SQL for EquipID={equip_id}")
+            return None
     except Exception as e:
-        Console.warn(f"[REGIME_STATE] Failed to load state from filesystem: {e}")
+        Console.warn(f"[REGIME_STATE] Failed to load state from SQL: {e}")
+        return None
         return None
 
 
@@ -504,75 +477,39 @@ def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] =
 # ============================================================================
 
 class ModelVersionManager:
-    """Manages model versioning, persistence, and loading (filesystem + SQL)."""
+    """Manages model versioning, persistence, and loading (SQL-ONLY MODE)."""
     
-    def __init__(self, equip: str, artifact_root: Path, sql_client=None, equip_id: Optional[int] = None, sql_only_mode: bool = False):
+    def __init__(self, equip: str, artifact_root: Path, sql_client=None, equip_id: Optional[int] = None, sql_only_mode: bool = True):
         """
-        Initialize model version manager.
+        Initialize model version manager (SQL-ONLY MODE).
         
         Args:
             equip: Equipment name (e.g., "FD_FAN")
-            artifact_root: Root artifacts directory (may or may not include equipment name)
-            sql_client: Optional SQLClient for SQL persistence (None = filesystem only)
-            equip_id: Equipment ID for SQL storage (required if sql_client provided)
-            sql_only_mode: If True, skip filesystem operations and only use SQL
+            artifact_root: IGNORED - kept for API compatibility only
+            sql_client: SQL client for model storage (REQUIRED)
+            equip_id: Equipment ID for SQL operations (REQUIRED)
+            sql_only_mode: Must be True (filesystem mode removed)
         """
         self.equip = equip
-        self.artifact_root = Path(artifact_root)
         self.sql_client = sql_client
         self.equip_id = equip_id
-        self.sql_only_mode = sql_only_mode
+        self.sql_only_mode = True  # Force SQL-only mode
         
-        # Check if artifact_root already includes equipment name to avoid duplication
-        # (e.g., artifacts/COND_PUMP vs artifacts)
-        if self.artifact_root.name == equip:
-            # Path already includes equipment name (e.g., artifacts/COND_PUMP)
-            self.models_root = self.artifact_root / "models"
-        else:
-            # Generic path, need to append equipment (e.g., artifacts -> artifacts/COND_PUMP/models)
-            self.models_root = self.artifact_root / equip / "models"
-        
-        self.models_root.mkdir(parents=True, exist_ok=True)
+        if not sql_client or equip_id is None:
+            Console.error("[MODEL] SQL client and equip_id required for SQL-only mode")
     
     def get_latest_version(self) -> Optional[int]:
-        """
-        Get the latest model version number.
-        MP-COR-01: Enhanced logging for malformed directories.
+        """Get the latest model version number from SQL ModelRegistry."""
+        if not self.sql_client or self.equip_id is None:
+            Console.warn("[MODEL] Cannot get latest version - SQL client/equip_id missing")
+            return None
         
-        Returns:
-            Latest version number, or None if no models exist
-        """
-        import re
-        versions = []
-        version_pattern = re.compile(r"^v\d+$")
-        
-        # MP-COR-01: Check all subdirectories and log any that don't match expected pattern
-        for child in self.models_root.iterdir():
-            if not child.is_dir():
-                continue
-            
-            if not version_pattern.match(child.name):
-                Console.debug(f"[MODEL] Ignoring non-version directory: {child.name} (expected format: v<number>)")
-                continue
-            
-            try:
-                v_num = int(child.name[1:])  # Extract number from "v123"
-                versions.append(v_num)
-            except ValueError:
-                # Should not happen given regex check, but keep as safety net
-                Console.warn(f"[MODEL] Unexpected: matched pattern but failed int conversion: {child.name}")
-                continue
-        
-        return max(versions) if versions else None
+        return self._get_latest_version_from_sql()
     
     def get_next_version(self) -> int:
         """Get the next version number (latest + 1, or 1 if none exist)."""
         latest = self.get_latest_version()
         return 1 if latest is None else latest + 1
-    
-    def get_version_path(self, version: int) -> Path:
-        """Get the directory path for a specific version."""
-        return self.models_root / f"v{version}"
     
     def save_models(
         self,
@@ -581,141 +518,42 @@ class ModelVersionManager:
         version: Optional[int] = None
     ) -> int:
         """
-        Save trained models with versioning.
+        Save trained models to SQL ModelRegistry (SQL-ONLY MODE).
         
         Args:
             models: Dictionary of model artifacts to save
-                {
-                    "ar1_params": {...},
-                    "pca_model": PCA(...),
-                    "iforest_model": IsolationForest(...),
-                    "gmm_model": GaussianMixture(...),
-                    "regime_model": KMeans(...),
-                    "scalers": {...},
-                    "feature_medians": pd.Series(...)
-                }
-            metadata: Model metadata for manifest.json
+            metadata: Model metadata
             version: Explicit version number, or None to auto-increment
         
         Returns:
             Version number used
         """
+        if not self.sql_client or self.equip_id is None:
+            Console.error("[MODEL] Cannot save models - SQL client/equip_id missing")
+            raise ValueError("SQL client and equip_id required for model persistence")
+        
         # Determine version
         if version is None:
             version = self.get_next_version()
         
-        version_dir = self.get_version_path(version)
-        version_dir.mkdir(parents=True, exist_ok=True)
+        Console.info(f"[MODEL] Saving models to SQL ModelRegistry v{version}")
         
-        Console.info(f"[MODEL] Saving models to version v{version}")
-        
-        # SQL-46: Skip filesystem writes when in SQL-only mode
-        saved_files = []
-        if not self.sql_only_mode:
-            # Save each model artifact with atomic writes to prevent corruption
-            for model_name, model_obj in models.items():
-                if model_obj is None:
-                    Console.warn(f"[MODEL] Skipping None model: {model_name}")
-                    continue
-                
-                filepath = version_dir / f"{model_name}.joblib"
-                temp_fd = None
-                temp_path = None
-                try:
-                    # Use atomic write pattern: write to temp file, then replace
-                    temp_fd, temp_path = tempfile.mkstemp(
-                        dir=version_dir,
-                        prefix=f".{model_name}_",
-                        suffix=".tmp"
-                    )
-                    # Close the file descriptor and write using joblib
-                    os.close(temp_fd)
-                    temp_fd = None
-                    
-                    # Write to temporary file
-                    joblib.dump(model_obj, temp_path)
-                    
-                    # Atomic replace (works on Windows & POSIX)
-                    os.replace(temp_path, filepath)
-                    temp_path = None  # Prevent cleanup since replace succeeded
-                    
-                    saved_files.append(model_name)
-                    Console.info(f"[MODEL]   - Saved {model_name}.joblib")
-                except Exception as e:
-                    Console.warn(f"[MODEL]   - Failed to save {model_name}: {e}")
-                    # Clean up temp file if it still exists
-                    if temp_path and os.path.exists(temp_path):
-                        try:
-                            os.unlink(temp_path)
-                        except Exception:
-                            pass
-                finally:
-                    # Ensure file descriptor is closed if still open
-                    if temp_fd is not None:
-                        try:
-                            os.close(temp_fd)
-                        except Exception:
-                            pass
-        else:
-            Console.info(f"[MODEL] SQL-only mode: Skipping filesystem .joblib writes")
-            saved_files = list(models.keys())  # Track what we have for manifest
-        
-        # Create manifest with atomic write (skip in SQL-only mode)
+        # Create manifest
         manifest = {
             "version": version,
             "created_at": datetime.now().isoformat(),
             "equip": self.equip,
-            "saved_models": saved_files,
+            "saved_models": list(models.keys()),
             **metadata
         }
         
-        if not self.sql_only_mode:
-            manifest_path = version_dir / "manifest.json"
-            temp_fd = None
-            temp_path = None
-            try:
-                # Atomic write for manifest
-                temp_fd, temp_path = tempfile.mkstemp(
-                    dir=version_dir,
-                    prefix=".manifest_",
-                    suffix=".tmp"
-                )
-                # Write JSON to temp file
-                with os.fdopen(temp_fd, 'w') as f:
-                    json.dump(manifest, f, indent=2)
-                temp_fd = None  # Already closed by fdopen context manager
-                
-                # Atomic replace
-                os.replace(temp_path, manifest_path)
-                temp_path = None  # Prevent cleanup since replace succeeded
-            except Exception as e:
-                Console.warn(f"[MODEL] Failed to save manifest: {e}")
-                # Clean up temp file if it still exists
-                if temp_path and os.path.exists(temp_path):
-                    try:
-                        os.unlink(temp_path)
-                    except Exception:
-                        pass
-                raise
-            finally:
-                # Ensure file descriptor is closed if still open
-                if temp_fd is not None:
-                    try:
-                        os.close(temp_fd)
-                    except Exception:
-                        pass
-            
-            Console.info(f"[MODEL] Saved {len(saved_files)} models to v{version}")
-            Console.info(f"[MODEL] Manifest: {manifest_path}")
-        else:
-            Console.info(f"[MODEL] SQL-only mode: Manifest not written to filesystem")
-        
-        # If SQL client available, also save to ModelRegistry
-        if self.sql_client and self.equip_id is not None:
-            try:
-                self._save_models_to_sql(models, metadata, version)
-            except Exception as e:
-                Console.warn(f"[MODEL-SQL] Failed to save models to SQL (continuing with filesystem): {e}")
+        # Save to SQL
+        try:
+            self._save_models_to_sql(models, metadata, version)
+            Console.info(f"[MODEL] Saved {len(models)} models to SQL ModelRegistry v{version}")
+        except Exception as e:
+            Console.error(f"[MODEL-SQL] Failed to save models to SQL: {e}")
+            raise
         
         return version
     
@@ -818,6 +656,23 @@ class ModelVersionManager:
             except Exception:
                 pass
             raise
+
+    def _get_latest_version_from_sql(self) -> Optional[int]:
+        """Fetch the latest Version for this EquipID from ModelRegistry."""
+        try:
+            cur = self.sql_client.cursor()
+            cur.execute(
+                "SELECT MAX(Version) FROM ModelRegistry WHERE EquipID = ?",
+                (self.equip_id,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+        except Exception as e:
+            Console.warn(f"[MODEL] Failed to get latest version from SQL: {e}")
+            return None
     
     def _load_models_from_sql(self, version: int) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
         """
@@ -948,77 +803,19 @@ class ModelVersionManager:
                 Console.info("[MODEL] No cached models found - will train from scratch")
                 return None, None
         
-        # SQL-46: In SQL-only mode, only try SQL (no filesystem fallback)
-        if self.sql_only_mode:
-            if self.sql_client and self.equip_id is not None:
-                result = self._load_models_from_sql(version)
-                if result:
-                    sql_models, sql_manifest = result
-                    Console.info(f"[MODEL] ✓ Loaded from SQL successfully (SQL-only mode)")
-                    return sql_models, sql_manifest
-                else:
-                    Console.warn(f"[MODEL] SQL-only mode: Failed to load from SQL, no fallback available")
-                    return None, None
-            else:
-                Console.warn(f"[MODEL] SQL-only mode: No SQL client available")
-                return None, None
-        
-        # Try SQL first if available and preferred (dual-write mode)
-        if prefer_sql and self.sql_client and self.equip_id is not None:
-            result = self._load_models_from_sql(version)
-            if result:
-                sql_models, sql_manifest = result
-                Console.info(f"[MODEL] ✓ Loaded from SQL successfully (dual-write mode)")
-                # Optionally enrich with filesystem manifest if available
-                version_dir = self.get_version_path(version)
-                manifest_path = version_dir / "manifest.json"
-                if manifest_path.exists():
-                    try:
-                        with open(manifest_path, "r") as f:
-                            fs_manifest = json.load(f)
-                            # Merge filesystem manifest (prioritize SQL metadata)
-                            sql_manifest = {**fs_manifest, **sql_manifest, "source": "sql+filesystem"}
-                    except Exception as e:
-                        Console.warn(f"[MODEL] Failed to load filesystem manifest for enrichment: {e}")
-                
-                return sql_models, sql_manifest
-            else:
-                Console.info(f"[MODEL] SQL load failed, falling back to filesystem")
-        
-        # Fallback to filesystem
-        version_dir = self.get_version_path(version)
-        if not version_dir.exists():
-            Console.warn(f"[MODEL] Version v{version} not found")
+        # SQL-ONLY MODE: Load from SQL ModelRegistry only
+        if not self.sql_client or self.equip_id is None:
+            Console.warn("[MODEL] Cannot load models - SQL client/equip_id missing")
             return None, None
         
-        Console.info(f"[MODEL] Loading models from filesystem v{version}")
-        
-        # Load manifest
-        manifest_path = version_dir / "manifest.json"
-        if not manifest_path.exists():
-            Console.warn(f"[MODEL] Manifest not found for v{version}")
+        result = self._load_models_from_sql(version)
+        if result:
+            sql_models, sql_manifest = result
+            Console.info(f"[MODEL] ✓ Loaded from SQL ModelRegistry successfully")
+            return sql_models, sql_manifest
+        else:
+            Console.warn(f"[MODEL] Failed to load models from SQL ModelRegistry")
             return None, None
-        
-        with open(manifest_path, "r") as f:
-            manifest = json.load(f)
-        
-        # Load all model files
-        models = {}
-        for model_name in manifest.get("saved_models", []):
-            filepath = version_dir / f"{model_name}.joblib"
-            if not filepath.exists():
-                Console.warn(f"[MODEL]   - Missing {model_name}.joblib")
-                continue
-            
-            try:
-                models[model_name] = joblib.load(filepath)
-                Console.info(f"[MODEL]   - Loaded {model_name}.joblib")
-            except Exception as e:
-                Console.warn(f"[MODEL]   - Failed to load {model_name}: {e}")
-        
-        Console.info(f"[MODEL] Loaded {len(models)} models from filesystem")
-        
-        return models, manifest
     
     def update_models_incremental(
         self,
