@@ -1,21 +1,19 @@
 # core/acm_main.py
 from __future__ import annotations
 
-import hashlib
 import argparse
-import sys
+import hashlib
 import json
-import time
-import threading
-from datetime import datetime
 import os
-from typing import Any, Dict, List, Tuple, Optional, Sequence
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
-import joblib
-import uuid
 
 # --- import guard to support both `python -m core.acm_main` and `python core\acm_main.py`
 try:
@@ -48,6 +46,7 @@ from core.sql_logger import SqlLogSink
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
 from core.episode_culprits_writer import write_episode_culprits_enhanced
+from core.config_history_writer import log_auto_tune_changes
 
 # SQL client (optional; only used in SQL mode)
 try:
@@ -609,7 +608,7 @@ def _calculate_adaptive_thresholds(
                 train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
                 train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
                 config_signature=config_sig,
-                notes=f"Auto-calculated warning threshold (50% of alert)"
+                notes="Auto-calculated warning threshold (50% of alert)"
             )
             Console.info("[THRESHOLD] SQL write completed for fused_warn_z")
             
@@ -818,9 +817,9 @@ def main() -> None:
         cfg["runtime"] = {}
     cfg["runtime"]["batch_num"] = batch_num
 
-    Console.info(f"[ACM] Inside Main Now")
+    Console.info("[ACM] Inside Main Now")
     Console.info(f"--- Starting ACM V5 for {equip} ---")
-    Console.info(f"[CFG] storage_backend=SQL_ONLY")
+    Console.info("[CFG] storage_backend=SQL_ONLY")
     Console.info(f"[CFG] batch_mode={BATCH_MODE}  |  continuous_learning={CONTINUOUS_LEARNING}")
     if CONTINUOUS_LEARNING:
         Console.info(f"[CFG] model_update_interval={model_update_interval}  |  threshold_update_interval={threshold_update_interval}")
@@ -836,6 +835,8 @@ def main() -> None:
     run_dir = Path(".")  # Dummy - never created
     tables_dir = Path(".")  # Dummy - never created
     art_root = Path(".")  # Dummy artifact root for SQL-ONLY mode (no filesystem persistence)
+    models_dir = Path(".")  # Dummy - never created (SQL-only mode)
+    stable_models_dir = Path(".")  # Dummy - never created (SQL-only mode)
 
     # Heartbeat gating
     heartbeat_on = bool(cfg.get("runtime", {}).get("heartbeat", True))
@@ -860,11 +861,12 @@ def main() -> None:
     regime_quality_ok: bool = True
 
     if args.clear_cache:
-        if model_cache_path.exists():
+        # SQL-ONLY MODE: model_cache_path is None, so clear-cache is a no-op
+        if model_cache_path is not None and model_cache_path.exists():
             model_cache_path.unlink()
             Console.info(f"[CACHE] Cleared model cache at {model_cache_path}")
         else:
-            Console.info(f"[CACHE] No model cache found at {model_cache_path} to clear.")
+            Console.info("[CACHE] SQL-only mode: No model cache to clear (models stored in SQL).")
 
     # Heuristic ETAs (adjust via config if needed)
     eta_load = float((cfg.get("hints") or {}).get("eta_load_sec", 30))
@@ -1609,7 +1611,7 @@ def main() -> None:
                     )
                 ):
                     refit_requested = True
-                    Console.warn(f"[MODEL] Refit requested by quality policy; bypassing cache this run")
+                    Console.warn("[MODEL] Refit requested by quality policy; bypassing cache this run")
                     try:
                         refit_flag_path.unlink()
                     except Exception:
@@ -1749,7 +1751,7 @@ def main() -> None:
                                     pass
                         else:
                             # Task 10: Enhanced logging for retrain trigger reasons
-                            Console.warn(f"[MODEL] ✗ Cached models invalid, retraining required:")
+                            Console.warn("[MODEL] Cached models invalid, retraining required:")
                             for reason in invalid_reasons:
                                 Console.warn(f"[MODEL]   - {reason}")
                             cached_models = None
@@ -2101,7 +2103,7 @@ def main() -> None:
                         
                         df_config.to_csv(config_table_path, index=False)
                         Console.info(f"[ADAPTIVE] Config updated: {config_table_path}")
-                        Console.info(f"[ADAPTIVE] Rerun ACM to apply new parameters (current run continues with old params)")
+                        Console.info("[ADAPTIVE] Rerun ACM to apply new parameters (current run continues with old params)")
                         
                     except Exception as e:
                         Console.error(f"[ADAPTIVE] Failed to update config CSV: {e}")
@@ -2133,10 +2135,10 @@ def main() -> None:
                     )
                     
                     if success:
-                        Console.info(f"[ADAPTIVE] Config changes written to SQL:ACM_ConfigHistory")
-                        Console.info(f"[ADAPTIVE] Rerun ACM to apply new parameters (current run continues with old params)")
+                        Console.info("[ADAPTIVE] Config changes written to SQL:ACM_ConfigHistory")
+                        Console.info("[ADAPTIVE] Rerun ACM to apply new parameters (current run continues with old params)")
                     else:
-                        Console.warn(f"[ADAPTIVE] Failed to write config changes to SQL")
+                        Console.warn("[ADAPTIVE] Failed to write config changes to SQL")
                         
                 except Exception as e:
                     Console.error(f"[ADAPTIVE] Failed to update config SQL: {e}")
@@ -2367,7 +2369,7 @@ def main() -> None:
                     
                     # Aggregate triggers
                     if config_changed:
-                        Console.warn(f"[MODEL] Config changed - forcing retraining")
+                        Console.warn("[MODEL] Config changed - forcing retraining")
                         force_retrain = True
                     elif model_age_trigger or regime_quality_trigger:
                         force_retrain = True
@@ -3165,7 +3167,7 @@ def main() -> None:
                     
                     if tuning_actions:
                         Console.info(f"[AUTO-TUNE] Applied {len(tuning_actions)} parameter adjustments: {', '.join(tuning_actions)}")
-                        Console.info(f"[AUTO-TUNE] Retraining required on next run to apply changes")
+                        Console.info("[AUTO-TUNE] Retraining required on next run to apply changes")
                         
                         # Log config changes to ACM_ConfigHistory
                         # Task 9: Check if auto_retrain.on_tuning_change is enabled to trigger refit
@@ -3187,7 +3189,7 @@ def main() -> None:
                         except Exception as log_err:
                             Console.warn(f"[CONFIG_HIST] Failed to log auto-tune changes: {log_err}")
                     else:
-                        Console.info(f"[AUTO-TUNE] No automatic parameter adjustments available")
+                        Console.info("[AUTO-TUNE] No automatic parameter adjustments available")
 
                     # Persist refit marker/request for next run
                     # SQL mode: write to ACM_RefitRequests; File mode: write flag file
@@ -3258,7 +3260,7 @@ def main() -> None:
                         Console.warn(f"[MODEL] Failed to write refit flag: {re}")
                 
                 else:
-                    Console.info(f"[AUTO-TUNE] Model quality acceptable, no tuning needed")
+                    Console.info("[AUTO-TUNE] Model quality acceptable, no tuning needed")
                     
             except Exception as e:
                 Console.warn(f"[AUTO-TUNE] Autonomous tuning failed: {e}")
@@ -3959,7 +3961,7 @@ def main() -> None:
                         enable_sql=True,  # FORCE SQL WRITES
                         sensor_context=sensor_context
                     )
-                    Console.info(f"[ANALYTICS] Successfully generated all comprehensive analytics tables")
+                    Console.info("[ANALYTICS] Successfully generated all comprehensive analytics tables")
                     Console.info(f"[ANALYTICS] Written {result.get('sql_tables', 0)} tables to SQL database")
                 except Exception as e:
                     Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
