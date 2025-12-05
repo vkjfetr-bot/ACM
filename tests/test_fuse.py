@@ -493,7 +493,12 @@ class TestAnalyticalCorrectness:
     """Tests specifically for analytical correctness issues."""
 
     def test_zscore_preserves_relative_ordering(self):
-        """Z-score transformation should preserve relative ordering."""
+        """Z-score transformation should preserve relative ordering.
+        
+        Note: We access _zscore directly here to verify a core mathematical property
+        that underpins the fusion algorithm. This is acceptable for unit testing
+        internal algorithm correctness.
+        """
         x = np.array([1.0, 5.0, 3.0, 7.0, 2.0])
         z = Fuser._zscore(x)
 
