@@ -41,6 +41,16 @@ class ForecastingState:
     retrigger_reason: Optional[str] = None # Why retraining was triggered
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    
+    @property
+    def model_params(self) -> Dict[str, Any]:
+        """Alias for model_coefficients_json for backward compatibility"""
+        return self.model_coefficients_json
+    
+    @model_params.setter
+    def model_params(self, value: Dict[str, Any]):
+        """Setter for model_params alias"""
+        self.model_coefficients_json = value
 
 
 class StateManager:
@@ -224,10 +234,10 @@ class StateManager:
                     cur.execute(
                         """
                         INSERT INTO dbo.ACM_ForecastingState 
-                        (EquipID, ModelCoefficientsJson, LastForecastJson, LastRetrainTime, 
+                        (EquipID, StateVersion, ModelCoefficientsJson, LastForecastJson, LastRetrainTime, 
                          TrainingDataHash, DataVolumeAnalyzed, RecentMAE, RecentRMSE, RetriggerReason,
                          CreatedAt, UpdatedAt)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), GETDATE())
+                        VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), GETDATE())
                         """,
                         (
                             state.equip_id,

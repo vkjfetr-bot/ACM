@@ -163,8 +163,12 @@ Key paths (ParamPath) and reasoning:
 - **OMR (`core/omr.py`):**
   - Multivariate reconstruction error via PLS/linear ensemble/PCA. Features auto model selection, diagnostics, per-sensor contribution extraction, z clipping, min sample guards.
 - **Forecasting/RUL (`core/forecasting.py`, `core/rul_estimator.py`, `core/enhanced_rul_estimator.py`):**
-  - AR1 per-sensor residual detector, data hash for retrain decisions, SQL/file dual persistence of forecast state.
-  - Enhanced RUL: multiple degradation models (AR1, exponential, Weibull-inspired, linear), learning state, attribution, maintenance recommendations, hazard smoothing.
+  - **Health & Failure Forecasting:** Exponential smoothing with bootstrap confidence intervals, adaptive parameters (alpha/beta), quality gates (blocks SPARSE/FLAT/NOISY but allows GAPPY data for historical replay)
+  - **Physical Sensor Forecasting:** Predicts future values for top 10 changing sensors using LinearTrend or VAR (Vector AutoRegression) methods; includes confidence intervals and regime awareness
+  - **RUL Estimation:** Monte Carlo simulations with multiple degradation paths (trajectory, hazard, energy-based); P10/P50/P90 bounds with confidence scoring
+  - **State Management:** Persistent forecast state with version tracking (ACM_ForecastingState); retrain decisions based on RMSE degradation, data quality, and time thresholds
+  - AR1 per-sensor residual detector, data hash for retrain decisions, SQL/file dual persistence of forecast state
+  - Enhanced RUL: multiple degradation models (AR1, exponential, Weibull-inspired, linear), learning state, attribution, maintenance recommendations, hazard smoothing
 - **Drift (`core/drift.py`):** CUSUMDetector with z calibration; report plot generator.
 - **Regimes (`core/regimes.py`):** feature basis builder, auto-k (silhouette/Calinski-Harabasz), smoothing, transient detection via ROC energy, health labeling, persistence to joblib/json, loading with version guard.
 - **Fusion (`core/fuse.py`):** `Fuser.fuse` (weighted sum with z clipping), `detect_episodes` (hysteresis thresholds), `ScoreCalibrator`, `tune_detector_weights` (PR-AUC against episode windows).
@@ -207,7 +211,7 @@ Key paths (ParamPath) and reasoning:
 - **Input data:** `data/` for CSV baselines/batches; SQL mode pulls from historian tables configured per equipment.
 - **Artifacts (diagnostic/file mode):** `artifacts/{EQUIP}/run_<timestamp>/` with `scores.csv`, `drift.csv`, `episodes.csv`, `tables/*.csv`, `charts/*.png`, `meta.json`.
 - **Models/cache:** `artifacts/{EQUIP}/models/` containing `detectors.joblib`, regime model joblib/json, forecast state, baseline buffer.
-- **Grafana dashboards:** `grafana_dashboards/` holds JSON panels and docs; operator suite includes `acm_ops_command_center`, `acm_asset_health_deep_dive`, `acm_failure_maintenance_planner`, `acm_sensor_regime_forensics`, `acm_ops_model_observability` (all JSON import-ready).
+- **Grafana dashboards:** Active work is on `grafana_dashboards/ACM Claude Generated To Be Fixed.json`. All other dashboards are archived under `grafana_dashboards/archive/` (see `grafana_dashboards/archive/ARCHIVE_LOG.md` for the move list) to keep the working set lean.
 
 ---
 

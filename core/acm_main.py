@@ -21,7 +21,11 @@ import uuid
 try:
     # import ONLY core modules relatively
     from . import regimes, drift, fuse
-    from . import correlation, outliers, river_models  # New modules
+    from . import correlation, outliers
+    try:
+        from . import river_models  # Optional: streaming models (requires river library)
+    except ImportError:
+        river_models = None  # Graceful fallback if river not installed
     from . import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
     from . import fast_features
     from .forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
@@ -30,7 +34,11 @@ except ImportError:
     import pathlib
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
     from core import regimes, drift, fuse
-    from core import correlation, outliers, river_models
+    from core import correlation, outliers
+    try:
+        from core import river_models  # Optional: streaming models (requires river library)
+    except ImportError:
+        river_models = None  # Graceful fallback if river not installed
     from core import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
     from core.forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from core import storage  # Use output_manager instead
@@ -942,8 +950,7 @@ def main() -> None:
     output_manager = OutputManager(
         sql_client=sql_client,
         run_id=run_id,
-        equip_id=equip_id,
-        sql_only_mode=SQL_MODE
+        equip_id=equip_id
     )
     # Diagnostic: verify SQL client attached and healthy
     if output_manager.sql_client is None:
@@ -1157,12 +1164,30 @@ def main() -> None:
                             used = f"baseline_buffer.csv ({len(train)} rows)"
                     
                     # Fallback: seed TRAIN from leading portion of SCORE
+                    # CRITICAL: Ensure no overlap with score window to prevent train=(0,N) issue
                     if used is None:
                         if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
                             seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
                             train = score_numeric.iloc[:seed_n].copy()
                             train_numeric = train.copy()
                             used = f"score head ({seed_n} rows)"
+                            
+                            # Remove overlap: train must end BEFORE score starts
+                            # This prevents the overlap warning and empty train after filtering
+                            tr_end_ts = pd.to_datetime(train_numeric.index.max())
+                            sc_start_ts = pd.to_datetime(score_numeric.index.min())
+                            if tr_end_ts >= sc_start_ts:
+                                # All score head rows overlap with score - use HALF of score for train instead
+                                split_idx = len(score_numeric) // 2
+                                if split_idx > min_points:
+                                    train = score_numeric.iloc[:split_idx].copy()
+                                    train_numeric = train.copy()
+                                    score_numeric = score_numeric.iloc[split_idx:].copy()
+                                    score = score_numeric.copy()
+                                    used = f"score split (train={split_idx} rows, no overlap)"
+                                    Console.info(f"[BASELINE] Split score to avoid overlap: train={split_idx}, score={len(score_numeric)}")
+                                else:
+                                    Console.warn(f"[BASELINE] Cannot split score (too few rows: {len(score_numeric)}), accepting overlap")
                     
                     if used:
                         Console.info(f"[BASELINE] Using adaptive baseline for TRAIN: {used}")
@@ -1338,29 +1363,46 @@ def main() -> None:
                                 except UnicodeEncodeError:
                                     Console.info(f"[DATA] Wrote data quality summary (path: {tables_dir / 'data_quality.csv'})")
                             
-                            # SQL mode: ACM_DataQuality bulk insert
+                            # SQL mode: ACM_DataQuality bulk insert - DQ-01: Write all quality metrics
                             elif sql_client and SQL_MODE:
                                 insert_records = [
                                     (
-                                        run_id,
-                                        int(equip_id),
-                                        "data_quality",
-                                        "OK",  # CheckResult: default OK unless issues detected
                                         rec["sensor"],
                                         rec.get("train_count", 0),
                                         rec.get("train_nulls", 0),
                                         rec.get("train_null_pct", 0.0),
+                                        rec.get("train_std", 0.0),
+                                        rec.get("train_longest_gap"),
+                                        rec.get("train_flatline_span"),
+                                        rec.get("train_min_ts"),
+                                        rec.get("train_max_ts"),
                                         rec.get("score_count", 0),
                                         rec.get("score_nulls", 0),
-                                        rec.get("score_null_pct", 0.0)
+                                        rec.get("score_null_pct", 0.0),
+                                        rec.get("score_std", 0.0),
+                                        rec.get("score_longest_gap"),
+                                        rec.get("score_flatline_span"),
+                                        rec.get("score_min_ts"),
+                                        rec.get("score_max_ts"),
+                                        rec.get("interp_method"),
+                                        rec.get("sampling_secs"),
+                                        rec.get("notes"),
+                                        run_id,
+                                        int(equip_id),
+                                        "data_quality",
+                                        "OK"  # CheckResult: default OK unless issues detected
                                     )
                                     for rec in records
                                 ]
                                 insert_sql = """
                                     INSERT INTO dbo.ACM_DataQuality 
-                                    (RunID, EquipID, CheckName, CheckResult, sensor, train_count, train_nulls, train_null_pct, 
-                                     score_count, score_nulls, score_null_pct)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    (sensor, train_count, train_nulls, train_null_pct, train_std, 
+                                     train_longest_gap, train_flatline_span, train_min_ts, train_max_ts,
+                                     score_count, score_nulls, score_null_pct, score_std,
+                                     score_longest_gap, score_flatline_span, score_min_ts, score_max_ts,
+                                     interp_method, sampling_secs, notes,
+                                     RunID, EquipID, CheckName, CheckResult)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """
                                 try:
                                     with sql_client.cursor() as cur:
@@ -1719,8 +1761,7 @@ def main() -> None:
                         equip=equip, 
                         artifact_root=Path(art_root),
                         sql_client=sql_client if SQL_MODE or dual_mode else None,
-                        equip_id=equip_id if SQL_MODE or dual_mode else None,
-                        sql_only_mode=SQL_MODE
+                        equip_id=equip_id if SQL_MODE or dual_mode else None
                     )
                     cached_models, cached_manifest = model_manager.load_models()
                     
@@ -2226,11 +2267,14 @@ def main() -> None:
 
         # ===== Online Learning with River (Optional) =====
         if cfg.get("river", {}).get("enabled", False):
-            with T.section("score.river_ar"):
-                river_cfg = cfg.get("river", {}) or {}
-                streaming_detector = river_models.RiverTAD(cfg=river_cfg)
-                # Note: River models are stateful and process data row-by-row.
-                frame["river_hst_raw"] = streaming_detector.score(score)
+            if river_models is not None:
+                with T.section("score.river_ar"):
+                    river_cfg = cfg.get("river", {}) or {}
+                    streaming_detector = river_models.RiverTAD(cfg=river_cfg)
+                    # Note: River models are stateful and process data row-by-row.
+                    frame["river_hst_raw"] = streaming_detector.score(score)
+            else:
+                Console.warn("[RIVER] River streaming models disabled - library not installed (pip install river)")
 
         # ===== 4) Regimes (Run before calibration to enable regime-aware thresholds) =====
         train_regime_labels = None
@@ -2379,6 +2423,23 @@ def main() -> None:
                     if force_retrain:
                         cached_models = None
                         ar1_detector = pca_detector = mhal_detector = iforest_detector = gmm_detector = None
+                        # Re-fit detectors immediately after invalidation
+                        Console.info("[MODEL] Re-fitting detectors due to forced retraining...")
+                        if ar1_enabled:
+                            ar1_detector = forecasting.AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
+                        if pca_enabled:
+                            pca_cfg = (cfg.get("models", {}).get("pca", {}) or {})
+                            pca_detector = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
+                            pca_train_spe, pca_train_t2 = pca_detector.score(train)
+                        if mhal_enabled:
+                            mhal_cfg = (cfg.get("models", {}).get("mahl", {}) or {})
+                            mhal_detector = correlation.MahalanobisDetector(mhal_cfg=mhal_cfg).fit(train)
+                        if iforest_enabled:
+                            iforest_cfg = (cfg.get("models", {}).get("iforest", {}) or {})
+                            iforest_detector = outliers.IsolationForestDetector(iforest_cfg=iforest_cfg).fit(train)
+                        if gmm_enabled:
+                            gmm_cfg = (cfg.get("models", {}).get("gmm", {}) or {})
+                            gmm_detector = outliers.GaussianMixtureDetector(gmm_cfg=gmm_cfg).fit(train)
                         
                 except Exception as e:
                     Console.warn(f"[MODEL] Quality assessment failed: {e}")
@@ -2396,8 +2457,7 @@ def main() -> None:
                         equip=equip, 
                         artifact_root=Path(art_root),
                         sql_client=sql_client if SQL_MODE or dual_mode else None,
-                        equip_id=equip_id if SQL_MODE or dual_mode else None,
-                        sql_only_mode=SQL_MODE
+                        equip_id=equip_id if SQL_MODE or dual_mode else None
                     )
                     
                     # Collect all models
@@ -3807,11 +3867,23 @@ def main() -> None:
                             # Health timeline (if we have fused scores)
                             if 'fused' in frame.columns:
                                 health_df = pd.DataFrame({
-                                    'timestamp': frame.index.strftime('%Y-%m-%d %H:%M:%S'),
-                                    'fused_z': frame['fused'],
-                                    'health_index': 100.0 / (1.0 + frame['fused'] ** 2)
+                                    'Timestamp': frame.index,
+                                    'HealthIndex': 100.0 / (1.0 + frame['fused'] ** 2),
+                                    'HealthZone': pd.cut(
+                                        100.0 / (1.0 + frame['fused'] ** 2),
+                                        bins=[-1, 50, 70, 85, 101],
+                                        labels=['ALERT', 'WATCH', 'CAUTION', 'GOOD']
+                                    ),
+                                    'FusedZ': frame['fused'],
+                                    'RunID': run_id,
+                                    'EquipID': equip_id
                                 })
-                                output_manager.write_dataframe(health_df, tables_dir / "health_timeline.csv")
+                                output_manager.write_dataframe(
+                                    health_df,
+                                    tables_dir / "health_timeline.csv",
+                                    sql_table="ACM_HealthTimeline",  # CRITICAL FIX: Enable SQL write for RUL dependency
+                                    add_created_at=True
+                                )
                                 table_count += 1
                             
                             # Regime timeline (if available)
@@ -3872,73 +3944,8 @@ def main() -> None:
                             Console.warn(f"[FORECAST] Forecast failed: {forecast_results.get('error', 'Unknown error')}")
                             
                     except Exception as e:
-                        Console.warn(f"[FORECAST] Unified forecasting engine failed: {e}")
-                        # Fallback to legacy forecasting (backward compatibility)
-                        try:
-                            Console.info("[FORECAST] Falling back to legacy forecasting module")
-                            rul_tables = forecasting.estimate_rul(
-                                tables_dir=tables_dir,
-                                equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                                run_id=str(run_id) if run_id is not None else None,
-                                config=cfg,
-                                sql_client=getattr(output_manager, "sql_client", None),
-                                output_manager=output_manager,
-                            )
-                            if rul_tables:
-                                Console.info(f"[FORECAST-LEGACY] Generated {len(rul_tables)} RUL/forecast tables")
-                        except Exception as e2:
-                            Console.warn(f"[FORECAST-LEGACY] Legacy forecasting also failed: {e2}")
-
-                    # === ENHANCED FORECASTING ===
-                    try:
-                        Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
-                        # Extract latest batch time from frame.index for proper sliding window queries
-                        batch_time = None
-                        if 'frame' in locals() and frame is not None and not frame.empty:
-                            try:
-                                batch_time = pd.to_datetime(frame.index.max())
-                            except Exception:
-                                pass
-                        metrics = forecasting.run_and_persist_enhanced_forecasting(
-                            sql_client=output_manager.sql_client,
-                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                            run_id=str(run_id) if run_id is not None else None,
-                            config=cfg,
-                            output_manager=output_manager,
-                            tables_dir=tables_dir,
-                            equip=equip,
-                            current_batch_time=batch_time,
-                            sensor_data=score if 'score' in locals() else None,
-                        )
-                        if metrics:
-                            Console.info(
-                                "[ENHANCED_FORECAST] "
-                                f"RUL={metrics.get('rul_hours', 0.0):.1f}h, "
-                                f"MaxFailProb={metrics.get('max_failure_probability', 0.0)*100:.1f}%, "
-                                f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
-                                f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
-                            )
-                            # Write retrain metadata (ACM_RunMetadata)
-                            try:
-                                if getattr(output_manager, 'sql_client', None):
-                                    from core.run_metadata_writer import write_retrain_metadata
-                                    write_retrain_metadata(
-                                        sql_client=output_manager.sql_client,
-                                        run_id=str(run_id),
-                                        equip_id=int(equip_id),
-                                        equip_name=str(equip),
-                                        retrain_decision=bool(metrics.get('retrain_needed', False)),
-                                        retrain_reason=str(metrics.get('retrain_reason', 'N/A')),
-                                        forecast_state_version=int(metrics.get('forecast_state_version', 0)),
-                                        model_age_batches=None,
-                                        forecast_rmse=metrics.get('forecast_rmse'),
-                                        forecast_mae=metrics.get('forecast_mae'),
-                                        forecast_mape=metrics.get('forecast_mape'),
-                                    )
-                            except Exception as e:
-                                Console.warn(f"[RUN_META] Failed to write ACM_RunMetadata (file-mode block): {e}")
-                    except Exception as e:
-                        Console.warn(f"[ENHANCED_FORECAST] Enhanced forecasting failed: {e}")
+                        Console.error(f"[FORECAST] Unified forecasting engine failed: {e}")
+                        Console.error(f"[FORECAST] RUL estimation skipped - ForecastEngine must be fixed")
                 except Exception as e:
                     Console.warn(f"[OUTPUTS] Output generation failed: {e}")
 
@@ -3999,76 +4006,13 @@ def main() -> None:
                     Console.warn(f"[FORECAST] Forecast failed: {forecast_results.get('error', 'Unknown error')}")
                     
             except Exception as e:
-                Console.warn(f"[FORECAST] Unified forecasting engine (SQL mode) failed: {e}")
-                # Fallback to legacy forecasting (backward compatibility)
-                try:
-                    Console.info("[FORECAST] Falling back to legacy forecasting module (SQL mode)")
-                    rul_tables = forecasting.estimate_rul(
-                        tables_dir=tables_dir,
-                        equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                        run_id=str(run_id) if run_id is not None else None,
-                        config=cfg,
-                        sql_client=getattr(output_manager, "sql_client", None),
-                        output_manager=output_manager,
-                    )
-                    if rul_tables:
-                        Console.info(f"[FORECAST-LEGACY] Generated {len(rul_tables)} RUL/forecast tables")
-                except Exception as e2:
-                    Console.warn(f"[FORECAST-LEGACY] Legacy forecasting also failed: {e2}")
+                Console.error(f"[FORECAST] Unified forecasting engine (SQL mode) failed: {e}")
+                Console.error(f"[FORECAST] RUL estimation skipped - ForecastEngine must be fixed")
 
         except Exception as e:
             Console.warn(f"[OUTPUTS] Comprehensive analytics generation failed: {e}")
 
-        # === ENHANCED FORECASTING (SQL MODE) ===
-        try:
-            Console.info("[ENHANCED_FORECAST] Running enhanced forecasting (SQL mode)")
-            # Extract latest batch time from frame.index for proper sliding window queries
-            batch_time = None
-            if 'frame' in locals() and frame is not None and not frame.empty:
-                try:
-                    batch_time = pd.to_datetime(frame.index.max())
-                except Exception:
-                    pass
-            metrics = forecasting.run_and_persist_enhanced_forecasting(
-                sql_client=output_manager.sql_client,
-                equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                run_id=str(run_id) if run_id is not None else None,
-                config=cfg,
-                output_manager=output_manager,
-                tables_dir=tables_dir,
-                equip=equip,
-                current_batch_time=batch_time,
-                sensor_data=score if 'score' in locals() else None,
-            )
-            if metrics:
-                Console.info(
-                    "[ENHANCED_FORECAST] "
-                    f"RUL={metrics.get('rul_hours', 0.0):.1f}h, "
-                    f"MaxFailProb={metrics.get('max_failure_probability', 0.0)*100:.1f}%, "
-                    f"MaintenanceRequired={metrics.get('maintenance_required', False)}, "
-                    f"Urgency={metrics.get('urgency_score', 0.0):.0f}/100"
-                )
-                # Write retrain metadata (ACM_RunMetadata)
-                try:
-                    if getattr(output_manager, 'sql_client', None):
-                        from core.run_metadata_writer import write_retrain_metadata
-                        write_retrain_metadata(
-                            sql_client=output_manager.sql_client,
-                            run_id=str(run_id),
-                            equip_id=int(equip_id),
-                            equip_name=str(equip),
-                            retrain_decision=bool(metrics.get('retrain_needed', False)),
-                            retrain_reason=str(metrics.get('retrain_reason', 'N/A')),
-                            forecast_state_version=int(metrics.get('forecast_state_version', 0)),
-                            model_age_batches=None,
-                            forecast_rmse=metrics.get('forecast_rmse'),
-                            forecast_mae=metrics.get('forecast_mae'),
-                            forecast_mape=metrics.get('forecast_mape'),
-                        )
-                except Exception as e:
-                    Console.warn(f"[RUN_META] Failed to write ACM_RunMetadata (SQL-mode block): {e}")
-        except Exception as e:
-            Console.warn(f"[ENHANCED_FORECAST] Enhanced forecasting (SQL mode) failed: {e}")
+        # Legacy enhanced_forecasting removed - ForecastEngine (v10) handles all forecasting
 
         # === SQL-SPECIFIC ARTIFACT WRITING (BATCHED TRANSACTION) ===
         # Batch all SQL writes in a single transaction to prevent connection pool exhaustion
@@ -4150,9 +4094,9 @@ def main() -> None:
                 if len(episodes):
                     df_events = pd.DataFrame({
                         "EquipID": int(equip_id),
-                        "StartEntryDateTime": episodes["start_ts"],
-                        "EndEntryDateTime": episodes["end_ts"],
-                        "Severity": episodes.get("severity", pd.Series(["info"]*len(episodes))),
+                        "start_ts": episodes["start_ts"],
+                        "end_ts": episodes["end_ts"],
+                        "severity": episodes.get("severity", pd.Series(["info"]*len(episodes))),
                         "Detector": "FUSION",
                         "Score": episodes.get("score", np.nan),
                         "ContributorsJSON": episodes.get("culprits", "{}"),

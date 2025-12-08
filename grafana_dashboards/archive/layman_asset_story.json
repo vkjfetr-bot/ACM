@@ -1,0 +1,182 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "layman-asset-story",
+    "title": "Asset Storyboard",
+    "timezone": "browser",
+    "schemaVersion": 36,
+    "version": 0,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "1. Current Health",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "time_series",
+            "datasource": { "type": "mssql", "uid": "ACM-SQL" },
+            "rawSql": "SELECT TOP 1 Timestamp AS time, HealthIndex AS value FROM dbo.ACM_HealthTimeline_Latest WHERE EquipID = $__equip ORDER BY Timestamp DESC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "color": {
+              "mode": "thresholds",
+              "thresholds": { "mode": "absolute", "steps": [ { "value": null, "color": "green" }, { "value": 70, "color": "orange" }, { "value": 50, "color": "red" } ] }
+            }
+          }
+        },
+        "options": {
+          "orientation": "auto",
+          "textMode": "value",
+          "graphMode": "none"
+        }
+      },
+      {
+        "id": 2,
+        "title": "2. Sensor Suite (Normalized)",
+        "type": "graph",
+        "gridPos": { "x": 0, "y": 5, "w": 12, "h": 7 },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "time_series",
+            "datasource": { "type": "mssql", "uid": "ACM-SQL" },
+            "rawSql": "SELECT Timestamp AS time, NormValue AS value, SensorName AS metric FROM dbo.ACM_SensorNormalized_TS WHERE EquipID = $__equip AND RunID = $__run ORDER BY Timestamp ASC"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": -3,
+            "max": 3,
+            "unit": "none"
+          }
+        },
+        "options": {
+          "legend": { "displayMode": "list", "placement": "bottom" },
+          "tooltip": { "mode": "single" }
+        }
+      },
+      {
+        "id": 3,
+        "title": "3. When Will It Fail?",
+        "type": "timeseries",
+        "gridPos": { "x": 12, "y": 0, "w": 12, "h": 5 },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "time_series",
+            "datasource": { "type": "mssql", "uid": "ACM-SQL" },
+            "rawSql": "SELECT Timestamp AS time, FailureProbability * 100 AS value FROM dbo.ACM_FailureForecast_TS WHERE EquipID = $__equip ORDER BY Timestamp ASC"
+          }
+        ],
+        "options": {
+          "legend": { "displayMode": "table" },
+          "tooltip": { "mode": "single" }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": { "mode": "palette-classic" },
+            "thresholds": { "mode": "absolute", "steps": [ { "value": null }, { "value": 50 }, { "value": 80 } ] }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "4. Failure Causes (Top Sensors)",
+        "type": "table",
+        "gridPos": { "x": 12, "y": 5, "w": 12, "h": 6 },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "datasource": { "type": "mssql", "uid": "ACM-SQL" },
+            "rawSql": "SELECT SensorName, ContributionPct, FailurePattern FROM dbo.ACM_FailureCausation WHERE EquipID = $__equip AND RunID = $__run ORDER BY ContributionPct DESC"
+          }
+        ],
+        "options": {
+          "showHeader": true,
+          "showLines": true,
+          "fields": {
+            "SensorName": { "title": "Sensor" },
+            "ContributionPct": { "title": "Impact %", "unit": "percent" },
+            "FailurePattern": { "title": "Pattern" }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "5. Maintenance Plan?",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 12, "w": 6, "h": 4 },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "datasource": { "type": "mssql", "uid": "ACM-SQL" },
+            "rawSql": "SELECT TOP 1 MaintenanceRequired, UrgencyScore FROM dbo.ACM_EnhancedMaintenanceRecommendation WHERE EquipID = $__equip AND RunID = $__run ORDER BY CreatedAt DESC"
+          }
+        ],
+        "options": {
+          "textMode": "value",
+          "orientation": "horizontal",
+          "colorMode": "value",
+          "graphMode": "none"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              { "type": "value", "options": { "0": { "text": "No", "color": "green" }, "1": { "text": "Yes", "color": "orange" } } }
+            ]
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Maintenance Window Insight",
+        "type": "table",
+        "gridPos": { "x": 6, "y": 12, "w": 12, "h": 4 },
+        "targets": [
+          {
+            "refId": "A",
+            "format": "table",
+            "datasource": { "type": "mssql", "uid": "ACM-SQL" },
+            "rawSql": "SELECT TOP 1 PreferredWindowStart, PreferredWindowEnd, Confidence FROM dbo.ACM_EnhancedMaintenanceRecommendation WHERE EquipID = $__equip AND RunID = $__run ORDER BY CreatedAt DESC"
+          }
+        ],
+        "options": {
+          "showHeader": true,
+          "showLines": false
+        }
+      },
+      {
+        "id": 7,
+        "title": "Narrative Canvas",
+        "type": "text",
+        "gridPos": { "x": 18, "y": 12, "w": 6, "h": 4 },
+        "options": {
+          "mode": "html",
+          "content": "<div style='padding:16px;background:#0f172a;border-radius:8px;color:#e2e8f0;font-family: \"Inter\", sans-serif;box-shadow:0 8px 24px rgba(15,23,42,0.4);'><h3 style='margin:0;font-size:18px;color:#38bdf8;'>Layman's Brief</h3><p style='margin-top:8px;font-size:14px;line-height:1.5;'>Health is tracked live; when the health curve dips below 70, lives and equipment may need intervention. Sensors are normalized so you can see relative bravery instead of raw volts. Failure probabilities tell you how soon we expect trouble, and detector contributions highlight which parts of the machine are likely to misbehave. When the orange maintenance block says \"Yes,\" you know the crew should suit up.</p></div>"
+        }
+      },
+      {
+        "id": 8,
+        "title": "Normalization Legend",
+        "type": "text",
+        "gridPos": { "x": 12, "y": 16, "w": 12, "h": 2 },
+        "options": {
+          "mode": "html",
+          "content": "<div style='padding:12px;background:#f1f5f9;border-radius:6px;font-family:\"Inter\",sans-serif;'><strong>Normalized sensor band:</strong> Green=tracking fine, Orange=watch, Red=outlier. The valley indicates rising risk. Hover the sensor time series for exact values.</div>"
+        }
+      }
+    ]
+  },
+  "overwrite": true
+}

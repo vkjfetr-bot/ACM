@@ -128,13 +128,25 @@ class ForecastEngine:
             # Step 1: Load health timeline
             health_df, data_quality = self._load_health_timeline()
             
-            if health_df is None or data_quality != HealthQuality.OK:
+            if health_df is None:
+                Console.warn(f"[ForecastEngine] No health data available; skipping forecast")
+                return {
+                    'success': False,
+                    'error': 'No health data available',
+                    'data_quality': 'NONE'
+                }
+            
+            # Allow GAPPY data (historical replay) but block SPARSE/FLAT/NOISY
+            if data_quality in [HealthQuality.SPARSE, HealthQuality.FLAT, HealthQuality.NOISY]:
                 Console.warn(f"[ForecastEngine] Poor data quality: {data_quality.value}; skipping forecast")
                 return {
                     'success': False,
                     'error': f'Poor data quality: {data_quality.value}',
                     'data_quality': data_quality.value
                 }
+            
+            if data_quality == HealthQuality.GAPPY:
+                Console.warn(f"[ForecastEngine] GAPPY data detected - proceeding with available data (historical replay mode)")
             
             # Step 2: Load persistent state
             state = self.state_mgr.load_state(self.equip_id)
@@ -146,11 +158,11 @@ class ForecastEngine:
             
             # Step 4: Check auto-tuning trigger
             current_volume = len(health_df)
-            state.data_volume += current_volume
-            should_tune = self.config_mgr.should_tune(self.equip_id, state.data_volume)
+            state.data_volume_analyzed += current_volume
+            should_tune = self.config_mgr.should_tune(self.equip_id, state.data_volume_analyzed)
             
             if should_tune:
-                Console.info(f"[ForecastEngine] Auto-tuning triggered at DataVolume={state.data_volume}")
+                Console.info(f"[ForecastEngine] Auto-tuning triggered at DataVolume={state.data_volume_analyzed}")
                 # TODO: Implement grid search tuning in future PR
                 # For now, use configured values
             
@@ -207,7 +219,7 @@ class ForecastEngine:
             run_id=self.run_id,
             output_manager=self.output_manager,
             min_train_samples=int(self.config_mgr.get_config(self.equip_id, 'min_train_samples', 200)),
-            max_gap_hours=float(self.config_mgr.get_config(self.equip_id, 'max_gap_hours', 6.0))
+            max_gap_hours=float(self.config_mgr.get_config(self.equip_id, 'max_gap_hours', 720.0))  # 30 days for historical replay
         )
         
         health_df, quality = tracker.load_from_sql()
@@ -405,9 +417,23 @@ class ForecastEngine:
             # ACM_RUL: RUL summary with sensor attributions
             top3_sensors = sensor_attributions[:3] if len(sensor_attributions) >= 3 else sensor_attributions
             
+            # Calculate predicted failure time
+            current_time = datetime.now()
+            rul_hours = forecast_results['rul_p50']
+            predicted_failure_time = current_time + timedelta(hours=float(rul_hours))
+            
+            # Calculate confidence based on data quality and variance
+            # Higher confidence with more data and lower variance
+            confidence = 0.8 if forecast_results.get('data_points', 0) > 1000 else 0.6
+            if forecast_results.get('rul_std', 0) > 0:
+                # Reduce confidence if variance is high relative to mean
+                cv = forecast_results['rul_std'] / max(forecast_results['rul_mean'], 1.0)
+                confidence = confidence * (1.0 - min(cv * 0.5, 0.4))
+            
             df_rul = pd.DataFrame({
                 'EquipID': [self.equip_id],
                 'RunID': [self.run_id],
+                'RUL_Hours': [forecast_results['rul_p50']],  # FIX: Primary RUL estimate (P50)
                 'P10_LowerBound': [forecast_results['rul_p10']],
                 'P50_Median': [forecast_results['rul_p50']],
                 'P90_UpperBound': [forecast_results['rul_p90']],
@@ -416,6 +442,10 @@ class ForecastEngine:
                 'MTTF_Hours': [forecast_results['mttf_hours']],
                 'FailureProbability': [forecast_results['failure_prob_horizon']],
                 'CurrentHealth': [forecast_results['current_health']],
+                'Confidence': [float(confidence)],  # FIX: Add confidence score
+                'FailureTime': [predicted_failure_time],  # FIX: Add predicted failure timestamp
+                'NumSimulations': [1000],  # FIX: Monte Carlo simulation count
+                'Method': ['Multipath'],  # FIX: Add forecasting method
                 'TopSensor1': [top3_sensors[0].sensor_name if len(top3_sensors) > 0 else None],
                 'TopSensor1Contribution': [top3_sensors[0].failure_contribution if len(top3_sensors) > 0 else None],
                 'TopSensor2': [top3_sensors[1].sensor_name if len(top3_sensors) > 1 else None],

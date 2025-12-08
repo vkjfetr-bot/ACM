@@ -1976,6 +1976,8 @@ def run_enhanced_forecasting_sql(
         prev_smoothing_params = prev_state.model_params.get("smoothing", {}) or {}
 
     # --- Load detector scores from ACM_Scores_Wide ---
+    # FORECAST-FIX-01: Load ALL historical scores for equipment (not just current RunID)
+    # This provides full historical context for forecasting models
     try:
         cur = sql_client.cursor()
         cur.execute(
@@ -1985,10 +1987,10 @@ def run_enhanced_forecasting_sql(
                    iforest_z, gmm_z, cusum_z, drift_z,
                    hst_z, river_hst_z, fused
             FROM dbo.ACM_Scores_Wide
-            WHERE EquipID = ? AND RunID = ?
+            WHERE EquipID = ?
             ORDER BY Timestamp
             """,
-            (equip_id, run_id),
+            (equip_id,),
         )
         rows = cur.fetchall() or []
         cur.close()
@@ -2681,15 +2683,28 @@ def run_enhanced_forecasting_sql(
     # --- 5. RUL Summary ---
     try:
         predicted_failure_time = health_series.index[-1] + pd.Timedelta(hours=rul_hours)
+
+        def _timedelta_hours(diff: Any) -> float:
+            """
+            Convert various timedelta-like objects (Timedelta, np.timedelta64, scalar seconds,
+            or single-element Series) into hours safely.
+            """
+            if isinstance(diff, pd.Series):
+                if diff.empty:
+                    return 0.0
+                diff = diff.iloc[0]
+            td = pd.Timedelta(diff)
+            return float(td.total_seconds() / 3600.0)
+
         ci_lower_rul = None
         ci_upper_rul = None
         if not health_forecast_df.empty:
             lower_hit = health_forecast_df[health_forecast_df["CI_Lower"] <= failure_threshold]
             upper_hit = health_forecast_df[health_forecast_df["CI_Upper"] <= failure_threshold]
             if not lower_hit.empty:
-                ci_lower_rul = float((lower_hit.iloc[0]["Timestamp"] - health_series.index[-1]).total_seconds() / 3600.0)
+                ci_lower_rul = _timedelta_hours(lower_hit.iloc[0]["Timestamp"] - health_series.index[-1])
             if not upper_hit.empty:
-                ci_upper_rul = float((upper_hit.iloc[0]["Timestamp"] - health_series.index[-1]).total_seconds() / 3600.0)
+                ci_upper_rul = _timedelta_hours(upper_hit.iloc[0]["Timestamp"] - health_series.index[-1])
         lower_bound_val = ci_lower_rul if ci_lower_rul is not None else max(0.0, rul_hours - 12.0)
         upper_bound_val = ci_upper_rul if ci_upper_rul is not None else rul_hours + 12.0
         
@@ -2740,6 +2755,36 @@ def run_enhanced_forecasting_sql(
     
     if not rul_summary_df.empty:
         tables["rul_summary"] = rul_summary_df
+
+    # Build maintenance recommendation window from RUL + failure probability
+    maintenance_recommendation_df = pd.DataFrame()
+    try:
+        now_ts = current_batch_time or datetime.now()
+        window_start = now_ts + timedelta(hours=max(rul_hours - 24.0, 0.0))
+        window_end = window_start + timedelta(hours=24.0)
+        prob_at_end = float(max_failure_prob)
+
+        comment = (
+            f"Schedule within window; RUL ~{rul_hours:.1f}h, "
+            f"max failure probability {prob_at_end:.1%}"
+        )
+
+        maintenance_recommendation_df = pd.DataFrame(
+            [
+                {
+                    "EarliestMaintenance": now_ts,
+                    "PreferredWindowStart": window_start,
+                    "PreferredWindowEnd": window_end,
+                    "FailureProbAtWindowEnd": prob_at_end,
+                    "Comment": comment,
+                }
+            ]
+        )
+    except Exception as mr_ex:
+        Console.warn(f"[ENHANCED_FORECAST] Maintenance recommendation generation failed: {mr_ex}")
+
+    if not maintenance_recommendation_df.empty:
+        tables["maintenance_recommendation"] = maintenance_recommendation_df
 
     # --- 7. Build metrics summary ---
     metrics = {
@@ -2889,9 +2934,10 @@ def run_and_persist_enhanced_forecasting(
         "health_forecast_ts": "ACM_HealthForecast",
         "failure_forecast_ts": "ACM_FailureForecast",
         "failure_hazard_ts": "ACM_FailureForecast",
-        "detector_forecast_ts": "ACM_FailureForecast",
+        "detector_forecast_ts": "ACM_DetectorForecast_TS",
         "sensor_forecast_ts": "ACM_SensorForecast",
         "rul_summary": "ACM_RUL",
+        "maintenance_recommendation": "ACM_MaintenanceRecommendation",
     }
     ef_csv_map = {
         "health_forecast_ts": "health_forecast.csv",
@@ -2900,6 +2946,7 @@ def run_and_persist_enhanced_forecasting(
         "detector_forecast_ts": "detector_forecast.csv",
         "sensor_forecast_ts": "sensor_forecast.csv",
         "rul_summary": "rul_summary.csv",
+        "maintenance_recommendation": "maintenance_recommendation.csv",
     }
     timestamp_columns = {
         "health_forecast_ts": ["Timestamp"],
@@ -2907,6 +2954,11 @@ def run_and_persist_enhanced_forecasting(
         "failure_hazard_ts": ["Timestamp"],
         "detector_forecast_ts": ["Timestamp"],
         "sensor_forecast_ts": ["Timestamp"],
+        "maintenance_recommendation": [
+            "EarliestMaintenance",
+            "PreferredWindowStart",
+            "PreferredWindowEnd",
+        ],
     }
 
     enable_sql = getattr(output_manager, "sql_client", None) is not None

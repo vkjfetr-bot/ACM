@@ -7,27 +7,67 @@ Maps detector algorithm codes to user-friendly descriptions for dashboards and r
 # Detector code to human-readable label mapping
 DETECTOR_LABELS = {
     'ar1_z': 'Time-Series Anomaly (AR1)',
+    'ar1': 'Time-Series Anomaly (AR1)',
     'pca_spe_z': 'Correlation Break (PCA-SPE)',
-    'pca_t2_z': 'Multivariate Outlier (PCA-T²)',
+    'pca_spe': 'Correlation Break (PCA-SPE)',
+    'pca_t2_z': 'Multivariate Outlier (PCA-T2)',
+    'pca_t2': 'Multivariate Outlier (PCA-T2)',
     'iforest_z': 'Rare State (IsolationForest)',
+    'iforest': 'Rare State (IsolationForest)',
     'gmm_z': 'Density Anomaly (GMM)',
+    'gmm': 'Density Anomaly (GMM)',
     'mhal_z': 'Multivariate Distance (Mahalanobis)',
+    'mhal': 'Multivariate Distance (Mahalanobis)',
     'omr_z': 'Baseline Consistency (OMR)',
+    'omr': 'Baseline Consistency (OMR)',
     'river_hst_z': 'Streaming Anomaly (River)',
-    'fused_z': 'Fused Multi-Detector'
+    'river_hst': 'Streaming Anomaly (River)',
+    'fused_z': 'Fused Multi-Detector',
+    'fused': 'Fused Multi-Detector'
+}
+
+# SQL-safe labels (ASCII only, no special chars except spaces/parens/hyphens)
+DETECTOR_LABELS_SQL = {
+    'ar1_z': 'Time-Series Anomaly (AR1)',
+    'ar1': 'Time-Series Anomaly (AR1)',
+    'pca_spe_z': 'Correlation Break (PCA-SPE)',
+    'pca_spe': 'Correlation Break (PCA-SPE)',
+    'pca_t2_z': 'Multivariate Outlier (PCA-T2)',
+    'pca_t2': 'Multivariate Outlier (PCA-T2)',
+    'iforest_z': 'Rare State (IsolationForest)',
+    'iforest': 'Rare State (IsolationForest)',
+    'gmm_z': 'Density Anomaly (GMM)',
+    'gmm': 'Density Anomaly (GMM)',
+    'mhal_z': 'Multivariate Distance (Mahalanobis)',
+    'mhal': 'Multivariate Distance (Mahalanobis)',
+    'omr_z': 'Baseline Consistency (OMR)',
+    'omr': 'Baseline Consistency (OMR)',
+    'river_hst_z': 'Streaming Anomaly (River)',
+    'river_hst': 'Streaming Anomaly (River)',
+    'fused_z': 'Fused Multi-Detector',
+    'fused': 'Fused Multi-Detector'
 }
 
 # Short labels for compact displays (dashboard tables)
 DETECTOR_LABELS_SHORT = {
     'ar1_z': 'Time-Series (AR1)',
+    'ar1': 'Time-Series (AR1)',
     'pca_spe_z': 'Correlation (PCA)',
+    'pca_spe': 'Correlation (PCA)',
     'pca_t2_z': 'Outlier (PCA-T²)',
+    'pca_t2': 'Outlier (PCA-T²)',
     'iforest_z': 'Rare State (IF)',
+    'iforest': 'Rare State (IF)',
     'gmm_z': 'Density (GMM)',
+    'gmm': 'Density (GMM)',
     'mhal_z': 'Distance (Mahal)',
+    'mhal': 'Distance (Mahal)',
     'omr_z': 'Baseline (OMR)',
+    'omr': 'Baseline (OMR)',
     'river_hst_z': 'Streaming (River)',
-    'fused_z': 'Fused'
+    'river_hst': 'Streaming (River)',
+    'fused_z': 'Fused',
+    'fused': 'Fused'
 }
 
 # Detailed descriptions for tooltips/documentation
@@ -57,13 +97,14 @@ DETECTOR_CATEGORIES = {
 }
 
 
-def get_detector_label(detector_code: str, use_short: bool = False) -> str:
+def get_detector_label(detector_code: str, use_short: bool = False, sql_safe: bool = False) -> str:
     """
     Get human-readable label for detector code.
     
     Args:
         detector_code: Raw detector code (e.g., 'ar1_z', 'pca_spe_z')
         use_short: Use short label for compact displays
+        sql_safe: Use SQL-safe label (ASCII only, no Unicode chars like ²)
     
     Returns:
         Human-readable label (e.g., 'Time-Series Anomaly (AR1)')
@@ -74,8 +115,16 @@ def get_detector_label(detector_code: str, use_short: bool = False) -> str:
         
         >>> get_detector_label('ar1_z', use_short=True)
         'Time-Series (AR1)'
+        
+        >>> get_detector_label('pca_t2_z', sql_safe=True)
+        'Multivariate Outlier (PCA-T2)'
     """
-    labels = DETECTOR_LABELS_SHORT if use_short else DETECTOR_LABELS
+    if sql_safe:
+        labels = DETECTOR_LABELS_SQL
+    elif use_short:
+        labels = DETECTOR_LABELS_SHORT
+    else:
+        labels = DETECTOR_LABELS
     return labels.get(detector_code, detector_code)
 
 

@@ -33,7 +33,7 @@ ALLOWED_TABLES = {
     'ACM_DetectorCorrelation', 'ACM_CalibrationSummary',
     'ACM_RegimeTransitions', 'ACM_RegimeDwellStats',
     'ACM_DriftEvents', 'ACM_CulpritHistory', 'ACM_EpisodeMetrics',
-    'ACM_DataQuality', 'ACM_Scores_Long', 'ACM_Drift_TS',
+    'ACM_DataQuality', 'ACM_Scores_Long', 'ACM_DriftSeries',
     'ACM_PCA_Models', 'ACM_PCA_Loadings', 'ACM_PCA_Metrics',
     'ACM_Run_Stats', 'ACM_SinceWhen',
     'ACM_SensorHotspots', 'ACM_SensorHotspotTimeline',

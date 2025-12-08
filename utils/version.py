@@ -18,7 +18,7 @@ Release Management:
 """
 
 __version__ = "10.0.0"
-__version_date__ = "2025-12-04"
+__version_date__ = "2025-12-05"
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))
@@ -90,7 +90,7 @@ def format_version_for_output(context=""):
 
 # v10.0.0 Release Notes (from v9.0.0)
 RELEASE_NOTES_V10 = """
-ACM v10.0.0 - MAJOR RELEASE: Unified Forecasting Architecture (2025-12-04)
+ACM v10.0.0 - MAJOR RELEASE: Unified Forecasting with Physical Sensor Predictions (2025-12-05)
 
 BREAKING CHANGES:
   ⚠ Forecasting system completely refactored into 8 specialized modules
@@ -111,6 +111,18 @@ ARCHITECTURE OVERHAUL:
     - sensor_attribution.py (120 lines): Sensor ranking and contributions
     - metrics.py (150 lines): Forecast error and RUL accuracy tracking
 
+PHYSICAL SENSOR FORECASTING (NEW):
+  ✓ Predicts future values for critical physical sensors (Motor Current, Bearing Temperature, Pressure, etc.)
+  ✓ Auto-selects top 10 sensors by variability (coefficient of variation)
+  ✓ Two forecasting methods:
+    - LinearTrend: Simple extrapolation with residual confidence intervals
+    - VAR (Vector AutoRegression): Multivariate forecasting for correlated sensors
+  ✓ Per-sensor bounds enforcement (configurable min/max values)
+  ✓ Regime-aware forecasting (forecasts tagged with operating regime)
+  ✓ 7-day forecast horizon (168 hours) with hourly granularity
+  ✓ ACM_SensorForecast table: 1,680 rows per run (168 timestamps × 10 sensors)
+  ✓ Dashboard visualization: time series + summary table with trend indicators
+
 SQL SCHEMA CONSOLIDATION:
   ✓ Dropped 12 old forecast tables:
     - ACM_HealthForecast_TS, ACM_FailureForecast_TS, ACM_RUL_TS
@@ -118,9 +130,10 @@ SQL SCHEMA CONSOLIDATION:
     - ACM_EnhancedFailureProbability_TS, ACM_FailureCausation
     - ACM_EnhancedMaintenanceRecommendation, ACM_RecommendedActions
     - ACM_HealthForecast_Continuous, ACM_FailureHazard_TS
-  ✓ Created 4 new tables:
+  ✓ Created 5 new tables:
     - ACM_HealthForecast (RunID, EquipID, Timestamp, ForecastHealth, CI, Method)
     - ACM_FailureForecast (RunID, EquipID, Timestamp, FailureProb, Survival, Hazard)
+    - ACM_SensorForecast (RunID, EquipID, Timestamp, SensorName, ForecastValue, CI, Method)
     - ACM_RUL (RunID, EquipID, RUL_Hours, P10/P50/P90, Confidence, TopSensors)
     - ACM_ForecastingState (EquipID, StateVersion, ModelState, RowVersion for locking)
 

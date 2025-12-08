@@ -1,19 +1,20 @@
-# ACM V9 - Autonomous Asset Condition Monitoring
+# ACM V10 - Autonomous Asset Condition Monitoring
 
-ACM V9 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, and flexible outputs so that engineers can understand what is changing, when it started, and which sensors or regimes are responsible.
+ACM V10 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, predictive forecasting, and flexible outputs so that engineers can understand what is changing, when it started, which sensors or regimes are responsible, and what will happen next.
 
-**Current Version:** v9.0.0 - Production Release
+**Current Version:** v10.0.0 - Production Release with Enhanced Forecasting
 
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
-### v9.0.0 Release Highlights
-- **Detector Label Consistency (CRIT-04)**: All detectors now use standardized human-readable format ("Multivariate Outlier (PCA-T²)") across all outputs and dashboards
-- **Database Cleanup**: Removed 9 unused/backup tables; reduced from 85 to 79 total tables
-- **Equipment Standardization**: All 26 runs use consistent equipment codes aligned with Equipment master table
-- **Run Completion Tracking**: All runs have valid CompletedAt timestamps; 4 incomplete runs marked with NOOP status
-- **Procedure Fixes**: Fixed usp_ACM_FinalizeRun to properly reference ACM_Runs table
-- **Enhanced Testing**: Comprehensive validation suite with 30+ unit tests and 8 SQL validation checks
-- **Professional Versioning**: Implemented semantic versioning (v9.0.0) with proper git tag management
+### v10.0.0 Release Highlights
+- **Unified Forecasting Engine**: Health forecasts, RUL predictions, failure probability, and physical sensor forecasts consolidated into 4 tables (down from 12+)
+- **Sensor Value Forecasting**: Predicts future values for critical physical sensors (Motor Current, Bearing Temperature, Pressure, etc.) with confidence intervals using linear trend and VAR methods
+- **Enhanced RUL Predictions**: Monte Carlo simulations with probabilistic models, multiple calculation paths (trajectory, hazard, energy-based)
+- **Smart Coldstart Mode**: Progressive data loading with exponential window expansion for sparse historical data
+- **Gap Tolerance**: Increased from 6h to 720h (30 days) to support historical replay with large gaps
+- **Forecast State Management**: Persistent model state with version tracking and optimistic locking (ACM_ForecastingState)
+- **Adaptive Configuration**: Per-equipment auto-tuning with configuration history tracking (ACM_AdaptiveConfig)
+- **Detector Label Consistency**: Standardized human-readable format across all outputs and dashboards
 
 ## What ACM is
 
@@ -25,7 +26,8 @@ ACM watches every asset through several analytical "heads" instead of a single a
 2. **Feature engineering:** `core.fast_features` delivers vectorized transforms (windowing, FFT, correlations, etc.) and can leverage Polars acceleration when available.
 3. **Detectors:** Each head (Mahalanobis, PCA SPE/T2, Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual, correlation/drift monitors, CUSUM-style trackers) produces interpretable scores, and episode culprits highlight which tag groups caused the response.
 4. **Fusion & tuning:** `core.fuse` blends scores under configurable weights while `core.analytics.AdaptiveTuning` adjusts thresholds and logs every change via `core.config_history_writer`.
-5. **Outputs:** `core.output_manager.OutputManager` writes CSV/PNG artifacts, SQL run logs, Grafana-ready dashboards, and stores models in `artifacts/{equip}/models`. SQL runners can call `usp_ACM_StartRun`/`usp_ACM_FinalizeRun` when the config enables it.
+5. **Forecasting & RUL:** `core.forecasting` generates health trajectories, failure probability curves, RUL estimates, and physical sensor forecasts. Supports exponential smoothing, Monte Carlo simulations, and multivariate VAR for sensor predictions.
+6. **Outputs:** `core.output_manager.OutputManager` writes CSV/PNG artifacts, SQL run logs, Grafana-ready dashboards, forecast tables (ACM_HealthForecast, ACM_FailureForecast, ACM_SensorForecast, ACM_RUL), and stores models in `artifacts/{equip}/models`. SQL runners can call `usp_ACM_StartRun`/`usp_ACM_FinalizeRun` when the config enables it.
 
 ## Running ACM
 
@@ -86,6 +88,6 @@ ACM decides between file and SQL mode based on the configuration (see `core/sql_
 - `configs/`: configuration tables plus SQL connection templates.
 - `data/`: default baseline/batch CSVs used in smoke tests.
 - `scripts/sql/`: helpers and integration tests for SQL mode.
-- `docs/` and `grafana_dashboards/`: design notes, integration plans, dashboards, and operator guides.
+- `docs/` and `grafana_dashboards/`: design notes, integration plans, dashboards, and operator guides. Only `grafana_dashboards/ACM Claude Generated To Be Fixed.json` remains active; all other dashboards live under `grafana_dashboards/archive/` with a move log in `grafana_dashboards/archive/ARCHIVE_LOG.md`.
 
 For more detail on SQL integration, dashboards, or specific detectors, consult the markdown files under `docs/` and `grafana_dashboards/docs/`.

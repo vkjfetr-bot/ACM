@@ -57,7 +57,7 @@ ALLOWED_TABLES = {
     'ACM_RegimeDwellStats','ACM_DriftEvents','ACM_EpisodeMetrics',
     'ACM_EpisodeDiagnostics','ACM_EpisodeCulprits',
     'ACM_DataQuality',
-    'ACM_Scores_Long','ACM_Drift_TS',
+    'ACM_Scores_Long','ACM_DriftSeries',
     'ACM_Anomaly_Events','ACM_Regime_Episodes',
     'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
     'ACM_Run_Stats','ACM_SinceWhen',
@@ -65,6 +65,7 @@ ALLOWED_TABLES = {
     # v10.0.0 Forecasting & RUL tables (consolidated from 12→4 tables)
     'ACM_HealthForecast',        # Replaces ACM_HealthForecast_TS, ACM_HealthForecast_Continuous
     'ACM_FailureForecast',       # Replaces ACM_FailureForecast_TS, ACM_FailureHazard_TS, ACM_EnhancedFailureProbability_TS
+    'ACM_SensorForecast',        # Physical sensor value forecasts (Motor Current, Temperature, etc.)
     'ACM_RUL',                   # Replaces ACM_RUL_TS, ACM_RUL_Summary, ACM_RUL_Attribution
     'ACM_ForecastingState',      # New: persistent model state with optimistic locking
     # Adaptive configuration (v10.0.0)
@@ -378,20 +379,16 @@ class OutputManager:
                  enable_batching: bool = True,
                  sql_health_cache_seconds: float = 60.0,
                  max_io_workers: int = 8,
-                 base_output_dir: Optional[Union[str, Path]] = None,
                  batch_flush_rows: int = 1000,
                  batch_flush_seconds: float = 30.0,
-                 max_in_flight_futures: int = 50,
-                 sql_only_mode: bool = False):
+                 max_in_flight_futures: int = 50):
         self.sql_client = sql_client
         self.run_id = run_id
         self.equip_id = equip_id
-        self.sql_only_mode = sql_only_mode
         self.batch_size = batch_size
         self._batched_transaction_active = False
         self.enable_batching = enable_batching
         self.max_io_workers = max_io_workers
-        self.base_output_dir = Path(base_output_dir).resolve() if base_output_dir else None
         
         # OUT-18: Batch flush triggers and backpressure
         self.batch_flush_rows = batch_flush_rows  # Flush after N rows
@@ -681,10 +678,7 @@ class OutputManager:
                 raise ValueError("[DATA] SQL mode requires equipment_name parameter")
             return self._load_data_from_sql(cfg, equipment_name, start_utc, end_utc)
         
-        # OM-CSV-01: Prevent CSV reads when OutputManager is configured for SQL-only mode
-        if self.sql_only_mode and not sql_mode:
-            raise ValueError("[DATA] OutputManager is in sql_only_mode but load_data called with sql_mode=False. "
-                           "CSV reads are not allowed. Use sql_mode=True or configure OutputManager with sql_only_mode=False.")
+        # ACM is SQL-only mode - CSV operations removed
         
         # CSV mode: Cold-start mode: If no training data, use first N% of score data for training
         cold_start_mode = False
@@ -1297,6 +1291,8 @@ class OutputManager:
                         inserted = self._upsert_health_forecast(sql_df)
                     elif sql_table == "ACM_FailureForecast":
                         inserted = self._upsert_failure_forecast(sql_df)
+                    elif sql_table == "ACM_DetectorForecast_TS":
+                        inserted = self._upsert_detector_forecast_ts(sql_df)
                     elif sql_table == "ACM_SensorForecast":
                         inserted = self._upsert_sensor_forecast(sql_df)
                     elif sql_table == "ACM_RUL":
@@ -1743,29 +1739,29 @@ class OutputManager:
                 "MeanInterarrivalHours": 0.0
             }])
         
-        # Calculate duration in hours for each episode
+        # Get durations directly from duration_hours or duration_h column (already calculated)
         durations = []
-        interarrivals = []
-        for i, ep in episodes_df.iterrows():
-            _start_val = ep.get("start_timestamp") or ep.get("StartTime")
-            _end_val = ep.get("end_timestamp") or ep.get("EndTime")
-            start = pd.to_datetime(_start_val) if _start_val is not None else pd.NaT
-            end = pd.to_datetime(_end_val) if _end_val is not None else pd.NaT
-            if isinstance(start, pd.Timestamp) and isinstance(end, pd.Timestamp):
-                dur_hours = (end - start).total_seconds() / 3600.0
-                durations.append(dur_hours)
+        if 'duration_hours' in episodes_df.columns:
+            durations = episodes_df['duration_hours'].dropna().tolist()
+        elif 'duration_h' in episodes_df.columns:
+            durations = episodes_df['duration_h'].dropna().tolist()
         
-        # Calculate interarrival times (time between episode starts)
-        starts = []
-        for i, ep in episodes_df.iterrows():
-            _start_val = ep.get("start_timestamp") or ep.get("StartTime")
-            start = pd.to_datetime(_start_val) if _start_val is not None else pd.NaT
-            if isinstance(start, pd.Timestamp):
-                starts.append(start)
-        if len(starts) > 1:
-            starts_sorted = sorted(starts)
-            for i in range(1, len(starts_sorted)):
-                interarrival_hours = (starts_sorted[i] - starts_sorted[i-1]).total_seconds() / 3600.0
+        # Calculate interarrival times using peak_timestamp
+        timestamps = []
+        timestamp_col = 'peak_timestamp' if 'peak_timestamp' in episodes_df.columns else 'PeakTimestamp'
+        if timestamp_col in episodes_df.columns:
+            for i, ep in episodes_df.iterrows():
+                ts_val = ep.get(timestamp_col)
+                ts = pd.to_datetime(ts_val) if ts_val is not None else pd.NaT
+                if isinstance(ts, pd.Timestamp):
+                    timestamps.append(ts)
+        
+        # Calculate interarrival times (time between consecutive episodes)
+        interarrivals = []
+        if len(timestamps) > 1:
+            timestamps_sorted = sorted(timestamps)
+            for i in range(1, len(timestamps_sorted)):
+                interarrival_hours = (timestamps_sorted[i] - timestamps_sorted[i-1]).total_seconds() / 3600.0
                 interarrivals.append(interarrival_hours)
         
         # Compute statistics
@@ -1779,8 +1775,8 @@ class OutputManager:
         
         # Calculate rate per day (episodes per 24 hours)
         rate_per_day = 0.0
-        if len(starts) >= 2:
-            time_span_hours = (max(starts) - min(starts)).total_seconds() / 3600.0
+        if len(timestamps) >= 2:
+            time_span_hours = (max(timestamps) - min(timestamps)).total_seconds() / 3600.0
             if time_span_hours > 0:
                 rate_per_day = (total_eps / time_span_hours) * 24.0
         
@@ -2031,7 +2027,7 @@ class OutputManager:
             return 0
     
     def write_drift_ts(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write drift timeseries to ACM_Drift_TS table."""
+        """Write drift timeseries to ACM_DriftSeries table."""
         if not self._check_sql_health():
             return 0
             
@@ -2063,7 +2059,7 @@ class OutputManager:
             sql_df['Timestamp'] = pd.to_datetime(sql_df['Timestamp']).dt.tz_localize(None)
             sql_df = sql_df.dropna(subset=['DriftValue'])
             
-            return self._bulk_insert_sql('ACM_Drift_TS', sql_df)
+            return self._bulk_insert_sql('ACM_DriftSeries', sql_df)
             
         except Exception as e:
             Console.warn(f"[OUTPUT] write_drift_ts failed: {e}")
@@ -2077,11 +2073,11 @@ class OutputManager:
         try:
             sql_df = df.copy()
             
-            # Map columns for ACM_Anomaly_Events
+            # Map columns for ACM_Anomaly_Events (table uses StartTime/EndTime, not StartTs/EndTs)
             column_map = {
                 'episode_id': 'EpisodeID',
-                'start_ts': 'StartTs',
-                'end_ts': 'EndTs',
+                'start_ts': 'StartTime',
+                'end_ts': 'EndTime',
                 'peak_fused_z': 'PeakScore',
                 'severity': 'Severity',
                 'status': 'Status'
@@ -2097,17 +2093,17 @@ class OutputManager:
             
             # Add defaults
             if 'Severity' not in sql_df.columns:
-                sql_df['Severity'] = 'MEDIUM'
+                sql_df['Severity'] = 'info'
             if 'Status' not in sql_df.columns:
                 sql_df['Status'] = 'OPEN'
             
             # Handle timestamps
-            for ts_col in ['StartTs', 'EndTs']:
+            for ts_col in ['StartTime', 'EndTime']:
                 if ts_col in sql_df.columns:
                     sql_df[ts_col] = pd.to_datetime(sql_df[ts_col]).dt.tz_localize(None)
             
             # Select final columns
-            final_cols = ['RunID', 'EquipID', 'StartTs', 'EndTs', 'PeakScore', 'Severity', 'Status']
+            final_cols = ['RunID', 'EquipID', 'StartTime', 'EndTime', 'Severity']
             sql_df = sql_df[[c for c in final_cols if c in sql_df.columns]]
             
             return self._bulk_insert_sql('ACM_Anomaly_Events', sql_df)
@@ -2216,8 +2212,9 @@ class OutputManager:
         try:
             # New style: extract metrics from PCA detector
             if pca_detector is not None:
+                # PCA may be None if insufficient samples (< 2) during fit - this is expected
                 if not hasattr(pca_detector, 'pca') or pca_detector.pca is None:
-                    Console.warn("[OUTPUT] PCA detector not fitted, skipping metrics write")
+                    # Silently skip - not an error, just insufficient training data
                     return 0
                     
                 # Build metrics in long format for SQL schema:
@@ -2465,7 +2462,7 @@ class OutputManager:
     def _upsert_sensor_forecast(self, df: pd.DataFrame) -> int:
         """
         FORECAST-WRITE-04: Write sensor forecast using bulk insert.
-        v10 schema: ACM_SensorForecast has (RunID, EquipID, SensorName, Timestamp, ForecastValue, CI_Lower, CI_Upper, Method, CreatedAt)
+        v10 schema: ACM_SensorForecast has (RunID, EquipID, SensorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, RegimeLabel, CreatedAt)
         """
         if df.empty or self.sql_client is None:
             return 0
@@ -2658,20 +2655,6 @@ class OutputManager:
                 self._bulk_insert_sql('ACM_Episodes', summary)
             except Exception as summary_err:
                 Console.warn(f"[EPISODES] Failed to write summary to ACM_Episodes: {summary_err}")
-        
-        # OUT-28: Emit episodes severity mapping JSON
-        if not self.sql_only_mode:
-            try:
-                severity_mapping = self._generate_episode_severity_mapping(episodes_for_output)
-                tables_dir = run_dir / "tables"
-                tables_dir.mkdir(exist_ok=True)
-                severity_path = tables_dir / "episodes_severity_mapping.json"
-                with open(severity_path, 'w') as f:
-                    import json
-                    json.dump(severity_mapping, f, indent=2)
-                Console.info(f"[EPISODES] Generated severity mapping: {severity_path}")
-            except Exception as e:
-                Console.warn(f"[EPISODES] Failed to generate severity mapping: {e}")
         
         return result
     
@@ -3531,8 +3514,8 @@ class OutputManager:
             'ContributionPct': contributions.values,
             'ZScore': latest_scores.values
         }).sort_values('ContributionPct', ascending=False)
-        # Human-readable detector labels for dashboards
-        df['DetectorType'] = df['DetectorType'].apply(lambda c: get_detector_label(str(c)))
+        # SQL-safe human-readable detector labels for dashboards
+        df['DetectorType'] = df['DetectorType'].apply(lambda c: get_detector_label(str(c), sql_safe=True))
         return df
     
     def _generate_contrib_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
@@ -3556,7 +3539,8 @@ class OutputManager:
         long_df.rename(columns={idx_col: 'Timestamp'}, inplace=True)
         long_df['Timestamp'] = normalize_timestamp_series(long_df['Timestamp'])
         long_df['ContributionPct'] = long_df['ContributionPct'].round(2)
-        long_df['DetectorType'] = long_df['DetectorType'].apply(lambda c: get_detector_label(str(c)))
+        # SQL-safe human-readable detector labels
+        long_df['DetectorType'] = long_df['DetectorType'].apply(lambda c: get_detector_label(str(c), sql_safe=True))
         return long_df[['Timestamp', 'DetectorType', 'ContributionPct']]
     
     def _generate_defect_summary(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
@@ -3660,10 +3644,13 @@ class OutputManager:
                 Console.warn("[DEFECTS] Skipping NULL detector column name")
                 continue
             detector_col = str(detector)
-            channel_name = detector_col.replace('_z', '').strip() if detector_col else 'UNKNOWN'
-            if not channel_name:
-                channel_name = f"UNKNOWN_{detector_col[:10]}"
-            family = channel_name.split('_')[0] if '_' in channel_name else channel_name
+            
+            # Use SQL-safe human-readable label instead of raw code
+            detector_label = get_detector_label(detector_col, sql_safe=True)
+            
+            # Determine family from label (first word before space/paren)
+            family_parts = detector_label.split(' ')[0] if ' ' in detector_label else detector_label.split('(')[0]
+            family = family_parts.strip()
 
             # Safely access values; skip if column missing unexpectedly
             if detector not in scores_df.columns:
@@ -3686,7 +3673,7 @@ class OutputManager:
                 severity = "LOW"
             
             defect_data.append({
-                'DetectorType': channel_name,
+                'DetectorType': detector_label,
                 'DetectorFamily': family,
                 'Severity': severity,
                 'ViolationCount': violation_count,
@@ -4024,11 +4011,11 @@ class OutputManager:
                     r = sa.corr(sb)
                     r = 0.0 if pd.isna(r) else float(round(r, 4))
                 correlations.append({
-                    'DetectorA': get_detector_label(str(det_a)),
-                    'DetectorB': get_detector_label(str(det_b)),
+                    'DetectorA': get_detector_label(str(det_a), sql_safe=True),
+                    'DetectorB': get_detector_label(str(det_b), sql_safe=True),
                     'PearsonR': r,
-                    'PairLabel': f"{get_detector_label(str(det_a))} <-> {get_detector_label(str(det_b))}",
-                    'DisturbanceHint': _pair_hint(get_detector_label(str(det_a)), get_detector_label(str(det_b)))
+                    'PairLabel': f"{get_detector_label(str(det_a), sql_safe=True)} <-> {get_detector_label(str(det_b), sql_safe=True)}",
+                    'DisturbanceHint': _pair_hint(get_detector_label(str(det_a), sql_safe=True), get_detector_label(str(det_b), sql_safe=True))
                 })
         
         return pd.DataFrame(correlations)
@@ -4047,7 +4034,7 @@ class OutputManager:
             saturation_pct = (values >= clip_z).mean() * 100
             
             row = {
-                'DetectorType': get_detector_label(str(detector)),
+                'DetectorType': get_detector_label(str(detector), sql_safe=True),
                 'MeanZ': round(values.mean(), 4),
                 'StdZ': round(values.std(), 4),
                 'P95Z': round(values.quantile(0.95), 4),
@@ -4385,16 +4372,19 @@ class OutputManager:
             key = _norm_key(str(det))
             present = key in zcols
             det_stats = stats.get(key, {'MeanZ': float('nan'), 'MaxZ': float('nan'), 'Points': 0})
+            # Use SQL-safe human-readable labels
+            detector_label = get_detector_label(key, sql_safe=True)
             rows.append({
-                'Detector': key,
+                'Detector': detector_label,
                 'Weight': float(w) if w is not None else 0.0,
                 'Present': bool(present),
                 **det_stats
             })
         # Add any present detectors not listed in weights for visibility
         for c in zcols:
-            if c not in [r['Detector'] for r in rows]:
-                rows.append({'Detector': c, 'Weight': 0.0, 'Present': True, **stats.get(c, {})})
+            detector_label = get_detector_label(c, sql_safe=True)
+            if detector_label not in [r['Detector'] for r in rows]:
+                rows.append({'Detector': detector_label, 'Weight': 0.0, 'Present': True, **stats.get(c, {})})
         return pd.DataFrame(rows)
 
     def _generate_health_distribution_over_time(self, scores_df: pd.DataFrame) -> pd.DataFrame:

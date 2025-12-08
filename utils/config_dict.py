@@ -207,7 +207,12 @@ class ConfigDict(MutableMapping):
                 else:
                     target = config[category]
                     for k in keys[:-1]:
-                        if k not in target or not isinstance(target[k], dict):
+                        # CFG-01: Handle non-dict values gracefully (e.g., bool, int)
+                        # If target[k] exists but isn't a dict, we can't nest - overwrite it
+                        if k not in target:
+                            target[k] = {}
+                        elif not isinstance(target[k], dict):
+                            # Overwrite scalar with dict to support nested paths
                             target[k] = {}
                         target = target[k]
                     target[keys[-1]] = value

@@ -72,7 +72,7 @@ class HealthTimeline:
             run_id="run_123",
             output_manager=output_mgr,
             min_train_samples=200,
-            max_gap_hours=6.0
+            max_gap_hours=720.0  # 30 days for historical replay
         )
         df, quality = tracker.load_from_sql()
         if quality != HealthQuality.OK:
@@ -90,7 +90,7 @@ class HealthTimeline:
         run_id: str,
         output_manager: Optional[Any] = None,
         min_train_samples: int = 200,
-        max_gap_hours: float = 6.0,
+        max_gap_hours: float = 720.0,  # 30 days for historical replay
         min_std_dev: float = 0.01,
         max_std_dev: float = 50.0,
         max_timeline_rows: int = 10000,
@@ -127,23 +127,24 @@ class HealthTimeline:
         Load health timeline with SQL-first priority.
         
         Priority:
-        1. OutputManager cache (in-memory artifact)
-        2. SQL query (ACM_HealthTimeline)
+        1. SQL query (ACM_HealthTimeline) - ALWAYS for forecasting to get full history
+        2. OutputManager cache (in-memory artifact) - DISABLED for forecasting
         NO CSV FALLBACK (v10.0.0 is SQL-only).
         
         Returns:
             (DataFrame, HealthQuality): Health data with Timestamp, HealthIndex, FusedZ columns
                                        and quality assessment
         """
-        # Try cache first (fast path)
-        if self.output_manager is not None:
-            df = self.output_manager.get_cached_table("health_timeline.csv")
-            if df is not None:
-                Console.info(f"[HealthTracker] Using cached health_timeline ({len(df)} rows)")
-                df = self._normalize_columns(df)
-                df = self._apply_row_limit(df)
-                quality = self.quality_check(df)
-                return df, quality
+        # CRITICAL: Skip cache for forecasting - must load ALL historical data
+        # Cache contains only current run's data, forecasting needs multi-run history
+        # if self.output_manager is not None:
+        #     df = self.output_manager.get_cached_table("health_timeline.csv")
+        #     if df is not None:
+        #         Console.info(f"[HealthTracker] Using cached health_timeline ({len(df)} rows)")
+        #         df = self._normalize_columns(df)
+        #         df = self._apply_row_limit(df)
+        #         quality = self.quality_check(df)
+        #         return df, quality
         
         # SQL path
         if self.sql_client is None:
@@ -152,20 +153,22 @@ class HealthTimeline:
         
         try:
             cur = self.sql_client.cursor()
+            # CRITICAL FIX: Load ALL historical health data for EquipID, not just current RunID
+            # Forecasting requires historical trend across multiple batches
             cur.execute(
                 """
                 SELECT Timestamp, HealthIndex, FusedZ
                 FROM dbo.ACM_HealthTimeline
-                WHERE EquipID = ? AND RunID = ?
+                WHERE EquipID = ?
                 ORDER BY Timestamp
                 """,
-                (self.equip_id, self.run_id),
+                (self.equip_id,),
             )
             rows = cur.fetchall()
             cur.close()
             
             if not rows:
-                Console.warn(f"[HealthTracker] No health timeline found for EquipID={self.equip_id}, RunID={self.run_id}")
+                Console.warn(f"[HealthTracker] No health timeline found for EquipID={self.equip_id} (across all runs)")
                 return None, HealthQuality.MISSING
             
             df = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex", "FusedZ"])
