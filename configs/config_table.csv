@@ -257,3 +257,6 @@ EquipID,Category,ParamPath,ParamValue,ValueType,LastUpdated,UpdatedBy,ChangeReas
 0,regimes,transient_detection.roc_threshold_trip,0.3,float,2025-12-02 00:00:00,COPILOT,Transient trip ROC threshold for alarm conditions,
 0,regimes,health.fused_warn_z,3.0,float,2025-12-02 00:00:00,COPILOT,Fused Z-score warn threshold for health degradation,
 0,regimes,health.fused_alert_z,4.5,float,2025-12-02 00:00:00,COPILOT,Fused Z-score alert threshold for critical health issues,
+0,health,smoothing_alpha,0.3,float,2025-12-09 00:00:00,COPILOT,Exponential smoothing parameter for health index (0-1; lower=smoother),
+0,health,max_change_per_period,20.0,float,2025-12-09 00:00:00,COPILOT,Maximum allowed health change per period for volatility detection (%),
+0,health,extreme_z_threshold,10.0,float,2025-12-09 00:00:00,COPILOT,Absolute Z-score threshold for extreme anomaly flagging,

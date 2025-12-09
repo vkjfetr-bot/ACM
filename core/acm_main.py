@@ -3866,18 +3866,55 @@ def main() -> None:
                             
                             # Health timeline (if we have fused scores)
                             if 'fused' in frame.columns:
+                                # Calculate raw health index
+                                raw_health = 100.0 / (1.0 + frame['fused'] ** 2)
+                                
+                                # Apply exponential smoothing to prevent unrealistic jumps
+                                # alpha = 0.3 means 30% new value, 70% previous (smooths over ~3 periods)
+                                alpha = cfg.get('health', {}).get('smoothing_alpha', 0.3)
+                                smoothed_health = raw_health.ewm(alpha=alpha, adjust=False).mean()
+                                
+                                # Data quality flags based on rate of change
+                                health_change = smoothed_health.diff().abs()
+                                max_change_per_period = cfg.get('health', {}).get('max_change_per_period', 20.0)
+                                quality_flag = np.where(
+                                    health_change > max_change_per_period,
+                                    'VOLATILE',
+                                    'NORMAL'
+                                )
+                                quality_flag[0] = 'NORMAL'  # First point has no previous value
+                                
+                                # Check for extreme FusedZ values (data quality issue indicator)
+                                extreme_z_threshold = cfg.get('health', {}).get('extreme_z_threshold', 10.0)
+                                quality_flag = np.where(
+                                    np.abs(frame['fused']) > extreme_z_threshold,
+                                    'EXTREME_ANOMALY',
+                                    quality_flag
+                                )
+                                
                                 health_df = pd.DataFrame({
                                     'Timestamp': frame.index,
-                                    'HealthIndex': 100.0 / (1.0 + frame['fused'] ** 2),
+                                    'HealthIndex': smoothed_health,
+                                    'RawHealthIndex': raw_health,  # Keep unsmoothed for reference
                                     'HealthZone': pd.cut(
-                                        100.0 / (1.0 + frame['fused'] ** 2),
-                                        bins=[-1, 50, 70, 85, 101],
-                                        labels=['ALERT', 'WATCH', 'CAUTION', 'GOOD']
+                                        smoothed_health,
+                                        bins=[-1, 30, 50, 70, 85, 101],
+                                        labels=['CRITICAL', 'ALERT', 'WATCH', 'CAUTION', 'GOOD']
                                     ),
                                     'FusedZ': frame['fused'],
+                                    'QualityFlag': quality_flag,
                                     'RunID': run_id,
                                     'EquipID': equip_id
                                 })
+                                
+                                # Log quality issues
+                                volatile_count = (quality_flag == 'VOLATILE').sum()
+                                extreme_count = (quality_flag == 'EXTREME_ANOMALY').sum()
+                                if volatile_count > 0:
+                                    Console.warn(f"[HEALTH] {volatile_count} volatile health transitions detected (>{max_change_per_period}% change)")
+                                if extreme_count > 0:
+                                    Console.warn(f"[HEALTH] {extreme_count} extreme anomaly scores detected (|Z| > {extreme_z_threshold})")
+                                
                                 output_manager.write_dataframe(
                                     health_df,
                                     tables_dir / "health_timeline.csv",
