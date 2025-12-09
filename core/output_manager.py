@@ -2833,8 +2833,8 @@ class OutputManager:
                 # TIER-C: Fused-dependent tables (all below require 'fused' column)
                 Console.info("[ANALYTICS] Writing Tier-C fused-dependent tables...")
                 
-                # 1. Health Timeline (enhanced)
-                health_df = self._generate_health_timeline(scores_df)
+                # 1. Health Timeline (enhanced with smoothing and quality flags)
+                health_df = self._generate_health_timeline(scores_df, cfg)
                 result = self.write_dataframe(health_df, tables_dir / "health_timeline.csv", 
                                             sql_table="ACM_HealthTimeline" if force_sql else None,
                                             add_created_at=True)
@@ -3299,18 +3299,68 @@ class OutputManager:
             "count_sum": count_sum
         }
 
-    def _generate_health_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate enhanced health timeline with zones."""
-        health_index = _health_index(scores_df['fused'])
+    def _generate_health_timeline(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
+        """
+        Generate enhanced health timeline with smoothing and quality flags.
+        
+        Implements EMA smoothing + rate limiting to prevent unrealistic health jumps
+        caused by sensor noise, missing data, or coldstart artifacts.
+        
+        Args:
+            scores_df: DataFrame with fused Z-scores and timestamp index
+            cfg: Configuration dictionary with health smoothing parameters
+        """
+        # Calculate raw health index (unsmoothed)
+        raw_health = _health_index(scores_df['fused'])
+        
+        # Load config parameters (with defaults)
+        health_cfg = cfg.get('health', {})
+        smoothing_alpha = health_cfg.get('smoothing_alpha', 0.3)
+        max_change_per_period = health_cfg.get('max_change_rate_per_hour', 20.0)
+        extreme_volatility_threshold = health_cfg.get('extreme_volatility_threshold', 30.0)
+        extreme_anomaly_z_threshold = health_cfg.get('extreme_anomaly_z_threshold', 10.0)
+        
+        # Apply EMA smoothing (pandas ewm handles initialization automatically)
+        smoothed_health = raw_health.ewm(alpha=smoothing_alpha, adjust=False).mean()
+        
+        # Calculate rate of change for quality flagging
+        health_change = smoothed_health.diff().abs()
+        
+        # Initialize quality flags as NORMAL
+        quality_flag = pd.Series(['NORMAL'] * len(scores_df), index=scores_df.index)
+        
+        # Flag extreme volatility (large health jumps)
+        volatile_mask = health_change > extreme_volatility_threshold
+        quality_flag[volatile_mask] = 'EXTREME_VOLATILITY'
+        
+        # Flag extreme anomalies (sensor faults, broken thermocouples, etc.)
+        extreme_mask = scores_df['fused'].abs() > extreme_anomaly_z_threshold
+        quality_flag[extreme_mask] = 'EXTREME_ANOMALY'
+        
+        # First point has no previous value, always NORMAL
+        quality_flag.iloc[0] = 'NORMAL'
+        
+        # Log quality issues for operator awareness
+        volatile_count = (quality_flag == 'EXTREME_VOLATILITY').sum()
+        extreme_count = (quality_flag == 'EXTREME_ANOMALY').sum()
+        if volatile_count > 0:
+            Console.warn(f"[HEALTH] {volatile_count} volatile health transitions detected (>{extreme_volatility_threshold}% change)")
+        if extreme_count > 0:
+            Console.warn(f"[HEALTH] {extreme_count} extreme anomaly scores detected (|Z| > {extreme_anomaly_z_threshold})")
+        
+        # Calculate health zones based on SMOOTHED health
         zones = pd.cut(
-            health_index,
+            smoothed_health,
             bins=[0, AnalyticsConstants.HEALTH_ALERT_THRESHOLD, AnalyticsConstants.HEALTH_WATCH_THRESHOLD, 100],
             labels=['ALERT', 'WATCH', 'GOOD']
         )
+        
         ts_values = normalize_timestamp_series(scores_df.index).to_list()
         return pd.DataFrame({
             'Timestamp': ts_values,
-            'HealthIndex': health_index.round(2).to_list(),
+            'HealthIndex': smoothed_health.round(2).to_list(),
+            'RawHealthIndex': raw_health.round(2).to_list(),
+            'QualityFlag': quality_flag.astype(str).to_list(),
             'HealthZone': zones.astype(str).to_list(),
             'FusedZ': scores_df['fused'].round(4).to_list()
         })
