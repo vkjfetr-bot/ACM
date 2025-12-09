@@ -3981,34 +3981,40 @@ def main() -> None:
                 except Exception as e:
                     Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
 
-            # === RUL + FORECASTING (v10.0.0 - SQL Mode) ===
-            try:
-                # v10.0.0: Use enhanced forecasting (forecasting.py has the working implementation)
-                Console.info("[FORECAST] Running enhanced forecasting engine (v10.0.0 - SQL mode)")
-                
-                # Call the actual working forecasting code
-                tables = forecasting.run_and_persist_enhanced_forecasting(
-                    sql_client=sql_client,
-                    equip_id=equip_id,
-                    run_id=run_id,
-                    config=cfg,
-                    output_manager=output_manager,
-                    tables_dir=tables_dir,
-                    equip=equip,
-                    current_batch_time=win_end,
-                    sensor_data=score_numeric if 'score_numeric' in locals() else None
-                )
-                
-                if tables:
-                    Console.info(f"[FORECAST] Successfully wrote {len(tables)} forecast tables")
-                    Console.info(f"[FORECAST] Tables: {', '.join(tables.keys())}")
-                else:
-                    Console.warn("[FORECAST] No forecast tables generated")
-                    
-            except Exception as e:
-                Console.error(f"[FORECAST] Enhanced forecasting (SQL mode) failed: {e}")
-                import traceback
-                Console.error(f"[FORECAST] Traceback: {traceback.format_exc()}")
+            # === RUL + FORECASTING (v10.0.0 - DISABLED) ===
+            # DISABLED: Focusing on anomaly detection analytical integrity first
+            # See docs/FORECASTING_FUTURE_WORK.md for architectural audit and future roadmap
+            # TODO: Re-enable after anomaly detection feature set validated
+            
+            # try:
+            #     # v10.0.0: Use enhanced forecasting (forecasting.py has the working implementation)
+            #     Console.info("[FORECAST] Running enhanced forecasting engine (v10.0.0 - SQL mode)")
+            #     
+            #     # Call the actual working forecasting code
+            #     tables = forecasting.run_and_persist_enhanced_forecasting(
+            #         sql_client=sql_client,
+            #         equip_id=equip_id,
+            #         run_id=run_id,
+            #         config=cfg,
+            #         output_manager=output_manager,
+            #         tables_dir=tables_dir,
+            #         equip=equip,
+            #         current_batch_time=win_end,
+            #         sensor_data=score_numeric if 'score_numeric' in locals() else None
+            #     )
+            #     
+            #     if tables:
+            #         Console.info(f"[FORECAST] Successfully wrote {len(tables)} forecast tables")
+            #         Console.info(f"[FORECAST] Tables: {', '.join(tables.keys())}")
+            #     else:
+            #         Console.warn("[FORECAST] No forecast tables generated")
+            #         
+            # except Exception as e:
+            #     Console.error(f"[FORECAST] Enhanced forecasting (SQL mode) failed: {e}")
+            #     import traceback
+            #     Console.error(f"[FORECAST] Traceback: {traceback.format_exc()}")
+            
+            Console.info("[FORECAST] Forecasting and RUL disabled - see docs/FORECASTING_FUTURE_WORK.md")
 
         except Exception as e:
             Console.warn(f"[OUTPUTS] Comprehensive analytics generation failed: {e}")
