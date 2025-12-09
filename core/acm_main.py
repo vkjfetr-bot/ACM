@@ -3981,33 +3981,34 @@ def main() -> None:
                 except Exception as e:
                     Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
 
-            # === RUL + FORECASTING (v10.0.0 Unified Engine - SQL Mode) ===
+            # === RUL + FORECASTING (v10.0.0 - SQL Mode) ===
             try:
-                # v10.0.0: Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
-                Console.info("[FORECAST] Running unified forecasting engine (v10.0.0 - SQL mode)")
-                forecast_engine = ForecastEngine(
-                    sql_client=getattr(output_manager, "sql_client", None),
+                # v10.0.0: Use enhanced forecasting (forecasting.py has the working implementation)
+                Console.info("[FORECAST] Running enhanced forecasting engine (v10.0.0 - SQL mode)")
+                
+                # Call the actual working forecasting code
+                tables = forecasting.run_and_persist_enhanced_forecasting(
+                    sql_client=sql_client,
+                    equip_id=equip_id,
+                    run_id=run_id,
+                    config=cfg,
                     output_manager=output_manager,
-                    equip_id=int(equip_id) if 'equip_id' in locals() else None,
-                    run_id=str(run_id) if run_id is not None else None,
-                    config=cfg
+                    tables_dir=tables_dir,
+                    equip=equip,
+                    current_batch_time=win_end,
+                    sensor_data=score_numeric if 'score_numeric' in locals() else None
                 )
                 
-                forecast_results = forecast_engine.run_forecast()
-                
-                if forecast_results.get('success'):
-                    Console.info(
-                        f"[FORECAST] RUL P50={forecast_results['rul_p50']:.1f}h, "
-                        f"P10={forecast_results['rul_p10']:.1f}h, P90={forecast_results['rul_p90']:.1f}h"
-                    )
-                    Console.info(f"[FORECAST] Top sensors: {forecast_results['top_sensors']}")
-                    Console.info(f"[FORECAST] Wrote tables: {', '.join(forecast_results['tables_written'])}")
+                if tables:
+                    Console.info(f"[FORECAST] Successfully wrote {len(tables)} forecast tables")
+                    Console.info(f"[FORECAST] Tables: {', '.join(tables.keys())}")
                 else:
-                    Console.warn(f"[FORECAST] Forecast failed: {forecast_results.get('error', 'Unknown error')}")
+                    Console.warn("[FORECAST] No forecast tables generated")
                     
             except Exception as e:
-                Console.error(f"[FORECAST] Unified forecasting engine (SQL mode) failed: {e}")
-                Console.error(f"[FORECAST] RUL estimation skipped - ForecastEngine must be fixed")
+                Console.error(f"[FORECAST] Enhanced forecasting (SQL mode) failed: {e}")
+                import traceback
+                Console.error(f"[FORECAST] Traceback: {traceback.format_exc()}")
 
         except Exception as e:
             Console.warn(f"[OUTPUTS] Comprehensive analytics generation failed: {e}")

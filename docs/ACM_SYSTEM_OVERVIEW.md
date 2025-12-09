@@ -1,8 +1,17 @@
-# ACM V9 - System Handbook
+# ACM V10 - System Handbook
 
-This handbook is a complete, implementation-level walkthrough of ACM V9 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
+This handbook is a complete, implementation-level walkthrough of ACM V10 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
 
-**Current Version:** v9.0.0 - Production Release
+**Current Version:** v10.0.0 - Production Release with Continuous Forecasting
+
+### v10.0.0 Major Changes from v9.0.0
+- **Continuous Forecasting Architecture**: Exponential temporal blending eliminates per-batch forecast duplication; single continuous health forecast line per equipment with 12-hour decay window
+- **State Persistence & Versioning**: `ForecastState` class with version tracking (v807→v813 validated) stored in `ACM_ForecastState` table; audit trail with RunID + BatchNum
+- **Hazard-Based RUL**: Converts health forecasts to failure hazard rates with EWMA smoothing; survival probability curves `S(t) = exp(-∫ lambda_smooth)` with Monte Carlo confidence bounds (P10/P50/P90)
+- **Time-Series Tables**: New `ACM_HealthForecast_Continuous` (merged forecasts) and `ACM_FailureHazard_TS` (smoothed hazard) tables for Grafana visualization
+- **Multi-Signal Evolution**: All signals (drift CUSUM, regime MiniBatchKMeans, 7+ detectors, adaptive thresholds) evolve correctly across batches with 28 pairwise detector correlations
+- **Production Validation**: Comprehensive analytical robustness report (`docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`) with 14-component checklist (all ✅ PASS)
+- **Critical Bug Fix**: Added Method='GaussianTail' to hazard DataFrame preventing SQL write failures for `ACM_FailureForecast` table
 
 ### v9.0.0 Major Changes from v8.2.0
 - **Detector Label Standardization**: Fixed `extract_dominant_sensor()` to preserve full detector labels ("Multivariate Outlier (PCA-T²)") instead of truncating to sensor names or codes
@@ -169,6 +178,16 @@ Key paths (ParamPath) and reasoning:
   - **State Management:** Persistent forecast state with version tracking (ACM_ForecastingState); retrain decisions based on RMSE degradation, data quality, and time thresholds
   - AR1 per-sensor residual detector, data hash for retrain decisions, SQL/file dual persistence of forecast state
   - Enhanced RUL: multiple degradation models (AR1, exponential, Weibull-inspired, linear), learning state, attribution, maintenance recommendations, hazard smoothing
+  - **NEW v10.0.0 - Continuous Forecasting Architecture:**
+    - `merge_forecast_horizons()` (lines 888-988): Exponential temporal blending with tau=12h; dual weighting (recency × horizon); NaN-aware merging; weight capping at 0.9
+    - `ForecastState` class: Version-tracked state persistence (v807→v813) in `ACM_ForecastState` table; audit trail with RunID + BatchNum + timestamp
+    - `write_continuous_health_forecast()` (lines 1014-1110): Bulk insert merged health forecasts into `ACM_HealthForecast_Continuous` with transaction handling
+    - `write_continuous_hazard_forecast()` (lines 1111-1209): EWMA-smoothed hazard curves into `ACM_FailureHazard_TS` with survival probability calculation
+    - Hazard calculation: `lambda(t) = -ln(1-p(t))/dt`, survival: `S(t) = exp(-∫ lambda_smooth)`
+    - Integration points: Lines 2938-2988 (horizon merging), 3029-3043 (continuous writes), ~2559 (Method='GaussianTail' for hazard_df)
+    - Quality assurance: RMSE validation gates, MAPE tracking (33.8%), TheilU coefficient (1.098), P10/P50/P90 confidence bounds
+    - Multi-signal evolution: Drift (CUSUM P95), regimes (MiniBatchKMeans auto-k), detector correlation (28 pairwise), adaptive thresholds with PR-AUC throttling
+    - Benefit: Single continuous forecast line per equipment; smooth 12h transitions; no Grafana per-run duplicates; production-validated (see `docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`)
 - **Drift (`core/drift.py`):** CUSUMDetector with z calibration; report plot generator.
 - **Regimes (`core/regimes.py`):** feature basis builder, auto-k (silhouette/Calinski-Harabasz), smoothing, transient detection via ROC energy, health labeling, persistence to joblib/json, loading with version guard.
 - **Fusion (`core/fuse.py`):** `Fuser.fuse` (weighted sum with z clipping), `detect_episodes` (hysteresis thresholds), `ScoreCalibrator`, `tune_detector_weights` (PR-AUC against episode windows).

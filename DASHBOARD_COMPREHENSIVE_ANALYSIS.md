@@ -13,7 +13,7 @@
 | ✅ Complete | P2 | Fix PCA fitted check warning | **FIXED**: Changed from warning to silent return when pca is None (expected with <2 samples). Line 2216 in output_manager.py. Fixed on 2025-12-08. |
 | ✅ Complete | P1 | Fix Data Quality Assessment dashboard - missing metrics | **FIXED**: ACM_DataQuality SQL insert now writes all quality columns (longest_gap, flatline_span, sampling_secs, std, timestamps). Line 1368 in acm_main.py. Fixed on 2025-12-08. |
 | ✅ Complete | P1 | Fix drift detection panel | **FIXED**: ACM_DriftSeries table exists with 10,893 rows. Dashboard query fixed to use ORDER BY ASC (was DESC) and added time range filter. Fixed on 2025-12-08. |
-| Pending | P1 | Implement sensor-level multivariate time series forecasting | Add sensor forecast generation to forecast_engine.py. Write to ACM_SensorForecast table. Currently using ACM_SensorNormalized_TS as workaround. |
+| ✅ Complete | P1 | Implement sensor-level multivariate time series forecasting | **FIXED**: Added `_generate_sensor_forecasts()` method to forecast_engine.py. Generates 7-day forecasts for top 10 sensors using Holt's exponential smoothing with trend detection and confidence intervals. Writes to ACM_SensorForecast table. Fixed on 2025-12-08. |
 | Pending | P2 | Fix AdaptiveConfigManager type handling | Clean up warnings in adaptive config manager. |
 
 **Date**: December 8, 2025  

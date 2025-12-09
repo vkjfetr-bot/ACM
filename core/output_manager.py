@@ -506,10 +506,11 @@ class OutputManager:
                 'UrgencyScore': 0.0, 'MaintenanceRequired': 0
             },
             'ACM_MaintenanceRecommendation': {
-                'Action': 'unspecified', 'Urgency': 'LOW', 'RUL_Hours': 0.0, 'Confidence': 0.0,
-                'DataQuality': 'UNKNOWN', 'EarliestMaintenance': 'ts',
-                'PreferredWindowStart': 'ts', 'PreferredWindowEnd': 'ts',
-                'FailureProbAtWindowEnd': 0.0
+                'EarliestMaintenance': 'ts',
+                'PreferredWindowStart': 'ts', 
+                'PreferredWindowEnd': 'ts',
+                'FailureProbAtWindowEnd': 0.0,
+                'Comment': ''
             },
             'ACM_RecommendedActions': {
                 'Action': 'unspecified'

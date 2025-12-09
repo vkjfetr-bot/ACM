@@ -466,7 +466,230 @@ class ForecastEngine:
             
             Console.info(f"[ForecastEngine] Wrote {len(tables_written)} forecast tables to SQL")
             
+            # NEW: ACM_SensorForecast - Physical sensor forecasts
+            sensor_forecast_df = self._generate_sensor_forecasts(sensor_attributions, forecast_results)
+            if sensor_forecast_df is not None and not sensor_forecast_df.empty:
+                sensor_path = temp_dir / f"sensor_forecast_{self.run_id}.csv"
+                self.output_manager.write_dataframe(
+                    sensor_forecast_df,
+                    file_path=sensor_path,
+                    sql_table='ACM_SensorForecast',
+                    add_created_at=False
+                )
+                tables_written.append('ACM_SensorForecast')
+                Console.info(f"[ForecastEngine] Wrote sensor forecasts for {len(sensor_attributions)} sensors")
+            
         except Exception as e:
             Console.error(f"[ForecastEngine] Failed to write outputs: {e}")
         
         return tables_written
+    
+    def _generate_sensor_forecasts(
+        self,
+        sensor_attributions: list,
+        forecast_results: Dict[str, Any],
+        forecast_horizon_hours: float = 168.0
+    ) -> Optional[pd.DataFrame]:
+        """
+        Generate sensor-level time series forecasts.
+        
+        This implements sensor-level forecasting using exponential smoothing with trend.
+        For each high-contribution sensor, we:
+        1. Load recent sensor readings from ACM_Scores_Wide
+        2. Fit exponential smoothing model (Holt's method)
+        3. Generate 7-day forecast with confidence intervals
+        4. Detect trend direction (increasing/decreasing/stable)
+        
+        Args:
+            sensor_attributions: List of SensorAttribution objects with top sensors
+            forecast_results: Dict containing current forecast metadata
+            forecast_horizon_hours: Hours to forecast ahead (default 168 = 7 days)
+            
+        Returns:
+            DataFrame with columns: EquipID, RunID, Timestamp, SensorName, ForecastValue,
+                                   CI_Lower, CI_Upper, TrendDirection, Method, CreatedAt
+            None if no sensor data available or forecasting fails
+        """
+        try:
+            # Try to import statsmodels, but fall back to simple moving average if unavailable
+            try:
+                from statsmodels.tsa.holtwinters import ExponentialSmoothing
+                USE_EXPONENTIAL_SMOOTHING = True
+            except ImportError:
+                Console.warn("[ForecastEngine] statsmodels not available, using simple trend forecasting")
+                USE_EXPONENTIAL_SMOOTHING = False
+            
+            from scipy import stats
+            
+            # Only forecast top N sensors to keep table size manageable
+            max_sensors = min(10, len(sensor_attributions))
+            top_sensors = sensor_attributions[:max_sensors]
+            
+            if not top_sensors:
+                Console.warn("[ForecastEngine] No sensor attributions available for forecasting")
+                return None
+            
+            # Load recent sensor data from ACM_Scores_Wide
+            lookback_hours = 720  # 30 days of history
+            cutoff_time = datetime.now() - timedelta(hours=lookback_hours)
+            
+            query = """
+            SELECT 
+                sw.Timestamp,
+                sw.SensorName,
+                sw.Score
+            FROM ACM_Scores_Wide sw
+            WHERE sw.EquipID = ?
+              AND sw.RunID = ?
+              AND sw.Timestamp >= ?
+              AND sw.SensorName IN ({placeholders})
+            ORDER BY sw.Timestamp ASC
+            """.format(placeholders=','.join(['?'] * len(top_sensors)))
+            
+            sensor_names = [s.sensor_name for s in top_sensors]
+            
+            cursor = self.sql_client.cursor()
+            cursor.execute(query, [self.equip_id, self.run_id, cutoff_time] + sensor_names)
+            rows = cursor.fetchall()
+            cursor.close()
+            
+            if not rows:
+                Console.warn("[ForecastEngine] No sensor data found in ACM_Scores_Wide for forecasting")
+                return None
+            
+            # Convert to DataFrame
+            sensor_history = pd.DataFrame(
+                [{'Timestamp': r[0], 'SensorName': r[1], 'Score': r[2]} for r in rows]
+            )
+            sensor_history['Timestamp'] = pd.to_datetime(sensor_history['Timestamp'])
+            
+            # Generate forecasts per sensor
+            forecast_records = []
+            dt_hours = 1.0  # Hourly intervals for sensor forecasts
+            n_steps = int(forecast_horizon_hours / dt_hours)
+            
+            for sensor_attr in top_sensors:
+                sensor_name = sensor_attr.sensor_name
+                sensor_data = sensor_history[sensor_history['SensorName'] == sensor_name].copy()
+                
+                if len(sensor_data) < 24:  # Need at least 24 hours
+                    Console.warn(f"[ForecastEngine] Insufficient data for sensor: {sensor_name} ({len(sensor_data)} points)")
+                    continue
+                
+                # Prepare time series
+                sensor_data = sensor_data.sort_values('Timestamp')
+                sensor_data = sensor_data.set_index('Timestamp')
+                series = sensor_data['Score']
+                
+                # Remove any NaNs
+                series = series.dropna()
+                
+                if len(series) < 24:
+                    continue
+                
+                try:
+                    if USE_EXPONENTIAL_SMOOTHING:
+                        # Fit exponential smoothing with trend (Holt's method)
+                        model = ExponentialSmoothing(
+                            series,
+                            trend='add',
+                            seasonal=None,
+                            initialization_method='estimated'
+                        )
+                        fitted_model = model.fit(
+                            smoothing_level=0.3,
+                            smoothing_trend=0.1,
+                            optimized=False
+                        )
+                        
+                        # Generate forecast
+                        forecast = fitted_model.forecast(steps=n_steps)
+                        
+                        # Calculate confidence intervals using residual std
+                        residuals = series - fitted_model.fittedvalues
+                        residual_std = residuals.std()
+                    else:
+                        # Simple fallback: linear trend with moving average smoothing
+                        # Calculate trend using last 168 hours (7 days)
+                        recent_window = min(168, len(series))
+                        recent_series = series.tail(recent_window)
+                        
+                        # Fit linear trend
+                        x = np.arange(len(recent_series))
+                        y = recent_series.values
+                        slope, intercept = np.polyfit(x, y, 1)
+                        
+                        # Calculate residual std for confidence intervals
+                        trend_line = slope * x + intercept
+                        residuals = y - trend_line
+                        residual_std = np.std(residuals)
+                        
+                        # Generate forecast using linear extrapolation
+                        last_x = len(recent_series) - 1
+                        forecast_x = np.arange(last_x + 1, last_x + 1 + n_steps)
+                        forecast_values = slope * forecast_x + intercept
+                        
+                        # Create pandas Series for consistency with statsmodels output
+                        forecast_times = [series.index[-1] + timedelta(hours=dt_hours * (i + 1)) for i in range(n_steps)]
+                        forecast = pd.Series(forecast_values, index=forecast_times)
+                    
+                    # 95% confidence interval
+                    z_score = 1.96
+                    forecast_lower = forecast - (z_score * residual_std)
+                    forecast_upper = forecast + (z_score * residual_std)
+                    
+                    # Detect trend direction using linear regression on recent data
+                    recent_window = series.tail(168)  # Last week
+                    if len(recent_window) >= 24:
+                        x = np.arange(len(recent_window))
+                        y = recent_window.values
+                        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+                        
+                        if p_value < 0.05:  # Significant trend
+                            if slope > 0.01:
+                                trend_direction = 'Increasing'
+                            elif slope < -0.01:
+                                trend_direction = 'Decreasing'
+                            else:
+                                trend_direction = 'Stable'
+                        else:
+                            trend_direction = 'Stable'
+                    else:
+                        trend_direction = 'Unknown'
+                    
+                    # Build forecast records
+                    last_timestamp = series.index[-1]
+                    for i in range(n_steps):
+                        forecast_timestamp = last_timestamp + timedelta(hours=dt_hours * (i + 1))
+                        forecast_records.append({
+                            'EquipID': self.equip_id,
+                            'RunID': self.run_id,
+                            'Timestamp': forecast_timestamp,
+                            'SensorName': sensor_name,
+                            'ForecastValue': float(forecast.iloc[i]),
+                            'CiLower': float(forecast_lower.iloc[i]),
+                            'CiUpper': float(forecast_upper.iloc[i]),
+                            'ForecastStd': residual_std,  # Use actual schema column
+                            'Method': 'SimpleLinearTrend' if not USE_EXPONENTIAL_SMOOTHING else 'ExponentialSmoothing',
+                            'RegimeLabel': 0,  # Default regime
+                            'CreatedAt': datetime.now()
+                        })
+                    
+                except Exception as e:
+                    Console.warn(f"[ForecastEngine] Failed to forecast sensor {sensor_name}: {e}")
+                    continue
+            
+            if not forecast_records:
+                Console.warn("[ForecastEngine] No sensor forecasts generated")
+                return None
+            
+            df = pd.DataFrame(forecast_records)
+            Console.info(
+                f"[ForecastEngine] Generated {len(df)} sensor forecast points "
+                f"for {df['SensorName'].nunique()} sensors over {forecast_horizon_hours:.0f}h"
+            )
+            return df
+            
+        except Exception as e:
+            Console.error(f"[ForecastEngine] Sensor forecasting failed: {e}")
+            return None
