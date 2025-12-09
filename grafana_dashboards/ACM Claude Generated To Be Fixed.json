@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "ACM V10 Dashboard featuring anomaly detection, regime identification, and episode diagnostics. Includes comprehensive visualizations across 7 sections: Health Timeline, Operating Regimes, Anomaly Detection, Episode Analysis, Data Quality, and Maintenance Diagnostics.",
+  "description": "ACM V10 Dashboard - Shows: (1) Health & Quality, (2) Operating Regimes (normal modes), (3) Anomaly Episodes (abnormal events - ACM_Anomaly_Events table), (4) Episode Diagnostics (forensics - ACM_EpisodeDiagnostics table). Regimes = continuous timeline (9,087 records). Episodes = sparse anomalies (76 records).",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 2,
@@ -326,7 +326,7 @@
       },
       "id": 100,
       "panels": [],
-      "title": "SYSTEM HEALTH & TIMELINE",
+      "title": "SECTION 1: HEALTH & DATA QUALITY (Smoothed Health Score with Quality Tracking)",
       "type": "row"
     },
     {
@@ -1077,7 +1077,7 @@
       },
       "id": 101,
       "panels": [],
-      "title": "OPERATING REGIMES & STABILITY",
+      "title": "SECTION 2: OPERATING REGIMES - Normal Modes (NOT Anomalies - From ACM_RegimeTimeline)",
       "type": "row"
     },
     {
@@ -1350,7 +1350,7 @@
       },
       "id": 102,
       "panels": [],
-      "title": "ANOMALY DETECTION & DIAGNOSTICS",
+      "title": "SECTION 3: ANOMALY EPISODES - Abnormal Events (When Things Go Wrong - ACM_Anomaly_Events)",
       "type": "row"
     },
     {
@@ -1924,7 +1924,7 @@
           "refId": "A"
         }
       ],
-      "title": "Episode Statistics",
+      "title": "Episode Statistics (76 Episodes Total - Summary from ACM_EpisodeMetrics)",
       "type": "table"
     },
     {
@@ -2058,8 +2058,169 @@
           }
         }
       ],
-      "title": "Anomaly Events - Detection Timeline",
+      "title": "Anomaly Events Timeline - 76 Episodes Shown as Bars (Each bar = 1 episode from ACM_Anomaly_Events)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Severity"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "LOW": {
+                        "color": "dark-yellow",
+                        "index": 0
+                      },
+                      "MEDIUM": {
+                        "color": "dark-orange",
+                        "index": 1
+                      },
+                      "HIGH": {
+                        "color": "dark-red",
+                        "index": 2
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Regime"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Peak Z"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "dark-green",
+                      "value": null
+                    },
+                    {
+                      "color": "dark-yellow",
+                      "value": 2
+                    },
+                    {
+                      "color": "dark-orange",
+                      "value": 3
+                    },
+                    {
+                      "color": "dark-red",
+                      "value": 5
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "id": 203,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Time"
+          }
+        ]
+      },
+      "pluginVersion": "12.2.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT TOP 20\r\n  ed.episode_id AS 'Episode ID',\r\n  FORMAT(ed.peak_timestamp, 'yyyy-MM-dd HH:mm') AS 'Time',\r\n  ed.severity AS 'Severity',\r\n  ROUND(ed.peak_z, 2) AS 'Peak Z',\r\n  ROUND(ed.duration_h, 1) AS 'Duration (h)',\r\n  ed.dominant_sensor AS 'Dominant Sensor',\r\n  COALESCE(r.RegimeLabel, 'Unknown') AS 'Regime',\r\n  FORMAT(ae.StartTime, 'HH:mm') + ' - ' + FORMAT(ae.EndTime, 'HH:mm') AS 'Episode Window'\r\nFROM ACM_EpisodeDiagnostics ed\r\nLEFT JOIN ACM_RegimeTimeline r \r\n  ON ed.peak_timestamp = r.Timestamp AND ed.EquipID = r.EquipID\r\nLEFT JOIN ACM_Anomaly_Events ae\r\n  ON ed.EquipID = ae.EquipID \r\n  AND ed.peak_timestamp >= ae.StartTime \r\n  AND ed.peak_timestamp <= ae.EndTime\r\nWHERE ed.EquipID = $equipment\r\nORDER BY ed.peak_timestamp DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "SECTION 4: Episode Diagnostics - Detailed Forensics (ACM_EpisodeDiagnostics + Regime Context)",
+      "type": "table"
     },
     {
       "datasource": {
