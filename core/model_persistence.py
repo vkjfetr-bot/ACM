@@ -479,7 +479,7 @@ def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] =
 class ModelVersionManager:
     """Manages model versioning, persistence, and loading (SQL-ONLY MODE)."""
     
-    def __init__(self, equip: str, artifact_root: Path, sql_client=None, equip_id: Optional[int] = None, sql_only_mode: bool = True):
+    def __init__(self, equip: str, artifact_root: Path, sql_client=None, equip_id: Optional[int] = None):
         """
         Initialize model version manager (SQL-ONLY MODE).
         
@@ -488,12 +488,10 @@ class ModelVersionManager:
             artifact_root: IGNORED - kept for API compatibility only
             sql_client: SQL client for model storage (REQUIRED)
             equip_id: Equipment ID for SQL operations (REQUIRED)
-            sql_only_mode: Must be True (filesystem mode removed)
         """
         self.equip = equip
         self.sql_client = sql_client
         self.equip_id = equip_id
-        self.sql_only_mode = True  # Force SQL-only mode
         
         if not sql_client or equip_id is None:
             Console.error("[MODEL] SQL client and equip_id required for SQL-only mode")

@@ -408,10 +408,9 @@ class SQLBatchRunner:
                     ("ACM_HealthTimeline", True),
                     ("ACM_SensorHotspots", True),
                     ("ACM_DefectTimeline", True),
-                    ("ACM_HealthForecast_TS", True),
-                    ("ACM_FailureForecast_TS", True),
-                    ("ACM_RUL_Summary", True),
-                    ("ACM_RUL_Attribution", True),
+                    ("ACM_HealthForecast", True),
+                    ("ACM_FailureForecast", True),
+                    ("ACM_RUL", True),
                     ("ACM_EpisodeMetrics", True),
                 ]
                 for table_name, has_run in tables_to_check:

@@ -1,0 +1,640 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(20, 184, 166, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "iteration": 1711736560000,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Latest consensus RUL hours from ACM_RUL_Summary.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#f97316",
+                "value": null
+              },
+              {
+                "color": "#f59e0b",
+                "value": 48
+              },
+              {
+                "color": "#14b8a6",
+                "value": 168
+              }
+            ]
+          },
+          "unit": "h"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT TOP 1\n  LastUpdate AS time,\n  'RUL (Hours)' AS metric,\n  COALESCE(RUL_Final_Hours, RUL_Hours, 0) AS value\nFROM ACM_RUL_Summary\nWHERE EquipID = $equipment\nORDER BY LastUpdate DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "RUL (Latest)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Confidence of latest RUL estimate. Source: ACM_RUL_Summary. Higher is better.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#f97316",
+                "value": null
+              },
+              {
+                "color": "#f59e0b",
+                "value": 0.6
+              },
+              {
+                "color": "#14b8a6",
+                "value": 0.8
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT TOP 1\n  LastUpdate AS time,\n  'RUL Confidence' AS metric,\n  COALESCE(Confidence, 0) AS value\nFROM ACM_RUL_Summary\nWHERE EquipID = $equipment\nORDER BY LastUpdate DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "RUL Confidence",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Failure probability at the recommended window end. Source: ACM_MaintenanceRecommendation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#14b8a6",
+                "value": null
+              },
+              {
+                "color": "#f59e0b",
+                "value": 0.2
+              },
+              {
+                "color": "#f97316",
+                "value": 0.4
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT TOP 1\n  PreferredWindowEnd AS time,\n  'Failure Prob @ Window End' AS metric,\n  COALESCE(FailureProbAtWindowEnd, 0) AS value\nFROM ACM_MaintenanceRecommendation\nWHERE EquipID = $equipment\nORDER BY PreferredWindowEnd DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Failure Prob @ Window End",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Earliest maintenance window start. Source: ACM_MaintenanceRecommendation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-blues"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT TOP 1\n  EarliestMaintenance AS time,\n  'Earliest Maintenance' AS metric,\n  CAST(DATEDIFF_BIG(ms, '1970-01-01', EarliestMaintenance) AS bigint) AS value\nFROM ACM_MaintenanceRecommendation\nWHERE EquipID = $equipment\nORDER BY EarliestMaintenance DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Earliest Maintenance Window",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "RUL multi-path timeline. Source: ACM_RUL_TS.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "spanNulls": true
+          },
+          "mappings": [],
+          "unit": "hour"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  RUL_Hours AS value,\n  'RUL (Hours)' AS metric\nFROM ACM_RUL_TS\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, LowerBound, 'RUL Lower' FROM ACM_RUL_TS WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, UpperBound, 'RUL Upper' FROM ACM_RUL_TS WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "RUL Timeline",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Failure probability forecast. Source: ACM_FailureForecast_TS.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#14b8a6",
+                "value": 0
+              },
+              {
+                "color": "#f59e0b",
+                "value": 0.25
+              },
+              {
+                "color": "#f97316",
+                "value": 0.5
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  FailureProb AS value,\n  'Failure Probability' AS metric\nFROM ACM_FailureForecast_TS\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY Timestamp",
+          "refId": "A"
+        }
+      ],
+      "title": "Failure Probability Forecast",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Health forecast with confidence bounds. Source: ACM_HealthForecast_TS.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 2,
+            "spanNulls": true
+          },
+          "mappings": [],
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawSql": "SELECT\n  Timestamp AS time,\n  ForecastHealth AS value,\n  'Forecast Health' AS metric\nFROM ACM_HealthForecast_TS\nWHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, CiLower, 'CI Lower' FROM ACM_HealthForecast_TS WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nUNION ALL\nSELECT Timestamp, CiUpper, 'CI Upper' FROM ACM_HealthForecast_TS WHERE EquipID = $equipment AND $__timeFilter(Timestamp)\nORDER BY time",
+          "refId": "A"
+        }
+      ],
+      "title": "Health Forecast (with CI)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Maintenance recommendation window and probability. Source: ACM_MaintenanceRecommendation.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 8,
+      "options": {
+        "footer": {
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawSql": "SELECT TOP 5\n  RunID,\n  EquipID,\n  EarliestMaintenance,\n  PreferredWindowStart,\n  PreferredWindowEnd,\n  FailureProbAtWindowEnd,\n  Comment\nFROM ACM_MaintenanceRecommendation\nWHERE EquipID = $equipment\nORDER BY PreferredWindowStart DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Maintenance Recommendation",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Sensors driving failure risk. Source: ACM_RUL_Attribution.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          },
+          "mappings": [],
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 9,
+      "options": {
+        "footer": {
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawSql": "SELECT TOP 15\n  FailureTime,\n  SensorName,\n  FailureContribution,\n  ZScoreAtFailure,\n  AlertCount,\n  Comment\nFROM ACM_RUL_Attribution\nWHERE EquipID = $equipment\nORDER BY FailureContribution DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "RUL Attribution (Top Sensors)",
+      "type": "table"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 42,
+  "style": "dark",
+  "tags": [
+    "ACM",
+    "Planner"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Select MSSQL",
+          "value": ""
+        },
+        "hide": 0,
+        "label": "Data Source",
+        "name": "datasource",
+        "options": [],
+        "query": "mssql",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "Pick equipment",
+          "value": ""
+        },
+        "datasource": {
+          "type": "mssql",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT EquipID AS __value, EquipName AS __text FROM Equipment ORDER BY EquipName",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Equipment",
+        "multi": false,
+        "name": "equipment",
+        "options": [],
+        "query": "SELECT EquipID AS __value, EquipName AS __text FROM Equipment ORDER BY EquipName",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ]
+  },
+  "timezone": "browser",
+  "title": "ACM Failure & Maintenance Planner",
+  "uid": "acm_failure_maintenance_planner",
+  "version": 1,
+  "weekStart": ""
+}

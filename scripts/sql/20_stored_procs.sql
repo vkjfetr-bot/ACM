@@ -55,6 +55,8 @@ CREATE PROCEDURE dbo.usp_ACM_StartRun
 AS
 BEGIN
     SET NOCOUNT ON;
+    SET QUOTED_IDENTIFIER ON;
+    
     IF @RunID IS NULL SET @RunID = NEWID();
     DECLARE @now datetime2(3) = SYSUTCDATETIME();
     
@@ -65,12 +67,12 @@ BEGIN
     -- If not provided, look for the last successful run's end time
     IF @WindowStartEntryDateTime IS NULL
     BEGIN
-        SELECT TOP 1 @WindowStartEntryDateTime = WindowEndEntryDateTime
-        FROM dbo.RunLog
+        SELECT TOP 1 @WindowStartEntryDateTime = CompletedAt
+        FROM dbo.ACM_Runs
         WHERE EquipID = @EquipID 
-          AND Outcome = 'OK' 
-          AND WindowEndEntryDateTime IS NOT NULL
-        ORDER BY WindowEndEntryDateTime DESC;
+          AND HealthStatus IS NOT NULL
+          AND CompletedAt IS NOT NULL
+        ORDER BY CompletedAt DESC;
         
         -- If no previous run, use DefaultStartUtc or fallback to a fixed start (e.g. 2023-10-15 for this dataset)
         IF @WindowStartEntryDateTime IS NULL
@@ -87,15 +89,11 @@ BEGIN
     END
 
     -- 3. Log the run
-    INSERT INTO dbo.RunLog(
-        RunID, EquipID, Stage, StartEntryDateTime, EndEntryDateTime,
-        Outcome, RowsRead, RowsWritten, ErrorJSON, TriggerReason, Version, ConfigHash,
-        WindowStartEntryDateTime, WindowEndEntryDateTime
+    INSERT INTO dbo.ACM_Runs(
+        RunID, EquipID, StartedAt, ConfigSignature
     )
     VALUES(
-        @RunID, @EquipID, @Stage, @now, NULL,
-        NULL, NULL, NULL, NULL, @TriggerReason, @Version, @ConfigHash,
-        @WindowStartEntryDateTime, @WindowEndEntryDateTime
+        @RunID, @EquipID, @now, @ConfigHash
     );
 
     -- Delete prior partial artifacts for same RunID if any (idempotent re-run)
@@ -107,6 +105,9 @@ BEGIN
     -- Also clear new tables
     DELETE FROM dbo.ACM_HealthTimeline WHERE RunID = @RunID;
     DELETE FROM dbo.ACM_DefectTimeline WHERE RunID = @RunID;
+    
+    -- Return window information via SELECT for Python caller
+    SELECT @RunID, @EquipIDOut, @WindowStartEntryDateTime, @WindowEndEntryDateTime;
 END
 GO
 
@@ -120,6 +121,8 @@ CREATE PROCEDURE dbo.usp_ACM_FinalizeRun
 AS
 BEGIN
     SET NOCOUNT ON;
+    SET QUOTED_IDENTIFIER ON;
+    
     UPDATE dbo.ACM_Runs
     SET CompletedAt = SYSUTCDATETIME(),
         TrainRowCount = COALESCE(@RowsRead, TrainRowCount),

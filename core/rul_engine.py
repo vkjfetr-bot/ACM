@@ -356,6 +356,15 @@ class LearningState:
     calibration_factor: float = 1.0
     last_updated: Optional[datetime] = None
     prediction_history: List[Dict[str, float]] = field(default_factory=list)
+
+    # Backward-compatible alias (legacy code may reference .ar1)
+    @property
+    def ar1(self) -> ModelPerformanceMetrics:
+        return self.ar1_metrics
+
+    @ar1.setter
+    def ar1(self, value: ModelPerformanceMetrics) -> None:
+        self.ar1_metrics = value
     
     def to_sql_dict(self) -> Dict[str, Any]:
         """Convert to SQL-friendly dict"""
@@ -1679,19 +1688,17 @@ def build_maintenance_recommendation(
     preferred_window_end = now + timedelta(hours=rul_hours)  # At expected failure time
     failure_prob_at_window_end = min(1.0, max(0.0, 1.0 - (rul_hours / max(rul_hours, 168))))  # Higher prob as RUL decreases
     
+    # Build comment field with action/urgency/RUL/confidence/data quality info
+    comment = f"{action} | Urgency: {urgency} | RUL: {rul_hours:.1f}h | Confidence: {confidence:.2f} | Data: {data_quality}"
+    
     recommendation = {
         "RunID": run_id,
         "EquipID": equip_id,
-        "Action": action,
-        "Urgency": urgency,
-        "RUL_Hours": rul_hours,
-        "Confidence": confidence,
-        "DataQuality": data_quality,
         "EarliestMaintenance": earliest_maintenance,
         "PreferredWindowStart": preferred_window_start,
         "PreferredWindowEnd": preferred_window_end,
         "FailureProbAtWindowEnd": failure_prob_at_window_end,
-        "Comment": None,  # Optional field
+        "Comment": comment,
     }
     
     df = pd.DataFrame([recommendation])

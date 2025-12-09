@@ -984,6 +984,225 @@ def merge_forecast_horizons(
     return merged[["Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper"]]
 
 
+def write_continuous_health_forecast(
+    merged_forecast: pd.DataFrame,
+    equip_id: int,
+    run_id: str,
+    sql_client: SqlClient,
+    merge_weights: Optional[np.ndarray] = None
+) -> bool:
+    """
+    Write merged continuous health forecast to ACM_HealthForecast_Continuous table.
+    
+    This function unpacks the merged forecast horizon (from merge_forecast_horizons)
+    and writes it to the time-series table for dashboard consumption.
+    
+    Args:
+        merged_forecast: DataFrame with [Timestamp, ForecastHealth, CI_Lower, CI_Upper]
+        equip_id: Equipment ID
+        run_id: Current RunID (UUID string)
+        sql_client: SQL connection
+        merge_weights: Optional array of blend weights (0-1) for each point
+    
+    Returns:
+        True if write succeeded, False otherwise
+    """
+    if merged_forecast.empty:
+        Console.warn("[CONTINUOUS_FORECAST] No merged forecast to write")
+        return False
+    
+    try:
+        # Prepare data for SQL write
+        df_write = merged_forecast.copy()
+        df_write["EquipID"] = equip_id
+        df_write["SourceRunID"] = run_id
+        
+        # Add merge weights if provided, else default to 1.0 (fully new forecast)
+        if merge_weights is not None and len(merge_weights) == len(df_write):
+            df_write["MergeWeight"] = merge_weights
+        else:
+            df_write["MergeWeight"] = 1.0
+        
+        df_write["CreatedAt"] = datetime.now()
+        
+        # Ensure column order matches table schema
+        df_write = df_write[[
+            "Timestamp", "ForecastHealth", "CI_Lower", "CI_Upper",
+            "SourceRunID", "MergeWeight", "EquipID", "CreatedAt"
+        ]]
+        
+        # TIME-01: Ensure naive timestamps
+        if df_write["Timestamp"].dt.tz is not None:
+            df_write["Timestamp"] = df_write["Timestamp"].dt.tz_localize(None)
+        if df_write["CreatedAt"].dt.tz is not None:
+            df_write["CreatedAt"] = df_write["CreatedAt"].dt.tz_localize(None)
+        
+        # Write to SQL using bulk insert
+        cur = sql_client.cursor()
+        
+        # First, delete old forecasts for this equipment and timestamp range to avoid duplicates
+        # Keep only the most recent merged forecast
+        min_ts = df_write["Timestamp"].min()
+        max_ts = df_write["Timestamp"].max()
+        
+        cur.execute(
+            """
+            DELETE FROM dbo.ACM_HealthForecast_Continuous
+            WHERE EquipID = ?
+              AND Timestamp BETWEEN ? AND ?
+              AND SourceRunID = ?
+            """,
+            (equip_id, min_ts, max_ts, run_id)
+        )
+        
+        # Insert new merged forecast
+        insert_sql = """
+            INSERT INTO dbo.ACM_HealthForecast_Continuous
+            (Timestamp, ForecastHealth, CI_Lower, CI_Upper, SourceRunID, MergeWeight, EquipID, CreatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        rows_to_insert = [
+            (
+                row["Timestamp"],
+                float(row["ForecastHealth"]) if pd.notna(row["ForecastHealth"]) else None,
+                float(row["CI_Lower"]) if pd.notna(row["CI_Lower"]) else None,
+                float(row["CI_Upper"]) if pd.notna(row["CI_Upper"]) else None,
+                row["SourceRunID"],
+                float(row["MergeWeight"]) if pd.notna(row["MergeWeight"]) else 1.0,
+                int(row["EquipID"]),
+                row["CreatedAt"]
+            )
+            for _, row in df_write.iterrows()
+        ]
+        
+        cur.executemany(insert_sql, rows_to_insert)
+        sql_client.conn.commit()
+        cur.close()
+        
+        Console.info(
+            f"[CONTINUOUS_FORECAST] Wrote {len(df_write)} merged forecast points to "
+            f"ACM_HealthForecast_Continuous (EquipID={equip_id}, RunID={run_id[:8]}...)"
+        )
+        return True
+        
+    except Exception as e:
+        Console.error(f"[CONTINUOUS_FORECAST] Failed to write merged forecast: {e}")
+        import traceback
+        Console.warn(f"[CONTINUOUS_FORECAST] Traceback: {traceback.format_exc()}")
+        try:
+            sql_client.conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def write_continuous_hazard_forecast(
+    hazard_df: pd.DataFrame,
+    equip_id: int,
+    run_id: str,
+    sql_client: SqlClient
+) -> bool:
+    """
+    Write smoothed hazard rate and failure probability to ACM_FailureHazard_TS table.
+    
+    This function writes the continuous hazard-based failure probability forecast
+    that has been smoothed with EWMA and properly computed from survival functions.
+    
+    Args:
+        hazard_df: DataFrame with [Timestamp, HazardRaw, HazardSmooth, Survival, FailureProb]
+        equip_id: Equipment ID
+        run_id: Current RunID (UUID string)
+        sql_client: SQL connection
+    
+    Returns:
+        True if write succeeded, False otherwise
+    """
+    if hazard_df.empty:
+        Console.warn("[CONTINUOUS_HAZARD] No hazard data to write")
+        return False
+    
+    try:
+        # Prepare data for SQL write
+        df_write = hazard_df.copy()
+        
+        # Ensure required columns
+        if "RunID" not in df_write.columns:
+            df_write["RunID"] = run_id
+        if "EquipID" not in df_write.columns:
+            df_write["EquipID"] = equip_id
+        
+        df_write["CreatedAt"] = datetime.now()
+        
+        # Ensure column order matches table schema
+        df_write = df_write[[
+            "Timestamp", "HazardRaw", "HazardSmooth", "Survival", "FailureProb",
+            "RunID", "EquipID", "CreatedAt"
+        ]]
+        
+        # TIME-01: Ensure naive timestamps
+        if df_write["Timestamp"].dt.tz is not None:
+            df_write["Timestamp"] = df_write["Timestamp"].dt.tz_localize(None)
+        
+        # Write to SQL using bulk insert
+        cur = sql_client.cursor()
+        
+        # Delete old hazard forecasts for this equipment and timestamp range
+        min_ts = df_write["Timestamp"].min()
+        max_ts = df_write["Timestamp"].max()
+        
+        cur.execute(
+            """
+            DELETE FROM dbo.ACM_FailureHazard_TS
+            WHERE EquipID = ?
+              AND Timestamp BETWEEN ? AND ?
+              AND RunID = ?
+            """,
+            (equip_id, min_ts, max_ts, run_id)
+        )
+        
+        # Insert new hazard forecast
+        insert_sql = """
+            INSERT INTO dbo.ACM_FailureHazard_TS
+            (Timestamp, HazardRaw, HazardSmooth, Survival, FailureProb, RunID, EquipID, CreatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        rows_to_insert = [
+            (
+                row["Timestamp"],
+                float(row["HazardRaw"]) if pd.notna(row["HazardRaw"]) else None,
+                float(row["HazardSmooth"]) if pd.notna(row["HazardSmooth"]) else None,
+                float(row["Survival"]) if pd.notna(row["Survival"]) else None,
+                float(row["FailureProb"]) if pd.notna(row["FailureProb"]) else None,
+                row["RunID"],
+                int(row["EquipID"]),
+                row["CreatedAt"]
+            )
+            for _, row in df_write.iterrows()
+        ]
+        
+        cur.executemany(insert_sql, rows_to_insert)
+        sql_client.conn.commit()
+        cur.close()
+        
+        Console.info(
+            f"[CONTINUOUS_HAZARD] Wrote {len(df_write)} hazard/failure probability points to "
+            f"ACM_FailureHazard_TS (EquipID={equip_id}, RunID={run_id[:8]}...)"
+        )
+        return True
+        
+    except Exception as e:
+        Console.error(f"[CONTINUOUS_HAZARD] Failed to write hazard forecast: {e}")
+        import traceback
+        Console.warn(f"[CONTINUOUS_HAZARD] Traceback: {traceback.format_exc()}")
+        try:
+            sql_client.conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def smooth_failure_probability_hazard(
     prev_hazard_baseline: float,
     new_probability_series: pd.Series,
@@ -1838,7 +2057,7 @@ def run_enhanced_forecasting_sql(
                 keep_runs = 30
             keep_runs = max(1, min(int(keep_runs), 1000))
             cur = sql_client.cursor()
-            for table_name in ("ACM_HealthForecast_TS", "ACM_FailureForecast_TS"):
+            for table_name in ("ACM_HealthForecast", "ACM_FailureForecast"):
                 cur.execute(f"""
                     WITH RankedRuns AS (
                         SELECT RunID,
@@ -1976,6 +2195,8 @@ def run_enhanced_forecasting_sql(
         prev_smoothing_params = prev_state.model_params.get("smoothing", {}) or {}
 
     # --- Load detector scores from ACM_Scores_Wide ---
+    # FORECAST-FIX-01: Load ALL historical scores for equipment (not just current RunID)
+    # This provides full historical context for forecasting models
     try:
         cur = sql_client.cursor()
         cur.execute(
@@ -1985,10 +2206,10 @@ def run_enhanced_forecasting_sql(
                    iforest_z, gmm_z, cusum_z, drift_z,
                    hst_z, river_hst_z, fused
             FROM dbo.ACM_Scores_Wide
-            WHERE EquipID = ? AND RunID = ?
+            WHERE EquipID = ?
             ORDER BY Timestamp
             """,
-            (equip_id, run_id),
+            (equip_id,),
         )
         rows = cur.fetchall() or []
         cur.close()
@@ -2336,8 +2557,18 @@ def run_enhanced_forecasting_sql(
                         hazard_df = hazard_df.copy()
                         hazard_df.insert(0, "RunID", run_id)
                         hazard_df.insert(1, "EquipID", equip_id)
+                        # Add Method column for SQL schema compatibility
+                        hazard_df["Method"] = "GaussianTail"
                         if regime_label is not None:
                             hazard_df["RegimeLabel"] = regime_label
+                        
+                        # FORECAST-STATE-CONTINUOUS: Write hazard to time-series table
+                        write_continuous_hazard_forecast(
+                            hazard_df=hazard_df,
+                            equip_id=equip_id,
+                            run_id=run_id,
+                            sql_client=sql_client
+                        )
                 except Exception as hz_e:
                     Console.warn(f"[FORECAST] Hazard smoothing failed: {hz_e}")
             
@@ -2681,15 +2912,28 @@ def run_enhanced_forecasting_sql(
     # --- 5. RUL Summary ---
     try:
         predicted_failure_time = health_series.index[-1] + pd.Timedelta(hours=rul_hours)
+
+        def _timedelta_hours(diff: Any) -> float:
+            """
+            Convert various timedelta-like objects (Timedelta, np.timedelta64, scalar seconds,
+            or single-element Series) into hours safely.
+            """
+            if isinstance(diff, pd.Series):
+                if diff.empty:
+                    return 0.0
+                diff = diff.iloc[0]
+            td = pd.Timedelta(diff)
+            return float(td.total_seconds() / 3600.0)
+
         ci_lower_rul = None
         ci_upper_rul = None
         if not health_forecast_df.empty:
             lower_hit = health_forecast_df[health_forecast_df["CI_Lower"] <= failure_threshold]
             upper_hit = health_forecast_df[health_forecast_df["CI_Upper"] <= failure_threshold]
             if not lower_hit.empty:
-                ci_lower_rul = float((lower_hit.iloc[0]["Timestamp"] - health_series.index[-1]).total_seconds() / 3600.0)
+                ci_lower_rul = _timedelta_hours(lower_hit.iloc[0]["Timestamp"] - health_series.index[-1])
             if not upper_hit.empty:
-                ci_upper_rul = float((upper_hit.iloc[0]["Timestamp"] - health_series.index[-1]).total_seconds() / 3600.0)
+                ci_upper_rul = _timedelta_hours(upper_hit.iloc[0]["Timestamp"] - health_series.index[-1])
         lower_bound_val = ci_lower_rul if ci_lower_rul is not None else max(0.0, rul_hours - 12.0)
         upper_bound_val = ci_upper_rul if ci_upper_rul is not None else rul_hours + 12.0
         
@@ -2741,6 +2985,36 @@ def run_enhanced_forecasting_sql(
     if not rul_summary_df.empty:
         tables["rul_summary"] = rul_summary_df
 
+    # Build maintenance recommendation window from RUL + failure probability
+    maintenance_recommendation_df = pd.DataFrame()
+    try:
+        now_ts = current_batch_time or datetime.now()
+        window_start = now_ts + timedelta(hours=max(rul_hours - 24.0, 0.0))
+        window_end = window_start + timedelta(hours=24.0)
+        prob_at_end = float(max_failure_prob)
+
+        comment = (
+            f"Schedule within window; RUL ~{rul_hours:.1f}h, "
+            f"max failure probability {prob_at_end:.1%}"
+        )
+
+        maintenance_recommendation_df = pd.DataFrame(
+            [
+                {
+                    "EarliestMaintenance": now_ts,
+                    "PreferredWindowStart": window_start,
+                    "PreferredWindowEnd": window_end,
+                    "FailureProbAtWindowEnd": prob_at_end,
+                    "Comment": comment,
+                }
+            ]
+        )
+    except Exception as mr_ex:
+        Console.warn(f"[ENHANCED_FORECAST] Maintenance recommendation generation failed: {mr_ex}")
+
+    if not maintenance_recommendation_df.empty:
+        tables["maintenance_recommendation"] = maintenance_recommendation_df
+
     # --- 7. Build metrics summary ---
     metrics = {
         "rul_hours": float(rul_hours),
@@ -2772,14 +3046,50 @@ def run_enhanced_forecasting_sql(
 
             # Build forecast horizon JSON for next iteration comparison
             forecast_horizon_json = "[]"
+            merged_forecast_df = None  # Will hold merged continuous forecast
             try:
-                horizon_df = pd.DataFrame({
+                # Create new forecast horizon
+                new_horizon_df = pd.DataFrame({
                     "Timestamp": forecast_timestamps,
                     "ForecastHealth": forecast_values,
                     "CI_Lower": ci_lower,
                     "CI_Upper": ci_upper,
                 })
-                forecast_horizon_json = ForecastState.serialize_forecast_horizon(horizon_df)
+                
+                # FORECAST-STATE-CONTINUOUS: Merge with previous horizon for continuity
+                if prev_state and prev_state.last_forecast_horizon_json:
+                    try:
+                        # Deserialize previous forecast horizon
+                        prev_horizon_json = json.loads(prev_state.last_forecast_horizon_json)
+                        prev_horizon_df = pd.DataFrame(prev_horizon_json)
+                        if not prev_horizon_df.empty and "Timestamp" in prev_horizon_df.columns:
+                            prev_horizon_df["Timestamp"] = pd.to_datetime(prev_horizon_df["Timestamp"])
+                            
+                            # Merge horizons with exponential temporal blending
+                            blend_tau = forecast_cfg.get("blend_tau_hours", BLEND_TAU_HOURS)
+                            merged_forecast_df = merge_forecast_horizons(
+                                prev_horizon=prev_horizon_df,
+                                new_horizon=new_horizon_df,
+                                current_time=current_batch_time,
+                                blend_tau_hours=blend_tau
+                            )
+                            Console.info(
+                                f"[CONTINUOUS_FORECAST] Merged {len(prev_horizon_df)} previous + "
+                                f"{len(new_horizon_df)} new points → {len(merged_forecast_df)} continuous"
+                            )
+                        else:
+                            # Previous horizon invalid, use new forecast
+                            merged_forecast_df = new_horizon_df.copy()
+                    except Exception as merge_err:
+                        Console.warn(f"[CONTINUOUS_FORECAST] Merge failed, using new forecast only: {merge_err}")
+                        merged_forecast_df = new_horizon_df.copy()
+                else:
+                    # No previous state, use new forecast as-is
+                    merged_forecast_df = new_horizon_df.copy()
+                
+                # Serialize merged forecast for next iteration
+                forecast_horizon_json = ForecastState.serialize_forecast_horizon(merged_forecast_df)
+                
             except Exception as fhe:
                 Console.warn(f"[FORECAST] Failed to serialize forecast horizon: {fhe}")
             
@@ -2831,6 +3141,19 @@ def run_enhanced_forecasting_sql(
                 f"quality={forecast_quality.get('forecast_accuracy', 'N/A')})"
             )
             
+            # FORECAST-STATE-CONTINUOUS: Write merged forecast to time-series table
+            if merged_forecast_df is not None and not merged_forecast_df.empty:
+                write_success = write_continuous_health_forecast(
+                    merged_forecast=merged_forecast_df,
+                    equip_id=equip_id,
+                    run_id=run_id,
+                    sql_client=sql_client
+                )
+                if write_success:
+                    metrics["continuous_forecast_points"] = len(merged_forecast_df)
+                else:
+                    Console.warn("[CONTINUOUS_FORECAST] Failed to write merged forecast to database")
+            
             # Add state info to metrics
             metrics["forecast_state_version"] = new_state.state_version
             metrics["retrain_needed"] = retrain_needed
@@ -2847,6 +3170,80 @@ def run_enhanced_forecasting_sql(
             Console.error(f"[FORECAST] Failed to save forecast state: {e}")
             import traceback
             Console.warn(f"[FORECAST] State persistence error traceback: {traceback.format_exc()}")
+
+    # === MULTIVARIATE SENSOR FORECASTING (v10.0.1) ===
+    # Generate sensor-level forecasts using VAR (Vector Autoregression)
+    try:
+        Console.info("[SENSOR_FORECAST] Generating multivariate sensor forecasts using VAR")
+        
+        if sensor_data is not None and not sensor_data.empty:
+            from statsmodels.tsa.vector_ar.var_model import VAR
+            
+            # Select top sensors for forecasting (limit to prevent overfitting)
+            max_sensors = min(10, len(sensor_data.columns))
+            
+            # Get sensor variance to identify most variable sensors
+            sensor_variance = sensor_data.var().sort_values(ascending=False)
+            top_sensors = sensor_variance.head(max_sensors).index.tolist()
+            
+            sensor_subset = sensor_data[top_sensors].copy()
+            
+            # Remove NaNs and ensure enough data points
+            sensor_subset = sensor_subset.dropna()
+            
+            if len(sensor_subset) >= 50:  # Need at least 50 points for VAR
+                # Fit VAR model
+                var_model = VAR(sensor_subset)
+                
+                # Determine optimal lag order (max 10 lags to prevent overfitting)
+                max_lags = min(10, len(sensor_subset) // 10)
+                var_fitted = var_model.fit(maxlags=max_lags, ic='aic')
+                
+                Console.info(f"[SENSOR_FORECAST] VAR model fitted with {var_fitted.k_ar} lags")
+                
+                # Generate 7-day forecast (168 hours)
+                forecast_steps = 168
+                forecast_result = var_fitted.forecast(sensor_subset.values[-var_fitted.k_ar:], steps=forecast_steps)
+                
+                # Build forecast DataFrame
+                last_timestamp = sensor_subset.index[-1]
+                dt_hours = 1.0  # Hourly forecast
+                
+                sensor_forecast_records = []
+                for i in range(forecast_steps):
+                    forecast_timestamp = last_timestamp + pd.Timedelta(hours=dt_hours * (i + 1))
+                    
+                    for j, sensor_name in enumerate(top_sensors):
+                        sensor_forecast_records.append({
+                            'EquipID': equip_id,
+                            'RunID': run_id,
+                            'Timestamp': forecast_timestamp,
+                            'SensorName': sensor_name,
+                            'ForecastValue': float(forecast_result[i, j]),
+                            'CiLower': None,  # VAR doesn't provide built-in CI
+                            'CiUpper': None,
+                            'ForecastStd': None,
+                            'Method': f'VAR({var_fitted.k_ar})',
+                            'RegimeLabel': int(regime_label) if regime_label and regime_label.isdigit() else 0,
+                            'CreatedAt': datetime.now()
+                        })
+                
+                sensor_forecast_df = pd.DataFrame(sensor_forecast_records)
+                
+                # Store in tables dict for persistence by wrapper function
+                tables["sensor_forecast_var"] = sensor_forecast_df
+                Console.info(f"[SENSOR_FORECAST] Generated {len(sensor_forecast_df)} VAR sensor forecast points for {len(top_sensors)} sensors")
+            else:
+                Console.warn(f"[SENSOR_FORECAST] Insufficient data ({len(sensor_subset)} points), need >= 50 for VAR")
+        else:
+            Console.warn("[SENSOR_FORECAST] No sensor data available for forecasting")
+            
+    except ImportError as e:
+        Console.warn(f"[SENSOR_FORECAST] statsmodels.VAR not available: {e}")
+    except Exception as e:
+        Console.error(f"[SENSOR_FORECAST] Multivariate sensor forecasting failed: {e}")
+        import traceback
+        Console.warn(f"[SENSOR_FORECAST] Traceback: {traceback.format_exc()}")
 
     return {"tables": tables, "metrics": metrics}
 
@@ -2886,12 +3283,14 @@ def run_and_persist_enhanced_forecasting(
         return metrics
 
     ef_sql_map = {
-        "health_forecast_ts": "ACM_HealthForecast_TS",
-        "failure_forecast_ts": "ACM_FailureForecast_TS",
-        "failure_hazard_ts": "ACM_FailureHazard_TS",
+        "health_forecast_ts": "ACM_HealthForecast",
+        "failure_forecast_ts": "ACM_FailureForecast",
+        "failure_hazard_ts": "ACM_FailureForecast",
         "detector_forecast_ts": "ACM_DetectorForecast_TS",
-        "sensor_forecast_ts": "ACM_SensorForecast_TS",
-        "rul_summary": "ACM_RUL_Summary",
+        "sensor_forecast_ts": "ACM_SensorForecast",
+        "sensor_forecast_var": "ACM_SensorForecast",  # VAR multivariate forecasts
+        "rul_summary": "ACM_RUL",
+        "maintenance_recommendation": "ACM_MaintenanceRecommendation",
     }
     ef_csv_map = {
         "health_forecast_ts": "health_forecast.csv",
@@ -2899,7 +3298,9 @@ def run_and_persist_enhanced_forecasting(
         "failure_hazard_ts": "failure_hazard.csv",
         "detector_forecast_ts": "detector_forecast.csv",
         "sensor_forecast_ts": "sensor_forecast.csv",
+        "sensor_forecast_var": "sensor_forecast_var.csv",  # VAR multivariate forecasts
         "rul_summary": "rul_summary.csv",
+        "maintenance_recommendation": "maintenance_recommendation.csv",
     }
     timestamp_columns = {
         "health_forecast_ts": ["Timestamp"],
@@ -2907,6 +3308,12 @@ def run_and_persist_enhanced_forecasting(
         "failure_hazard_ts": ["Timestamp"],
         "detector_forecast_ts": ["Timestamp"],
         "sensor_forecast_ts": ["Timestamp"],
+        "sensor_forecast_var": ["Timestamp"],  # VAR multivariate forecasts
+        "maintenance_recommendation": [
+            "EarliestMaintenance",
+            "PreferredWindowStart",
+            "PreferredWindowEnd",
+        ],
     }
 
     enable_sql = getattr(output_manager, "sql_client", None) is not None
@@ -2924,7 +3331,7 @@ def run_and_persist_enhanced_forecasting(
         csv_name = ef_csv_map.get(logical_name, f"{logical_name}.csv")
         
         # DEBUG: Log columns and Method values before write
-        if sql_table == "ACM_FailureForecast_TS":
+        if sql_table == "ACM_FailureForecast":
             Console.info(f"[DEBUG] Before write_dataframe: columns={list(df_to_write.columns)}")
             if "Method" in df_to_write.columns:
                 Console.info(f"[DEBUG] Method column dtype={df_to_write['Method'].dtype}, nulls={df_to_write['Method'].isna().sum()}, first 5 values={list(df_to_write['Method'].head())}")

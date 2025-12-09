@@ -17,11 +17,7 @@ CREATE OR ALTER PROCEDURE dbo.usp_ACM_StartRun
   @DefaultStartUtc           DATETIME2(3) = NULL,
   @Version                   VARCHAR(50) = NULL,
   @ConfigHash                VARCHAR(128) = NULL,
-  @TriggerReason             VARCHAR(64) = 'timer',
-  @RunID                     UNIQUEIDENTIFIER OUTPUT,
-  @WindowStartEntryDateTime  DATETIME2(3) OUTPUT,
-  @WindowEndEntryDateTime    DATETIME2(3) OUTPUT,
-  @EquipIDOut                INT OUTPUT
+  @TriggerReason             VARCHAR(64) = 'timer'
 AS
 BEGIN
   SET NOCOUNT ON;
@@ -30,6 +26,10 @@ BEGIN
   BEGIN TRY
     -- Resolve EquipID
     DECLARE @EquipName NVARCHAR(100);
+    DECLARE @RunID UNIQUEIDENTIFIER;
+    DECLARE @WindowStartEntryDateTime DATETIME2(3);
+    DECLARE @WindowEndEntryDateTime DATETIME2(3);
+    DECLARE @EquipIDOut INT;
     
     IF @EquipID IS NULL
     BEGIN
@@ -109,6 +109,13 @@ BEGIN
 
     -- Return resolved EquipID
     SET @EquipIDOut = @EquipID;
+
+    -- Return results via SELECT (for pyodbc compatibility)
+    SELECT 
+      CONVERT(VARCHAR(36), @RunID) AS RunID,
+      @WindowStartEntryDateTime AS WindowStart,
+      @WindowEndEntryDateTime AS WindowEnd,
+      @EquipIDOut AS EquipID;
 
   END TRY
   BEGIN CATCH

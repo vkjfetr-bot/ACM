@@ -1639,7 +1639,7 @@ def run(ctx: Any) -> Dict[str, Any]:
         summary_df = build_summary_dataframe(regime_model)
         if not summary_df.empty:
             summary_path = ctx.tables_dir / "regime_summary.csv"
-            # REG-CSV-02: Write to ACM_RegimeSummary SQL table
+            # REG-CSV-02: Write to ACM_RegimeStats SQL table
             if OutputManager is not None:
                 om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
                 sql_cols = {
@@ -1649,7 +1649,7 @@ def run(ctx: Any) -> Dict[str, Any]:
                     "stability_score": "StabilityScore", "median_fused": "MedianFused",
                     "p95_abs_fused": "P95AbsFused", "count": "Count"
                 }
-                om.write_dataframe(summary_df, summary_path, sql_table="ACM_RegimeSummary" if sql_client else None, sql_columns=sql_cols)
+                om.write_dataframe(summary_df, summary_path, sql_table="ACM_RegimeStats" if sql_client else None, sql_columns=sql_cols)
             else:
                 summary_df.to_csv(summary_path, index=False)
             tables.append({"name":"regime_summary","path":str(summary_path)})
@@ -1664,11 +1664,11 @@ def run(ctx: Any) -> Dict[str, Any]:
                 .reset_index(drop=True)
             )
             fi_path = ctx.tables_dir / "regime_feature_importance.csv"
-            # REG-CSV-02: Write to ACM_RegimeFeatureImportance SQL table
+            # REG-CSV-02: Write to ACM_RegimeOccupancy SQL table
             if OutputManager is not None:
                 om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
                 sql_cols = {"feature": "Feature", "importance": "Importance"}
-                om.write_dataframe(feature_importance_df, fi_path, sql_table="ACM_RegimeFeatureImportance" if sql_client else None, sql_columns=sql_cols)
+                om.write_dataframe(feature_importance_df, fi_path, sql_table="ACM_RegimeOccupancy" if sql_client else None, sql_columns=sql_cols)
             else:
                 feature_importance_df.to_csv(fi_path, index=False)
             tables.append({"name":"regime_feature_importance","path":str(fi_path)})
