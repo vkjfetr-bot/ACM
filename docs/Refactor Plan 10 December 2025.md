@@ -514,10 +514,10 @@ You already have:
 
 | Task ID | Area      | Description                                                                       | Files                                          | Done when                                                                          |
 | ------: | --------- | --------------------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------- |
-|    M4.1 | Trend     | Use `LinearTrendModel` as the sole degradation model for health index.            | `degradation_model.py`, `forecast_engine.py`   | ForecastEngine always calls `LinearTrendModel` to fit & forecast.                  |
-|    M4.2 | RUL       | Wire `RULEstimator` as the only RUL mechanism.                                    | `rul_estimator.py`, `forecast_engine.py`       | RUL summary in result dict comes from RULEstimator output.                         |
-|    M4.3 | Fail prob | Use `failure_probability` to compute failure, survival, and hazard vs horizon.    | `failure_probability.py`, `forecast_engine.py` | AC tables for failure forecast are populated using these functions.                |
-|    M4.4 | Metrics   | Optionally log forecast quality metrics to forecasting state, using `metrics.py`. | `metrics.py`, `state_manager.py`               | Forecasting state includes simple metrics (e.g. MAE, bias) when data is available. |
+|    ~~M4.1~~ | ~~Trend~~     | ~~Use `LinearTrendModel` as the sole degradation model for health index.~~            | ~~`degradation_model.py`, `forecast_engine.py`~~   | ✅ ForecastEngine._fit_degradation_model() uses LinearTrendModel exclusively                  |
+|    ~~M4.2~~ | ~~RUL~~       | ~~Wire `RULEstimator` as the only RUL mechanism.~~                                    | ~~`rul_estimator.py`, `forecast_engine.py`~~       | ✅ _generate_forecast_and_rul() uses RULEstimator with Monte Carlo                         |
+|    ~~M4.3~~ | ~~Fail prob~~ | ~~Use `failure_probability` to compute failure, survival, and hazard vs horizon.~~    | ~~`failure_probability.py`, `forecast_engine.py`~~ | ✅ compute_failure_statistics() called for survival/hazard/MTTF                |
+|    ~~M4.4~~ | ~~Metrics~~   | ~~Optionally log forecast quality metrics to forecasting state, using `metrics.py`.~~ | ~~`metrics.py`, `state_manager.py`~~               | ✅ ForecastingState includes RecentMAE/RecentRMSE; StateManager persists | |
 
 **Source control**
 

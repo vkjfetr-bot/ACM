@@ -26,7 +26,7 @@ try:
         from . import river_models  # Optional: streaming models (requires river library)
     except ImportError:
         river_models = None  # Graceful fallback if river not installed
-    from . import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
+    from .ar1_detector import AR1Detector  # Extracted from forecasting.py
     from . import fast_features
     from .forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from . import storage  # Use output_manager instead
@@ -39,7 +39,7 @@ except ImportError:
         from core import river_models  # Optional: streaming models (requires river library)
     except ImportError:
         river_models = None  # Graceful fallback if river not installed
-    from core import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
+    from core.ar1_detector import AR1Detector
     from core.forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from core import storage  # Use output_manager instead
     try:
@@ -1868,7 +1868,7 @@ def main() -> None:
                     # Reconstruct detector objects from cached models
                     # Note: We need to pass empty configs since we're loading pre-trained models
                     if "ar1_params" in cached_models and cached_models["ar1_params"]:
-                        ar1_detector = forecasting.AR1Detector(ar1_cfg={})
+                        ar1_detector = AR1Detector(ar1_cfg={})
                         ar1_detector.phimap = cached_models["ar1_params"]["phimap"]
                         ar1_detector.sdmap = cached_models["ar1_params"]["sdmap"]
                         ar1_detector._is_fitted = True
@@ -1963,7 +1963,7 @@ def main() -> None:
             
             if ar1_enabled and not ar1_detector:
                 with T.section("fit.ar1"):
-                    ar1_detector = forecasting.AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
+                    ar1_detector = AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
             
             if pca_enabled and not pca_detector:
                 with T.section("fit.pca_subspace"):
@@ -2426,7 +2426,7 @@ def main() -> None:
                         # Re-fit detectors immediately after invalidation
                         Console.info("[MODEL] Re-fitting detectors due to forced retraining...")
                         if ar1_enabled:
-                            ar1_detector = forecasting.AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
+                            ar1_detector = AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
                         if pca_enabled:
                             pca_cfg = (cfg.get("models", {}).get("pca", {}) or {})
                             pca_detector = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
@@ -4018,40 +4018,38 @@ def main() -> None:
                 except Exception as e:
                     Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
 
-            # === RUL + FORECASTING (v10.0.0 - DISABLED) ===
-            # DISABLED: Focusing on anomaly detection analytical integrity first
-            # See docs/FORECASTING_FUTURE_WORK.md for architectural audit and future roadmap
-            # TODO: Re-enable after anomaly detection feature set validated
-            
-            # try:
-            #     # v10.0.0: Use enhanced forecasting (forecasting.py has the working implementation)
-            #     Console.info("[FORECAST] Running enhanced forecasting engine (v10.0.0 - SQL mode)")
-            #     
-            #     # Call the actual working forecasting code
-            #     tables = forecasting.run_and_persist_enhanced_forecasting(
-            #         sql_client=sql_client,
-            #         equip_id=equip_id,
-            #         run_id=run_id,
-            #         config=cfg,
-            #         output_manager=output_manager,
-            #         tables_dir=tables_dir,
-            #         equip=equip,
-            #         current_batch_time=win_end,
-            #         sensor_data=score_numeric if 'score_numeric' in locals() else None
-            #     )
-            #     
-            #     if tables:
-            #         Console.info(f"[FORECAST] Successfully wrote {len(tables)} forecast tables")
-            #         Console.info(f"[FORECAST] Tables: {', '.join(tables.keys())}")
-            #     else:
-            #         Console.warn("[FORECAST] No forecast tables generated")
-            #         
-            # except Exception as e:
-            #     Console.error(f"[FORECAST] Enhanced forecasting (SQL mode) failed: {e}")
-            #     import traceback
-            #     Console.error(f"[FORECAST] Traceback: {traceback.format_exc()}")
-            
-            Console.info("[FORECAST] Forecasting and RUL disabled - see docs/FORECASTING_FUTURE_WORK.md")
+            # === RUL + FORECASTING (v10.0.0 - ENABLED) ===
+            # v10.0.0: Unified forecasting via ForecastEngine (replaces legacy forecasting modules)
+            try:
+                Console.info("[FORECAST] Running unified forecasting engine (v10.0.0 - SQL mode)")
+                
+                # M7: ForecastEngine integration in SQL mode
+                forecast_engine = ForecastEngine(
+                    sql_client=getattr(output_manager, "sql_client", sql_client),
+                    output_manager=output_manager,
+                    equip_id=int(equip_id) if equip_id is not None else None,
+                    run_id=str(run_id) if run_id is not None else None,
+                    config=cfg
+                )
+                
+                forecast_results = forecast_engine.run_forecast()
+                
+                if forecast_results.get('success'):
+                    Console.info(
+                        f"[FORECAST] RUL P50={forecast_results.get('rul_p50', 0):.1f}h, "
+                        f"P10={forecast_results.get('rul_p10', 0):.1f}h, P90={forecast_results.get('rul_p90', 0):.1f}h"
+                    )
+                    Console.info(f"[FORECAST] Top sensors: {forecast_results.get('top_sensors', 'N/A')}")
+                    Console.info(f"[FORECAST] Wrote tables: {', '.join(forecast_results.get('tables_written', []))}")
+                else:
+                    error_msg = forecast_results.get('error', 'Unknown error')
+                    data_quality = forecast_results.get('data_quality', 'UNKNOWN')
+                    Console.warn(f"[FORECAST] Forecast skipped: {error_msg} (quality={data_quality})")
+                    
+            except Exception as e:
+                Console.error(f"[FORECAST] Unified forecasting engine failed: {e}")
+                import traceback
+                Console.error(f"[FORECAST] Traceback: {traceback.format_exc()}")
 
         except Exception as e:
             Console.warn(f"[OUTPUTS] Comprehensive analytics generation failed: {e}")
