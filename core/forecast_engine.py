@@ -22,6 +22,28 @@ Orchestrates the complete forecasting workflow:
 References:
 - All module-specific references in respective files
 - ISO 13381-1:2015: Prognostics workflow standards
+
+Future R&D Entrypoints (M15):
+---------------------------------
+TODO: FAULT_FAMILY_PREDICTION - Classify failure modes into fault families
+      - Table: ACM_FaultFamilies (FaultID, EquipID, FaultName, SensorSignature, DetectionMethod)
+      - Method: _predict_fault_family() using sensor attribution clusters
+      - Integration: Add FaultFamily column to ACM_RUL after sensor attribution step
+      
+TODO: EPISODE_CLUSTERING - Group similar anomaly episodes for pattern mining
+      - Table: ACM_BehaviourDeviation (EpisodeID, ClusterID, ClusterLabel, SimilarityScore)
+      - Method: _cluster_episodes() using episode diagnostics features
+      - Integration: Post-process ACM_EpisodeDiagnostics after forecasting complete
+      
+TODO: MULTIVARIATE_DEGRADATION - Extend LinearTrendModel to vector autoregression
+      - Model: VARDegradationModel handling correlated sensor degradation
+      - Method: _fit_var_model() for sensor-level multivariate forecasting
+      - Integration: Replace LinearTrendModel when multi-sensor data available
+      
+TODO: CAUSAL_ATTRIBUTION - Pearl-style counterfactual sensor importance
+      - Method: _compute_counterfactual_rul() in SensorAttributor
+      - Compute RUL delta when each sensor is zeroed out
+      - Replace heuristic attribution with causal importance scores
 """
 
 from datetime import datetime, timedelta
@@ -34,7 +56,7 @@ from core.degradation_model import LinearTrendModel
 from core.failure_probability import compute_failure_statistics, health_to_failure_probability
 from core.rul_estimator import RULEstimator
 from core.sensor_attribution import SensorAttributor
-from core.metrics import compute_comprehensive_metrics, log_metrics_summary
+from core.metrics import compute_comprehensive_metrics, log_metrics_summary, compute_forecast_diagnostics, log_forecast_diagnostics
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
 from utils.logger import Console
@@ -136,13 +158,20 @@ class ForecastEngine:
                     'data_quality': 'NONE'
                 }
             
-            # M3.2: Early quality gating before expensive operations
+            # M3.2 + M14: Early quality gating before expensive operations
             # Allow GAPPY data (historical replay) but block SPARSE/FLAT/NOISY
             if data_quality in [HealthQuality.SPARSE, HealthQuality.FLAT, HealthQuality.NOISY]:
-                Console.warn(f"[ForecastEngine] Poor data quality: {data_quality.value}; skipping forecast")
+                # M14: Friendly message for coldstart/quality issues (not fatal)
+                quality_messages = {
+                    HealthQuality.SPARSE: "Insufficient data samples - need more historical data for reliable forecast",
+                    HealthQuality.FLAT: "Health data shows no variance - equipment may be in steady state",
+                    HealthQuality.NOISY: "Health data has excessive noise - consider smoothing or filtering"
+                }
+                friendly_msg = quality_messages.get(data_quality, f"Data quality issue: {data_quality.value}")
+                Console.warn(f"[ForecastEngine] {friendly_msg}; skipping forecast (not fatal)")
                 return {
                     'success': False,
-                    'error': f'Poor data quality: {data_quality.value}',
+                    'error': friendly_msg,
                     'data_quality': data_quality.value
                 }
             
@@ -179,20 +208,36 @@ class ForecastEngine:
                 health_df, degradation_model, forecast_config
             )
             
-            # Step 7: Rank sensor attributions
+            # Step 6b: Compute forecast diagnostics (M9)
+            diagnostics = compute_forecast_diagnostics(forecast_results, data_summary)
+            log_forecast_diagnostics(diagnostics)
+            
+            # Step 7: Rank sensor attributions (M10)
             sensor_attributions = self._load_sensor_attributions()
+            # Add to forecast_results for unified access
+            attributor = SensorAttributor(sql_client=self.sql_client)
+            top_sensors_str = attributor.format_top_n(sensor_attributions, n=3)
+            forecast_results['sensor_attributions'] = sensor_attributions
+            forecast_results['top_sensors'] = top_sensors_str
             
             # Step 8: Compute metrics (if we have historical forecasts to compare)
             # metrics = self._compute_metrics(forecast_results)
             
-            # Step 9: Write outputs to SQL
-            tables_written = self._write_outputs(forecast_results, sensor_attributions)
+            # Step 9: Write outputs to SQL (M13: pass diagnostics for operator context)
+            tables_written = self._write_outputs(
+                forecast_results, sensor_attributions, diagnostics, data_summary
+            )
             
-            # Step 10: Update state
+            # Step 10: Update state with diagnostics (M9)
             state.model_params = degradation_model.get_parameters()
-            state.last_health_value = float(health_df['HealthIndex'].iloc[-1])
-            state.last_health_timestamp = health_df['Timestamp'].iloc[-1]
             state.updated_at = datetime.now()
+            
+            # Store diagnostics in state for persistence
+            # Include health values in the diagnostics dict for state persistence
+            diagnostics['last_health_value'] = float(health_df['HealthIndex'].iloc[-1])
+            diagnostics['last_health_timestamp'] = health_df['Timestamp'].iloc[-1].isoformat() if hasattr(health_df['Timestamp'].iloc[-1], 'isoformat') else str(health_df['Timestamp'].iloc[-1])
+            state.last_forecast_json = diagnostics
+            state.recent_mae = diagnostics.get('forecast_std')  # Use forecast_std as proxy
             
             self.state_mgr.save_state(state)
             
@@ -267,10 +312,22 @@ class ForecastEngine:
         forecast_section = self.config.get('forecasting', {})
         config.update(forecast_section)
         
+        # M11: Ensure forecast horizon and resolution have defaults
+        # forecast_horizon_hours: How far ahead to forecast (default 168h = 7 days)
+        # forecast_resolution_hours: Step size for forecast points (defaults to data cadence)
+        if 'forecast_horizon_hours' not in config:
+            config['forecast_horizon_hours'] = 168.0
+        if 'forecast_resolution_hours' not in config:
+            config['forecast_resolution_hours'] = None  # Will use dt_hours from data
+        
+        # Alias for backward compatibility
+        config['max_forecast_hours'] = config.get('max_forecast_hours', config['forecast_horizon_hours'])
+        
         Console.info(
             f"[ForecastEngine] Loaded config: alpha={config.get('alpha', 0.3):.2f}, "
             f"beta={config.get('beta', 0.1):.2f}, "
-            f"failure_threshold={config.get('failure_threshold', 70.0):.1f}"
+            f"failure_threshold={config.get('failure_threshold', 70.0):.1f}, "
+            f"horizon={config.get('forecast_horizon_hours', 168.0):.0f}h"
         )
         
         return config
@@ -318,12 +375,21 @@ class ForecastEngine:
         """Generate health forecast and RUL estimate"""
         # Extract config values
         failure_threshold = float(forecast_config.get('failure_threshold', 70.0))
-        max_forecast_hours = float(forecast_config.get('max_forecast_hours', 168.0))
         confidence_level = float(forecast_config.get('confidence_min', 0.80))
         n_simulations = int(forecast_config.get('monte_carlo_simulations', 1000))
         
-        # M3.3: Use dt_hours from DataSummary if available, else from model
-        dt_hours = float(forecast_config.get('dt_hours', degradation_model.dt_hours))
+        # M11: Forecast horizon from config (default 168h = 7 days)
+        forecast_horizon_hours = float(forecast_config.get('forecast_horizon_hours', 168.0))
+        max_forecast_hours = float(forecast_config.get('max_forecast_hours', forecast_horizon_hours))
+        
+        # M11: Forecast resolution - use configured value or fall back to data cadence
+        # forecast_resolution_hours allows coarser output (e.g., hourly) than data cadence
+        resolution_hours = forecast_config.get('forecast_resolution_hours')
+        if resolution_hours is None:
+            # M3.3: Use dt_hours from DataSummary if available, else from model
+            dt_hours = float(forecast_config.get('dt_hours', degradation_model.dt_hours))
+        else:
+            dt_hours = float(resolution_hours)
         
         # Generate degradation forecast
         max_steps = int(max_forecast_hours / dt_hours)
@@ -357,10 +423,8 @@ class ForecastEngine:
             max_horizon_hours=max_forecast_hours
         )
         
-        # Load sensor attributions
-        attributor = SensorAttributor(sql_client=self.sql_client)
-        sensor_attrs = attributor.load_from_sql(self.equip_id, self.run_id)
-        top_sensors_str = attributor.format_top_n(sensor_attrs, n=3)
+        # Note: Sensor attributions are loaded separately in run_forecast() via _load_sensor_attributions()
+        # to avoid duplicate SQL queries. The 'sensor_attributions' key is populated there.
         
         return {
             'current_health': current_health,
@@ -377,9 +441,7 @@ class ForecastEngine:
             'rul_p90': rul_estimate.p90_upper_bound,
             'rul_mean': rul_estimate.mean_rul,
             'rul_std': rul_estimate.std_rul,
-            'failure_prob_horizon': rul_estimate.failure_probability,
-            'sensor_attributions': sensor_attrs,
-            'top_sensors': top_sensors_str
+            'failure_prob_horizon': rul_estimate.failure_probability
         }
     
     def _load_sensor_attributions(self) -> list:
@@ -388,23 +450,95 @@ class ForecastEngine:
         attributions = attributor.load_from_sql(self.equip_id, self.run_id)
         return attributions
     
+    def _validate_forecast_timestamps(self, timestamps: list) -> list:
+        """
+        Validate and normalize forecast timestamps (M12).
+        
+        Ensures:
+        - Timestamps are naive (no timezone info) - required for SQL Server datetime2
+        - Timestamps are strictly increasing
+        - Consistent step size (dt_hours) for proper time series alignment
+        
+        Args:
+            timestamps: List of datetime objects from forecast
+            
+        Returns:
+            Validated list of naive datetime objects
+        """
+        if not timestamps:
+            return []
+        
+        validated = []
+        prev_ts = None
+        expected_delta = None
+        
+        for ts in timestamps:
+            # Convert to naive datetime if needed (remove timezone)
+            if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
+            
+            # Ensure datetime type
+            if isinstance(ts, pd.Timestamp):
+                ts = ts.to_pydatetime().replace(tzinfo=None)
+            
+            # Check strictly increasing
+            if prev_ts is not None:
+                delta = ts - prev_ts
+                if delta.total_seconds() <= 0:
+                    Console.warn(f"[ForecastEngine] Non-increasing timestamp detected: {prev_ts} -> {ts}")
+                    continue  # Skip non-increasing timestamps
+                
+                # Track expected delta for consistency check
+                if expected_delta is None:
+                    expected_delta = delta
+                elif abs((delta - expected_delta).total_seconds()) > 60:  # Allow 1 min tolerance
+                    Console.warn(
+                        f"[ForecastEngine] Inconsistent timestamp spacing: "
+                        f"expected {expected_delta}, got {delta}"
+                    )
+            
+            validated.append(ts)
+            prev_ts = ts
+        
+        return validated
+
     def _write_outputs(
         self,
         forecast_results: Dict[str, Any],
-        sensor_attributions: list
+        sensor_attributions: list,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        data_summary: Optional[Any] = None
     ) -> list[str]:
         """Write forecast outputs to SQL tables via OutputManager"""
         tables_written = []
         
         try:
+            # M12: Validate timestamps before writing
+            raw_timestamps = forecast_results['forecast_timestamps']
+            validated_timestamps = self._validate_forecast_timestamps(raw_timestamps)
+            
+            if len(validated_timestamps) < len(raw_timestamps):
+                Console.warn(
+                    f"[ForecastEngine] Filtered {len(raw_timestamps) - len(validated_timestamps)} "
+                    f"invalid timestamps"
+                )
+            
+            # Use validated timestamps for all forecast DataFrames
+            forecast_values = forecast_results['forecast_values'][:len(validated_timestamps)]
+            forecast_lower = forecast_results['forecast_lower'][:len(validated_timestamps)]
+            forecast_upper = forecast_results['forecast_upper'][:len(validated_timestamps)]
+            failure_probs = forecast_results['failure_probs'][:len(validated_timestamps)]
+            survival_probs = forecast_results['survival_probs'][:len(validated_timestamps)]
+            hazard_rates = forecast_results['hazard_rates'][:len(validated_timestamps)]
+            
             # ACM_HealthForecast: Health forecast time series
             df_health_forecast = pd.DataFrame({
                 'EquipID': self.equip_id,
                 'RunID': self.run_id,
-                'Timestamp': forecast_results['forecast_timestamps'],
-                'HealthForecast': forecast_results['forecast_values'],
-                'LowerBound': forecast_results['forecast_lower'],
-                'UpperBound': forecast_results['forecast_upper'],
+                'Timestamp': validated_timestamps,
+                'HealthForecast': forecast_values,
+                'LowerBound': forecast_lower,
+                'UpperBound': forecast_upper,
                 'CreatedAt': datetime.now()
             })
             
@@ -426,10 +560,10 @@ class ForecastEngine:
             df_failure_forecast = pd.DataFrame({
                 'EquipID': self.equip_id,
                 'RunID': self.run_id,
-                'Timestamp': forecast_results['forecast_timestamps'],
-                'FailureProb': forecast_results['failure_probs'],
-                'SurvivalProb': forecast_results['survival_probs'],
-                'HazardRate': forecast_results['hazard_rates'],
+                'Timestamp': validated_timestamps,
+                'FailureProb': failure_probs,
+                'SurvivalProb': survival_probs,
+                'HazardRate': hazard_rates,
                 'CreatedAt': datetime.now()
             })
             
@@ -458,6 +592,44 @@ class ForecastEngine:
                 cv = forecast_results['rul_std'] / max(forecast_results['rul_mean'], 1.0)
                 confidence = confidence * (1.0 - min(cv * 0.5, 0.4))
             
+            # M13: Derive operator context fields
+            current_health = forecast_results['current_health']
+            
+            # HealthLevel: GOOD/CAUTION/WARNING/CRITICAL based on health thresholds
+            if current_health >= 85:
+                health_level = 'GOOD'
+            elif current_health >= 70:
+                health_level = 'CAUTION'
+            elif current_health >= 50:
+                health_level = 'WARNING'
+            else:
+                health_level = 'CRITICAL'
+            
+            # TrendSlope: Derived from forecast values (health units per hour)
+            forecast_values_arr = forecast_results.get('forecast_values', [])
+            if len(forecast_values_arr) >= 2:
+                # Simple linear slope from first to last forecast point
+                delta_health = forecast_values_arr[-1] - forecast_values_arr[0]
+                n_steps = len(forecast_values_arr)
+                # Estimate hours based on validated timestamps
+                if len(validated_timestamps) >= 2:
+                    delta_time = (validated_timestamps[-1] - validated_timestamps[0]).total_seconds() / 3600
+                    trend_slope = delta_health / max(delta_time, 1.0) if delta_time > 0 else 0.0
+                else:
+                    trend_slope = 0.0
+            else:
+                trend_slope = 0.0
+            
+            # DataQuality: From diagnostics or data_summary
+            data_quality = 'UNKNOWN'
+            if diagnostics and 'data_quality' in diagnostics:
+                data_quality = diagnostics['data_quality']
+            elif data_summary and hasattr(data_summary, 'quality'):
+                data_quality = data_summary.quality.value if data_summary.quality else 'UNKNOWN'
+            
+            # ForecastStd: From diagnostics
+            forecast_std = diagnostics.get('forecast_std', 0.0) if diagnostics else 0.0
+            
             df_rul = pd.DataFrame({
                 'EquipID': [self.equip_id],
                 'RunID': [self.run_id],
@@ -469,11 +641,17 @@ class ForecastEngine:
                 'StdRUL': [forecast_results['rul_std']],
                 'MTTF_Hours': [forecast_results['mttf_hours']],
                 'FailureProbability': [forecast_results['failure_prob_horizon']],
-                'CurrentHealth': [forecast_results['current_health']],
+                'CurrentHealth': [current_health],
                 'Confidence': [float(confidence)],  # FIX: Add confidence score
                 'FailureTime': [predicted_failure_time],  # FIX: Add predicted failure timestamp
                 'NumSimulations': [1000],  # FIX: Monte Carlo simulation count
                 'Method': ['Multipath'],  # FIX: Add forecasting method
+                # M13: Operator context fields
+                'HealthLevel': [health_level],
+                'TrendSlope': [float(trend_slope)],
+                'DataQuality': [data_quality],
+                'ForecastStd': [float(forecast_std) if not np.isnan(forecast_std) else 0.0],
+                # Sensor attributions
                 'TopSensor1': [top3_sensors[0].sensor_name if len(top3_sensors) > 0 else None],
                 'TopSensor1Contribution': [top3_sensors[0].failure_contribution if len(top3_sensors) > 0 else None],
                 'TopSensor2': [top3_sensors[1].sensor_name if len(top3_sensors) > 1 else None],
