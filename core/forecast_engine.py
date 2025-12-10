@@ -19,6 +19,12 @@ Orchestrates the complete forecasting workflow:
 11. Save all outputs to SQL via OutputManager
 12. Update persistent state
 
+v10.1.0 Enhancements:
+- Regime-conditioned forecasting with per-regime degradation rates
+- OMR/drift context integration for forecast confidence adjustment
+- Per-regime RUL estimates and hazard rates
+- Unified ACM_ForecastContext table for complete diagnostic context
+
 References:
 - All module-specific references in respective files
 - ISO 13381-1:2015: Prognostics workflow standards
@@ -47,19 +53,55 @@ TODO: CAUSAL_ATTRIBUTION - Pearl-style counterfactual sensor importance
 """
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
 from core.health_tracker import HealthTimeline, HealthQuality, DataSummary
 from core.degradation_model import LinearTrendModel
 from core.failure_probability import compute_failure_statistics, health_to_failure_probability
-from core.rul_estimator import RULEstimator
+from core.rul_estimator import RULEstimator, RULEstimate
 from core.sensor_attribution import SensorAttributor
 from core.metrics import compute_comprehensive_metrics, log_metrics_summary, compute_forecast_diagnostics, log_forecast_diagnostics
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
 from utils.logger import Console
+
+
+# ========================================================================
+# v10.1.0: Regime-Conditioned Forecasting Support
+# ========================================================================
+
+@dataclass
+class RegimeStats:
+    """Per-regime statistics for conditioned forecasting."""
+    regime_label: int
+    health_state: str  # healthy, suspect, critical
+    degradation_rate: float  # Health units/hour in this regime
+    health_mean: float
+    health_std: float
+    dwell_fraction: float  # % time spent in regime
+    transition_count: int
+    failure_threshold: float  # Regime-adjusted failure threshold
+    sample_count: int
+
+
+@dataclass  
+class ForecastContext:
+    """Unified context for regime-aware forecasting decisions."""
+    current_regime: Optional[int]
+    regime_confidence: float
+    current_omr_z: Optional[float]
+    omr_trend: str  # stable, increasing, decreasing
+    omr_top_contributors: List[Dict[str, Any]]
+    current_drift_z: Optional[float]
+    drift_trend: str  # stable, increasing, decreasing
+    health_trend: str  # improving, stable, degrading
+    data_quality: float  # 0-1
+    active_defects: int
+    retraining_recommended: bool
+    retraining_reason: Optional[str]
 
 
 class ForecastEngine:
@@ -227,6 +269,22 @@ class ForecastEngine:
             tables_written = self._write_outputs(
                 forecast_results, sensor_attributions, diagnostics, data_summary
             )
+            
+            # Step 9b (v10.1.0): Regime-conditioned forecasting
+            # Only run if regime data is available and feature is enabled
+            enable_regime_forecasting = bool(forecast_config.get('enable_regime_conditioned', True))
+            if enable_regime_forecasting:
+                try:
+                    regime_tables = self._run_regime_conditioned_forecasting(
+                        health_df=health_df,
+                        degradation_model=degradation_model,
+                        forecast_config=forecast_config,
+                        forecast_results=forecast_results
+                    )
+                    tables_written.extend(regime_tables)
+                except Exception as e:
+                    # Non-fatal: regime forecasting is optional enhancement
+                    Console.warn(f"[ForecastEngine] Regime-conditioned forecasting skipped: {e}")
             
             # Step 10: Update state with diagnostics (M9)
             state.model_params = degradation_model.get_parameters()
@@ -690,6 +748,85 @@ class ForecastEngine:
         
         return tables_written
     
+    def _run_regime_conditioned_forecasting(
+        self,
+        health_df: pd.DataFrame,
+        degradation_model: LinearTrendModel,
+        forecast_config: Dict[str, Any],
+        forecast_results: Dict[str, Any]
+    ) -> List[str]:
+        """
+        Run regime-conditioned forecasting extension (v10.1.0).
+        
+        This method:
+        1. Creates RegimeConditionedForecaster instance
+        2. Loads forecast context (OMR, drift, regime state)
+        3. Computes per-regime statistics
+        4. Estimates RUL per regime with adjusted thresholds
+        5. Writes outputs to ACM_RUL_ByRegime, ACM_RegimeHazard, ACM_ForecastContext
+        
+        Args:
+            health_df: Health timeline DataFrame
+            degradation_model: Fitted degradation model
+            forecast_config: Configuration dictionary
+            forecast_results: Results from standard forecasting
+            
+        Returns:
+            List of tables written
+        """
+        tables_written = []
+        
+        try:
+            # Create regime-conditioned forecaster
+            conditioned = RegimeConditionedForecaster(
+                sql_client=self.sql_client,
+                output_manager=self.output_manager,
+                equip_id=self.equip_id,
+                run_id=self.run_id,
+                config=forecast_config
+            )
+            
+            # Load context (OMR, drift, regime state)
+            context = conditioned.load_forecast_context()
+            Console.info(
+                f"[ForecastEngine] Regime context: regime={context.current_regime}, "
+                f"omr_z={context.current_omr_z}, drift_trend={context.drift_trend}"
+            )
+            
+            # Compute per-regime stats
+            regime_stats = conditioned.compute_regime_stats(lookback_days=90)
+            if not regime_stats:
+                Console.warn("[ForecastEngine] No regime stats available - skipping conditioned forecast")
+                return tables_written
+            
+            # Estimate RUL per regime
+            current_health = forecast_results.get('current_health', 85.0)
+            rul_results = conditioned.estimate_rul_by_regime(
+                current_health=current_health,
+                degradation_model=degradation_model,
+                current_regime=context.current_regime,
+                forecast_config=forecast_config
+            )
+            
+            # Log regime-conditioned RUL
+            conditioned_rul = rul_results.get('rul_conditioned')
+            if conditioned_rul:
+                Console.info(
+                    f"[ForecastEngine] Regime-conditioned RUL: "
+                    f"P50={conditioned_rul.p50_median:.1f}h (regime={context.current_regime})"
+                )
+            
+            # Write outputs to SQL
+            tables_written = conditioned.write_regime_conditioned_outputs(
+                rul_results=rul_results,
+                forecast_context=context
+            )
+            
+        except Exception as e:
+            Console.error(f"[ForecastEngine] Regime-conditioned forecasting failed: {e}")
+        
+        return tables_written
+    
     def _generate_sensor_forecasts(
         self,
         sensor_attributions: list,
@@ -899,3 +1036,626 @@ class ForecastEngine:
         except Exception as e:
             Console.error(f"[ForecastEngine] Sensor forecasting failed: {e}")
             return None
+
+
+# ========================================================================
+# v10.1.0: Regime-Conditioned Forecasting Extension
+# ========================================================================
+
+class RegimeConditionedForecaster:
+    """
+    Extension to ForecastEngine providing regime-aware forecasting.
+    
+    Key Features:
+    - Per-regime degradation rates computed from historical data
+    - Regime-adjusted failure thresholds (critical regimes get lower thresholds)
+    - OMR/drift context integration for confidence adjustment
+    - Hazard rate computation per regime
+    - Unified forecast context logging
+    
+    Usage:
+        conditioned = RegimeConditionedForecaster(
+            sql_client=sql_client,
+            output_manager=output_mgr,
+            equip_id=1,
+            run_id="run_123"
+        )
+        
+        # Load context and compute per-regime stats
+        context = conditioned.load_forecast_context()
+        regime_stats = conditioned.compute_regime_stats()
+        
+        # Estimate RUL per regime
+        rul_by_regime = conditioned.estimate_rul_by_regime(
+            current_health=85.0,
+            current_regime=1
+        )
+    """
+    
+    def __init__(
+        self,
+        sql_client: Any,
+        output_manager: OutputManager,
+        equip_id: int,
+        run_id: str,
+        config: Optional[Dict[str, Any]] = None
+    ):
+        self.sql_client = sql_client
+        self.output_manager = output_manager
+        self.equip_id = equip_id
+        self.run_id = run_id
+        self.config = config or {}
+        
+        # Cache for regime stats
+        self._regime_stats: Optional[Dict[int, RegimeStats]] = None
+        self._forecast_context: Optional[ForecastContext] = None
+    
+    def load_forecast_context(self) -> ForecastContext:
+        """
+        Load unified forecast context including regime, OMR, and drift state.
+        
+        Returns:
+            ForecastContext with all diagnostic information
+        """
+        if self._forecast_context is not None:
+            return self._forecast_context
+        
+        # Load OMR/drift context via OutputManager helper
+        omr_drift = self.output_manager.load_omr_drift_context(
+            self.equip_id, lookback_hours=24
+        )
+        
+        # Load current regime from most recent RegimeTimeline
+        current_regime = self._load_current_regime()
+        regime_confidence = self._compute_regime_confidence()
+        
+        # Detect health trend from recent HealthTimeline
+        health_trend = self._detect_health_trend()
+        
+        # Count active defects from SensorDefects
+        active_defects = self._count_active_defects()
+        
+        # Determine if retraining is recommended
+        retraining_recommended, retraining_reason = self._check_retraining_needed(omr_drift)
+        
+        # Estimate data quality from recent metrics
+        data_quality = self._estimate_data_quality()
+        
+        self._forecast_context = ForecastContext(
+            current_regime=current_regime,
+            regime_confidence=regime_confidence,
+            current_omr_z=omr_drift.get('omr_z'),
+            omr_trend=omr_drift.get('omr_trend', 'unknown'),
+            omr_top_contributors=omr_drift.get('top_contributors', []),
+            current_drift_z=omr_drift.get('drift_z'),
+            drift_trend=omr_drift.get('drift_trend', 'unknown'),
+            health_trend=health_trend,
+            data_quality=data_quality,
+            active_defects=active_defects,
+            retraining_recommended=retraining_recommended,
+            retraining_reason=retraining_reason
+        )
+        
+        return self._forecast_context
+    
+    def compute_regime_stats(self, lookback_days: int = 90) -> Dict[int, RegimeStats]:
+        """
+        Compute per-regime statistics for conditioned forecasting.
+        
+        Analyzes historical data to compute:
+        - Degradation rate per regime (health units per hour)
+        - Health mean/std per regime
+        - Dwell time fraction per regime
+        - Regime-adjusted failure thresholds
+        
+        Args:
+            lookback_days: Days of history to analyze
+            
+        Returns:
+            Dict mapping regime_label to RegimeStats
+        """
+        if self._regime_stats is not None:
+            return self._regime_stats
+        
+        try:
+            # Query historical health + regime data
+            query = """
+                SELECT 
+                    rt.RegimeLabel,
+                    ht.Timestamp,
+                    ht.HealthIndex,
+                    ht.FusedZ
+                FROM ACM_HealthTimeline ht
+                JOIN ACM_RegimeTimeline rt 
+                    ON ht.EquipID = rt.EquipID AND ht.Timestamp = rt.Timestamp
+                WHERE ht.EquipID = ?
+                  AND ht.Timestamp >= DATEADD(day, -?, GETDATE())
+                ORDER BY ht.Timestamp ASC
+            """
+            
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (self.equip_id, lookback_days))
+                rows = cur.fetchall()
+            
+            if not rows:
+                Console.warn(f"[RegimeConditioned] No historical data for regime stats")
+                self._regime_stats = {}
+                return self._regime_stats
+            
+            # Build DataFrame for analysis
+            df = pd.DataFrame(rows, columns=['RegimeLabel', 'Timestamp', 'HealthIndex', 'FusedZ'])
+            df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+            df = df.sort_values('Timestamp')
+            
+            # Compute per-regime stats
+            self._regime_stats = {}
+            base_failure_threshold = float(self.config.get('failure_threshold', 70.0))
+            
+            for regime_label in df['RegimeLabel'].unique():
+                regime_df = df[df['RegimeLabel'] == regime_label].copy()
+                
+                if len(regime_df) < 10:
+                    continue
+                
+                # Compute degradation rate (health change per hour)
+                regime_df = regime_df.sort_values('Timestamp')
+                time_diffs = regime_df['Timestamp'].diff().dt.total_seconds() / 3600
+                health_diffs = regime_df['HealthIndex'].diff()
+                
+                valid_mask = (time_diffs > 0) & (time_diffs.notna()) & (health_diffs.notna())
+                if valid_mask.sum() > 5:
+                    rates = (health_diffs[valid_mask] / time_diffs[valid_mask]).values
+                    degradation_rate = float(np.median(rates))  # Use median for robustness
+                else:
+                    degradation_rate = 0.0
+                
+                # Health statistics
+                health_mean = float(regime_df['HealthIndex'].mean())
+                health_std = float(regime_df['HealthIndex'].std())
+                
+                # Dwell fraction
+                total_points = len(df)
+                dwell_fraction = float(len(regime_df) / total_points) if total_points > 0 else 0.0
+                
+                # Transition count (entries to this regime)
+                regime_changes = df['RegimeLabel'].diff().fillna(0)
+                transition_count = int((regime_changes != 0).sum())
+                
+                # Health state classification
+                fused_median = float(regime_df['FusedZ'].median()) if 'FusedZ' in regime_df.columns else 0.0
+                if fused_median >= 3.0:
+                    health_state = 'critical'
+                elif fused_median >= 1.5:
+                    health_state = 'suspect'
+                else:
+                    health_state = 'healthy'
+                
+                # Regime-adjusted failure threshold
+                # Critical regimes get lower threshold (earlier warning)
+                threshold_adjustment = {
+                    'healthy': 0.0,
+                    'suspect': 5.0,    # Lower by 5 points
+                    'critical': 10.0   # Lower by 10 points
+                }
+                failure_threshold = base_failure_threshold - threshold_adjustment.get(health_state, 0.0)
+                
+                self._regime_stats[int(regime_label)] = RegimeStats(
+                    regime_label=int(regime_label),
+                    health_state=health_state,
+                    degradation_rate=degradation_rate,
+                    health_mean=health_mean,
+                    health_std=health_std,
+                    dwell_fraction=dwell_fraction,
+                    transition_count=transition_count,
+                    failure_threshold=failure_threshold,
+                    sample_count=len(regime_df)
+                )
+            
+            Console.info(f"[RegimeConditioned] Computed stats for {len(self._regime_stats)} regimes")
+            return self._regime_stats
+            
+        except Exception as e:
+            Console.error(f"[RegimeConditioned] Failed to compute regime stats: {e}")
+            self._regime_stats = {}
+            return self._regime_stats
+    
+    def estimate_rul_by_regime(
+        self,
+        current_health: float,
+        degradation_model: LinearTrendModel,
+        current_regime: Optional[int] = None,
+        forecast_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Estimate RUL with regime-conditioned adjustments.
+        
+        Uses per-regime degradation rates and failure thresholds to provide
+        more accurate RUL estimates based on current operating mode.
+        
+        Args:
+            current_health: Current health index
+            degradation_model: Fitted degradation model
+            current_regime: Current regime label (loads from SQL if None)
+            forecast_config: Configuration overrides
+            
+        Returns:
+            Dict with:
+            - 'rul_global': RULEstimate (standard, non-regime)
+            - 'rul_by_regime': Dict[int, Dict] per-regime RUL estimates
+            - 'rul_conditioned': RULEstimate using current regime
+            - 'regime_hazards': DataFrame for ACM_RegimeHazard
+        """
+        config = forecast_config or self.config
+        regime_stats = self.compute_regime_stats()
+        
+        if current_regime is None:
+            current_regime = self._load_current_regime()
+        
+        # Global (unconditional) RUL estimate
+        base_threshold = float(config.get('failure_threshold', 70.0))
+        n_simulations = int(config.get('monte_carlo_simulations', 1000))
+        confidence_level = float(config.get('confidence_min', 0.80))
+        max_horizon = float(config.get('max_forecast_hours', 720.0))
+        dt_hours = float(config.get('dt_hours', 1.0))
+        
+        global_estimator = RULEstimator(
+            degradation_model=degradation_model,
+            failure_threshold=base_threshold,
+            n_simulations=n_simulations,
+            confidence_level=confidence_level
+        )
+        
+        rul_global = global_estimator.estimate_rul(
+            current_health=current_health,
+            dt_hours=dt_hours,
+            max_horizon_hours=max_horizon
+        )
+        
+        # Per-regime RUL estimates
+        rul_by_regime = {}
+        for regime_label, stats in regime_stats.items():
+            # Create regime-adjusted estimator
+            regime_estimator = RULEstimator(
+                degradation_model=degradation_model,
+                failure_threshold=stats.failure_threshold,
+                n_simulations=n_simulations // 2,  # Fewer sims per regime for speed
+                confidence_level=confidence_level,
+                noise_factor=1.0 + abs(stats.degradation_rate) * 10  # More noise if degrading faster
+            )
+            
+            regime_rul = regime_estimator.estimate_rul(
+                current_health=current_health,
+                dt_hours=dt_hours,
+                max_horizon_hours=max_horizon
+            )
+            
+            rul_by_regime[regime_label] = {
+                'RUL_Hours': regime_rul.p50_median,
+                'P10_LowerBound': regime_rul.p10_lower_bound,
+                'P50_Median': regime_rul.p50_median,
+                'P90_UpperBound': regime_rul.p90_upper_bound,
+                'DegradationRate': stats.degradation_rate,
+                'Confidence': regime_rul.confidence_level * stats.dwell_fraction,
+                'Method': 'RegimeConditioned',
+                'SampleCount': stats.sample_count,
+                'FailureThreshold': stats.failure_threshold
+            }
+        
+        # Conditioned RUL using current regime
+        rul_conditioned = rul_global  # Default to global
+        if current_regime is not None and current_regime in regime_stats:
+            stats = regime_stats[current_regime]
+            conditioned_estimator = RULEstimator(
+                degradation_model=degradation_model,
+                failure_threshold=stats.failure_threshold,
+                n_simulations=n_simulations,
+                confidence_level=confidence_level,
+                noise_factor=1.0 + abs(stats.degradation_rate) * 5
+            )
+            rul_conditioned = conditioned_estimator.estimate_rul(
+                current_health=current_health,
+                dt_hours=dt_hours,
+                max_horizon_hours=max_horizon
+            )
+        
+        # Compute regime hazards for time series output
+        regime_hazards = self._compute_regime_hazards(
+            current_health=current_health,
+            degradation_model=degradation_model,
+            regime_stats=regime_stats,
+            max_horizon=max_horizon,
+            dt_hours=dt_hours
+        )
+        
+        return {
+            'rul_global': rul_global,
+            'rul_by_regime': rul_by_regime,
+            'rul_conditioned': rul_conditioned,
+            'regime_hazards': regime_hazards,
+            'current_regime': current_regime
+        }
+    
+    def write_regime_conditioned_outputs(
+        self,
+        rul_results: Dict[str, Any],
+        forecast_context: Optional[ForecastContext] = None
+    ) -> List[str]:
+        """
+        Write regime-conditioned forecast outputs to SQL.
+        
+        Args:
+            rul_results: Output from estimate_rul_by_regime()
+            forecast_context: ForecastContext (loads if None)
+            
+        Returns:
+            List of tables written
+        """
+        tables_written = []
+        
+        try:
+            # ACM_RUL_ByRegime
+            rul_by_regime = rul_results.get('rul_by_regime', {})
+            if rul_by_regime:
+                df_rul = pd.DataFrame([
+                    {'RegimeLabel': regime, **stats}
+                    for regime, stats in rul_by_regime.items()
+                ])
+                self.output_manager.write_rul_by_regime(
+                    self.equip_id, self.run_id, df_rul
+                )
+                tables_written.append('ACM_RUL_ByRegime')
+            
+            # ACM_RegimeHazard
+            regime_hazards = rul_results.get('regime_hazards')
+            if regime_hazards is not None and not regime_hazards.empty:
+                self.output_manager.write_regime_hazard(
+                    self.equip_id, self.run_id, regime_hazards
+                )
+                tables_written.append('ACM_RegimeHazard')
+            
+            # ACM_ForecastContext
+            if forecast_context is None:
+                forecast_context = self.load_forecast_context()
+            
+            context_df = pd.DataFrame([{
+                'Timestamp': datetime.now(),
+                'ForecastHorizon_Hours': float(self.config.get('max_forecast_hours', 720.0)),
+                'CurrentHealth': rul_results['rul_conditioned'].p50_median if hasattr(rul_results.get('rul_conditioned'), 'p50_median') else 0.0,
+                'CurrentRegime': forecast_context.current_regime,
+                'RegimeConfidence': forecast_context.regime_confidence,
+                'CurrentOMR_Z': forecast_context.current_omr_z,
+                'OMR_Contribution': forecast_context.omr_top_contributors[0]['contribution'] if forecast_context.omr_top_contributors else None,
+                'CurrentDrift_Z': forecast_context.current_drift_z,
+                'DriftTrend': forecast_context.drift_trend,
+                'FusedZ': None,  # Would need to load from health timeline
+                'HealthTrend': forecast_context.health_trend,
+                'DataQuality': forecast_context.data_quality,
+                'ModelConfidence': forecast_context.regime_confidence,
+                'ActiveDefects': forecast_context.active_defects,
+                'TopContributor': forecast_context.omr_top_contributors[0]['sensor'] if forecast_context.omr_top_contributors else None,
+                'Notes': forecast_context.retraining_reason
+            }])
+            
+            self.output_manager.write_forecast_context(
+                self.equip_id, self.run_id, context_df
+            )
+            tables_written.append('ACM_ForecastContext')
+            
+            Console.info(f"[RegimeConditioned] Wrote {len(tables_written)} tables")
+            
+        except Exception as e:
+            Console.error(f"[RegimeConditioned] Failed to write outputs: {e}")
+        
+        return tables_written
+    
+    # ========================================================================
+    # Helper Methods
+    # ========================================================================
+    
+    def _load_current_regime(self) -> Optional[int]:
+        """Load most recent regime label from ACM_RegimeTimeline."""
+        if self.sql_client is None:
+            return None
+        
+        try:
+            query = """
+                SELECT TOP 1 RegimeLabel 
+                FROM ACM_RegimeTimeline 
+                WHERE EquipID = ? 
+                ORDER BY Timestamp DESC
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (self.equip_id,))
+                row = cur.fetchone()
+                return int(row[0]) if row else None
+        except Exception:
+            return None
+    
+    def _compute_regime_confidence(self) -> float:
+        """Compute confidence in current regime assignment."""
+        # Look at regime stability over recent window
+        if self.sql_client is None:
+            return 0.5
+        
+        try:
+            query = """
+                SELECT RegimeLabel, COUNT(*) as Cnt
+                FROM ACM_RegimeTimeline
+                WHERE EquipID = ?
+                  AND Timestamp >= DATEADD(hour, -24, GETDATE())
+                GROUP BY RegimeLabel
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (self.equip_id,))
+                rows = cur.fetchall()
+            
+            if not rows:
+                return 0.5
+            
+            total = sum(r[1] for r in rows)
+            max_count = max(r[1] for r in rows)
+            
+            # Confidence = fraction of time in dominant regime
+            return float(max_count / total) if total > 0 else 0.5
+            
+        except Exception:
+            return 0.5
+    
+    def _detect_health_trend(self) -> str:
+        """Detect health trend from recent HealthTimeline."""
+        if self.sql_client is None:
+            return 'unknown'
+        
+        try:
+            query = """
+                SELECT HealthIndex, Timestamp
+                FROM ACM_HealthTimeline
+                WHERE EquipID = ?
+                  AND Timestamp >= DATEADD(hour, -168, GETDATE())
+                ORDER BY Timestamp ASC
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (self.equip_id,))
+                rows = cur.fetchall()
+            
+            if len(rows) < 10:
+                return 'unknown'
+            
+            # Simple linear regression on health values
+            y = np.array([r[0] for r in rows])
+            x = np.arange(len(y))
+            
+            slope = np.polyfit(x, y, 1)[0]
+            
+            if slope > 0.01:
+                return 'improving'
+            elif slope < -0.01:
+                return 'degrading'
+            else:
+                return 'stable'
+                
+        except Exception:
+            return 'unknown'
+    
+    def _count_active_defects(self) -> int:
+        """Count active sensor defects."""
+        if self.sql_client is None:
+            return 0
+        
+        try:
+            query = """
+                SELECT COUNT(*) 
+                FROM ACM_SensorDefects 
+                WHERE EquipID = ? AND ActiveDefect = 1
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (self.equip_id,))
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            return 0
+    
+    def _check_retraining_needed(self, omr_drift: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Check if model retraining is recommended based on drift indicators."""
+        reasons = []
+        
+        # High drift suggests distribution shift
+        drift_z = omr_drift.get('drift_z')
+        if drift_z is not None and drift_z > 3.0:
+            reasons.append(f"High drift detected (Z={drift_z:.2f})")
+        
+        # Increasing drift trend
+        if omr_drift.get('drift_trend') == 'increasing':
+            reasons.append("Drift trend increasing")
+        
+        # High OMR with increasing trend
+        omr_z = omr_drift.get('omr_z')
+        if omr_z is not None and omr_z > 4.0 and omr_drift.get('omr_trend') == 'increasing':
+            reasons.append(f"OMR elevated and increasing (Z={omr_z:.2f})")
+        
+        if reasons:
+            return True, '; '.join(reasons)
+        return False, None
+    
+    def _estimate_data_quality(self) -> float:
+        """Estimate data quality score 0-1."""
+        # Based on recent data gaps and completeness
+        if self.sql_client is None:
+            return 0.5
+        
+        try:
+            query = """
+                SELECT COUNT(*) as Cnt,
+                       COUNT(CASE WHEN HealthIndex IS NULL THEN 1 END) as NullCnt
+                FROM ACM_HealthTimeline
+                WHERE EquipID = ?
+                  AND Timestamp >= DATEADD(day, -7, GETDATE())
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (self.equip_id,))
+                row = cur.fetchone()
+            
+            if row and row[0] > 0:
+                null_ratio = row[1] / row[0]
+                return max(0.0, 1.0 - null_ratio * 2)  # Penalize nulls
+            return 0.5
+            
+        except Exception:
+            return 0.5
+    
+    def _compute_regime_hazards(
+        self,
+        current_health: float,
+        degradation_model: LinearTrendModel,
+        regime_stats: Dict[int, RegimeStats],
+        max_horizon: float,
+        dt_hours: float
+    ) -> pd.DataFrame:
+        """
+        Compute hazard rates per regime over forecast horizon.
+        
+        Returns DataFrame for ACM_RegimeHazard with columns:
+        - RegimeLabel, Timestamp, HazardRate, SurvivalProb, CumulativeHazard,
+          FailureProb, HealthAtTime
+        """
+        records = []
+        base_time = datetime.now()
+        
+        # Generate baseline forecast
+        max_steps = int(max_horizon / dt_hours)
+        forecast = degradation_model.predict(steps=max_steps, dt_hours=dt_hours)
+        
+        for regime_label, stats in regime_stats.items():
+            # Compute hazard rate based on degradation rate and threshold proximity
+            health_margin = current_health - stats.failure_threshold
+            
+            for i in range(0, max_steps, max(1, max_steps // 50)):  # Sample 50 points
+                forecast_time = base_time + timedelta(hours=i * dt_hours)
+                health_at_time = forecast.point_forecast[i] if i < len(forecast.point_forecast) else stats.health_mean
+                
+                # Simple exponential hazard model
+                margin_at_time = health_at_time - stats.failure_threshold
+                if margin_at_time <= 0:
+                    hazard_rate = 1.0
+                else:
+                    # Hazard increases as margin decreases
+                    hazard_rate = max(0.001, abs(stats.degradation_rate) / margin_at_time)
+                
+                # Cumulative hazard (integral)
+                cumulative_hazard = hazard_rate * (i * dt_hours)
+                
+                # Survival probability (Weibull-like)
+                survival_prob = np.exp(-cumulative_hazard)
+                failure_prob = 1.0 - survival_prob
+                
+                records.append({
+                    'RegimeLabel': regime_label,
+                    'Timestamp': forecast_time,
+                    'HazardRate': float(hazard_rate),
+                    'SurvivalProb': float(survival_prob),
+                    'CumulativeHazard': float(cumulative_hazard),
+                    'FailureProb': float(failure_prob),
+                    'HealthAtTime': float(health_at_time)
+                })
+        
+        return pd.DataFrame(records) if records else pd.DataFrame()
