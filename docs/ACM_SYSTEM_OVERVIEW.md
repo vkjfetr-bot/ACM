@@ -4,6 +4,13 @@ This handbook is a complete, implementation-level walkthrough of ACM V10 for new
 
 **Current Version:** v10.0.0 - Production Release with Continuous Forecasting
 
+### Recent Deltas (Dec 2025)
+- Forecast/RUL refactor is underway: `core/forecast_engine.py` becomes primary, `forecasting_legacy.py` is being quarantined. Expect call sites in `acm_main.py` to switch to the new API.
+- FD_FAN historian data is now time-shifted (2023-10-15 → 2025-09-14). Adjust dashboard time ranges and validation scripts accordingly.
+- Quick SQL visibility: use `scripts/check_dashboard_tables.py`, `scripts/check_table_counts.py`, or `scripts/validate_all_tables.py` for row counts and ranges; `scripts/check_tables_existence.py` for existence checks.
+- Schema reference: `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` (authoritative ACM table/column definitions).
+- Active dashboard JSON for fixes: `grafana_dashboards/ACM Claude Generated To Be Fixed.json`; others are archived.
+
 ### v10.0.0 Major Changes from v9.0.0
 - **Continuous Forecasting Architecture**: Exponential temporal blending eliminates per-batch forecast duplication; single continuous health forecast line per equipment with 12-hour decay window
 - **State Persistence & Versioning**: `ForecastState` class with version tracking (v807→v813 validated) stored in `ACM_ForecastState` table; audit trail with RunID + BatchNum

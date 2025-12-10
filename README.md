@@ -6,6 +6,12 @@ ACM V10 is a multi-detector pipeline for autonomous asset condition monitoring. 
 
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
+### Recent Updates (Dec 2025)
+- Forecast/RUL work is moving into `core/forecast_engine.py` and the new degradation/RUL stack; `forecasting_legacy.py` is being phased out. Wire new calls in `acm_main.py` as the refactor lands.
+- SQL historian sample for FD_FAN is time-shifted (2023-10-15 → 2025-09-14). Set Grafana ranges accordingly when validating dashboards or forecasts.
+- Quick SQL/Grafana sanity scripts: `scripts/check_dashboard_tables.py`, `scripts/check_table_counts.py`, `scripts/check_tables_existence.py`, `scripts/validate_all_tables.py`.
+- Active dashboard under repair: `grafana_dashboards/ACM Claude Generated To Be Fixed.json` (keep others archived).
+
 ### v10.0.0 Release Highlights
 - **🚀 Continuous Forecasting with Exponential Blending**: Health forecasts now evolve smoothly across batch runs using exponential temporal blending (tau=12h), eliminating per-batch duplication in Grafana dashboards. Single continuous forecast line per equipment with automatic state persistence and version tracking (v807→v813 validated).
 - **📊 Hazard-Based RUL Estimation**: Converts health forecasts to failure hazard rates with EWMA smoothing, survival probability curves, and probabilistic RUL predictions (P10/P50/P90 confidence bounds). Monte Carlo simulations with 1000 runs provide uncertainty quantification and top-3 culprit sensor attribution.
