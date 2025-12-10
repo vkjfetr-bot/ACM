@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from core.health_tracker import HealthTimeline, HealthQuality
+from core.health_tracker import HealthTimeline, HealthQuality, DataSummary
 from core.degradation_model import LinearTrendModel
 from core.failure_probability import compute_failure_statistics, health_to_failure_probability
 from core.rul_estimator import RULEstimator
@@ -125,8 +125,8 @@ class ForecastEngine:
             - 'error': str (if success=False)
         """
         try:
-            # Step 1: Load health timeline
-            health_df, data_quality = self._load_health_timeline()
+            # Step 1: Load health timeline with DataSummary (M3)
+            health_df, data_quality, data_summary = self._load_health_timeline()
             
             if health_df is None:
                 Console.warn(f"[ForecastEngine] No health data available; skipping forecast")
@@ -136,6 +136,7 @@ class ForecastEngine:
                     'data_quality': 'NONE'
                 }
             
+            # M3.2: Early quality gating before expensive operations
             # Allow GAPPY data (historical replay) but block SPARSE/FLAT/NOISY
             if data_quality in [HealthQuality.SPARSE, HealthQuality.FLAT, HealthQuality.NOISY]:
                 Console.warn(f"[ForecastEngine] Poor data quality: {data_quality.value}; skipping forecast")
@@ -155,6 +156,10 @@ class ForecastEngine:
             
             # Step 3: Load adaptive configuration
             forecast_config = self._load_forecast_config()
+            
+            # M3.3: Use dt_hours from DataSummary (computed once, not recomputed)
+            if data_summary and data_summary.dt_hours > 0:
+                forecast_config['dt_hours'] = data_summary.dt_hours
             
             # Step 4: Check auto-tuning trigger
             current_volume = len(health_df)
@@ -211,27 +216,48 @@ class ForecastEngine:
                 'data_quality': 'UNKNOWN'
             }
     
-    def _load_health_timeline(self) -> tuple[Optional[pd.DataFrame], HealthQuality]:
-        """Load health timeline with quality assessment"""
+    def _load_health_timeline(self) -> tuple[Optional[pd.DataFrame], HealthQuality, Optional[DataSummary]]:
+        """
+        Load health timeline with quality assessment and data summary.
+        
+        Uses HealthTimeline with rolling window (M3.1) to avoid full-history overfitting.
+        Returns DataSummary (M3.3) for efficient metadata access by ForecastEngine.
+        
+        Returns:
+            Tuple of (DataFrame, HealthQuality, DataSummary)
+        """
+        # Get configurable rolling window (default 90 days = 2160 hours)
+        history_window_hours = float(
+            self.config_mgr.get_config(self.equip_id, 'history_window_hours', 2160.0)
+        )
+        
         tracker = HealthTimeline(
             sql_client=self.sql_client,
             equip_id=self.equip_id,
             run_id=self.run_id,
             output_manager=self.output_manager,
             min_train_samples=int(self.config_mgr.get_config(self.equip_id, 'min_train_samples', 200)),
-            max_gap_hours=float(self.config_mgr.get_config(self.equip_id, 'max_gap_hours', 720.0))  # 30 days for historical replay
+            max_gap_hours=float(self.config_mgr.get_config(self.equip_id, 'max_gap_hours', 720.0)),
+            history_window_hours=history_window_hours  # M3.1: Rolling window
         )
         
         health_df, quality = tracker.load_from_sql()
         
-        if quality != HealthQuality.OK:
-            stats = tracker.get_statistics(health_df) if health_df is not None else None
-            if stats:
-                Console.warn(
-                    f"[ForecastEngine] Data quality issue: {stats.quality_reason}"
-                )
+        # M3.3: Get data summary for ForecastEngine consumption
+        data_summary = tracker.get_data_summary(health_df) if health_df is not None else None
         
-        return health_df, quality
+        if quality != HealthQuality.OK and data_summary:
+            Console.warn(
+                f"[ForecastEngine] Data quality issue: {data_summary.quality_reason}"
+            )
+        
+        if data_summary:
+            Console.info(
+                f"[ForecastEngine] Data summary: n_samples={data_summary.n_samples}, "
+                f"dt_hours={data_summary.dt_hours:.2f}, window={data_summary.window_hours:.0f}h"
+            )
+        
+        return health_df, quality, data_summary
     
     def _load_forecast_config(self) -> Dict[str, Any]:
         """Load forecast configuration with equipment overrides"""
@@ -295,7 +321,9 @@ class ForecastEngine:
         max_forecast_hours = float(forecast_config.get('max_forecast_hours', 168.0))
         confidence_level = float(forecast_config.get('confidence_min', 0.80))
         n_simulations = int(forecast_config.get('monte_carlo_simulations', 1000))
-        dt_hours = degradation_model.dt_hours
+        
+        # M3.3: Use dt_hours from DataSummary if available, else from model
+        dt_hours = float(forecast_config.get('dt_hours', degradation_model.dt_hours))
         
         # Generate degradation forecast
         max_steps = int(max_forecast_hours / dt_hours)
