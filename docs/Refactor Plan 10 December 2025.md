@@ -470,10 +470,10 @@ You already have:
 
 | Task ID | Area         | Description                                                                                 | Files                         | Done when                                                                  |
 | ------: | ------------ | ------------------------------------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------- |
-|    M1.1 | Imports      | Remove all active imports/usages of `forecasting` and `rul_engine`.                         | `acm_main.py`, whole repo     | Global search shows no live references; only deprecated comments remain.   |
-|    M1.2 | Legacy calls | Delete/comment enhanced forecasting calls that use `forecasting` in SQL path.               | `acm_main.py`                 | SQL-mode path has no call to `forecasting`; only ForecastEngine planned.   |
-|    M1.3 | Monolith     | Strip `forecasting.py` down to non-used reference/notes; move any useful helpers elsewhere. | `forecasting.py`, v10 modules | `forecasting.py` no longer imported anywhere; only small helpers migrated. |
-|    M1.4 | Old RUL      | Mark `rul_engine.py` as deprecated and unused.                                              | `rul_engine.py`               | No imports anywhere; file only kept as reference.                          |
+|    ~~M1.1~~ | ~~Imports~~      | ~~Remove all active imports/usages of `forecasting` and `rul_engine`.~~                         | ~~`acm_main.py`, whole repo~~     | ✅ No active imports in code; modules already renamed to `*_legacy.py`   |
+|    ~~M1.2~~ | ~~Legacy calls~~ | ~~Delete/comment enhanced forecasting calls that use `forecasting` in SQL path.~~               | ~~`acm_main.py`~~                 | ✅ Legacy forecasting call already commented out (lines 4026-4045)   |
+|    ~~M1.3~~ | ~~Monolith~~     | ~~Strip `forecasting.py` down to non-used reference/notes; move any useful helpers elsewhere.~~ | ~~`forecasting_legacy.py`~~ | ✅ Removed rul_engine import; added strong deprecation header |
+|    ~~M1.4~~ | ~~Old RUL~~      | ~~Mark `rul_engine.py` as deprecated and unused.~~                                              | ~~`rul_engine_legacy.py`~~               | ✅ Added strong deprecation header; no imports anywhere                          |
 
 **Source control**
 
