@@ -950,7 +950,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT Timestamp AS time, ABS(Contribution) AS value, SensorName AS metric FROM ACM_OMRContributionsLong WHERE EquipID = ${equipment} AND Timestamp >= DATEADD(day, -30, GETDATE()) AND ABS(Contribution) > 0.05 ORDER BY Timestamp ASC",
+          "rawSql": "SELECT Timestamp AS time, ABS(ContributionScore) AS value, SensorName AS metric FROM ACM_OMRContributionsLong WHERE EquipID = ${equipment} AND Timestamp >= DATEADD(day, -30, GETDATE()) AND ABS(ContributionScore) > 0.05 ORDER BY Timestamp ASC",
           "refId": "A"
         }
       ],

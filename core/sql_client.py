@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any, Dict, Optional
+from contextlib import contextmanager
 import configparser
 from pathlib import Path
 
@@ -221,6 +222,24 @@ class SQLClient:
         if self.conn is None:
             raise RuntimeError("SQLClient.cursor() called before connect().")
         return self.conn.cursor()
+
+    @contextmanager
+    def get_cursor(self):
+        """
+        Context manager for cursor with automatic cleanup.
+        
+        Usage:
+            with sql_client.get_cursor() as cur:
+                cur.execute("SELECT ...")
+                rows = cur.fetchall()
+        """
+        if self.conn is None:
+            raise RuntimeError("SQLClient.get_cursor() called before connect().")
+        cur = self.conn.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
 
     # Simple proc invoker (without TVPs or OUTPUT capture).
     # Usage: call_proc("dbo.usp_ACM_FinalizeRun", {"RunID": "...", "Outcome": "OK", ...})

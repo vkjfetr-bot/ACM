@@ -193,10 +193,36 @@ class HealthTimeline:
         try:
             cur = self.sql_client.cursor()
             
-            # M3.1: Rolling window enforcement
-            # Use history_window_hours to limit data scope and avoid full-history overfitting.
+            # M3.1: Rolling window enforcement (FIXED in v10.1.0)
+            # CRITICAL FIX: Use MAX(Timestamp) from actual data, NOT datetime.now()
+            # datetime.now() fails when data is historical/stale (e.g., batch replay)
             # Research shows rolling windows (30-90 days) produce better degradation models.
-            window_cutoff = datetime.now() - timedelta(hours=self.history_window_hours)
+            
+            # First, get the latest timestamp from actual data for this equipment
+            cur.execute(
+                """
+                SELECT MAX(Timestamp) AS LatestTimestamp
+                FROM dbo.ACM_HealthTimeline
+                WHERE EquipID = ?
+                """,
+                (self.equip_id,),
+            )
+            row = cur.fetchone()
+            
+            if row is None or row[0] is None:
+                cur.close()
+                Console.warn(
+                    f"[HealthTracker] No health timeline found for EquipID={self.equip_id} (empty table)"
+                )
+                return None, HealthQuality.MISSING
+            
+            latest_timestamp = row[0]
+            window_cutoff = latest_timestamp - timedelta(hours=self.history_window_hours)
+            
+            Console.info(
+                f"[HealthTracker] Data anchor: {latest_timestamp}, "
+                f"window cutoff: {window_cutoff} ({self.history_window_hours:.0f}h lookback)"
+            )
             
             cur.execute(
                 """
@@ -214,7 +240,7 @@ class HealthTimeline:
             if not rows:
                 Console.warn(
                     f"[HealthTracker] No health timeline found for EquipID={self.equip_id} "
-                    f"in last {self.history_window_hours:.0f} hours"
+                    f"in window {window_cutoff} to {latest_timestamp}"
                 )
                 return None, HealthQuality.MISSING
             

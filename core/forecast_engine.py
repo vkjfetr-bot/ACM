@@ -508,7 +508,7 @@ class ForecastEngine:
         attributions = attributor.load_from_sql(self.equip_id, self.run_id)
         return attributions
     
-    def _validate_forecast_timestamps(self, timestamps: list) -> list:
+    def _validate_forecast_timestamps(self, timestamps) -> list:
         """
         Validate and normalize forecast timestamps (M12).
         
@@ -518,13 +518,20 @@ class ForecastEngine:
         - Consistent step size (dt_hours) for proper time series alignment
         
         Args:
-            timestamps: List of datetime objects from forecast
+            timestamps: List or DatetimeIndex of datetime objects from forecast
             
         Returns:
             Validated list of naive datetime objects
         """
-        if not timestamps:
+        # Handle empty/None cases - avoid pd.DatetimeIndex truth value ambiguity
+        if timestamps is None:
             return []
+        if hasattr(timestamps, '__len__') and len(timestamps) == 0:
+            return []
+        
+        # Convert DatetimeIndex to list for iteration
+        if isinstance(timestamps, pd.DatetimeIndex):
+            timestamps = timestamps.tolist()
         
         validated = []
         prev_ts = None
@@ -589,14 +596,23 @@ class ForecastEngine:
             survival_probs = forecast_results['survival_probs'][:len(validated_timestamps)]
             hazard_rates = forecast_results['hazard_rates'][:len(validated_timestamps)]
             
+            # Get forecast std from diagnostics or compute from bounds
+            forecast_std = float(forecast_results.get('forecast_std', 0.0))
+            if forecast_std == 0 and len(forecast_upper) > 0 and len(forecast_lower) > 0:
+                # Estimate std from CI bounds (approximately 2 std for 95% CI)
+                forecast_std = float((forecast_upper[0] - forecast_lower[0]) / 4.0)
+            
             # ACM_HealthForecast: Health forecast time series
+            # Column names MUST match SQL table schema exactly
             df_health_forecast = pd.DataFrame({
                 'EquipID': self.equip_id,
                 'RunID': self.run_id,
                 'Timestamp': validated_timestamps,
-                'HealthForecast': forecast_values,
-                'LowerBound': forecast_lower,
-                'UpperBound': forecast_upper,
+                'ForecastHealth': forecast_values,  # SQL column name (not HealthForecast)
+                'CiLower': forecast_lower,          # SQL column name (not LowerBound)
+                'CiUpper': forecast_upper,          # SQL column name (not UpperBound)
+                'ForecastStd': forecast_std,
+                'Method': 'ExponentialSmoothing',
                 'CreatedAt': datetime.now()
             })
             

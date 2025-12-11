@@ -4836,7 +4836,7 @@ class OutputManager:
             
             # Get recent drift values
             drift_query = """
-                SELECT TOP 10 DriftZ 
+                SELECT TOP 10 DriftValue 
                 FROM ACM_DriftSeries 
                 WHERE EquipID = ?
                   AND Timestamp >= DATEADD(hour, -?, GETDATE())
@@ -4862,12 +4862,12 @@ class OutputManager:
             
             # Get top OMR contributors
             contrib_query = """
-                SELECT TOP 5 SensorName, AVG(Contribution) as AvgContrib
+                SELECT TOP 5 SensorName, AVG(ContributionScore) as AvgContrib
                 FROM ACM_OMRContributionsLong
                 WHERE EquipID = ?
                   AND Timestamp >= DATEADD(hour, -?, GETDATE())
                 GROUP BY SensorName
-                ORDER BY AVG(Contribution) DESC
+                ORDER BY AVG(ContributionScore) DESC
             """
             with self.sql_client.get_cursor() as cur:
                 cur.execute(contrib_query, (equip_id, lookback_hours))
