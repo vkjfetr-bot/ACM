@@ -743,6 +743,52 @@ class ForecastEngine:
                 tables_written.append('ACM_SensorForecast')
                 Console.info(f"[ForecastEngine] Wrote sensor forecasts for {len(sensor_attributions)} sensors")
             
+            # v10.1.0: Multivariate forecasting with VAR model
+            enable_multivariate = self.config_mgr.get_config(
+                self.equip_id, 'forecasting.multivariate.enabled', True
+            )
+            if enable_multivariate and len(sensor_attributions) >= 2:
+                try:
+                    from core.multivariate_forecast import MultivariateSensorForecaster
+                    var_max_lag = int(self.config_mgr.get_config(
+                        self.equip_id, 'forecasting.multivariate.var_max_lag', 12
+                    ))
+                    correlation_window_hours = int(self.config_mgr.get_config(
+                        self.equip_id, 'forecasting.multivariate.correlation_window_hours', 168
+                    ))
+                    
+                    # Get sensor names from attributions
+                    sensor_names = [s.sensor_name for s in sensor_attributions]
+                    
+                    mvar_forecaster = MultivariateSensorForecaster(
+                        sql_client=self.sql_client,
+                        equip_id=self.equip_id,
+                        run_id=self.run_id,
+                        lookback_hours=float(correlation_window_hours)
+                    )
+                    mvar_result = mvar_forecaster.forecast(
+                        sensor_names=sensor_names,
+                        horizon_hours=float(forecast_results.get('forecast_horizon', 168))
+                    )
+                    if mvar_result is not None and not mvar_result.forecast_df.empty:
+                        # Write multivariate forecasts to SQL
+                        mvar_path = temp_dir / f"multivariate_forecast_{self.run_id}.csv"
+                        self.output_manager.write_dataframe(
+                            mvar_result.forecast_df,
+                            file_path=mvar_path,
+                            sql_table='ACM_MultivariateForecast',
+                            add_created_at=True
+                        )
+                        tables_written.append('ACM_MultivariateForecast')
+                        Console.info(
+                            f"[ForecastEngine] Multivariate (VAR) forecast complete: "
+                            f"{len(sensor_names)} sensors, method={mvar_result.method}"
+                        )
+                except ImportError as ie:
+                    Console.warn(f"[ForecastEngine] Multivariate forecasting module not available: {ie}")
+                except Exception as e:
+                    Console.warn(f"[ForecastEngine] Multivariate forecasting failed (non-fatal): {e}")
+            
         except Exception as e:
             Console.error(f"[ForecastEngine] Failed to write outputs: {e}")
         
@@ -838,7 +884,7 @@ class ForecastEngine:
         
         This implements sensor-level forecasting using exponential smoothing with trend.
         For each high-contribution sensor, we:
-        1. Load recent sensor readings from ACM_Scores_Wide
+        1. Load recent sensor readings from ACM_SensorNormalized_TS
         2. Fit exponential smoothing model (Holt's method)
         3. Generate 7-day forecast with confidence intervals
         4. Detect trend direction (increasing/decreasing/stable)
@@ -872,35 +918,34 @@ class ForecastEngine:
                 Console.warn("[ForecastEngine] No sensor attributions available for forecasting")
                 return None
             
-            # Load recent sensor data from ACM_Scores_Wide
+            # Load recent sensor data from ACM_SensorNormalized_TS (contains SensorName, NormValue, ZScore)
             lookback_hours = 720  # 30 days of history
             cutoff_time = datetime.now() - timedelta(hours=lookback_hours)
             
             query = """
             SELECT 
-                sw.Timestamp,
-                sw.SensorName,
-                sw.Score
-            FROM ACM_Scores_Wide sw
-            WHERE sw.EquipID = ?
-              AND sw.RunID = ?
-              AND sw.Timestamp >= ?
-              AND sw.SensorName IN ({placeholders})
-            ORDER BY sw.Timestamp ASC
+                sn.Timestamp,
+                sn.SensorName,
+                sn.ZScore
+            FROM ACM_SensorNormalized_TS sn
+            WHERE sn.EquipID = ?
+              AND sn.Timestamp >= ?
+              AND sn.SensorName IN ({placeholders})
+            ORDER BY sn.Timestamp ASC
             """.format(placeholders=','.join(['?'] * len(top_sensors)))
             
             sensor_names = [s.sensor_name for s in top_sensors]
             
             cursor = self.sql_client.cursor()
-            cursor.execute(query, [self.equip_id, self.run_id, cutoff_time] + sensor_names)
+            cursor.execute(query, [self.equip_id, cutoff_time] + sensor_names)
             rows = cursor.fetchall()
             cursor.close()
             
             if not rows:
-                Console.warn("[ForecastEngine] No sensor data found in ACM_Scores_Wide for forecasting")
+                Console.warn("[ForecastEngine] No sensor data found in ACM_SensorNormalized_TS for forecasting")
                 return None
             
-            # Convert to DataFrame
+            # Convert to DataFrame - use ZScore as the value to forecast
             sensor_history = pd.DataFrame(
                 [{'Timestamp': r[0], 'SensorName': r[1], 'Score': r[2]} for r in rows]
             )

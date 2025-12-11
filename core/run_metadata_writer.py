@@ -172,6 +172,7 @@ def extract_run_metadata_from_scores(scores: pd.DataFrame, per_regime_enabled: b
     Returns:
         dict: Metadata including health metrics and calibration info
     """
+    import numpy as np
     metadata = {}
     
     try:
@@ -179,8 +180,14 @@ def extract_run_metadata_from_scores(scores: pd.DataFrame, per_regime_enabled: b
         if "__health" in scores.columns:
             health = scores["__health"]
         else:
-            # Fallback to computing from fused
-            health = 100.0 / (1.0 + scores["fused"] ** 2)
+            # v10.1.0: Fallback uses softer sigmoid formula
+            # OLD: 100/(1+Z^2) was too aggressive
+            z_threshold = 5.0
+            steepness = 1.5
+            abs_z = np.abs(scores["fused"])
+            normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+            sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+            health = np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
         
         metadata["avg_health_index"] = float(health.mean())
         metadata["min_health_index"] = float(health.min())

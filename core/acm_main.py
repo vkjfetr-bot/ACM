@@ -847,6 +847,9 @@ def main() -> None:
     run_dir = Path(".")  # Dummy - never created
     tables_dir = Path(".")  # Dummy - never created
     art_root = Path(".")  # Dummy artifact root for SQL-ONLY mode (no filesystem persistence)
+    models_dir = Path(".")  # Dummy models directory for SQL-ONLY mode
+    # TASK-7-FIX: Define stable_models_dir to prevent NameError in regime loading fallback
+    stable_models_dir = Path("artifacts") / equip_slug / "models"  # Fallback path for legacy code
 
     # Heartbeat gating
     heartbeat_on = bool(cfg.get("runtime", {}).get("heartbeat", True))
@@ -2793,8 +2796,8 @@ def main() -> None:
             tuning_diagnostics = None
             with T.section("fusion.auto_tune"):
                 try:
-                    # First fusion pass with current weights to get baseline
-                    fused_baseline, _ = fuse.combine(present, weights, cfg, original_features=score)
+                    # First fusion pass with current weights to get baseline (no regime labels needed for preview)
+                    fused_baseline, _ = fuse.combine(present, weights, cfg, original_features=score, regime_labels=None)
                     fused_baseline_np = np.asarray(fused_baseline, dtype=np.float32).reshape(-1)
                     
                     # Tune weights based on episode separability (not circular correlation)
@@ -2913,14 +2916,15 @@ def main() -> None:
             # Calculate fusion on train data (for threshold baseline)
             if train_present and not train.empty:
                 try:
-                    train_fused, _ = fuse.combine(train_present, weights, cfg, original_features=train)
+                    train_fused, _ = fuse.combine(train_present, weights, cfg, original_features=train, regime_labels=train_regime_labels)
                     train_fused_np = np.asarray(train_fused, dtype=np.float32).reshape(-1)
                     train_frame["fused"] = train_fused_np
                 except Exception as train_fuse_e:
                     Console.warn(f"[FUSE] Failed to calculate train fusion: {train_fuse_e}")
                     train_frame["fused"] = np.zeros(len(train))
             
-            fused, episodes = fuse.combine(present, weights, cfg, original_features=score)
+            # v10.1.0: Pass regime labels to enable episode-regime correlation
+            fused, episodes = fuse.combine(present, weights, cfg, original_features=score, regime_labels=score_regime_labels)
             fused_np = np.asarray(fused, dtype=np.float32).reshape(-1)
             if fused_np.shape[0] != len(frame.index):
                 raise RuntimeError(f"[FUSE] Fused length {fused_np.shape[0]} != frame length {len(frame.index)}")
@@ -2978,11 +2982,17 @@ def main() -> None:
                         # Calculate fusion on accumulated data
                         if accumulated_present:
                             try:
+                                # Build accumulated regime labels for episode-regime correlation
+                                accumulated_regime_labels = None
+                                if regime_quality_ok and train_regime_labels is not None and score_regime_labels is not None:
+                                    accumulated_regime_labels = np.concatenate([train_regime_labels, score_regime_labels])
+                                
                                 accumulated_fused, _ = fuse.combine(
                                     accumulated_present, 
                                     weights, 
                                     cfg, 
-                                    original_features=accumulated_data
+                                    original_features=accumulated_data,
+                                    regime_labels=accumulated_regime_labels
                                 )
                                 accumulated_fused_np = np.asarray(accumulated_fused, dtype=np.float32).reshape(-1)
                                 
@@ -3866,13 +3876,20 @@ def main() -> None:
                             
                             # Health timeline (if we have fused scores)
                             if 'fused' in frame.columns:
-                                # Calculate raw health index
-                                raw_health = 100.0 / (1.0 + frame['fused'] ** 2)
+                                # v10.1.0: Calculate raw health index using softer sigmoid formula
+                                # OLD: 100/(1+Z^2) was too aggressive (Z=2.5 gave 14%)
+                                # NEW: Sigmoid with z_threshold=5.0, Z=2.5 gives ~50%, Z=5 gives ~15%
+                                z_threshold = cfg.get('health', {}).get('z_threshold', 5.0)
+                                steepness = cfg.get('health', {}).get('steepness', 1.5)
+                                abs_z = np.abs(frame['fused'])
+                                normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+                                sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+                                raw_health = np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
                                 
                                 # Apply exponential smoothing to prevent unrealistic jumps
                                 # alpha = 0.3 means 30% new value, 70% previous (smooths over ~3 periods)
                                 alpha = cfg.get('health', {}).get('smoothing_alpha', 0.3)
-                                smoothed_health = raw_health.ewm(alpha=alpha, adjust=False).mean()
+                                smoothed_health = pd.Series(raw_health).ewm(alpha=alpha, adjust=False).mean()
                                 
                                 # Data quality flags based on rate of change
                                 health_change = smoothed_health.diff().abs()

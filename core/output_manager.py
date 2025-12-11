@@ -332,22 +332,46 @@ def _read_csv_with_peek(path: Union[str, Path], ts_col_hint: Optional[str], engi
     return df, ts_col
 
 
-def _health_index(fused_z):
+def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
     """
-    Calculate health index from fused z-score.
+    Calculate health index from fused z-score using a softer sigmoid mapping.
     
-    Health = 100 / (1 + z^2)
+    v10.1.0: Replaced overly aggressive 100/(1+Z^2) formula.
     
-    Higher values indicate healthier state (closer to 0 z-score).
-    Lower values indicate degradation (higher absolute z-score).
+    OLD formula issues:
+    - Z=2.5 gave Health=14% (too harsh for moderate anomaly)
+    - Z=3.0 gave Health=10% (equipment in crisis for minor deviation)
+    
+    NEW sigmoid formula:
+    - Z=0: Health = 100% (perfectly normal)
+    - Z=z_threshold/2 (2.5): Health = 50% (moderate concern)
+    - Z=z_threshold (5.0): Health ≈ 15% (serious anomaly)
+    - Z>z_threshold: Health approaches 0% asymptotically
     
     Args:
         fused_z: Fused z-score (scalar, array, or Series)
+        z_threshold: Z-score at which health should be very low (default 5.0)
+        steepness: Controls sigmoid slope (default 1.5, higher=sharper transition)
     
     Returns:
         Health index 0-100 (same type as input)
     """
-    return 100.0 / (1.0 + fused_z ** 2)
+    import numpy as np
+    
+    # Handle various input types
+    abs_z = np.abs(fused_z)
+    
+    # Sigmoid centered at z_threshold/2, with steepness controlling transition sharpness
+    # At z=0: normalized << 0, sigmoid ≈ 0, health ≈ 100
+    # At z=z_threshold/2: normalized = 0, sigmoid = 0.5, health = 50
+    # At z=z_threshold: normalized > 0, sigmoid ≈ 0.85, health ≈ 15
+    normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+    sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+    
+    health = 100.0 * (1 - sigmoid)
+    
+    # Ensure bounds
+    return np.clip(health, 0.0, 100.0)
 
 
 # ==================== MAIN OUTPUT MANAGER CLASS ====================
@@ -1881,6 +1905,10 @@ class OutputManager:
         long = df.melt(id_vars=["Timestamp"], var_name="SensorName", value_name="ContributionScore")
         long["SensorName"] = long["SensorName"].astype(str).str.replace("_contrib","", regex=False)
         
+        # TASK-1-FIX: Ensure ContributionScore is never NULL to prevent SQL constraint violations
+        # Replace NaN/NULL with 0.0 before any downstream processing
+        long["ContributionScore"] = pd.to_numeric(long["ContributionScore"], errors="coerce").fillna(0.0)
+        
         # Calculate ContributionPct: percentage of total contribution at each timestamp
         long["ContributionPct"] = 0.0
         if not long.empty and "ContributionScore" in long.columns:
@@ -1944,7 +1972,8 @@ class OutputManager:
         if scores_df is None or len(scores_df) == 0:
             return pd.DataFrame(columns=["RunID","EquipID","BinStart","BinEnd","Count"])
         fused = pd.to_numeric(scores_df["fused"], errors="coerce")
-        health = 100.0 / (1.0 + fused**2) if fused is not None else pd.Series([], dtype=float)
+        # v10.1.0: Use centralized _health_index function with softer sigmoid
+        health = _health_index(fused) if fused is not None else pd.Series([], dtype=float)
         bins = list(range(0, 101, 10))
         cats = pd.cut(health, bins=bins, include_lowest=True, right=False)
         counts = cats.value_counts().sort_index()

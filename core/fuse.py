@@ -604,8 +604,16 @@ class Fuser:
             fused += w[k] * zs[k]
         return pd.Series(fused, index=original_features.index[:n], name="fused")
 
-    def detect_episodes(self, series: pd.Series, streams: Dict[str, np.ndarray], original_features: pd.DataFrame) -> pd.DataFrame:
-        """CUSUM-like episode builder on z-series."""
+    def detect_episodes(self, series: pd.Series, streams: Dict[str, np.ndarray], original_features: pd.DataFrame, regime_labels: Optional[np.ndarray] = None) -> pd.DataFrame:
+        """CUSUM-like episode builder on z-series.
+        
+        v10.1.0: Added regime_labels parameter for episode-regime correlation.
+        Episodes now include:
+        - start_regime: Dominant regime at episode start
+        - end_regime: Dominant regime at episode end  
+        - spans_transition: True if episode crosses regime boundary
+        - regime_context: Regime context flag for filtering false positives
+        """
         if len(series) == 0:
             return pd.DataFrame()
 
@@ -723,6 +731,34 @@ class Fuser:
             peak_fused_z = float(np.nanmax(episode_fused)) if len(episode_fused) > 0 else 0.0
             avg_fused_z = float(np.nanmean(episode_fused)) if len(episode_fused) > 0 else 0.0
             
+            # v10.1.0: Episode-Regime Correlation
+            # Extract regime context for this episode
+            start_regime = -1
+            end_regime = -1
+            spans_transition = False
+            regime_context = "unknown"
+            
+            if regime_labels is not None and len(regime_labels) > e:
+                episode_regimes = regime_labels[s:e+1]
+                
+                # Get dominant regime at start and end
+                start_regime = int(episode_regimes[0]) if len(episode_regimes) > 0 else -1
+                end_regime = int(episode_regimes[-1]) if len(episode_regimes) > 0 else -1
+                
+                # Check if episode spans multiple regimes
+                unique_regimes = np.unique(episode_regimes)
+                spans_transition = len(unique_regimes) > 1
+                
+                # Determine regime context for filtering
+                if spans_transition:
+                    # Episode spans regime transition - may be false positive
+                    regime_context = "transition"
+                elif len(unique_regimes) == 1:
+                    # Single regime - genuine anomaly within stable operating mode
+                    regime_context = "stable"
+                else:
+                    regime_context = "unknown"
+            
             rows.append({
                 "start_ts": start_ts, 
                 "end_ts": end_ts, 
@@ -730,12 +766,22 @@ class Fuser:
                 "len": int(e - s + 1), 
                 "culprits": culprits,
                 "peak_fused_z": peak_fused_z,
-                "avg_fused_z": avg_fused_z
+                "avg_fused_z": avg_fused_z,
+                "start_regime": start_regime,
+                "end_regime": end_regime,
+                "spans_transition": spans_transition,
+                "regime_context": regime_context
             })
         return pd.DataFrame(rows)
 
 
-def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict[str, Any], original_features: pd.DataFrame) -> Tuple[pd.Series, pd.DataFrame]:
+def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict[str, Any], original_features: pd.DataFrame, regime_labels: Optional[np.ndarray] = None) -> Tuple[pd.Series, pd.DataFrame]:
+    """
+    Combine detector streams into fused score and detect episodes.
+    
+    v10.1.0: Added regime_labels parameter for episode-regime correlation.
+    Episodes now include regime context for filtering false positives during transitions.
+    """
     epcfg = (cfg or {}).get("episodes", {})
     cpd = epcfg.get("cpd", {}) if isinstance(epcfg, dict) else {}
     
@@ -826,5 +872,5 @@ def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict
     )
     fuser = Fuser(weights=weights, ep=params)
     fused = fuser.fuse(streams, original_features)
-    episodes = fuser.detect_episodes(fused, streams, original_features)
+    episodes = fuser.detect_episodes(fused, streams, original_features, regime_labels=regime_labels)
     return fused, episodes

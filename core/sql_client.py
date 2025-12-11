@@ -206,6 +206,16 @@ class SQLClient:
             finally:
                 self.conn = None
 
+    def commit(self) -> None:
+        """Commit the current transaction. TASK-5-FIX: Expose commit() method on SQLClient."""
+        if self.conn is not None and not self.conn.autocommit:
+            self.conn.commit()
+
+    def rollback(self) -> None:
+        """Rollback the current transaction. TASK-5-FIX: Expose rollback() method on SQLClient."""
+        if self.conn is not None and not self.conn.autocommit:
+            self.conn.rollback()
+
     # ---------- basic primitives ----------
     def cursor(self) -> pyodbc.Cursor:
         if self.conn is None:

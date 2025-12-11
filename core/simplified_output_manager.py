@@ -47,9 +47,25 @@ ALLOWED_TABLES = {
 
 
 # Health calculation helper
-def _health_index(fused_z):
-    """Calculate health index from fused z-score: Health = 100 / (1 + z^2)"""
-    return 100.0 / (1.0 + fused_z ** 2)
+def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
+    """
+    Calculate health index from fused z-score using softer sigmoid formula.
+    
+    v10.1.0: Replaced overly aggressive 100/(1+Z^2) formula.
+    
+    Args:
+        fused_z: Fused z-score (scalar, array, or Series)
+        z_threshold: Z-score at which health should be very low (default 5.0)
+        steepness: Controls sigmoid slope (default 1.5)
+    
+    Returns:
+        Health index 0-100
+    """
+    import numpy as np
+    abs_z = np.abs(fused_z)
+    normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+    sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+    return np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
 
 
 # Timestamp helpers
