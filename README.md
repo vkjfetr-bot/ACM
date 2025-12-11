@@ -40,6 +40,117 @@ ACM watches every asset through several analytical "heads" instead of a single a
 5. **Forecasting & RUL:** `core.forecasting` generates health trajectories, failure probability curves, RUL estimates, and physical sensor forecasts. **NEW in v10.0.0**: Continuous forecasting with exponential blending eliminates per-batch duplication; hazard-based RUL provides survival probability curves with EWMA smoothing; state persistence tracks forecast evolution across batches (see [Continuous Learning](#continuous-learning--forecasting) section).
 6. **Outputs:** `core.output_manager.OutputManager` writes CSV/PNG artifacts, SQL run logs, Grafana-ready dashboards, forecast tables (ACM_HealthForecast, ACM_FailureForecast, ACM_SensorForecast, ACM_RUL, **ACM_HealthForecast_Continuous**, **ACM_FailureHazard_TS**), and stores models in `artifacts/{equip}/models`. SQL runners call `usp_ACM_StartRun`/`usp_ACM_FinalizeRun` when the config enables it.
 
+## Configuration
+
+ACM's configuration is stored in `configs/config_table.csv` (238 parameters) and synced to the SQL `ACM_Config` table via `scripts/sql/populate_acm_config.py`. Parameters are organized by category with equipment-specific overrides (EquipID=0 for global defaults, EquipID=1/2621 for FD_FAN/GAS_TURBINE).
+
+### Configuration Categories
+
+**Data Ingestion (`data.*`)**
+- `timestamp_col`: Column name for timestamps (default: `EntryDateTime`)
+- `sampling_secs`: Data cadence in seconds (default: 1800 for 30-min intervals)
+- `max_rows`: Maximum rows to process per batch (default: 100000)
+- `min_train_samples`: Minimum samples required for training (default: 200)
+
+**Feature Engineering (`features.*`)**
+- `window`: Rolling window size for feature extraction (default: 16)
+- `fft_bands`: Frequency bands for FFT decomposition
+- `polars_threshold`: Row count to trigger Polars acceleration (default: 5000)
+
+**Detectors & Models (`models.*`)**
+- `pca.*`: PCA configuration (n_components=5, randomized SVD)
+- `ar1.*`: AR1 detector settings (window=256, alpha=0.05)
+- `iforest.*`: Isolation Forest (n_estimators=100, contamination=0.01)
+- `gmm.*`: Gaussian Mixture Models (k_min=2, k_max=3, BIC search enabled)
+- `mahl.regularization`: Mahalanobis regularization to prevent ill-conditioning
+- `omr.*`: Overall Model Residual (auto model selection, n_components=5)
+- `use_cache`: Enable model caching via ModelVersionManager
+- `auto_retrain.*`: Automatic retraining thresholds (max_anomaly_rate=0.25, max_drift_score=2.0, max_model_age_hours=720)
+
+**Fusion & Weights (`fusion.*`)**
+- `weights.*`: Detector contribution weights (ar1_z=0.2, iforest_z=0.2, gmm_z=0.1, pca_spe_z=0.2, mhal_z=0.2, omr_z=0.10)
+- `per_regime`: Enable per-regime fusion (default: True)
+- `auto_tune.*`: Adaptive weight tuning (enabled, learning_rate=0.3, temperature=1.5)
+
+**Episodes & Anomaly Detection (`episodes.*`)**
+- `cpd.k_sigma`: K-sigma threshold for change-point detection (default: 2.0)
+- `cpd.h_sigma`: H-sigma threshold for episode boundaries (default: 12.0)
+- `min_len`: Minimum episode length in samples (default: 3)
+- `gap_merge`: Merge episodes with gaps smaller than this (default: 5)
+- `cpd.auto_tune.*`: Barrier auto-tuning (k_factor=0.8, h_factor=1.2)
+
+**Thresholds (`thresholds.*`)**
+- `q`: Quantile threshold for anomaly detection (default: 0.98)
+- `alert`: Alert threshold (default: 0.85)
+- `warn`: Warning threshold (default: 0.7)
+- `self_tune.*`: Self-tuning parameters (enabled, target_fp_rate=0.001, max_clip_z=100.0)
+- `adaptive.*`: Per-regime adaptive thresholds (enabled, method=quantile, confidence=0.997, per_regime=True)
+
+**Regimes (`regimes.*`)**
+- `auto_k.k_min`: Minimum clusters for auto-k selection (default: 2)
+- `auto_k.k_max`: Maximum clusters (default: 6)
+- `auto_k.max_models`: Maximum candidate models to evaluate (default: 10)
+- `quality.silhouette_min`: Minimum silhouette score for acceptable clustering (default: 0.3)
+- `smoothing.*`: Regime label smoothing (passes=3, window=7, min_dwell_samples=10)
+- `transient_detection.*`: Transient change detection (roc_window=10, roc_threshold_high=0.15)
+- `health.*`: Health-based regime boundaries (fused_warn_z=2.5, fused_alert_z=4.0)
+
+**Drift Detection (`drift.*`)**
+- `cusum.*`: CUSUM drift detector (threshold=2.0, smoothing_alpha=0.3, drift=0.1)
+- `p95_threshold`: P95 threshold for drift vs fault classification (default: 2.0)
+- `multi_feature.*`: Multi-feature drift detection (enabled, trend_window=20, hysteresis_on=3.0)
+
+**Forecasting (`forecasting.*`)**
+- `enhanced_enabled`: Enable unified forecasting engine (default: True)
+- `enable_continuous`: Enable continuous stateful forecasting (default: True)
+- `failure_threshold`: Health threshold for failure prediction (default: 70.0)
+- `max_forecast_hours`: Maximum forecast horizon (default: 168 hours = 7 days)
+- `confidence_k`: Confidence interval multiplier (default: 1.96 for 95% CI)
+- `training_window_hours`: Sliding training window (default: 72 hours)
+- `blend_tau_hours`: Exponential blending time constant (default: 12 hours)
+- `hazard_smoothing_alpha`: EWMA alpha for hazard rate smoothing (default: 0.3)
+
+**Runtime (`runtime.*`)**
+- `storage_backend`: Storage mode (default: `sql`)
+- `reuse_model_fit`: Legacy joblib cache (False in SQL mode; use ModelRegistry instead)
+- `tick_minutes`: Data cadence for batch runs (default: 30 for FD_FAN, 1440 for GAS_TURBINE)
+- `version`: Current ACM version (v10.1.0)
+- `phases.*`: Enable/disable pipeline phases (features, regimes, drift, models, fuse, report)
+
+**SQL Integration (`sql.*`)**
+- `enabled`: Enable SQL connection (default: True)
+- Connection parameters: driver, server, database, encrypt, trust_server_certificate
+- Performance tuning: pool_min, pool_max, fast_executemany, tvp_chunk_rows, deadlock_retry.*
+
+**Health & Continuous Learning (`health.*, continuous_learning.*`)**
+- `health.smoothing_alpha`: Exponential smoothing for health index (default: 0.3)
+- `health.extreme_z_threshold`: Absolute Z-score for extreme anomaly flagging (default: 10.0)
+- `continuous_learning.enabled`: Enable continuous learning for batch mode (default: True)
+- `continuous_learning.model_update_interval`: Batches between retraining (default: 1)
+
+### Configuration Management
+
+**Editing Config**
+1. Edit `configs/config_table.csv` directly (maintain CSV format)
+2. Run `python scripts/sql/populate_acm_config.py` to sync changes to SQL
+3. Commit changes to version control
+
+**Equipment-Specific Overrides**
+- Global defaults: `EquipID=0`
+- FD_FAN overrides: `EquipID=1` (e.g., `mahl.regularization=1.0`, `episodes.cpd.k_sigma=4.0`)
+- GAS_TURBINE overrides: `EquipID=2621` (e.g., `timestamp_col=Ts`, `tick_minutes=1440`)
+
+**Configuration History**
+All adaptive tuning changes are logged to `ACM_ConfigHistory` via `core.config_history_writer.ConfigHistoryWriter`. Includes timestamp, parameter path, old/new values, reason, and UpdatedBy tag.
+
+**Best Practices**
+- Use `COPILOT`, `SYSTEM`, `ADAPTIVE_TUNING`, or `OPTIMIZATION` as UpdatedBy tags for traceability
+- Document ChangeReason for non-trivial updates
+- Test config changes in file mode before syncing to SQL
+- Keep equipment-specific overrides minimal (only override when necessary)
+
+For complete parameter descriptions and implementation details, see `docs/ACM_SYSTEM_OVERVIEW.md`.
+
 ## Continuous Learning & Forecasting
 
 **NEW in v10.0.0**: ACM now implements true continuous forecasting where health predictions evolve smoothly across batch runs instead of creating per-batch duplicates.
