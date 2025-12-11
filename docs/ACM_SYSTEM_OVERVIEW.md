@@ -4,6 +4,13 @@ This handbook is a complete, implementation-level walkthrough of ACM V10 for new
 
 **Current Version:** v10.0.0 - Production Release with Continuous Forecasting
 
+### Recent Deltas (Dec 2025)
+- Forecast/RUL refactor is underway: `core/forecast_engine.py` becomes primary, `forecasting_legacy.py` is being quarantined. Expect call sites in `acm_main.py` to switch to the new API.
+- FD_FAN historian data is now time-shifted (2023-10-15 → 2025-09-14). Adjust dashboard time ranges and validation scripts accordingly.
+- Quick SQL visibility: use `scripts/check_dashboard_tables.py`, `scripts/check_table_counts.py`, or `scripts/validate_all_tables.py` for row counts and ranges; `scripts/check_tables_existence.py` for existence checks.
+- Schema reference: `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` (authoritative ACM table/column definitions).
+- Active dashboard JSON for fixes: `grafana_dashboards/ACM Claude Generated To Be Fixed.json`; others are archived.
+
 ### v10.0.0 Major Changes from v9.0.0
 - **Continuous Forecasting Architecture**: Exponential temporal blending eliminates per-batch forecast duplication; single continuous health forecast line per equipment with 12-hour decay window
 - **State Persistence & Versioning**: `ForecastState` class with version tracking (v807→v813 validated) stored in `ACM_ForecastState` table; audit trail with RunID + BatchNum
@@ -114,19 +121,90 @@ Mode decision and migration:
 ## 3) Configuration Surfaces
 
 ### Primary table (`configs/config_table.csv` or SQL `ACM_Config`)
-Key paths (ParamPath) and reasoning:
-- `data.train_csv`, `data.score_csv`, `data_dir`, `timestamp_col`, `tag_columns`, `sampling_secs`, `max_rows`: defines ingestion sources and schema expectations.
-- `features.window`, `features.fft_bands`, `features.top_k_tags`, `features.fs_hz`: controls rolling window size and spectral bins; window must match process dynamics to capture oscillations without oversmoothing.
-- `models.*` (pca, ar1, iforest, gmm, omr): detector hyperparameters; tighter contamination lowers false positives, higher `pca.n_components` trades explainability vs. residual sensitivity.
-- `thresholds.*`: fused/detector z clipping, quantiles for calibration.
-- `fusion.*`: detector weights and auto-tuning knobs (episode separability-based).
-- `regimes.*`: auto-k bounds, smoothing, transient detection, health thresholds; smaller `k_min/k_max` avoids over-segmentation on short baselines.
-- `drift.*`: CUSUM thresholds and drift aggregation.
-- `runtime.*`: version tag, heartbeat, reuse_model_fit, baseline buffer, phases toggles.
-- `output.*`: dual_mode (file + SQL), enable_forecast, enable_enhanced_forecast, destinations. (Strategic direction: SQL-first; retire file-only branches over time.)
 
-**Config sync:** when `configs/config_table.csv` changes, run `python scripts/sql/populate_acm_config.py` to update `ACM_Config` so SQL mode stays authoritative.  
-**Config history:** `ACM_ConfigHistory` tracks changes when enabled.
+**Current State (v10.1.0):** 238 parameters across 10 categories, cleaned of duplicates and disabled features (Dec 2025 cleanup: removed river.* streaming features, merged redundant detectors.* into models.*, resolved conflicting values).
+
+**Key Configuration Categories:**
+
+1. **Data Ingestion (`data.*`)**
+   - `train_csv`, `score_csv`, `data_dir`: File paths for baseline/batch CSVs (file mode)
+   - `timestamp_col`: Column name for timestamps (default: `EntryDateTime`)
+   - `sampling_secs`: Data cadence in seconds (1800 = 30-min intervals)
+   - `max_rows`: Maximum rows per batch (100000)
+   - `min_train_samples`: Minimum samples for training (200; K-means n_clusters=6 requires statistical validity)
+
+2. **Feature Engineering (`features.*`)**
+   - `window`: Rolling window size (16); must match process dynamics to capture oscillations without oversmoothing
+   - `fft_bands`: Spectral frequency bins for FFT decomposition
+   - `polars_threshold`: Row count to trigger Polars acceleration (5000)
+
+3. **Detectors & Models (`models.*`)**
+   - `pca.*`: PCA configuration (n_components=5, randomized SVD, incremental=False)
+   - `ar1.*`: AR1 detector (window=256, alpha=0.05, z_cap=8.0)
+   - `iforest.*`: Isolation Forest (n_estimators=100, contamination=0.01); tighter contamination lowers false positives
+   - `gmm.*`: Gaussian Mixture (k_min=2, k_max=3, BIC search enabled); higher `pca.n_components` trades explainability vs. residual sensitivity
+   - `mahl.regularization`: Mahalanobis regularization (0.1 global, 1.0 for FD_FAN) to prevent ill-conditioning
+   - `omr.*`: Overall Model Residual (auto model selection, n_components=5, min_samples=100)
+   - `use_cache`: Enable ModelVersionManager caching (True in SQL mode)
+   - `auto_retrain.*`: Automatic retraining triggers (max_anomaly_rate=0.25, max_drift_score=2.0, max_model_age_hours=720)
+
+4. **Fusion & Weights (`fusion.*`)**
+   - `weights.*`: Detector contributions (ar1_z=0.2, iforest_z=0.2, gmm_z=0.1, pca_spe_z=0.2, mhal_z=0.2, omr_z=0.10)
+   - `per_regime`: Per-regime fusion enabled (True)
+   - `auto_tune.*`: Adaptive weight tuning (enabled, learning_rate=0.3, temperature=1.5, method=episode_separability)
+
+5. **Episodes & Anomaly Detection (`episodes.*`)**
+   - `cpd.k_sigma`: K-sigma threshold for change-point detection (2.0 global, 4.0 for FD_FAN/GAS_TURBINE)
+   - `cpd.h_sigma`: H-sigma threshold for episode boundaries (12.0)
+   - `min_len`, `gap_merge`: Episode merging logic (min_len=3, gap_merge=5)
+   - `cpd.auto_tune.*`: Barrier auto-tuning (k_factor=0.8, h_factor=1.2)
+
+6. **Thresholds (`thresholds.*`)**
+   - `q`: Quantile threshold (0.98 for calibration)
+   - `alert`, `warn`: Thresholds for health zones (0.85, 0.7)
+   - `self_tune.*`: Self-tuning (enabled, target_fp_rate=0.001, max_clip_z=100.0)
+   - `adaptive.*`: Per-regime adaptive thresholds (enabled, method=quantile, confidence=0.997, per_regime=True)
+
+7. **Regimes (`regimes.*`)**
+   - `auto_k.k_min/k_max`: Cluster bounds (2-6); smaller range avoids over-segmentation on short baselines
+   - `auto_k.max_models`, `auto_k.max_eval_samples`: Auto-k evaluation limits (10, 5000)
+   - `quality.silhouette_min`: Minimum acceptable clustering quality (0.3)
+   - `smoothing.*`: Label smoothing (passes=3, window=7, min_dwell_samples=10, min_dwell_seconds=900)
+   - `transient_detection.*`: Change detection (roc_window=10, roc_threshold_high=0.15, roc_threshold_trip=0.3)
+   - `health.*`: Health-based regime boundaries (fused_warn_z=2.5, fused_alert_z=4.0)
+
+8. **Drift Detection (`drift.*`)**
+   - `cusum.*`: CUSUM drift detector (threshold=2.0, smoothing_alpha=0.3, drift=0.1)
+   - `p95_threshold`: Drift vs fault classification (2.0)
+   - `multi_feature.*`: Multi-feature drift (enabled, trend_window=20, hysteresis_on=3.0, hysteresis_off=1.5)
+
+9. **Forecasting (`forecasting.*`)**
+   - `enhanced_enabled`, `enable_continuous`: Unified/continuous forecasting (both True)
+   - `failure_threshold`: Health threshold for failure prediction (70.0)
+   - `max_forecast_hours`: Maximum horizon (168 = 7 days)
+   - `confidence_k`: CI multiplier (1.96 for 95% confidence)
+   - `blend_tau_hours`: Exponential blending time constant (12 hours)
+   - `hazard_smoothing_alpha`: EWMA alpha for hazard rate smoothing (0.3)
+
+10. **Runtime (`runtime.*`)**
+    - `storage_backend`: Storage mode (`sql`; file mode deprecated)
+    - `reuse_model_fit`: Legacy joblib cache (False in SQL mode; use ModelRegistry)
+    - `tick_minutes`: Batch cadence (30 for FD_FAN, 1440 for GAS_TURBINE)
+    - `version`: Current ACM version (v10.1.0)
+    - `phases.*`: Pipeline phase toggles (features, regimes, drift, models, fuse, report)
+
+**Equipment-Specific Overrides:**
+- Global defaults: `EquipID=0`
+- FD_FAN (EquipID=1): `mahl.regularization=1.0`, `episodes.cpd.k_sigma=4.0`, `min_train_samples=200`
+- GAS_TURBINE (EquipID=2621): `timestamp_col=Ts`, `tick_minutes=1440`, `min_train_samples=200`
+
+**Config sync:** When `configs/config_table.csv` changes, run `python scripts/sql/populate_acm_config.py` to update `ACM_Config` so SQL mode stays authoritative (238 params synced as of Dec 2025 cleanup).  
+**Config history:** `ACM_ConfigHistory` tracks all adaptive tuning changes via `core.config_history_writer.ConfigHistoryWriter` with timestamp, parameter path, old/new values, reason, and UpdatedBy tag.
+
+**Removed/Deprecated (v10.1.0 cleanup):**
+- `river.*`: Streaming features removed (never implemented)
+- `fusion.weights.river_hst_z`, `fusion.weights.pca_t2_z`: Zero-weight detectors removed
+- Duplicate `detectors.*` namespace: Merged into `models.*` to eliminate redundancy
 
 ### SQL connection
 - `configs/sql_connection.ini` (or `.example.ini`) supplies DSN/user/pass; `SQLClient.from_ini` loads it.

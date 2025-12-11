@@ -26,7 +26,7 @@ try:
         from . import river_models  # Optional: streaming models (requires river library)
     except ImportError:
         river_models = None  # Graceful fallback if river not installed
-    from . import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
+    from .ar1_detector import AR1Detector  # Extracted from forecasting.py
     from . import fast_features
     from .forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from . import storage  # Use output_manager instead
@@ -39,7 +39,7 @@ except ImportError:
         from core import river_models  # Optional: streaming models (requires river library)
     except ImportError:
         river_models = None  # Graceful fallback if river not installed
-    from core import forecasting  # DEPRECATED v10: Keep for backward compat, use forecast_engine instead
+    from core.ar1_detector import AR1Detector
     from core.forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from core import storage  # Use output_manager instead
     try:
@@ -847,6 +847,9 @@ def main() -> None:
     run_dir = Path(".")  # Dummy - never created
     tables_dir = Path(".")  # Dummy - never created
     art_root = Path(".")  # Dummy artifact root for SQL-ONLY mode (no filesystem persistence)
+    models_dir = Path(".")  # Dummy models directory for SQL-ONLY mode
+    # TASK-7-FIX: Define stable_models_dir to prevent NameError in regime loading fallback
+    stable_models_dir = Path("artifacts") / equip_slug / "models"  # Fallback path for legacy code
 
     # Heartbeat gating
     heartbeat_on = bool(cfg.get("runtime", {}).get("heartbeat", True))
@@ -1868,7 +1871,7 @@ def main() -> None:
                     # Reconstruct detector objects from cached models
                     # Note: We need to pass empty configs since we're loading pre-trained models
                     if "ar1_params" in cached_models and cached_models["ar1_params"]:
-                        ar1_detector = forecasting.AR1Detector(ar1_cfg={})
+                        ar1_detector = AR1Detector(ar1_cfg={})
                         ar1_detector.phimap = cached_models["ar1_params"]["phimap"]
                         ar1_detector.sdmap = cached_models["ar1_params"]["sdmap"]
                         ar1_detector._is_fitted = True
@@ -1963,7 +1966,7 @@ def main() -> None:
             
             if ar1_enabled and not ar1_detector:
                 with T.section("fit.ar1"):
-                    ar1_detector = forecasting.AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
+                    ar1_detector = AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
             
             if pca_enabled and not pca_detector:
                 with T.section("fit.pca_subspace"):
@@ -2426,7 +2429,7 @@ def main() -> None:
                         # Re-fit detectors immediately after invalidation
                         Console.info("[MODEL] Re-fitting detectors due to forced retraining...")
                         if ar1_enabled:
-                            ar1_detector = forecasting.AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
+                            ar1_detector = AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
                         if pca_enabled:
                             pca_cfg = (cfg.get("models", {}).get("pca", {}) or {})
                             pca_detector = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
@@ -2793,8 +2796,8 @@ def main() -> None:
             tuning_diagnostics = None
             with T.section("fusion.auto_tune"):
                 try:
-                    # First fusion pass with current weights to get baseline
-                    fused_baseline, _ = fuse.combine(present, weights, cfg, original_features=score)
+                    # First fusion pass with current weights to get baseline (no regime labels needed for preview)
+                    fused_baseline, _ = fuse.combine(present, weights, cfg, original_features=score, regime_labels=None)
                     fused_baseline_np = np.asarray(fused_baseline, dtype=np.float32).reshape(-1)
                     
                     # Tune weights based on episode separability (not circular correlation)
@@ -2913,14 +2916,15 @@ def main() -> None:
             # Calculate fusion on train data (for threshold baseline)
             if train_present and not train.empty:
                 try:
-                    train_fused, _ = fuse.combine(train_present, weights, cfg, original_features=train)
+                    train_fused, _ = fuse.combine(train_present, weights, cfg, original_features=train, regime_labels=train_regime_labels)
                     train_fused_np = np.asarray(train_fused, dtype=np.float32).reshape(-1)
                     train_frame["fused"] = train_fused_np
                 except Exception as train_fuse_e:
                     Console.warn(f"[FUSE] Failed to calculate train fusion: {train_fuse_e}")
                     train_frame["fused"] = np.zeros(len(train))
             
-            fused, episodes = fuse.combine(present, weights, cfg, original_features=score)
+            # v10.1.0: Pass regime labels to enable episode-regime correlation
+            fused, episodes = fuse.combine(present, weights, cfg, original_features=score, regime_labels=score_regime_labels)
             fused_np = np.asarray(fused, dtype=np.float32).reshape(-1)
             if fused_np.shape[0] != len(frame.index):
                 raise RuntimeError(f"[FUSE] Fused length {fused_np.shape[0]} != frame length {len(frame.index)}")
@@ -2978,11 +2982,17 @@ def main() -> None:
                         # Calculate fusion on accumulated data
                         if accumulated_present:
                             try:
+                                # Build accumulated regime labels for episode-regime correlation
+                                accumulated_regime_labels = None
+                                if regime_quality_ok and train_regime_labels is not None and score_regime_labels is not None:
+                                    accumulated_regime_labels = np.concatenate([train_regime_labels, score_regime_labels])
+                                
                                 accumulated_fused, _ = fuse.combine(
                                     accumulated_present, 
                                     weights, 
                                     cfg, 
-                                    original_features=accumulated_data
+                                    original_features=accumulated_data,
+                                    regime_labels=accumulated_regime_labels
                                 )
                                 accumulated_fused_np = np.asarray(accumulated_fused, dtype=np.float32).reshape(-1)
                                 
@@ -3866,13 +3876,20 @@ def main() -> None:
                             
                             # Health timeline (if we have fused scores)
                             if 'fused' in frame.columns:
-                                # Calculate raw health index
-                                raw_health = 100.0 / (1.0 + frame['fused'] ** 2)
+                                # v10.1.0: Calculate raw health index using softer sigmoid formula
+                                # OLD: 100/(1+Z^2) was too aggressive (Z=2.5 gave 14%)
+                                # NEW: Sigmoid with z_threshold=5.0, Z=2.5 gives ~50%, Z=5 gives ~15%
+                                z_threshold = cfg.get('health', {}).get('z_threshold', 5.0)
+                                steepness = cfg.get('health', {}).get('steepness', 1.5)
+                                abs_z = np.abs(frame['fused'])
+                                normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+                                sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+                                raw_health = np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
                                 
                                 # Apply exponential smoothing to prevent unrealistic jumps
                                 # alpha = 0.3 means 30% new value, 70% previous (smooths over ~3 periods)
                                 alpha = cfg.get('health', {}).get('smoothing_alpha', 0.3)
-                                smoothed_health = raw_health.ewm(alpha=alpha, adjust=False).mean()
+                                smoothed_health = pd.Series(raw_health).ewm(alpha=alpha, adjust=False).mean()
                                 
                                 # Data quality flags based on rate of change
                                 health_change = smoothed_health.diff().abs()
@@ -4018,40 +4035,38 @@ def main() -> None:
                 except Exception as e:
                     Console.error(f"[ANALYTICS] Error generating comprehensive analytics: {str(e)}")
 
-            # === RUL + FORECASTING (v10.0.0 - DISABLED) ===
-            # DISABLED: Focusing on anomaly detection analytical integrity first
-            # See docs/FORECASTING_FUTURE_WORK.md for architectural audit and future roadmap
-            # TODO: Re-enable after anomaly detection feature set validated
-            
-            # try:
-            #     # v10.0.0: Use enhanced forecasting (forecasting.py has the working implementation)
-            #     Console.info("[FORECAST] Running enhanced forecasting engine (v10.0.0 - SQL mode)")
-            #     
-            #     # Call the actual working forecasting code
-            #     tables = forecasting.run_and_persist_enhanced_forecasting(
-            #         sql_client=sql_client,
-            #         equip_id=equip_id,
-            #         run_id=run_id,
-            #         config=cfg,
-            #         output_manager=output_manager,
-            #         tables_dir=tables_dir,
-            #         equip=equip,
-            #         current_batch_time=win_end,
-            #         sensor_data=score_numeric if 'score_numeric' in locals() else None
-            #     )
-            #     
-            #     if tables:
-            #         Console.info(f"[FORECAST] Successfully wrote {len(tables)} forecast tables")
-            #         Console.info(f"[FORECAST] Tables: {', '.join(tables.keys())}")
-            #     else:
-            #         Console.warn("[FORECAST] No forecast tables generated")
-            #         
-            # except Exception as e:
-            #     Console.error(f"[FORECAST] Enhanced forecasting (SQL mode) failed: {e}")
-            #     import traceback
-            #     Console.error(f"[FORECAST] Traceback: {traceback.format_exc()}")
-            
-            Console.info("[FORECAST] Forecasting and RUL disabled - see docs/FORECASTING_FUTURE_WORK.md")
+            # === RUL + FORECASTING (v10.0.0 - ENABLED) ===
+            # v10.0.0: Unified forecasting via ForecastEngine (replaces legacy forecasting modules)
+            try:
+                Console.info("[FORECAST] Running unified forecasting engine (v10.0.0 - SQL mode)")
+                
+                # M7: ForecastEngine integration in SQL mode
+                forecast_engine = ForecastEngine(
+                    sql_client=getattr(output_manager, "sql_client", sql_client),
+                    output_manager=output_manager,
+                    equip_id=int(equip_id) if equip_id is not None else None,
+                    run_id=str(run_id) if run_id is not None else None,
+                    config=cfg
+                )
+                
+                forecast_results = forecast_engine.run_forecast()
+                
+                if forecast_results.get('success'):
+                    Console.info(
+                        f"[FORECAST] RUL P50={forecast_results.get('rul_p50', 0):.1f}h, "
+                        f"P10={forecast_results.get('rul_p10', 0):.1f}h, P90={forecast_results.get('rul_p90', 0):.1f}h"
+                    )
+                    Console.info(f"[FORECAST] Top sensors: {forecast_results.get('top_sensors', 'N/A')}")
+                    Console.info(f"[FORECAST] Wrote tables: {', '.join(forecast_results.get('tables_written', []))}")
+                else:
+                    error_msg = forecast_results.get('error', 'Unknown error')
+                    data_quality = forecast_results.get('data_quality', 'UNKNOWN')
+                    Console.warn(f"[FORECAST] Forecast skipped: {error_msg} (quality={data_quality})")
+                    
+            except Exception as e:
+                Console.error(f"[FORECAST] Unified forecasting engine failed: {e}")
+                import traceback
+                Console.error(f"[FORECAST] Traceback: {traceback.format_exc()}")
 
         except Exception as e:
             Console.warn(f"[OUTPUTS] Comprehensive analytics generation failed: {e}")

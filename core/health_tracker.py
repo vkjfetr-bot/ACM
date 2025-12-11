@@ -6,9 +6,11 @@ Provides unified interface for loading health data with comprehensive quality ch
 
 Key Features:
 - SQL-first loading from ACM_HealthTimeline
+- Rolling window enforcement (configurable history_window_hours, default 90 days)
 - 5-level quality assessment (OK, SPARSE, GAPPY, FLAT, NOISY)
 - Regime shift detection via Kolmogorov-Smirnov test
 - Robust statistics and gap analysis
+- DataSummary for ForecastEngine consumption (dt_hours, n_samples, start/end, quality)
 - Research-backed thresholds
 
 References:
@@ -17,6 +19,7 @@ References:
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Optional, Tuple
 import numpy as np
@@ -55,13 +58,40 @@ class HealthStatistics:
     quality_reason: str
 
 
+@dataclass
+class DataSummary:
+    """
+    Compact data summary for ForecastEngine consumption.
+    
+    Provides essential metadata without requiring ForecastEngine to recompute.
+    All fields are pre-calculated by HealthTimeline for efficiency.
+    
+    Attributes:
+        dt_hours: Data cadence in hours (median gap between samples)
+        n_samples: Number of valid health samples
+        start_time: First timestamp in window
+        end_time: Last timestamp in window
+        quality: HealthQuality enum (OK, SPARSE, GAPPY, FLAT, NOISY, MISSING)
+        quality_reason: Human-readable explanation of quality flag
+        window_hours: Effective window size (end_time - start_time)
+    """
+    dt_hours: float
+    n_samples: int
+    start_time: Optional['datetime'] = None
+    end_time: Optional['datetime'] = None
+    quality: HealthQuality = HealthQuality.MISSING
+    quality_reason: str = "Not computed"
+    window_hours: float = 0.0
+
+
 class HealthTimeline:
     """
     Loads and validates health timeline data with quality assessment.
     
     Design Philosophy:
-    - SQL-first (ACM_HealthTimeline) with OutputManager cache fallback
-    - Fail-fast quality checks before expensive forecasting operations
+    - SQL-first (ACM_HealthTimeline) with rolling window enforcement (M3.1)
+    - Fail-fast quality checks before expensive forecasting operations (M3.2)
+    - DataSummary provides dt_hours, n_samples, start/end for ForecastEngine (M3.3)
     - Regime shift detection to trigger model retraining
     - Configurable thresholds from ACM_AdaptiveConfig
     
@@ -72,12 +102,17 @@ class HealthTimeline:
             run_id="run_123",
             output_manager=output_mgr,
             min_train_samples=200,
-            max_gap_hours=720.0  # 30 days for historical replay
+            max_gap_hours=720.0,  # 30 days for historical replay
+            history_window_hours=2160.0  # 90 days rolling window
         )
         df, quality = tracker.load_from_sql()
         if quality != HealthQuality.OK:
             Console.warn(f"Poor data quality: {quality.value}")
             return
+        
+        # Use DataSummary for ForecastEngine consumption
+        summary = tracker.get_data_summary(df)
+        print(f"dt_hours={summary.dt_hours}, n_samples={summary.n_samples}")
         
         stats = tracker.get_statistics(df)
         shift_detected = tracker.detect_regime_shift(df, prev_health_df)
@@ -94,7 +129,8 @@ class HealthTimeline:
         min_std_dev: float = 0.01,
         max_std_dev: float = 50.0,
         max_timeline_rows: int = 10000,
-        downsample_freq: str = "15min"
+        downsample_freq: str = "15min",
+        history_window_hours: float = 2160.0  # 90 days rolling window (M3.1)
     ):
         """
         Initialize health timeline loader.
@@ -105,11 +141,13 @@ class HealthTimeline:
             run_id: ACM run identifier
             output_manager: OutputManager instance for cache access
             min_train_samples: Minimum rows for SPARSE check (default 200)
-            max_gap_hours: Maximum time gap for GAPPY check (default 6.0 hours)
+            max_gap_hours: Maximum time gap for GAPPY check (default 720 hours = 30 days)
             min_std_dev: Minimum std for FLAT check (default 0.01)
             max_std_dev: Maximum std for NOISY check (default 50.0)
             max_timeline_rows: Downsample threshold (default 10000)
             downsample_freq: Resample frequency when over limit (default "15min")
+            history_window_hours: Rolling window size in hours (default 2160 = 90 days)
+                                 Research-backed: avoids full-history overfitting
         """
         self.sql_client = sql_client
         self.equip_id = equip_id
@@ -121,6 +159,7 @@ class HealthTimeline:
         self.max_std_dev = max_std_dev
         self.max_timeline_rows = max_timeline_rows
         self.downsample_freq = downsample_freq
+        self.history_window_hours = history_window_hours
     
     def load_from_sql(self) -> Tuple[Optional[pd.DataFrame], HealthQuality]:
         """
@@ -153,26 +192,63 @@ class HealthTimeline:
         
         try:
             cur = self.sql_client.cursor()
-            # CRITICAL FIX: Load ALL historical health data for EquipID, not just current RunID
-            # Forecasting requires historical trend across multiple batches
+            
+            # M3.1: Rolling window enforcement (FIXED in v10.1.0)
+            # CRITICAL FIX: Use MAX(Timestamp) from actual data, NOT datetime.now()
+            # datetime.now() fails when data is historical/stale (e.g., batch replay)
+            # Research shows rolling windows (30-90 days) produce better degradation models.
+            
+            # First, get the latest timestamp from actual data for this equipment
+            cur.execute(
+                """
+                SELECT MAX(Timestamp) AS LatestTimestamp
+                FROM dbo.ACM_HealthTimeline
+                WHERE EquipID = ?
+                """,
+                (self.equip_id,),
+            )
+            row = cur.fetchone()
+            
+            if row is None or row[0] is None:
+                cur.close()
+                Console.warn(
+                    f"[HealthTracker] No health timeline found for EquipID={self.equip_id} (empty table)"
+                )
+                return None, HealthQuality.MISSING
+            
+            latest_timestamp = row[0]
+            window_cutoff = latest_timestamp - timedelta(hours=self.history_window_hours)
+            
+            Console.info(
+                f"[HealthTracker] Data anchor: {latest_timestamp}, "
+                f"window cutoff: {window_cutoff} ({self.history_window_hours:.0f}h lookback)"
+            )
+            
             cur.execute(
                 """
                 SELECT Timestamp, HealthIndex, FusedZ
                 FROM dbo.ACM_HealthTimeline
                 WHERE EquipID = ?
+                  AND Timestamp >= ?
                 ORDER BY Timestamp
                 """,
-                (self.equip_id,),
+                (self.equip_id, window_cutoff),
             )
             rows = cur.fetchall()
             cur.close()
             
             if not rows:
-                Console.warn(f"[HealthTracker] No health timeline found for EquipID={self.equip_id} (across all runs)")
+                Console.warn(
+                    f"[HealthTracker] No health timeline found for EquipID={self.equip_id} "
+                    f"in window {window_cutoff} to {latest_timestamp}"
+                )
                 return None, HealthQuality.MISSING
             
             df = pd.DataFrame.from_records(rows, columns=["Timestamp", "HealthIndex", "FusedZ"])
-            Console.info(f"[HealthTracker] Loaded {len(df)} health points from SQL")
+            Console.info(
+                f"[HealthTracker] Loaded {len(df)} health points from SQL "
+                f"(rolling window: {self.history_window_hours:.0f}h)"
+            )
             
             df = self._normalize_columns(df)
             df = self._apply_row_limit(df)
@@ -348,6 +424,72 @@ class HealthTimeline:
         else:
             return f"{len(df)} samples, std={std:.2f}, max_gap={max_gap:.1f}h"
     
+    def get_data_summary(self, df: pd.DataFrame) -> DataSummary:
+        """
+        Generate compact data summary for ForecastEngine consumption (M3.3).
+        
+        This provides pre-calculated metadata so ForecastEngine doesn't need to
+        recompute statistics. Key fields:
+        - dt_hours: Data cadence (median gap between consecutive samples)
+        - n_samples: Number of valid health samples
+        - start_time/end_time: Time boundaries of the data window
+        - quality: HealthQuality enum
+        - window_hours: Effective duration of the data window
+        
+        Args:
+            df: Health DataFrame with Timestamp, HealthIndex columns
+        
+        Returns:
+            DataSummary dataclass with essential metadata
+        """
+        if df is None or df.empty:
+            return DataSummary(
+                dt_hours=1.0,  # Default to hourly if unknown
+                n_samples=0,
+                start_time=None,
+                end_time=None,
+                quality=HealthQuality.MISSING,
+                quality_reason="No data available",
+                window_hours=0.0
+            )
+        
+        n_samples = len(df)
+        quality = self.quality_check(df)
+        
+        # Extract timestamps
+        if "Timestamp" in df.columns:
+            timestamps = pd.to_datetime(df["Timestamp"])
+            start_time = timestamps.iloc[0].to_pydatetime()
+            end_time = timestamps.iloc[-1].to_pydatetime()
+            window_hours = (end_time - start_time).total_seconds() / 3600.0
+            
+            # Compute dt_hours as median gap (robust to outliers)
+            if len(df) > 1:
+                time_diffs = timestamps.diff().dt.total_seconds() / 3600.0
+                dt_hours = float(time_diffs.median())
+            else:
+                dt_hours = 1.0  # Default if only one sample
+        else:
+            start_time = None
+            end_time = None
+            window_hours = 0.0
+            dt_hours = 1.0
+        
+        # Generate quality reason
+        std = df["HealthIndex"].std() if "HealthIndex" in df.columns else 0.0
+        max_gap = time_diffs.max() if "Timestamp" in df.columns and len(df) > 1 else 0.0
+        quality_reason = self._get_quality_reason(df, quality, std, max_gap)
+        
+        return DataSummary(
+            dt_hours=dt_hours,
+            n_samples=n_samples,
+            start_time=start_time,
+            end_time=end_time,
+            quality=quality,
+            quality_reason=quality_reason,
+            window_hours=window_hours
+        )
+
     def detect_regime_shift(
         self,
         current_df: pd.DataFrame,

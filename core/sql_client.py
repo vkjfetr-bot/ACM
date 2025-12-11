@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any, Dict, Optional
+from contextlib import contextmanager
 import configparser
 from pathlib import Path
 
@@ -206,11 +207,39 @@ class SQLClient:
             finally:
                 self.conn = None
 
+    def commit(self) -> None:
+        """Commit the current transaction. TASK-5-FIX: Expose commit() method on SQLClient."""
+        if self.conn is not None and not self.conn.autocommit:
+            self.conn.commit()
+
+    def rollback(self) -> None:
+        """Rollback the current transaction. TASK-5-FIX: Expose rollback() method on SQLClient."""
+        if self.conn is not None and not self.conn.autocommit:
+            self.conn.rollback()
+
     # ---------- basic primitives ----------
     def cursor(self) -> pyodbc.Cursor:
         if self.conn is None:
             raise RuntimeError("SQLClient.cursor() called before connect().")
         return self.conn.cursor()
+
+    @contextmanager
+    def get_cursor(self):
+        """
+        Context manager for cursor with automatic cleanup.
+        
+        Usage:
+            with sql_client.get_cursor() as cur:
+                cur.execute("SELECT ...")
+                rows = cur.fetchall()
+        """
+        if self.conn is None:
+            raise RuntimeError("SQLClient.get_cursor() called before connect().")
+        cur = self.conn.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
 
     # Simple proc invoker (without TVPs or OUTPUT capture).
     # Usage: call_proc("dbo.usp_ACM_FinalizeRun", {"RunID": "...", "Outcome": "OK", ...})

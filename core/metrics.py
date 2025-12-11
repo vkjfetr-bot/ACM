@@ -372,3 +372,162 @@ def log_metrics_summary(metrics: Dict[str, float], prefix: str = "[Metrics]") ->
         f"Sharpness={metrics.get('interval_sharpness', float('nan')):.2f}, "
         f"N={int(metrics.get('n_samples', 0))}"
     )
+
+
+def compute_forecast_diagnostics(
+    forecast_results: Dict[str, any],
+    data_summary: Optional[any] = None
+) -> Dict[str, any]:
+    """
+    Compute forecast diagnostics for ForecastEngine integration (M9).
+    
+    This function computes diagnostic metrics from forecast results without
+    requiring actual future values (which aren't available at forecast time).
+    It calculates:
+    - Forecast statistics (mean, std, range)
+    - RUL uncertainty metrics (spread, coefficient of variation)
+    - Confidence interval width and asymmetry
+    - Data quality indicators from DataSummary
+    
+    Args:
+        forecast_results: Dictionary from ForecastEngine._generate_forecast_and_rul()
+            Expected keys: rul_p10, rul_p50, rul_p90, rul_mean, rul_std,
+                          forecast_values, forecast_lower, forecast_upper,
+                          current_health, mttf_hours
+        data_summary: Optional DataSummary object with dt_hours, n_samples, quality
+    
+    Returns:
+        Flat dictionary suitable for storing in ForecastingState.last_forecast_json:
+        - forecast_mean: Mean of health forecast values
+        - forecast_std: Std dev of health forecast values
+        - forecast_range: Max - min of forecast values
+        - rul_spread: P90 - P10 (uncertainty width)
+        - rul_cv: Coefficient of variation (std/mean) for RUL
+        - ci_width_mean: Mean confidence interval width
+        - ci_asymmetry: Upper-to-lower bound ratio (>1 = skewed upward)
+        - current_health: Health at forecast start
+        - mttf_hours: Mean time to failure
+        - n_samples: Number of training samples (from DataSummary)
+        - data_quality: Quality classification (from DataSummary)
+        - dt_hours: Data cadence (from DataSummary)
+        - computed_at: Timestamp when diagnostics computed
+    """
+    diagnostics: Dict[str, float] = {}
+    
+    # Extract forecast arrays
+    forecast_values = forecast_results.get('forecast_values')
+    forecast_lower = forecast_results.get('forecast_lower')
+    forecast_upper = forecast_results.get('forecast_upper')
+    
+    # Forecast statistics
+    if forecast_values is not None and len(forecast_values) > 0:
+        forecast_arr = np.asarray(forecast_values)
+        valid = np.isfinite(forecast_arr)
+        if np.any(valid):
+            diagnostics['forecast_mean'] = float(np.mean(forecast_arr[valid]))
+            diagnostics['forecast_std'] = float(np.std(forecast_arr[valid]))
+            diagnostics['forecast_range'] = float(np.max(forecast_arr[valid]) - np.min(forecast_arr[valid]))
+        else:
+            diagnostics['forecast_mean'] = float('nan')
+            diagnostics['forecast_std'] = float('nan')
+            diagnostics['forecast_range'] = float('nan')
+    else:
+        diagnostics['forecast_mean'] = float('nan')
+        diagnostics['forecast_std'] = float('nan')
+        diagnostics['forecast_range'] = float('nan')
+    
+    # RUL uncertainty metrics
+    rul_p10 = forecast_results.get('rul_p10', float('nan'))
+    rul_p50 = forecast_results.get('rul_p50', float('nan'))
+    rul_p90 = forecast_results.get('rul_p90', float('nan'))
+    rul_mean = forecast_results.get('rul_mean', float('nan'))
+    rul_std = forecast_results.get('rul_std', float('nan'))
+    
+    # RUL spread (P90 - P10)
+    if np.isfinite(rul_p10) and np.isfinite(rul_p90):
+        diagnostics['rul_spread'] = float(rul_p90 - rul_p10)
+    else:
+        diagnostics['rul_spread'] = float('nan')
+    
+    # RUL coefficient of variation (CV = std / mean)
+    if np.isfinite(rul_std) and np.isfinite(rul_mean) and rul_mean > 0:
+        diagnostics['rul_cv'] = float(rul_std / rul_mean)
+    else:
+        diagnostics['rul_cv'] = float('nan')
+    
+    # Confidence interval metrics
+    if forecast_lower is not None and forecast_upper is not None:
+        lower_arr = np.asarray(forecast_lower)
+        upper_arr = np.asarray(forecast_upper)
+        valid = np.isfinite(lower_arr) & np.isfinite(upper_arr)
+        
+        if np.any(valid):
+            widths = upper_arr[valid] - lower_arr[valid]
+            diagnostics['ci_width_mean'] = float(np.mean(widths))
+            
+            # Asymmetry: ratio of upper to lower bound widths relative to forecast mean
+            if forecast_values is not None and len(forecast_values) > 0:
+                forecast_arr = np.asarray(forecast_values)
+                valid_all = valid & np.isfinite(forecast_arr)
+                if np.any(valid_all):
+                    upper_widths = upper_arr[valid_all] - forecast_arr[valid_all]
+                    lower_widths = forecast_arr[valid_all] - lower_arr[valid_all]
+                    # Avoid division by zero
+                    lower_mean = np.mean(np.abs(lower_widths))
+                    upper_mean = np.mean(np.abs(upper_widths))
+                    if lower_mean > 1e-6:
+                        diagnostics['ci_asymmetry'] = float(upper_mean / lower_mean)
+                    else:
+                        diagnostics['ci_asymmetry'] = float('nan')
+                else:
+                    diagnostics['ci_asymmetry'] = float('nan')
+            else:
+                diagnostics['ci_asymmetry'] = float('nan')
+        else:
+            diagnostics['ci_width_mean'] = float('nan')
+            diagnostics['ci_asymmetry'] = float('nan')
+    else:
+        diagnostics['ci_width_mean'] = float('nan')
+        diagnostics['ci_asymmetry'] = float('nan')
+    
+    # Current health and MTTF
+    diagnostics['current_health'] = float(forecast_results.get('current_health', float('nan')))
+    diagnostics['mttf_hours'] = float(forecast_results.get('mttf_hours', float('nan')))
+    diagnostics['rul_p50'] = float(rul_p50) if np.isfinite(rul_p50) else float('nan')
+    
+    # DataSummary metrics (M9 integration with M3)
+    if data_summary is not None:
+        diagnostics['n_samples'] = int(getattr(data_summary, 'n_samples', 0))
+        diagnostics['dt_hours'] = float(getattr(data_summary, 'dt_hours', float('nan')))
+        # Quality is enum, convert to string
+        quality = getattr(data_summary, 'quality', None)
+        diagnostics['data_quality'] = quality.value if quality else 'UNKNOWN'
+    else:
+        diagnostics['n_samples'] = 0
+        diagnostics['dt_hours'] = float('nan')
+        diagnostics['data_quality'] = 'UNKNOWN'
+    
+    # Timestamp
+    from datetime import datetime
+    diagnostics['computed_at'] = datetime.now().isoformat()
+    
+    return diagnostics
+
+
+def log_forecast_diagnostics(diagnostics: Dict[str, any], prefix: str = "[ForecastDiag]") -> None:
+    """
+    Log forecast diagnostics summary to console.
+    
+    Args:
+        diagnostics: Dictionary from compute_forecast_diagnostics()
+        prefix: Log message prefix
+    """
+    Console.info(
+        f"{prefix} RUL_P50={diagnostics.get('rul_p50', float('nan')):.1f}h, "
+        f"RUL_Spread={diagnostics.get('rul_spread', float('nan')):.1f}h, "
+        f"RUL_CV={diagnostics.get('rul_cv', float('nan')):.2f}, "
+        f"CI_Width={diagnostics.get('ci_width_mean', float('nan')):.2f}, "
+        f"Health={diagnostics.get('current_health', float('nan')):.1f}, "
+        f"N={diagnostics.get('n_samples', 0)}, "
+        f"Quality={diagnostics.get('data_quality', 'UNKNOWN')}"
+    )

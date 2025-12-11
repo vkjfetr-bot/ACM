@@ -254,10 +254,22 @@ def build_feature_basis(
     pca_detector: Optional[Any],
     cfg: Dict[str, Any],
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
-    """Construct a compact feature matrix for regime clustering."""
+    """Construct a compact feature matrix for regime clustering.
+    
+    v10.1.0: Added 'use_raw_sensors' mode to cluster on actual operational parameters
+    instead of PCA-reduced statistical features. This produces regimes that reflect
+    real operational modes (day/night, load levels, ambient conditions).
+    """
     basis_cfg = _cfg_get(cfg, "regimes.feature_basis", {})
     n_pca = int(basis_cfg.get("n_pca_components", 3))
     raw_tags_cfg = basis_cfg.get("raw_tags", []) or []
+    
+    # v10.1.0: New mode to use raw sensors for operationally-meaningful regimes
+    use_raw_sensors = bool(basis_cfg.get("use_raw_sensors", True))  # Default ON
+    operational_keywords = basis_cfg.get("operational_keywords", [
+        "temp", "load", "speed", "flow", "pressure", "rpm", "power", 
+        "current", "voltage", "ambient", "inlet", "outlet", "bearing", "winding"
+    ])
 
     train_parts: List[pd.DataFrame] = []
     score_parts: List[pd.DataFrame] = []
@@ -266,7 +278,32 @@ def build_feature_basis(
     pca_variance_ratio: Optional[float] = None
     pca_variance_vector: List[float] = []
 
-    if pca_detector is not None and getattr(pca_detector, "pca", None) is not None:
+    # v10.1.0: Prioritize raw sensor data for regime clustering if available
+    if use_raw_sensors and raw_train is not None and raw_score is not None:
+        # Auto-detect operational columns based on keywords
+        available_operational = []
+        for col in raw_train.columns:
+            col_lower = col.lower()
+            if any(kw in col_lower for kw in operational_keywords):
+                available_operational.append(col)
+        
+        # Also include any explicitly configured raw_tags
+        for tag in raw_tags_cfg:
+            if tag in raw_train.columns and tag not in available_operational:
+                available_operational.append(tag)
+        
+        if available_operational:
+            Console.info(f"[REGIME] v10.1.0: Using {len(available_operational)} raw operational sensors for regime clustering: {available_operational[:5]}{'...' if len(available_operational) > 5 else ''}")
+            used_raw_tags = available_operational
+            train_raw = raw_train.reindex(train_features.index)[available_operational].astype(float).ffill().bfill().fillna(0.0)
+            score_raw = raw_score.reindex(score_features.index)[available_operational].astype(float).ffill().bfill().fillna(0.0)
+            train_parts.append(train_raw)
+            score_parts.append(score_raw)
+        else:
+            Console.warn(f"[REGIME] v10.1.0: No operational columns found matching keywords {operational_keywords[:5]}. Falling back to PCA features.")
+
+    # Only use PCA features if raw sensors not available or insufficient
+    if not train_parts and pca_detector is not None and getattr(pca_detector, "pca", None) is not None:
         keep_cols = getattr(pca_detector, "keep_cols", list(train_features.columns))
         train_subset = train_features.reindex(columns=keep_cols).fillna(0.0)
         score_subset = score_features.reindex(columns=keep_cols).fillna(0.0)
@@ -288,7 +325,8 @@ def build_feature_basis(
         except Exception:
             n_pca_used = 0
 
-    if raw_train is not None and raw_score is not None:
+    # Legacy raw_tags handling (when use_raw_sensors=False)
+    if not use_raw_sensors and raw_train is not None and raw_score is not None:
         available_tags = [tag for tag in raw_tags_cfg if tag in raw_train.columns]
         if available_tags:
             used_raw_tags = available_tags

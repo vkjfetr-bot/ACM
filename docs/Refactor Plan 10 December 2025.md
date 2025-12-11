@@ -470,10 +470,10 @@ You already have:
 
 | Task ID | Area         | Description                                                                                 | Files                         | Done when                                                                  |
 | ------: | ------------ | ------------------------------------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------- |
-|    M1.1 | Imports      | Remove all active imports/usages of `forecasting` and `rul_engine`.                         | `acm_main.py`, whole repo     | Global search shows no live references; only deprecated comments remain.   |
-|    M1.2 | Legacy calls | Delete/comment enhanced forecasting calls that use `forecasting` in SQL path.               | `acm_main.py`                 | SQL-mode path has no call to `forecasting`; only ForecastEngine planned.   |
-|    M1.3 | Monolith     | Strip `forecasting.py` down to non-used reference/notes; move any useful helpers elsewhere. | `forecasting.py`, v10 modules | `forecasting.py` no longer imported anywhere; only small helpers migrated. |
-|    M1.4 | Old RUL      | Mark `rul_engine.py` as deprecated and unused.                                              | `rul_engine.py`               | No imports anywhere; file only kept as reference.                          |
+|    ~~M1.1~~ | ~~Imports~~      | ~~Remove all active imports/usages of `forecasting` and `rul_engine`.~~                         | ~~`acm_main.py`, whole repo~~     | ✅ No active imports in code; modules already renamed to `*_legacy.py`   |
+|    ~~M1.2~~ | ~~Legacy calls~~ | ~~Delete/comment enhanced forecasting calls that use `forecasting` in SQL path.~~               | ~~`acm_main.py`~~                 | ✅ Legacy forecasting call already commented out (lines 4026-4045)   |
+|    ~~M1.3~~ | ~~Monolith~~     | ~~Strip `forecasting.py` down to non-used reference/notes; move any useful helpers elsewhere.~~ | ~~`forecasting_legacy.py`~~ | ✅ Removed rul_engine import; added strong deprecation header |
+|    ~~M1.4~~ | ~~Old RUL~~      | ~~Mark `rul_engine.py` as deprecated and unused.~~                                              | ~~`rul_engine_legacy.py`~~               | ✅ Added strong deprecation header; no imports anywhere                          |
 
 **Source control**
 
@@ -485,10 +485,10 @@ You already have:
 
 | Task ID | Area             | Description                                                                                            | Files                | Done when                                                                           |
 | ------: | ---------------- | ------------------------------------------------------------------------------------------------------ | -------------------- | ----------------------------------------------------------------------------------- |
-|    M2.1 | Workflow         | Restructure `run_forecast` to follow the 11-step workflow (load → state → config → fit → RUL → write). | `forecast_engine.py` | `run_forecast` body is clean, linear, and only uses v10 modules.                    |
-|    M2.2 | Strip legacy     | Remove per-sensor ARIMA/VAR, direct CSV writes, and direct calls to old modules from ForecastEngine.   | `forecast_engine.py` | No ARIMA/VAR or file I/O remains; only health/RUL/failure forecast via v10 modules. |
-|    M2.3 | Return contract  | Standardise result dict keys (success, RUL numbers, top_sensors, data_quality, error).                 | `forecast_engine.py` | Logs in `acm_main` match these keys; no missing key errors.                         |
-|    M2.4 | Dependency scope | Ensure ForecastEngine imports only v10 modules + utilities, not legacy forecasting/rul_engine.         | `forecast_engine.py` | Import section shows only v10 modules & utilities.                                  |
+|    ~~M2.1~~ | ~~Workflow~~         | ~~Restructure `run_forecast` to follow the 11-step workflow (load → state → config → fit → RUL → write).~~ | ~~`forecast_engine.py`~~ | ✅ Clean 10-step workflow using v10 modules only                    |
+|    ~~M2.2~~ | ~~Strip legacy~~     | ~~Remove per-sensor ARIMA/VAR, direct CSV writes, and direct calls to old modules from ForecastEngine.~~   | ~~`forecast_engine.py`~~ | ✅ No ARIMA/VAR; all writes via OutputManager |
+|    ~~M2.3~~ | ~~Return contract~~  | ~~Standardise result dict keys (success, RUL numbers, top_sensors, data_quality, error).~~                 | ~~`forecast_engine.py`~~ | ✅ All required keys present in result dict                         |
+|    ~~M2.4~~ | ~~Dependency scope~~ | ~~Ensure ForecastEngine imports only v10 modules + utilities, not legacy forecasting/rul_engine.~~         | ~~`forecast_engine.py`~~ | ✅ Only v10 imports (health_tracker, degradation_model, rul_estimator, etc.)                                  |
 
 **Source control**
 
@@ -500,9 +500,9 @@ You already have:
 
 | Task ID | Area    | Description                                                                                 | Files               | Done when                                                    |
 | ------: | ------- | ------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------ |
-|    M3.1 | Window  | Configure HealthTimeline to load only a rolling history (e.g. last 30–90 days).             | `health_tracker.py` | SQL query and/or resampling enforces a bounded window.       |
-|    M3.2 | Quality | Confirm quality flags are used (`OK`, `SPARSE`, `GAPPY`, `FLAT`, `NOISY`) with clear rules. | `health_tracker.py` | ForecastEngine can act based on the flag (skip or proceed).  |
-|    M3.3 | Summary | Expose dt_hours, n_samples, start/end, quality from HealthTimeline for ForecastEngine.      | `health_tracker.py` | ForecastEngine uses these fields and doesn’t recompute them. |
+|    ~~M3.1~~ | ~~Window~~  | ~~Configure HealthTimeline to load only a rolling history (e.g. last 30–90 days).~~             | ~~`health_tracker.py`~~ | ✅ Added history_window_hours (2160h=90d default)       |
+|    ~~M3.2~~ | ~~Quality~~ | ~~Confirm quality flags are used (`OK`, `SPARSE`, `GAPPY`, `FLAT`, `NOISY`) with clear rules.~~ | ~~`health_tracker.py`~~ | ✅ Early gating in ForecastEngine (skip on SPARSE/FLAT/NOISY)  |
+|    ~~M3.3~~ | ~~Summary~~ | ~~Expose dt_hours, n_samples, start/end, quality from HealthTimeline for ForecastEngine.~~      | ~~`health_tracker.py`~~ | ✅ DataSummary dataclass; ForecastEngine uses it directly |
 
 **Source control**
 
@@ -514,10 +514,10 @@ You already have:
 
 | Task ID | Area      | Description                                                                       | Files                                          | Done when                                                                          |
 | ------: | --------- | --------------------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------- |
-|    M4.1 | Trend     | Use `LinearTrendModel` as the sole degradation model for health index.            | `degradation_model.py`, `forecast_engine.py`   | ForecastEngine always calls `LinearTrendModel` to fit & forecast.                  |
-|    M4.2 | RUL       | Wire `RULEstimator` as the only RUL mechanism.                                    | `rul_estimator.py`, `forecast_engine.py`       | RUL summary in result dict comes from RULEstimator output.                         |
-|    M4.3 | Fail prob | Use `failure_probability` to compute failure, survival, and hazard vs horizon.    | `failure_probability.py`, `forecast_engine.py` | AC tables for failure forecast are populated using these functions.                |
-|    M4.4 | Metrics   | Optionally log forecast quality metrics to forecasting state, using `metrics.py`. | `metrics.py`, `state_manager.py`               | Forecasting state includes simple metrics (e.g. MAE, bias) when data is available. |
+|    ~~M4.1~~ | ~~Trend~~     | ~~Use `LinearTrendModel` as the sole degradation model for health index.~~            | ~~`degradation_model.py`, `forecast_engine.py`~~   | ✅ ForecastEngine._fit_degradation_model() uses LinearTrendModel exclusively                  |
+|    ~~M4.2~~ | ~~RUL~~       | ~~Wire `RULEstimator` as the only RUL mechanism.~~                                    | ~~`rul_estimator.py`, `forecast_engine.py`~~       | ✅ _generate_forecast_and_rul() uses RULEstimator with Monte Carlo                         |
+|    ~~M4.3~~ | ~~Fail prob~~ | ~~Use `failure_probability` to compute failure, survival, and hazard vs horizon.~~    | ~~`failure_probability.py`, `forecast_engine.py`~~ | ✅ compute_failure_statistics() called for survival/hazard/MTTF                |
+|    ~~M4.4~~ | ~~Metrics~~   | ~~Optionally log forecast quality metrics to forecasting state, using `metrics.py`.~~ | ~~`metrics.py`, `state_manager.py`~~               | ✅ ForecastingState includes RecentMAE/RecentRMSE; StateManager persists | |
 
 **Source control**
 

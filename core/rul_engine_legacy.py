@@ -1,6 +1,20 @@
 """
-Unified RUL Engine
-==================
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        ⚠️  LEGACY MODULE - DEPRECATED  ⚠️                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+THIS MODULE IS NO LONGER USED AND WILL BE REMOVED IN v11.0.0
+
+Replaced by v10 architecture:
+- core/rul_estimator.py (Monte Carlo RUL with confidence intervals)
+- core/degradation_model.py (LinearTrendModel for health trends)
+- core/failure_probability.py (failure/survival/hazard functions)
+
+DO NOT IMPORT OR MODIFY THIS FILE.
+Kept only as reference during migration.
+
+[DEPRECATED] Unified RUL Engine
+================================
 
 Single RUL estimation module combining:
 - Ensemble modeling (AR1 + Exponential + Weibull)

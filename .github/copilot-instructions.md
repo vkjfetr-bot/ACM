@@ -6,6 +6,7 @@
   - `README.md` - Primary product overview, features, running ACM
   - `docs/ACM_SYSTEM_OVERVIEW.md` - Complete architectural walkthrough, module map, workflows
   - `docs/SOURCE_CONTROL_PRACTICES.md` - Git workflow, branching, versioning, release management
+  - `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` - Authoritative ACM table/column definitions
   - `utils/version.py` - Current version info and release notes
   - Other relevant docs under `docs/` for specific topics (OMR_DETECTOR.md, COLDSTART_MODE.md, etc.)
   
@@ -35,7 +36,7 @@
 ## Workflows
 - Rapid run: `python -m core.acm_main --equip GAS_TURBINE`.
 - SQL smoke: `python scripts/sql/verify_acm_connection.py` (needs SQL Server creds).
-- Schema snapshot: `python scripts/sql/export_schema_doc.py --output docs/sql/SQL_SCHEMA_REFERENCE.md` regenerates the latest table definitions so SQL changes stay aligned with production.
+- **Schema inspection (SOLE AUTHORITATIVE TOOL)**: `python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` regenerates the latest table definitions so SQL changes stay aligned with production. **CRITICAL**: This is the ONLY script to use for SQL table inspection, schema queries, dashboard panel validation, or any task requiring SQL table information. DO NOT create new scripts for table inspection, row counting, schema checks, or dashboard analysis—use this comprehensive tool exclusively.
 - File-mode helper: `scripts/run_file_mode.ps1` wraps a baseline local run.
 
 ## Testing
@@ -82,7 +83,7 @@
 - **Batch Operations**: `docs/BATCH_MODE_SQL_AUDIT.md`, `docs/BATCH_MODE_WAVE_PATTERN_FIX.md`
 - **Coldstart**: `docs/COLDSTART_MODE.md` (cold-start strategy for sparse data)
 - **SQL Integration**: `docs/SQL_BATCH_RUNNER.md`, `docs/SQL_BATCH_QUICK_REF.md`
-- **Schema Reference**: `docs/sql/SQL_SCHEMA_REFERENCE.md` (table definitions)
+- **Schema Reference**: `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` (table definitions)
 - **Grafana**: `grafana_dashboards/README.md` + dashboards under `grafana_dashboards/*.json`
 - **Analytics**: `docs/Analytics Backbone.md` (detector fusion, episodes, regimes)
 
@@ -90,7 +91,13 @@
 - **Entry point**: `python -m core.acm_main --equip <EQUIP>`
 - **Batch runner**: `python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440`
 - **SQL verification**: `python scripts/sql/verify_acm_connection.py`
-- **Schema export**: `python scripts/sql/export_schema_doc.py --output docs/sql/SQL_SCHEMA_REFERENCE.md`
+- **Schema export (SOLE SQL INSPECTION TOOL)**: `python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` - **Use this exclusively for:**
+  - SQL table schema inspection
+  - Table row counts and statistics
+  - Sample data queries (top/bottom records)
+  - Dashboard panel table validation
+  - Schema documentation generation
+  - **DO NOT create new scripts** for these purposes; this tool handles all SQL inspection needs
 - **Config sync**: `python scripts/sql/populate_acm_config.py`
 - **File mode helper**: `scripts/run_file_mode.ps1`
 

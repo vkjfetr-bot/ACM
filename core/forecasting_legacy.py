@@ -1,6 +1,25 @@
 """
-Unified Forecasting Module
-===========================
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        ⚠️  LEGACY MODULE - DEPRECATED  ⚠️                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+THIS MODULE IS NO LONGER USED AND WILL BE REMOVED IN v11.0.0
+
+Replaced by v10 architecture:
+- core/forecast_engine.py (orchestration)
+- core/health_tracker.py (health loading)
+- core/degradation_model.py (trend modeling)
+- core/rul_estimator.py (RUL calculation)
+- core/failure_probability.py (failure/survival/hazard)
+- core/state_manager.py (state persistence)
+
+DO NOT IMPORT OR MODIFY THIS FILE.
+Kept only as reference for migration of remaining helper functions.
+"""
+
+"""
+[DEPRECATED] Unified Forecasting Module
+========================================
 
 Single source of truth for all ACM forecasting capabilities:
 - AR(1) baseline detector for per-sensor residual analysis
@@ -60,7 +79,7 @@ from utils.logger import Console  # type: ignore
 from utils.timestamp_utils import normalize_timestamps, normalize_index
 # FOR-CODE-04: Use SqlClient protocol for type safety
 from core.sql_protocol import SqlClient
-from core import rul_engine  # Unified RUL estimation engine
+# REMOVED: from core import rul_engine  # No longer used - replaced by core/rul_estimator.py
 from core.model_persistence import ForecastState, save_forecast_state, load_forecast_state  # type: ignore
 from datetime import datetime, timedelta
 import hashlib
@@ -2622,14 +2641,6 @@ def run_enhanced_forecasting_sql(
     except Exception as e:
         Console.warn(f"[ENHANCED_FORECAST] RUL estimation failed: {e}")
         rul_hours = 168.0
-        rul_stats = {}
-
-    # --- 4A. Detector Attribution (Active Detectors) ---
-    # Forecast detector Z-score trends (PCA, CUSUM, GMM, IForest, etc.)
-    detector_forecast_df = pd.DataFrame(columns=["RunID", "EquipID", "Timestamp", "DetectorName", "ForecastValue", "CI_Lower", "CI_Upper", "CiLower", "CiUpper", "ForecastStd", "Method", "RegimeLabel", "FusedZ"])
-    detector_state: Dict[str, Any] = {}
-    
-    # Initialize detector forecast defaults at function scope (FIX: prevent UnboundLocalError)
     decay_rate = float(forecast_cfg.get("detector_decay", 0.1))
     max_detector_z = float(forecast_cfg.get("max_detector_z", 10.0))
     det_ci_hw = float(forecast_cfg.get("detector_ci_halfwidth", 0.5))

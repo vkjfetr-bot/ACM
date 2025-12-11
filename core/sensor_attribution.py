@@ -13,6 +13,24 @@ Key Features:
 References:
 - Pearl (2009): "Causality" - Counterfactual analysis framework
 - Molnar (2020): "Interpretable Machine Learning" - Feature importance via perturbation
+
+Future R&D Entrypoints (M15):
+---------------------------------
+TODO: CAUSAL_COUNTERFACTUAL - Full Pearl-style counterfactual attribution
+      - Method: compute_counterfactual(sensor_data, rul_estimator, baseline_rul)
+      - For each sensor: zero out contribution, recompute RUL, measure delta
+      - Requires RULEstimator integration for each perturbation
+      - Output: Causal importance scores (larger delta = higher contribution)
+      
+TODO: FAULT_SIGNATURE_DETECTION - Identify recurring sensor patterns
+      - Method: detect_fault_signatures(sensor_history, known_faults)
+      - Match current sensor profile against historical fault patterns
+      - Output: Fault signature match scores for ACM_FaultFamilies
+      
+TODO: SENSOR_INTERACTION_GRAPH - Build sensor dependency network
+      - Method: build_interaction_graph(correlation_matrix)
+      - Identify sensor clusters and propagation paths
+      - Output: NetworkX graph for root cause analysis
 """
 
 from dataclasses import dataclass

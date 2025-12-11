@@ -17,8 +17,8 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "10.0.0"
-__version_date__ = "2025-12-08"  # v10.0.0: Continuous Forecasting with Exponential Blending
+__version__ = "10.1.0"
+__version_date__ = "2025-12-11"  # v10.1.0: Multivariate Forecasting with VAR, Episode-Regime Correlation, Improved Health Tracking
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))

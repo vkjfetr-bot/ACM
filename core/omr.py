@@ -527,6 +527,20 @@ class OMRDetector:
         # Per-sensor squared contributions (for root cause analysis)
         squared_residuals = residuals ** 2
         
+        # v10.1.0: Normalize contributions by feature variance for fair comparison
+        # AND downweight kurtosis/skewness features which naturally dominate
+        if return_contributions:
+            # Compute variance of each feature's squared residuals for normalization
+            feature_variances = np.var(squared_residuals, axis=0) + 1e-9
+            normalized_contributions = squared_residuals / feature_variances
+            
+            # Apply weight reduction for hyper-sensitive statistical features
+            # Kurtosis (4th moment) and skewness (3rd moment) are overly reactive to outliers
+            kurt_skew_weight = 0.25  # Reduce _kurt and _skew contributions to 25%
+            for i, feature_name in enumerate(self.model.feature_names):
+                if feature_name.endswith('_kurt') or feature_name.endswith('_skew'):
+                    normalized_contributions[:, i] *= kurt_skew_weight
+        
         # Overall residual norm (L2)
         residual_norm = np.linalg.norm(residuals, axis=1)
         
@@ -538,9 +552,9 @@ class OMRDetector:
         omr_z = omr_z.astype(np.float32)
         
         if return_contributions:
-            # Return per-sensor contributions (squared residuals)
+            # Return normalized per-sensor contributions
             contrib_df = pd.DataFrame(
-                squared_residuals,
+                normalized_contributions,
                 index=X.index,
                 columns=self.model.feature_names
             )

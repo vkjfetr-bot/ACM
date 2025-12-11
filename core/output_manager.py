@@ -77,7 +77,12 @@ ALLOWED_TABLES = {
     'ACM_OMR_Diagnostics','ACM_Forecast_QualityMetrics',
     'ACM_HealthDistributionOverTime',
     # Adaptive threshold metadata
-    'ACM_ThresholdMetadata'
+    'ACM_ThresholdMetadata',
+    # v10.1.0 Regime-conditioned forecasting tables (migration 63)
+    'ACM_RUL_ByRegime',           # Per-regime RUL estimates with degradation rates
+    'ACM_RegimeHazard',           # Per-regime hazard rates and survival probabilities
+    'ACM_ForecastContext',        # Unified forecast context with OMR/drift/regime state
+    'ACM_AdaptiveThresholds_ByRegime'  # Per-regime adaptive thresholds
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
@@ -327,22 +332,46 @@ def _read_csv_with_peek(path: Union[str, Path], ts_col_hint: Optional[str], engi
     return df, ts_col
 
 
-def _health_index(fused_z):
+def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
     """
-    Calculate health index from fused z-score.
+    Calculate health index from fused z-score using a softer sigmoid mapping.
     
-    Health = 100 / (1 + z^2)
+    v10.1.0: Replaced overly aggressive 100/(1+Z^2) formula.
     
-    Higher values indicate healthier state (closer to 0 z-score).
-    Lower values indicate degradation (higher absolute z-score).
+    OLD formula issues:
+    - Z=2.5 gave Health=14% (too harsh for moderate anomaly)
+    - Z=3.0 gave Health=10% (equipment in crisis for minor deviation)
+    
+    NEW sigmoid formula:
+    - Z=0: Health = 100% (perfectly normal)
+    - Z=z_threshold/2 (2.5): Health = 50% (moderate concern)
+    - Z=z_threshold (5.0): Health ≈ 15% (serious anomaly)
+    - Z>z_threshold: Health approaches 0% asymptotically
     
     Args:
         fused_z: Fused z-score (scalar, array, or Series)
+        z_threshold: Z-score at which health should be very low (default 5.0)
+        steepness: Controls sigmoid slope (default 1.5, higher=sharper transition)
     
     Returns:
         Health index 0-100 (same type as input)
     """
-    return 100.0 / (1.0 + fused_z ** 2)
+    import numpy as np
+    
+    # Handle various input types
+    abs_z = np.abs(fused_z)
+    
+    # Sigmoid centered at z_threshold/2, with steepness controlling transition sharpness
+    # At z=0: normalized << 0, sigmoid ≈ 0, health ≈ 100
+    # At z=z_threshold/2: normalized = 0, sigmoid = 0.5, health = 50
+    # At z=z_threshold: normalized > 0, sigmoid ≈ 0.85, health ≈ 15
+    normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+    sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+    
+    health = 100.0 * (1 - sigmoid)
+    
+    # Ensure bounds
+    return np.clip(health, 0.0, 100.0)
 
 
 # ==================== MAIN OUTPUT MANAGER CLASS ====================
@@ -1876,6 +1905,10 @@ class OutputManager:
         long = df.melt(id_vars=["Timestamp"], var_name="SensorName", value_name="ContributionScore")
         long["SensorName"] = long["SensorName"].astype(str).str.replace("_contrib","", regex=False)
         
+        # TASK-1-FIX: Ensure ContributionScore is never NULL to prevent SQL constraint violations
+        # Replace NaN/NULL with 0.0 before any downstream processing
+        long["ContributionScore"] = pd.to_numeric(long["ContributionScore"], errors="coerce").fillna(0.0)
+        
         # Calculate ContributionPct: percentage of total contribution at each timestamp
         long["ContributionPct"] = 0.0
         if not long.empty and "ContributionScore" in long.columns:
@@ -1939,7 +1972,8 @@ class OutputManager:
         if scores_df is None or len(scores_df) == 0:
             return pd.DataFrame(columns=["RunID","EquipID","BinStart","BinEnd","Count"])
         fused = pd.to_numeric(scores_df["fused"], errors="coerce")
-        health = 100.0 / (1.0 + fused**2) if fused is not None else pd.Series([], dtype=float)
+        # v10.1.0: Use centralized _health_index function with softer sigmoid
+        health = _health_index(fused) if fused is not None else pd.Series([], dtype=float)
         bins = list(range(0, 101, 10))
         cats = pd.cut(health, bins=bins, include_lowest=True, right=False)
         counts = cats.value_counts().sort_index()
@@ -4529,4 +4563,324 @@ class OutputManager:
         except Exception as e:
             Console.error(f"Failed to read threshold metadata: {e}")
             return None
+
+    # ========================================================================
+    # v10.1.0 Regime-Conditioned Forecasting Tables
+    # ========================================================================
+    
+    def write_rul_by_regime(
+        self,
+        equip_id: int,
+        run_id: str,
+        rul_by_regime: pd.DataFrame
+    ) -> None:
+        """
+        Persist per-regime RUL estimates to ACM_RUL_ByRegime.
+        
+        Args:
+            equip_id: Equipment identifier
+            run_id: Run identifier
+            rul_by_regime: DataFrame with columns:
+                - RegimeLabel: int
+                - RUL_Hours: float
+                - P10_LowerBound: float
+                - P50_Median: float  
+                - P90_UpperBound: float
+                - DegradationRate: float (health units per hour)
+                - Confidence: float (0-1)
+                - Method: str
+                - SampleCount: int
+        """
+        if rul_by_regime is None or rul_by_regime.empty:
+            return
+            
+        df = rul_by_regime.copy()
+        df['EquipID'] = equip_id
+        df['RunID'] = run_id
+        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
+        
+        self._ensure_dataframe_columns(df, 'ACM_RUL_ByRegime')
+        self.write_dataframe(df, 'ACM_RUL_ByRegime')
+        Console.info(f"RUL by regime written: {len(df)} regimes")
+
+    def write_regime_hazard(
+        self,
+        equip_id: int,
+        run_id: str,
+        regime_hazard: pd.DataFrame
+    ) -> None:
+        """
+        Persist per-regime hazard statistics to ACM_RegimeHazard.
+        
+        Args:
+            equip_id: Equipment identifier
+            run_id: Run identifier
+            regime_hazard: DataFrame with columns:
+                - RegimeLabel: int
+                - Timestamp: datetime
+                - HazardRate: float (instantaneous failure rate)
+                - SurvivalProb: float (cumulative survival probability)
+                - CumulativeHazard: float
+                - FailureProb: float (probability of failure by this time)
+                - HealthAtTime: float
+                - DriftAtTime: float (optional)
+                - OMR_Z_AtTime: float (optional)
+        """
+        if regime_hazard is None or regime_hazard.empty:
+            return
+            
+        df = regime_hazard.copy()
+        df['EquipID'] = equip_id
+        df['RunID'] = run_id
+        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
+        
+        # Normalize timestamps
+        if 'Timestamp' in df.columns:
+            df['Timestamp'] = normalize_timestamp_series(df['Timestamp'])
+        
+        self._ensure_dataframe_columns(df, 'ACM_RegimeHazard')
+        self.write_dataframe(df, 'ACM_RegimeHazard')
+        Console.info(f"Regime hazard written: {len(df)} records")
+
+    def write_forecast_context(
+        self,
+        equip_id: int,
+        run_id: str,
+        forecast_context: pd.DataFrame
+    ) -> None:
+        """
+        Persist unified forecast context with OMR/drift/regime state to ACM_ForecastContext.
+        
+        This table provides a comprehensive snapshot of all factors influencing the forecast.
+        
+        Args:
+            equip_id: Equipment identifier
+            run_id: Run identifier
+            forecast_context: DataFrame with columns:
+                - Timestamp: datetime (forecast reference time)
+                - ForecastHorizon_Hours: float
+                - CurrentHealth: float
+                - CurrentRegime: int
+                - RegimeConfidence: float
+                - CurrentOMR_Z: float
+                - OMR_Contribution: float (weight-adjusted contribution)
+                - CurrentDrift_Z: float
+                - DriftTrend: str ('stable', 'increasing', 'decreasing')
+                - FusedZ: float
+                - HealthTrend: str ('improving', 'stable', 'degrading')
+                - DataQuality: float (0-1)
+                - ModelConfidence: float (0-1, forecast model confidence)
+                - ActiveDefects: int (count of active sensor defects)
+                - TopContributor: str (sensor/detector driving health)
+                - Notes: str (optional context)
+        """
+        if forecast_context is None or forecast_context.empty:
+            return
+            
+        df = forecast_context.copy()
+        df['EquipID'] = equip_id
+        df['RunID'] = run_id
+        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
+        
+        # Normalize timestamps
+        if 'Timestamp' in df.columns:
+            df['Timestamp'] = normalize_timestamp_series(df['Timestamp'])
+        
+        self._ensure_dataframe_columns(df, 'ACM_ForecastContext')
+        self.write_dataframe(df, 'ACM_ForecastContext')
+        Console.info(f"Forecast context written: {len(df)} records")
+
+    def write_adaptive_thresholds_by_regime(
+        self,
+        equip_id: int,
+        run_id: str,
+        thresholds_by_regime: pd.DataFrame
+    ) -> None:
+        """
+        Persist per-regime adaptive thresholds to ACM_AdaptiveThresholds_ByRegime.
+        
+        Args:
+            equip_id: Equipment identifier
+            run_id: Run identifier  
+            thresholds_by_regime: DataFrame with columns:
+                - RegimeLabel: int
+                - ThresholdType: str ('fused_alert_z', 'fused_warn_z', etc.)
+                - ThresholdValue: float
+                - CalculationMethod: str
+                - SampleCount: int
+                - RegimeHealthMean: float (mean health in this regime)
+                - RegimeHealthStd: float (std health in this regime)
+                - RegimeOccupancy: float (% time in regime)
+        """
+        if thresholds_by_regime is None or thresholds_by_regime.empty:
+            return
+            
+        df = thresholds_by_regime.copy()
+        df['EquipID'] = equip_id
+        df['RunID'] = run_id
+        df['IsActive'] = 1
+        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
+        
+        self._ensure_dataframe_columns(df, 'ACM_AdaptiveThresholds_ByRegime')
+        self.write_dataframe(df, 'ACM_AdaptiveThresholds_ByRegime')
+        Console.info(f"Adaptive thresholds by regime written: {len(df)} records")
+
+    def load_regime_hazard_stats(
+        self,
+        equip_id: int,
+        lookback_days: int = 90
+    ) -> Optional[pd.DataFrame]:
+        """
+        Load historical regime hazard statistics for forecasting.
+        
+        Args:
+            equip_id: Equipment identifier
+            lookback_days: Days of history to load
+            
+        Returns:
+            DataFrame with per-regime statistics or None
+        """
+        if self.sql_client is None:
+            return None
+            
+        try:
+            query = """
+                SELECT RegimeLabel, 
+                       AVG(HazardRate) as AvgHazardRate,
+                       AVG(DegradationRate) as AvgDegradationRate,
+                       AVG(HealthAtTime) as AvgHealth,
+                       STDEV(HealthAtTime) as StdHealth,
+                       COUNT(*) as SampleCount,
+                       AVG(FailureProb) as AvgFailureProb
+                FROM (
+                    SELECT r.RegimeLabel, h.HazardRate, 
+                           COALESCE(rul.DegradationRate, 0) as DegradationRate,
+                           h.HealthAtTime, h.FailureProb
+                    FROM ACM_RegimeHazard h
+                    JOIN ACM_RegimeTimeline r 
+                        ON h.EquipID = r.EquipID AND h.Timestamp = r.Timestamp
+                    LEFT JOIN ACM_RUL_ByRegime rul
+                        ON h.EquipID = rul.EquipID AND h.RunID = rul.RunID 
+                        AND r.RegimeLabel = rul.RegimeLabel
+                    WHERE h.EquipID = ?
+                      AND h.Timestamp >= DATEADD(day, -?, GETDATE())
+                ) sub
+                GROUP BY RegimeLabel
+                ORDER BY RegimeLabel
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (equip_id, lookback_days))
+                rows = cur.fetchall()
+                if not rows:
+                    return None
+                cols = ['RegimeLabel', 'AvgHazardRate', 'AvgDegradationRate', 
+                        'AvgHealth', 'StdHealth', 'SampleCount', 'AvgFailureProb']
+                return pd.DataFrame(rows, columns=cols)
+        except Exception as e:
+            Console.warn(f"Failed to load regime hazard stats: {e}")
+            return None
+
+    def load_omr_drift_context(
+        self,
+        equip_id: int,
+        lookback_hours: int = 24
+    ) -> Dict[str, Any]:
+        """
+        Load recent OMR and drift context for forecasting.
+        
+        Args:
+            equip_id: Equipment identifier
+            lookback_hours: Hours of recent data to analyze
+            
+        Returns:
+            Dict with keys: omr_z, omr_trend, drift_z, drift_trend, top_contributors
+        """
+        context: Dict[str, Any] = {
+            'omr_z': None,
+            'omr_trend': 'unknown',
+            'drift_z': None,
+            'drift_trend': 'unknown',
+            'top_contributors': []
+        }
+        
+        if self.sql_client is None:
+            return context
+            
+        try:
+            # Get recent OMR values
+            omr_query = """
+                SELECT TOP 10 OMR_Z 
+                FROM ACM_OMRTimeline 
+                WHERE EquipID = ? 
+                  AND Timestamp >= DATEADD(hour, -?, GETDATE())
+                ORDER BY Timestamp DESC
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(omr_query, (equip_id, lookback_hours))
+                omr_rows = cur.fetchall()
+                if omr_rows:
+                    omr_values = [float(r[0]) for r in omr_rows if r[0] is not None]
+                    if omr_values:
+                        context['omr_z'] = omr_values[0]  # Most recent
+                        if len(omr_values) >= 3:
+                            # Trend: compare first half vs second half
+                            mid = len(omr_values) // 2
+                            recent_avg = np.mean(omr_values[:mid])
+                            older_avg = np.mean(omr_values[mid:])
+                            if recent_avg > older_avg + 0.5:
+                                context['omr_trend'] = 'increasing'
+                            elif recent_avg < older_avg - 0.5:
+                                context['omr_trend'] = 'decreasing'
+                            else:
+                                context['omr_trend'] = 'stable'
+            
+            # Get recent drift values
+            drift_query = """
+                SELECT TOP 10 DriftValue 
+                FROM ACM_DriftSeries 
+                WHERE EquipID = ?
+                  AND Timestamp >= DATEADD(hour, -?, GETDATE())
+                ORDER BY Timestamp DESC
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(drift_query, (equip_id, lookback_hours))
+                drift_rows = cur.fetchall()
+                if drift_rows:
+                    drift_values = [float(r[0]) for r in drift_rows if r[0] is not None]
+                    if drift_values:
+                        context['drift_z'] = drift_values[0]
+                        if len(drift_values) >= 3:
+                            mid = len(drift_values) // 2
+                            recent_avg = np.mean(drift_values[:mid])
+                            older_avg = np.mean(drift_values[mid:])
+                            if recent_avg > older_avg + 0.3:
+                                context['drift_trend'] = 'increasing'
+                            elif recent_avg < older_avg - 0.3:
+                                context['drift_trend'] = 'decreasing'
+                            else:
+                                context['drift_trend'] = 'stable'
+            
+            # Get top OMR contributors
+            contrib_query = """
+                SELECT TOP 5 SensorName, AVG(ContributionScore) as AvgContrib
+                FROM ACM_OMRContributionsLong
+                WHERE EquipID = ?
+                  AND Timestamp >= DATEADD(hour, -?, GETDATE())
+                GROUP BY SensorName
+                ORDER BY AVG(ContributionScore) DESC
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(contrib_query, (equip_id, lookback_hours))
+                contrib_rows = cur.fetchall()
+                if contrib_rows:
+                    context['top_contributors'] = [
+                        {'sensor': r[0], 'contribution': float(r[1])} 
+                        for r in contrib_rows if r[0] is not None
+                    ]
+                    
+        except Exception as e:
+            Console.warn(f"Failed to load OMR/drift context: {e}")
+            
+        return context
+
 
