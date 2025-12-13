@@ -23,6 +23,17 @@ venv/
 ## Project outputs (do not publish)
 artifacts/
 backups/
+logs/
+
+## Data files (large, local-only)
+data/
+data/**/*.csv
+*.csv
+
+## Output and visualization files
+**/*.png
+**/*.json
+**/output/
 
 ## Local configs with credentials
 configs/sql_connection.ini
@@ -31,8 +42,7 @@ configs/sql_connection.ini
 **/artifacts/
 ACM_V6_BACKUP_*/
 
-
 # Temporary audit and analysis documents
 *.html
 Comprehensive Audit of Regime Identifi.md
-Master ACM Backlog – Analytics & Forec.md
+Master ACM Backlog ï¿½ Analytics & Forec.md
