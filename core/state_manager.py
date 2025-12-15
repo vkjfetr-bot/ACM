@@ -511,14 +511,26 @@ class AdaptiveConfigManager:
             Console.warn(f"[AdaptiveConfigManager] Failed to update config '{key}': {e}")
             return False
     
-    def _parse_config_value(self, value_str: str) -> Any:
-        """Parse config value string to appropriate type"""
-        try:
-            # Try int
-            if '.' not in value_str:
-                return int(value_str)
-            # Try float
-            return float(value_str)
-        except ValueError:
-            # Return as string
-            return value_str
+    def _parse_config_value(self, value: Any) -> Any:
+        """Parse config value to appropriate type (handles both string and numeric SQL types)"""
+        # If already numeric, return as-is
+        if isinstance(value, (int, float)):
+            # Convert to int if it's a whole number
+            if isinstance(value, float) and value == int(value):
+                return int(value)
+            return value
+        
+        # Handle string values
+        if isinstance(value, str):
+            try:
+                # Try int
+                if '.' not in value:
+                    return int(value)
+                # Try float
+                return float(value)
+            except ValueError:
+                # Return as string
+                return value
+        
+        # Return as-is for other types
+        return value

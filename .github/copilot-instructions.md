@@ -83,6 +83,7 @@
 - **Batch Operations**: `docs/BATCH_MODE_SQL_AUDIT.md`, `docs/BATCH_MODE_WAVE_PATTERN_FIX.md`
 - **Coldstart**: `docs/COLDSTART_MODE.md` (cold-start strategy for sparse data)
 - **SQL Integration**: `docs/SQL_BATCH_RUNNER.md`, `docs/SQL_BATCH_QUICK_REF.md`
+- **Equipment Import**: `docs/EQUIPMENT_IMPORT_PROCEDURE.md` (how to add new equipment to ACM)
 - **Schema Reference**: `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` (table definitions)
 - **Grafana**: `grafana_dashboards/README.md` + dashboards under `grafana_dashboards/*.json`
 - **Analytics**: `docs/Analytics Backbone.md` (detector fusion, episodes, regimes)

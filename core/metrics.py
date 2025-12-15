@@ -531,3 +531,279 @@ def log_forecast_diagnostics(diagnostics: Dict[str, any], prefix: str = "[Foreca
         f"N={diagnostics.get('n_samples', 0)}, "
         f"Quality={diagnostics.get('data_quality', 'UNKNOWN')}"
     )
+
+
+# =============================================================================
+# CALIBRATION SCORE AND ROLLING BACKTEST (v10.1.0)
+# =============================================================================
+# Proper probabilistic calibration assessment and time-series backtesting
+# Reference: Gneiting et al. (2007) "Probabilistic forecasts, calibration and sharpness"
+# =============================================================================
+
+def compute_calibration_score(
+    actual: np.ndarray,
+    forecast: np.ndarray,
+    lower_bound: np.ndarray,
+    upper_bound: np.ndarray,
+    coverage_levels: Optional[list] = None
+) -> Dict[str, float]:
+    """
+    Compute probabilistic calibration score for forecast intervals.
+    
+    Calibration measures whether predicted probabilities match observed frequencies.
+    For 95% CI, ~95% of actuals should fall within bounds. Deviation from this
+    indicates miscalibration (overconfident or underconfident forecasts).
+    
+    This implements proper calibration assessment per Gneiting et al. (2007):
+    1. Check coverage at multiple probability levels (not just 95%)
+    2. Compute calibration error as deviation from ideal coverage
+    3. Return single calibration score (lower = better calibrated)
+    
+    Reference:
+        Gneiting, Balabdaoui, Raftery (2007): "Probabilistic forecasts, 
+        calibration and sharpness", JRSS-B 69(2):243-268
+    
+    Args:
+        actual: Observed values
+        forecast: Point forecasts (used to construct symmetric intervals)
+        lower_bound: Lower confidence bounds (e.g., 2.5th percentile)
+        upper_bound: Upper confidence bounds (e.g., 97.5th percentile)
+        coverage_levels: Target coverage levels to check (default: [0.50, 0.80, 0.90, 0.95])
+    
+    Returns:
+        Dictionary with:
+        - calibration_error: Mean absolute deviation from ideal coverage (0 = perfect)
+        - calibration_score: 1 - calibration_error (1 = perfect, 0 = completely miscalibrated)
+        - coverage_95: Observed coverage at 95% level
+        - overconfident: True if intervals too narrow (coverage < target)
+        - coverage_by_level: Dict of observed coverage at each level
+    """
+    if coverage_levels is None:
+        coverage_levels = [0.50, 0.80, 0.90, 0.95]
+    
+    actual = np.asarray(actual, dtype=float)
+    forecast = np.asarray(forecast, dtype=float)
+    lower_bound = np.asarray(lower_bound, dtype=float)
+    upper_bound = np.asarray(upper_bound, dtype=float)
+    
+    # Filter valid data
+    valid = (np.isfinite(actual) & np.isfinite(forecast) & 
+             np.isfinite(lower_bound) & np.isfinite(upper_bound))
+    
+    if np.sum(valid) < 10:
+        return {
+            'calibration_error': float('nan'),
+            'calibration_score': float('nan'),
+            'coverage_95': float('nan'),
+            'overconfident': False,
+            'coverage_by_level': {}
+        }
+    
+    actual_v = actual[valid]
+    forecast_v = forecast[valid]
+    lower_v = lower_bound[valid]
+    upper_v = upper_bound[valid]
+    
+    # Compute interval width (assumes symmetric intervals for width scaling)
+    full_width = upper_v - lower_v
+    half_width = full_width / 2.0
+    
+    # Check coverage at different levels by scaling the interval width
+    # For 95% CI → scale factor 1.0
+    # For 80% CI → scale factor ~0.60 (from normal quantiles: 1.28/1.96)
+    # For 50% CI → scale factor ~0.34 (from normal quantiles: 0.67/1.96)
+    
+    scale_factors = {
+        0.50: 0.6745 / 1.96,  # z_0.75 / z_0.975
+        0.80: 1.282 / 1.96,   # z_0.90 / z_0.975
+        0.90: 1.645 / 1.96,   # z_0.95 / z_0.975
+        0.95: 1.0             # Full width
+    }
+    
+    coverage_by_level = {}
+    calibration_errors = []
+    
+    for level in coverage_levels:
+        scale = scale_factors.get(level, level)  # Fallback to level as scale
+        
+        # Scale interval around forecast midpoint
+        midpoint = (lower_v + upper_v) / 2.0
+        scaled_lower = midpoint - half_width * scale
+        scaled_upper = midpoint + half_width * scale
+        
+        # Compute observed coverage
+        within = (actual_v >= scaled_lower) & (actual_v <= scaled_upper)
+        observed_coverage = float(np.mean(within))
+        
+        coverage_by_level[f'coverage_{int(level*100):02d}'] = observed_coverage
+        
+        # Calibration error = |observed - expected|
+        cal_error = abs(observed_coverage - level)
+        calibration_errors.append(cal_error)
+    
+    # Aggregate calibration metrics
+    calibration_error = float(np.mean(calibration_errors))
+    calibration_score = 1.0 - calibration_error  # Higher = better
+    
+    # Check if overconfident (coverage below target)
+    coverage_95 = coverage_by_level.get('coverage_95', float('nan'))
+    overconfident = coverage_95 < 0.90 if np.isfinite(coverage_95) else False
+    
+    return {
+        'calibration_error': calibration_error,
+        'calibration_score': calibration_score,
+        'coverage_95': coverage_95,
+        'overconfident': overconfident,
+        'coverage_by_level': coverage_by_level
+    }
+
+
+def rolling_backtest(
+    health_series: np.ndarray,
+    forecast_model,
+    horizon: int = 24,
+    min_train_samples: int = 100,
+    step_size: int = 1
+) -> Dict[str, float]:
+    """
+    Perform rolling backtest on forecast model with expanding window.
+    
+    Process:
+    1. Train model on data up to time t
+    2. Forecast h steps ahead
+    3. Compare forecast to actual values at t+h
+    4. Roll forward by step_size and repeat
+    5. Aggregate metrics across all windows
+    
+    This is the gold standard for forecast validation because it:
+    - Simulates real deployment (no future information leakage)
+    - Tests model across multiple time points
+    - Measures both point forecast and interval accuracy
+    
+    Reference:
+        Hyndman & Athanasopoulos (2018): "Forecasting: Principles and Practice", 
+        Chapter 5.4: Evaluating forecast accuracy
+    
+    Args:
+        health_series: Full time series of health values
+        forecast_model: Model with fit(data) and predict(steps) methods
+            - fit(data: np.ndarray) -> self
+            - predict(steps: int) -> ForecastResult with point_forecast, ci_lower, ci_upper
+        horizon: Forecast horizon (steps ahead)
+        min_train_samples: Minimum training samples before first backtest
+        step_size: Steps to roll forward between tests (1 = exhaustive, higher = faster)
+    
+    Returns:
+        Dictionary with aggregated backtest metrics:
+        - mae: Mean absolute error across all backtests
+        - rmse: Root mean squared error
+        - mape: Mean absolute percentage error
+        - directional_accuracy: Fraction of correct trend predictions
+        - coverage_95: Fraction of actuals within 95% CI
+        - n_backtests: Number of backtest windows
+        - theils_u: Theil's U vs naive model
+        - calibration_score: Probabilistic calibration quality
+    """
+    n = len(health_series)
+    
+    if n < min_train_samples + horizon:
+        Console.warning(f"[Backtest] Insufficient data: {n} samples < {min_train_samples + horizon} required")
+        return {
+            'mae': float('nan'),
+            'rmse': float('nan'),
+            'mape': float('nan'),
+            'directional_accuracy': float('nan'),
+            'coverage_95': float('nan'),
+            'n_backtests': 0,
+            'theils_u': float('nan'),
+            'calibration_score': float('nan')
+        }
+    
+    # Collect all forecasts and actuals
+    all_actuals = []
+    all_forecasts = []
+    all_lower = []
+    all_upper = []
+    
+    # Rolling window backtest
+    for t in range(min_train_samples, n - horizon, step_size):
+        try:
+            # Train on data up to time t
+            train_data = health_series[:t]
+            forecast_model.fit(train_data)
+            
+            # Forecast horizon steps ahead
+            result = forecast_model.predict(steps=horizon)
+            
+            # Get forecast at horizon
+            if hasattr(result, 'point_forecast') and len(result.point_forecast) >= horizon:
+                forecast_value = result.point_forecast[horizon - 1]
+                
+                # Get CI bounds if available
+                ci_lower = result.ci_lower[horizon - 1] if hasattr(result, 'ci_lower') and result.ci_lower is not None else np.nan
+                ci_upper = result.ci_upper[horizon - 1] if hasattr(result, 'ci_upper') and result.ci_upper is not None else np.nan
+            else:
+                continue  # Skip if prediction failed
+            
+            # Actual value at t + horizon
+            actual_value = health_series[t + horizon - 1]
+            
+            all_actuals.append(actual_value)
+            all_forecasts.append(forecast_value)
+            all_lower.append(ci_lower)
+            all_upper.append(ci_upper)
+            
+        except Exception:
+            continue  # Skip failed backtests
+    
+    n_backtests = len(all_actuals)
+    
+    if n_backtests < 5:
+        Console.warning(f"[Backtest] Only {n_backtests} successful backtests")
+        return {
+            'mae': float('nan'),
+            'rmse': float('nan'),
+            'mape': float('nan'),
+            'directional_accuracy': float('nan'),
+            'coverage_95': float('nan'),
+            'n_backtests': n_backtests,
+            'theils_u': float('nan'),
+            'calibration_score': float('nan')
+        }
+    
+    # Convert to arrays
+    actuals = np.array(all_actuals)
+    forecasts = np.array(all_forecasts)
+    lowers = np.array(all_lower)
+    uppers = np.array(all_upper)
+    
+    # Compute metrics using existing functions
+    mae = compute_mae(actuals, forecasts)
+    rmse = compute_rmse(actuals, forecasts)
+    mape = compute_mape(actuals, forecasts)
+    directional_acc = compute_directional_accuracy(actuals, forecasts)
+    theils_u = compute_theils_u(actuals, forecasts)
+    
+    # Coverage
+    valid_ci = np.isfinite(lowers) & np.isfinite(uppers)
+    if np.sum(valid_ci) > 5:
+        coverage_95 = compute_coverage_probability(actuals[valid_ci], lowers[valid_ci], uppers[valid_ci])
+        
+        # Calibration score
+        cal_result = compute_calibration_score(actuals[valid_ci], forecasts[valid_ci], 
+                                               lowers[valid_ci], uppers[valid_ci])
+        calibration_score = cal_result['calibration_score']
+    else:
+        coverage_95 = float('nan')
+        calibration_score = float('nan')
+    
+    return {
+        'mae': mae,
+        'rmse': rmse,
+        'mape': mape,
+        'directional_accuracy': directional_acc,
+        'coverage_95': coverage_95,
+        'n_backtests': n_backtests,
+        'theils_u': theils_u,
+        'calibration_score': calibration_score
+    }

@@ -67,6 +67,7 @@ This handbook is a complete, implementation-level walkthrough of ACM V10 for new
   - `core/sql_client.py`: Thin pyodbc wrapper used by SQL mode (SP calls, retries).
   - `core/smart_coldstart.py`: Coldstart retry/orchestration when SQL historian is sparse.
   - `utils/logger.py`, `utils/timer.py`: Console logging, SQL sink integration, heartbeat, timing helpers.
+  - Feature builder implementation detail: `core/fast_features.py` prefers Polars over pandas by default. The threshold `fusion.features.polars_threshold` is set to 10 to aggressively route feature computations through Polars for performance.
 
 - **Persistence & SQL assets**
   - `scripts/sql/` (numbered migrations + helpers):
@@ -115,6 +116,13 @@ Mode decision and migration:
 - Avoid adding new file/SQL branching; collapse to the SQL-first path where practical.
 - `--equip` selects the config row (SQL `ACM_Config` or `configs/config_table.csv` fallback).
 - `ACM_BATCH_MODE=1` toggles batch-run semantics (continuous learning hooks).
+
+### Quick Actions
+
+- Resume a paused batch run for a single equipment:
+  - `python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --resume`
+- Sync local config changes into SQL `ACM_Config` (ensures `fusion.features.polars_threshold=10` is reflected):
+  - `python scripts/sql/populate_acm_config.py`
 
 ---
 
@@ -535,3 +543,293 @@ timeout=30
 - **Access:** restrict artifacts and configs directories to least privilege; SQL user should have only required read/write on ACM_* tables and historian views.
 - **Logging:** avoid logging credentials or PII; Console outputs may be mirrored to SQL via `SqlLogSink`.
 - **Environment overrides:** prefer environment variables or secure secret stores for credentials in CI/CD; validate that `SqlLogSink` is enabled only where allowed.
+
+---
+
+## 19) Adding New Equipment
+
+To import a new equipment's sensor data into ACM, see [EQUIPMENT_IMPORT_PROCEDURE.md](EQUIPMENT_IMPORT_PROCEDURE.md).
+
+Quick summary:
+1. Prepare CSV with datetime + sensor columns
+2. Run `python scripts/sql/import_csv_to_acm.py --csv file.csv --equip-code CODE --equip-name "Name"`
+3. Run batch processing: `python scripts/sql_batch_runner.py --equip CODE --max-batches 10`
+4. View in dashboard (select equipment, adjust time range)
+
+---
+
+## 20) Configuration Reference
+
+ACM uses a cascading configuration system where **global defaults** (EquipID=0) can be overridden by **equipment-specific values**. Configuration is stored in `configs/config_table.csv` and synced to SQL `ACM_Config` table via `scripts/sql/populate_acm_config.py`.
+
+### Configuration Architecture
+
+```
+configs/config_table.csv  -->  Python ConfigDict  -->  SQL ACM_Config (optional sync)
+         |                           |
+         v                           v
+   EquipID=0 (global)        Dot-path access: cfg['models.pca.n_components']
+   EquipID=N (override)      Equipment-specific lookup with fallback
+```
+
+### Parameter Categories
+
+| Category | Purpose | Typical Tuning Frequency |
+|----------|---------|--------------------------|
+| `data` | Data loading, cadence, timestamps | Per-Equipment |
+| `features` | Window sizes, spectral analysis | Rarely |
+| `models` | Detector hyperparameters | Per-Equipment (some) |
+| `fusion` | Detector weight blending | Auto-tuned |
+| `episodes` | Anomaly event detection | Per-Equipment |
+| `thresholds` | Alert/warning levels | Per-Equipment |
+| `regimes` | Operating mode clustering | Per-Equipment |
+| `drift` | Slow change detection | Rarely |
+| `forecasting` | Health/RUL prediction | Rarely |
+| `runtime` | Execution control | Per-Equipment |
+| `health` | Health index calculation | Rarely |
+
+---
+
+### DATA CATEGORY - Most Likely to Need Per-Equipment Tuning
+
+| Parameter | Default | Type | Description | Equipment-Specific? |
+|-----------|---------|------|-------------|---------------------|
+| **`sampling_secs`** | 1800 | int | **CRITICAL**: Data sampling interval in seconds. Must match equipment's native data cadence. Examples: FD_FAN/GAS_TURBINE=1800 (30 min), ELECTRIC_MOTOR=60 (1 min). Wrong value causes massive data loss during resampling. | **YES - Always override for new equipment** |
+| `timestamp_col` | EntryDateTime | string | Name of timestamp column in historian data. Some assets use "Ts" or other names. | YES if asset uses different column |
+| `min_train_samples` | 200 | int | Minimum training rows for coldstart. Affects how long coldstart takes to accumulate enough data. | YES if equipment has sparse data |
+| `max_rows` | 100000 | int | Maximum rows to process per batch. Prevents memory issues. | Rarely |
+| `train_csv` / `score_csv` | - | string | File paths for file-mode operation (SQL mode ignores these). | Only for file mode |
+
+**Critical Insight**: If you see "Insufficient data: N rows (required: 200)" but the SP returns many more rows, check that `sampling_secs` matches the actual data cadence.
+
+---
+
+### MODEL CATEGORY - Detector Hyperparameters
+
+#### PCA (Principal Component Analysis)
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `pca.n_components` | 5 | Latent dimensions retained. More = captures more variance, less robust to noise. | Rarely |
+| `pca.svd_solver` | randomized | SVD algorithm. "randomized" is faster for large datasets. | No |
+
+#### AR1 (Autoregressive Time-Series)
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `ar1.window` | 256 | Lookback window for AR model. Should be > data cadence. | YES if very different cadence |
+| `ar1.alpha` | 0.05 | Significance level for residual threshold. | Rarely |
+| `ar1.z_cap` | 8.0 | Maximum z-score cap to prevent outlier dominance. | Rarely |
+
+#### IsolationForest
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `iforest.n_estimators` | 100 | Number of trees. More = more accurate but slower. | Rarely |
+| `iforest.contamination` | 0.01 | Expected anomaly fraction. Lower = fewer false positives. | YES for very noisy equipment |
+| `iforest.max_samples` | 2048 | Samples per tree. Affects training speed. | No |
+
+#### GMM (Gaussian Mixture Model)
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `gmm.k_min` / `gmm.k_max` | 2/3 | Component range for BIC search. | Rarely |
+| `gmm.covariance_type` | diag | Covariance structure. "diag" is faster. | No |
+
+#### Mahalanobis Distance
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| **`mahl.regularization`** | 0.1 | Covariance matrix regularization. **Increase if you see "high condition number" warnings**. | **YES - auto-tuned for ill-conditioned data** |
+
+#### OMR (Overall Model Residual)
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `omr.model_type` | auto | Model type: auto/pca/ae. Auto selects based on data. | Rarely |
+| `omr.n_components` | 5 | Latent components. | Rarely |
+| `omr.min_samples` | 100 | Minimum samples to fit OMR. | Rarely |
+
+#### Continuous Learning
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `auto_retrain.enabled` | True | Enable automatic retraining. | No |
+| `auto_retrain.max_anomaly_rate` | 0.25 | Retrain if anomaly rate exceeds 25%. | YES if expected high anomaly rate |
+| `auto_retrain.max_drift_score` | 2.0 | Retrain if drift exceeds threshold. | Rarely |
+| `auto_retrain.max_model_age_hours` | 720 | Retrain if model older than 30 days. | Rarely |
+
+---
+
+### FUSION CATEGORY - Detector Weight Blending
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `weights.ar1_z` | 0.2 | Weight for AR1 detector (0-1). | Auto-tuned |
+| `weights.iforest_z` | 0.2 | Weight for IsolationForest. | Auto-tuned |
+| `weights.gmm_z` | 0.1 | Weight for GMM density. | Auto-tuned |
+| `weights.pca_spe_z` | 0.2 | Weight for PCA squared prediction error. | Auto-tuned |
+| `weights.mhal_z` | 0.2 | Weight for Mahalanobis distance. | Auto-tuned |
+| `weights.omr_z` | 0.1 | Weight for OMR residual. | Auto-tuned |
+| `auto_tune.enabled` | True | Enable automatic weight tuning based on episode separability. | No |
+| `per_regime` | True | Compute separate fusion weights per regime. | No |
+| `cooldown` | 10 | Samples after episode before new episode can start. | Rarely |
+
+---
+
+### EPISODES CATEGORY - Anomaly Event Detection
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| **`cpd.k_sigma`** | 2.0 | Episode start threshold (z-score). **Increase if too many episodes detected**. | **YES - often auto-tuned based on anomaly rate** |
+| `cpd.h_sigma` | 12.0 | Episode severity threshold (high severity). | Rarely |
+| `min_len` | 3 | Minimum episode length in samples. | Rarely |
+| `gap_merge` | 5 | Merge episodes separated by fewer than N samples. | Rarely |
+| `cpd.auto_tune.enabled` | True | Auto-adjust thresholds based on anomaly rate. | No |
+
+---
+
+### THRESHOLDS CATEGORY - Alert Levels
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `q` | 0.98 | Calibration quantile for z-score thresholds. | Rarely |
+| **`self_tune.clip_z`** | 100.0 | Maximum z-score cap. **Reduce if high saturation warnings**. | **YES - auto-tuned for saturating detectors** |
+| `self_tune.target_fp_rate` | 0.001 | Target false positive rate for adaptive thresholds. | Rarely |
+| `alert` | 0.85 | Health fraction triggering ALERT status. | Rarely |
+| `warn` | 0.7 | Health fraction triggering CAUTION status. | Rarely |
+| `adaptive.enabled` | True | Enable per-regime adaptive thresholds. | No |
+| `adaptive.confidence` | 0.997 | Confidence level (99.7% = 3-sigma). | Rarely |
+| `adaptive.fallback_threshold` | 3.0 | Default z-threshold if calculation fails. | Rarely |
+
+---
+
+### REGIMES CATEGORY - Operating Mode Clustering
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `auto_k.k_min` / `auto_k.k_max` | 2/6 | Range for regime count search. | YES if known modes |
+| `quality.silhouette_min` | 0.3 | Minimum clustering quality. | Rarely |
+| `smoothing.passes` | 3 | Regime smoothing passes. | Rarely |
+| `smoothing.window` | 7 | Smoothing window size. | Rarely |
+| `smoothing.min_dwell_samples` | 10 | Minimum samples to stay in regime. | YES for fast-cycling equipment |
+| `smoothing.min_dwell_seconds` | 900 | Minimum regime duration (15 min). | YES for fast-cycling equipment |
+| `health.fused_warn_z` | 2.5 | Z-score for health warning zone. | Rarely |
+| `health.fused_alert_z` | 4.0 | Z-score for health alert zone. | Rarely |
+
+---
+
+### DRIFT CATEGORY - Slow Change Detection
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `cusum.threshold` | 2.0 | CUSUM drift detection threshold. | Rarely |
+| `cusum.smoothing_alpha` | 0.3 | EWMA smoothing for drift curves. | Rarely |
+| `cusum.drift` | 0.1 | Drift allowance before detection. | Rarely |
+| `p95_threshold` | 2.0 | P95 threshold for drift vs fault distinction. | Rarely |
+| `multi_feature.enabled` | True | Multi-feature drift detection. | No |
+
+---
+
+### FORECASTING CATEGORY - Health & RUL Prediction
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `enhanced_enabled` | True | Enable enhanced forecasting module. | No |
+| `enable_continuous` | True | Enable continuous stateful forecasting. | No |
+| `failure_threshold` | 70.0 | Health % defining failure. | Rarely |
+| `max_forecast_hours` | 168.0 | Maximum forecast horizon (7 days). | Rarely |
+| `forecast_horizons` | [24, 72, 168] | Horizons to compute (hours). | Rarely |
+| `training_window_hours` | 72 | Lookback window for training. | YES if sparse data |
+| `hazard_smoothing_alpha` | 0.3 | Hazard rate smoothing. | Rarely |
+| `hazard_failure_prob` | 0.6 | Probability level for failure time. | Rarely |
+| `multivariate.enabled` | True | VAR-based sensor forecasting. | No |
+
+---
+
+### RUNTIME CATEGORY - Execution Control
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `storage_backend` | sql | Storage mode: sql or file. | YES if equipment uses file mode |
+| `tick_minutes` | 30 | Batch interval in minutes. | YES if different cadence |
+| `future_grace_minutes` | 1051200 | Allow historian backfill (2 years). | Rarely |
+| `log_level` | INFO | Logging verbosity. | No |
+| `max_fill_ratio` | 0.2 | Maximum missing data ratio to accept. | Rarely |
+| `phases.*` | True | Enable/disable pipeline phases. | Rarely |
+
+---
+
+### HEALTH CATEGORY - Health Index Calculation
+
+| Parameter | Default | Description | Equipment-Specific? |
+|-----------|---------|-------------|---------------------|
+| `smoothing_alpha` | 0.3 | Exponential smoothing (0=smooth, 1=raw). | Rarely |
+| `max_change_per_period` | 20.0 | Max health change % for volatility flag. | Rarely |
+| `extreme_z_threshold` | 10.0 | Z-score for extreme anomaly flag. | Rarely |
+| `z_threshold` | 5.0 | Z-score at ~15% health (sigmoid). | Rarely |
+| `steepness` | 1.5 | Sigmoid steepness. | Rarely |
+
+---
+
+### Equipment-Specific Override Examples
+
+Current overrides in production:
+
+| EquipID | Equipment | Parameter | Value | Reason |
+|---------|-----------|-----------|-------|--------|
+| 1 | FD_FAN | `mahl.regularization` | 1.0 | High condition number fix |
+| 1 | FD_FAN | `self_tune.clip_z` | 100.0 | High saturation |
+| 1 | FD_FAN | `episodes.cpd.k_sigma` | 4.0 | High anomaly rate |
+| 2621 | GAS_TURBINE | `data.timestamp_col` | Ts | Different column name |
+| 2621 | GAS_TURBINE | `self_tune.clip_z` | 43.2 | High saturation |
+| 2621 | GAS_TURBINE | `episodes.cpd.k_sigma` | 4.0 | High anomaly rate |
+| 2621 | GAS_TURBINE | `runtime.tick_minutes` | 1440 | Hourly cadence |
+| 8634 | ELECTRIC_MOTOR | **`data.sampling_secs`** | **60** | **1-minute data cadence** |
+
+---
+
+### Adding Equipment-Specific Overrides
+
+1. **Find EquipID**: `SELECT EquipID, EquipCode FROM Equipment WHERE EquipCode = 'YOUR_CODE'`
+
+2. **Add row to config_table.csv**:
+   ```csv
+   8634,data,sampling_secs,60,int,2025-12-13 00:00:00,COPILOT,ELECTRIC_MOTOR has 1-minute data cadence,
+   ```
+
+3. **Sync to SQL**:
+   ```powershell
+   python scripts/sql/populate_acm_config.py
+   ```
+
+4. **Reset coldstart** (if needed):
+   ```sql
+   SET QUOTED_IDENTIFIER ON;
+   DELETE FROM ACM_ColdstartState WHERE EquipID = 8634;
+   ```
+
+---
+
+### Auto-Tuning Parameters
+
+ACM automatically tunes these parameters based on observed behavior:
+
+| Parameter | Trigger | What Happens |
+|-----------|---------|--------------|
+| `mahl.regularization` | High condition number warning | Increased to stabilize covariance matrix |
+| `self_tune.clip_z` | High z-score saturation (>15%) | Reduced to prevent detector clipping |
+| `episodes.cpd.k_sigma` | High anomaly rate (>10%) | Increased to reduce false episodes |
+| `fusion.weights.*` | Episode separability analysis | Weights adjusted based on detector contribution |
+
+Auto-tuned values are logged in ACM_RunLogs with `[ADAPTIVE]` prefix.
+
+---
+
+### Configuration Validation Checklist for New Equipment
+
+1. **Data Cadence**: Verify `sampling_secs` matches actual data interval
+   - Check: `SELECT TOP 10 EntryDateTime, DATEDIFF(SECOND, LAG(EntryDateTime) OVER (ORDER BY EntryDateTime), EntryDateTime) AS GapSecs FROM {Equipment}_Data ORDER BY EntryDateTime`
+   
+2. **Timestamp Column**: Verify column name exists
+   - Check: `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{Equipment}_Data' AND COLUMN_NAME LIKE '%time%'`
+
+3. **Tag Mapping**: Verify all sensors are mapped
+   - Check: `SELECT * FROM ACM_TagEquipmentMap WHERE EquipID = N AND IsActive = 1`
+
+4. **Coldstart Requirements**: Verify sufficient data exists
+   - Need: `min_train_samples` (default 200) / (60 / `sampling_secs`) hours of data minimum
+   - Example: 200 samples at 60-second cadence = 200 minutes = 3.3 hours

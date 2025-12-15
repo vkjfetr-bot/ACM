@@ -1,11 +1,12 @@
 """
-RUL Estimator with Monte Carlo Simulation (v10.0.0)
+RUL Estimator with Monte Carlo Simulation (v10.1.0)
 
 Remaining Useful Life estimation via Monte Carlo degradation simulations.
 Replaces logic from rul_engine.py (lines 248-394) and forecasting.py RUL sections.
 
 Key Features:
 - Monte Carlo simulation with stochastic degradation paths
+- Semi-Markov regime transition model for multi-step RUL (v10.1.0)
 - P10/P50/P90 quantile-based confidence intervals
 - Agresti-Coull confidence interval adjustment
 - Time-to-failure distribution via survival analysis
@@ -15,10 +16,11 @@ References:
 - Saxena et al. (2008) IEEE Trans: Monte Carlo RUL estimation with 500-5000 simulations
 - Agresti & Coull (1998): Approximate confidence intervals for binomial proportions
 - ISO 13381-1:2015: RUL estimation terminology and methods
+- Limnios & Oprisan (2001): Semi-Markov Processes and Reliability (regime transitions)
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 import numpy as np
 from scipy import stats
 
@@ -194,31 +196,73 @@ class RULEstimator:
         baseline_forecast: np.ndarray,
         model_std: float,
         dt_hours: float,
-        max_steps: int
+        max_steps: int,
+        regime_transition_matrix: Optional[np.ndarray] = None,
+        regime_degradation_rates: Optional[Dict[int, float]] = None,
+        current_regime: Optional[int] = None
     ) -> np.ndarray:
         """
-        Run Monte Carlo simulations with stochastic noise.
+        Run Monte Carlo simulations with stochastic noise and regime transitions.
         
         For each simulation:
         1. Add Gaussian noise to baseline forecast: health[t] = baseline[t] + N(0, σ²)
-        2. Find first time step where health < failure_threshold
-        3. Record time-to-failure
+        2. If regime transition model provided, simulate regime jumps using semi-Markov
+        3. Adjust degradation rate based on current regime
+        4. Find first time step where health < failure_threshold
+        5. Record time-to-failure
+        
+        Semi-Markov Model (v10.1.0):
+        - At each time step, sample from transition probability matrix
+        - Each regime has its own degradation rate
+        - This captures the reality that equipment transitions between operating regimes
+        
+        Reference: Limnios & Oprisan (2001) "Semi-Markov Processes and Reliability"
         
         Args:
             baseline_forecast: Deterministic forecast from degradation model
             model_std: Standard deviation of forecast errors
             dt_hours: Time step (hours)
             max_steps: Maximum simulation steps
+            regime_transition_matrix: Optional NxN transition probability matrix
+            regime_degradation_rates: Optional dict mapping regime -> degradation rate
+            current_regime: Optional starting regime (0-indexed)
         
         Returns:
             Array of time-to-failure values (hours) from N simulations
         """
         simulation_times = []
+        n_regimes = regime_transition_matrix.shape[0] if regime_transition_matrix is not None else 0
         
         for _ in range(self.n_simulations):
+            # Initialize regime for this simulation
+            sim_regime = current_regime if current_regime is not None else 0
+            
             # Add stochastic noise to baseline forecast
             noise = np.random.normal(0, model_std, len(baseline_forecast))
-            health_trajectory = baseline_forecast + noise
+            health_trajectory = baseline_forecast.copy()
+            
+            # Simulate with regime transitions if model provided
+            if regime_transition_matrix is not None and regime_degradation_rates is not None and n_regimes > 0:
+                for t in range(1, len(health_trajectory)):
+                    # Apply regime-specific degradation adjustment
+                    regime_rate = regime_degradation_rates.get(sim_regime, 0.0)
+                    baseline_rate = (baseline_forecast[t] - baseline_forecast[t-1]) / dt_hours if t > 0 else 0.0
+                    
+                    # Blend baseline with regime-specific rate
+                    if abs(regime_rate) > 1e-6:
+                        health_trajectory[t] = health_trajectory[t-1] + regime_rate * dt_hours + noise[t]
+                    else:
+                        health_trajectory[t] = baseline_forecast[t] + noise[t]
+                    
+                    # Sample regime transition (semi-Markov)
+                    if sim_regime < n_regimes:
+                        transition_probs = regime_transition_matrix[sim_regime]
+                        sim_regime = np.random.choice(n_regimes, p=transition_probs)
+            else:
+                health_trajectory = baseline_forecast + noise
+            
+            # Clamp health trajectory to valid range [0, 100]
+            health_trajectory = np.clip(health_trajectory, 0.0, 100.0)
             
             # Find time-to-failure (first crossing of threshold)
             time_to_failure = self._find_time_to_failure(
@@ -270,9 +314,9 @@ class RULEstimator:
         when sample sizes are small (n < 100).
         
         Formula:
-        - ñ = n + z²
-        - p̃ = (x + z²/2) / ñ
-        - CI = p̃ ± z * sqrt(p̃(1-p̃) / ñ)
+        - n_tilde = n + z^2
+        - p_tilde = (x + z^2/2) / n_tilde
+        - CI = p_tilde +/- z * sqrt(p_tilde(1-p_tilde) / n_tilde)
         
         Reference:
         - Agresti & Coull (1998): "Approximate is better than 'exact' for interval
@@ -301,3 +345,114 @@ class RULEstimator:
         p90_adj = p90 + adjustment_factor * p90
         
         return p10_adj, p50_adj, p90_adj
+
+
+# =============================================================================
+# REGIME TRANSITION MODEL (v10.1.0)
+# =============================================================================
+# Builds semi-Markov transition matrix from ACM_RegimeTimeline data
+# Reference: Limnios & Oprisan (2001) "Semi-Markov Processes and Reliability"
+# =============================================================================
+
+def build_regime_transition_matrix(
+    regime_sequence: np.ndarray,
+    n_regimes: Optional[int] = None
+) -> np.ndarray:
+    """
+    Build regime transition probability matrix from observed sequence.
+    
+    This creates a first-order Markov transition matrix where P[i,j] is the
+    probability of transitioning from regime i to regime j.
+    
+    For semi-Markov extension, we count actual transitions (not self-loops).
+    
+    Args:
+        regime_sequence: Array of regime labels (chronological order)
+        n_regimes: Number of regimes (inferred if None)
+    
+    Returns:
+        NxN transition probability matrix (rows sum to 1)
+    """
+    if len(regime_sequence) < 2:
+        # Return identity matrix (stay in current regime)
+        n = n_regimes or 2
+        return np.eye(n)
+    
+    regime_sequence = np.asarray(regime_sequence, dtype=int)
+    
+    if n_regimes is None:
+        n_regimes = int(np.max(regime_sequence)) + 1
+    
+    # Count transitions
+    transition_counts = np.zeros((n_regimes, n_regimes), dtype=float)
+    
+    for i in range(len(regime_sequence) - 1):
+        from_regime = regime_sequence[i]
+        to_regime = regime_sequence[i + 1]
+        
+        if 0 <= from_regime < n_regimes and 0 <= to_regime < n_regimes:
+            transition_counts[from_regime, to_regime] += 1
+    
+    # Convert counts to probabilities (row-normalize)
+    row_sums = transition_counts.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums > 0, row_sums, 1.0)  # Avoid division by zero
+    
+    transition_matrix = transition_counts / row_sums
+    
+    # Fill rows with no transitions with uniform distribution
+    for i in range(n_regimes):
+        if transition_matrix[i].sum() < 0.01:
+            transition_matrix[i] = np.ones(n_regimes) / n_regimes
+    
+    return transition_matrix
+
+
+def compute_regime_residual_variance(
+    health_series: np.ndarray,
+    regime_labels: np.ndarray,
+    dt_hours: float = 1.0
+) -> Dict[int, float]:
+    """
+    Compute residual variance for each regime (scientific noise factor).
+    
+    This replaces the arbitrary noise_factor = 1 + rate * 10 formula with
+    empirical residual variance: sigma^2 = Var(health - fitted_trend).
+    
+    Args:
+        health_series: Health values (same length as regime_labels)
+        regime_labels: Regime assignments for each time point
+        dt_hours: Time interval between observations
+    
+    Returns:
+        Dict mapping regime_label -> residual_std (standard deviation)
+    """
+    regime_variances = {}
+    unique_regimes = np.unique(regime_labels)
+    
+    for regime in unique_regimes:
+        mask = regime_labels == regime
+        health_in_regime = health_series[mask]
+        
+        if len(health_in_regime) < 5:
+            regime_variances[int(regime)] = 1.0  # Default
+            continue
+        
+        # Fit linear trend and compute residuals
+        times = np.arange(len(health_in_regime)) * dt_hours
+        
+        try:
+            from scipy.stats import theilslopes
+            slope, intercept, _, _ = theilslopes(health_in_regime, times)
+            trend = intercept + slope * times
+            residuals = health_in_regime - trend
+            
+            residual_std = float(np.std(residuals))
+            if not np.isfinite(residual_std) or residual_std < 0.1:
+                residual_std = 1.0
+                
+            regime_variances[int(regime)] = residual_std
+            
+        except Exception:
+            regime_variances[int(regime)] = 1.0
+    
+    return regime_variances

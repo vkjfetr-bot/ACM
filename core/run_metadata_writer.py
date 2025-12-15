@@ -77,25 +77,31 @@ def write_run_metadata(
         if completed_at.tzinfo is not None:
             completed_at = completed_at.replace(tzinfo=None)
         
-        # Build insert statement
-        insert_sql = """
-        INSERT INTO dbo.ACM_Runs (
-            RunID, EquipID, EquipName, StartedAt, CompletedAt, DurationSeconds,
-            ConfigSignature, TrainRowCount, ScoreRowCount, EpisodeCount,
-            HealthStatus, AvgHealthIndex, MinHealthIndex, MaxFusedZ,
-            DataQualityScore, RefitRequested, KeptColumns, ErrorMessage, CreatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        # Build UPDATE statement (row already exists from _sql_start_run)
+        update_sql = """
+        UPDATE dbo.ACM_Runs
+        SET EquipName = ?,
+            CompletedAt = ?,
+            DurationSeconds = ?,
+            TrainRowCount = ?,
+            ScoreRowCount = ?,
+            EpisodeCount = ?,
+            HealthStatus = ?,
+            AvgHealthIndex = ?,
+            MinHealthIndex = ?,
+            MaxFusedZ = ?,
+            DataQualityScore = ?,
+            RefitRequested = ?,
+            KeptColumns = ?,
+            ErrorMessage = ?
+        WHERE RunID = ?
         """
         
-        # Prepare record
+        # Prepare record (note: RunID is last for WHERE clause)
         record = (
-            run_id,
-            equip_id,
             equip_name,
-            started_at,
             completed_at,
             duration_seconds,
-            config_signature,
             train_row_count,
             score_row_count,
             episode_count,
@@ -107,12 +113,12 @@ def write_run_metadata(
             refit_requested,
             kept_columns,
             error_message,
-            datetime.now(timezone.utc).replace(tzinfo=None)
+            run_id
         )
         
-        # Execute insert
+        # Execute update
         with sql_client.cursor() as cur:
-            cur.execute(insert_sql, record)
+            cur.execute(update_sql, record)
         
         # Commit
         sql_client.conn.commit()

@@ -275,22 +275,35 @@ class LinearTrendModel(BaseDegradationModel):
         confidence_level: float = 0.95
     ) -> DegradationForecast:
         """
-        Generate multi-step ahead forecast with uncertainty bounds.
+        Generate multi-step ahead forecast with properly widening uncertainty bounds.
         
-        Forecast Equation:
-        - ŷ[t+h] = L[t] + h*T[t]
+        Forecast Equation (Holt's linear trend):
+        - y_hat[t+h] = L[t] + h*T[t]
         
-        Uncertainty Growth (per Box & Jenkins 1970):
-        - σ[h] = σ_residual * sqrt(1 + h*(α^2 + h*β^2/2))
-        - Captures compounding forecast error with horizon
+        Uncertainty Growth (per Hyndman & Athanasopoulos 2018, Chapter 8.1):
+        The exact variance formula for Holt's method h-step-ahead forecast is:
+        
+        Var[e_t(h)] = sigma^2 * [1 + sum_{j=1}^{h-1}(alpha + alpha*beta*j)^2]
+        
+        Where:
+        - sigma^2 = residual variance from training
+        - alpha = level smoothing parameter  
+        - beta = trend smoothing parameter
+        - h = forecast horizon
+        
+        This creates proper "cone-shaped" prediction intervals that widen over time,
+        reflecting increasing uncertainty in longer-range forecasts.
+        
+        Reference: Hyndman, R.J. & Athanasopoulos, G. (2018) Forecasting: 
+        Principles and Practice, Chapter 8.1, otexts.com/fpp2/prediction-intervals.html
         
         Args:
             steps: Number of forecast steps
             dt_hours: Time interval per step (uses fitted dt_hours if None)
-            confidence_level: Confidence level for bounds (default 0.95 = ±1.96σ)
+            confidence_level: Confidence level for bounds (default 0.95 = +/-1.96 sigma)
         
         Returns:
-            DegradationForecast with timestamps, point forecast, and uncertainty bounds
+            DegradationForecast with timestamps, point forecast, and widening uncertainty bounds
         """
         if dt_hours is None:
             dt_hours = self.dt_hours
@@ -309,13 +322,23 @@ class LinearTrendModel(BaseDegradationModel):
                 freq=pd.Timedelta(hours=dt_hours)
             )
         
-        # Point forecast: ŷ[t+h] = L[t] + h*T[t]
+        # Point forecast: y_hat[t+h] = L[t] + h*T[t]
         horizons = np.arange(1, steps + 1)
         point_forecast = self.level + horizons * self.trend
         
-        # Uncertainty growth: σ[h] = σ_residual * sqrt(1 + h*(α^2 + h*β^2/2))
-        # Reference: Box & Jenkins (1970), adapted for Holt's method
-        variance_multiplier = 1.0 + horizons * (self.alpha ** 2 + horizons * (self.beta ** 2) / 2.0)
+        # PROPER WIDENING PREDICTION INTERVALS (Hyndman & Athanasopoulos 2018)
+        # Var[e_t(h)] = sigma^2 * [1 + sum_{j=1}^{h-1}(alpha + alpha*beta*j)^2]
+        # This creates cone-shaped intervals that widen with forecast horizon
+        variance_multiplier = np.zeros(steps)
+        for h in range(1, steps + 1):
+            # Cumulative sum of squared forecast error coefficients
+            cumsum = 0.0
+            for j in range(1, h):
+                coef = self.alpha + self.alpha * self.beta * j
+                cumsum += coef ** 2
+            variance_multiplier[h - 1] = 1.0 + cumsum
+        
+        # Standard error at each horizon (widening cone)
         std_forecast = self.std_error * np.sqrt(variance_multiplier)
         
         # Confidence bounds (z-score for confidence level)
@@ -323,6 +346,12 @@ class LinearTrendModel(BaseDegradationModel):
         z_score = sp_stats.norm.ppf((1 + confidence_level) / 2.0)
         lower_bound = point_forecast - z_score * std_forecast
         upper_bound = point_forecast + z_score * std_forecast
+        
+        # CRITICAL: Clamp all forecast values to valid health range [0, 100]
+        # Health index cannot exceed 100% or go below 0%
+        point_forecast = np.clip(point_forecast, 0.0, 100.0)
+        lower_bound = np.clip(lower_bound, 0.0, 100.0)
+        upper_bound = np.clip(upper_bound, 0.0, 100.0)
         
         return DegradationForecast(
             timestamps=forecast_timestamps,
@@ -419,16 +448,87 @@ class LinearTrendModel(BaseDegradationModel):
     
     def _adaptive_smoothing(self, health_values: pd.Series) -> Tuple[float, float]:
         """
-        Adaptive alpha/beta tuning via grid search (minimize MAE).
+        Adaptive alpha/beta tuning via expanding-window time-series cross-validation.
+        
+        This implements proper time-series CV (not simple grid search) per
+        Hyndman & Athanasopoulos (2018), Section 5.4: "Evaluating forecast accuracy".
+        
+        Process:
+        1. Define grid of alpha/beta candidates within recommended bounds
+        2. For each candidate, perform expanding-window CV:
+           - Train on first k observations (k = min_train_size)
+           - Forecast h steps ahead (h = forecast_horizon)
+           - Record error against actual
+           - Expand window by step_size and repeat
+        3. Select parameters with lowest mean absolute error across all folds
         
         Grid bounds per Hyndman & Athanasopoulos (2018):
         - Alpha: [0.05, 0.95] (level smoothing)
         - Beta: [0.01, 0.30] (trend smoothing)
         
-        Objective: Minimize Mean Absolute Error (MAE) of one-step-ahead forecasts
-        
         Returns:
             (optimal_alpha, optimal_beta)
+        """
+        n = len(health_values)
+        
+        # CV parameters
+        min_train_size = max(20, n // 4)  # At least 20 or 25% of data
+        forecast_horizon = min(12, n // 10)  # Forecast horizon (cap at 12 steps)
+        step_size = max(1, n // 20)  # Step size between folds
+        
+        if n < min_train_size + forecast_horizon + 5:
+            # Insufficient data for CV - fall back to simple grid search
+            return self._simple_grid_search(health_values)
+        
+        alpha_grid = np.linspace(0.05, 0.95, 8)  # Coarser grid for speed
+        beta_grid = np.linspace(0.01, 0.30, 6)
+        
+        best_alpha = self.alpha
+        best_beta = self.beta
+        best_cv_error = float("inf")
+        
+        for alpha_candidate in alpha_grid:
+            for beta_candidate in beta_grid:
+                # Expanding-window CV
+                cv_errors = []
+                
+                for train_end in range(min_train_size, n - forecast_horizon, step_size):
+                    # Train on [0:train_end]
+                    train_data = health_values.iloc[:train_end]
+                    
+                    # Fit Holt's model on training data
+                    level = float(train_data.iloc[0])
+                    trend = (float(train_data.iloc[1]) - float(train_data.iloc[0])) / self.dt_hours if len(train_data) > 1 else 0.0
+                    
+                    for i in range(1, len(train_data)):
+                        obs = float(train_data.iloc[i])
+                        prev_level = level
+                        prev_trend = trend
+                        level = alpha_candidate * obs + (1 - alpha_candidate) * (prev_level + prev_trend)
+                        trend = beta_candidate * (level - prev_level) + (1 - beta_candidate) * prev_trend
+                        trend = np.clip(trend, -self.max_trend_per_hour * self.dt_hours, 
+                                       self.max_trend_per_hour * self.dt_hours)
+                    
+                    # Forecast h steps ahead
+                    forecast = level + forecast_horizon * trend
+                    
+                    # Compare to actual
+                    actual = float(health_values.iloc[train_end + forecast_horizon - 1])
+                    cv_errors.append(abs(forecast - actual))
+                
+                if len(cv_errors) > 0:
+                    mean_cv_error = float(np.mean(cv_errors))
+                    if mean_cv_error < best_cv_error:
+                        best_cv_error = mean_cv_error
+                        best_alpha = alpha_candidate
+                        best_beta = beta_candidate
+        
+        return best_alpha, best_beta
+    
+    def _simple_grid_search(self, health_values: pd.Series) -> Tuple[float, float]:
+        """
+        Fallback simple grid search when insufficient data for proper CV.
+        Minimizes one-step-ahead MAE.
         """
         alpha_grid = np.linspace(0.05, 0.95, 10)
         beta_grid = np.linspace(0.01, 0.30, 10)

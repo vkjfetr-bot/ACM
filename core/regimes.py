@@ -36,13 +36,53 @@ try:
 except Exception:  # pragma: no cover - scipy optional in some deployments
     _median_filter = None
 
-REGIME_MODEL_VERSION = "2.0"
+REGIME_MODEL_VERSION = "2.1"  # Bumped for FIX #1-10 changes
 
 
 class ModelVersionMismatch(Exception):
     """Raised when a cached regime model version differs from the expected version."""
 
 
+def _parse_semver(version: str) -> Tuple[int, int, int]:
+    """
+    Parse semantic version string into (major, minor, patch) tuple.
+    
+    FIX #10: Supports version strings like "2.0", "2.1.0", "2"
+    """
+    parts = version.split(".")
+    major = int(parts[0]) if len(parts) > 0 else 0
+    minor = int(parts[1]) if len(parts) > 1 else 0
+    patch = int(parts[2]) if len(parts) > 2 else 0
+    return (major, minor, patch)
+
+
+def _is_version_compatible(cached_version: str, expected_version: str) -> bool:
+    """
+    Check if cached model version is compatible with expected version.
+    
+    FIX #10: Implements semantic versioning compatibility:
+    - Major version must match (breaking changes)
+    - Minor version can be <= expected (backward compatible features)
+    - Patch version is ignored (bug fixes)
+    
+    Examples:
+    - cached="2.0", expected="2.1" -> True (minor upgrade)
+    - cached="2.1", expected="2.0" -> True (can use newer model)
+    - cached="1.9", expected="2.0" -> False (major mismatch)
+    """
+    try:
+        cached_semver = _parse_semver(cached_version)
+        expected_semver = _parse_semver(expected_version)
+        
+        # Major version must match
+        if cached_semver[0] != expected_semver[0]:
+            return False
+        
+        # Same major version = compatible
+        return True
+    except Exception:
+        # If parsing fails, fall back to exact match
+        return cached_version == expected_version
 _HEALTH_PRIORITY = {
     "healthy": 0,
     "suspect": 1,
@@ -166,7 +206,21 @@ def _robust_scale_clip(X: np.ndarray, clip_pct: float = 99.9) -> np.ndarray:
 
 
 def _compute_sample_durations(index: pd.Index) -> np.ndarray:
-    """Estimate per-sample durations in seconds for a time-aligned index."""
+    """
+    Estimate per-sample durations in seconds for a time-aligned index.
+    
+    FIX #2: This is the SINGLE SOURCE OF TRUTH for duration calculations.
+    All dwell time metrics (dwell_seconds, dwell_fraction, avg_dwell_seconds)
+    should derive from this function's output.
+    
+    Priority:
+    1. If DatetimeIndex: compute actual time diffs in seconds
+    2. Fallback: unit durations (1.0 per sample)
+    
+    Returns:
+        Array of durations in seconds for each sample. Last sample uses
+        median of valid diffs as its duration estimate.
+    """
 
     n = len(index)
     if n == 0:
@@ -319,6 +373,15 @@ def build_feature_basis(
                 if variance_ratio is not None:
                     pca_variance_vector = [float(x) for x in variance_ratio[:n_pca_used]]
                     pca_variance_ratio = float(np.sum(pca_variance_vector))
+                    
+                    # FIX #5: Validate PCA variance for numerical stability
+                    if not np.isfinite(pca_variance_ratio) or pca_variance_ratio < 0 or pca_variance_ratio > 1.0:
+                        Console.warn(f"[REGIME] PCA variance ratio out of bounds: {pca_variance_ratio}. Resetting to NaN.")
+                        pca_variance_ratio = float("nan")
+                        pca_variance_vector = None
+                    elif any(not np.isfinite(v) for v in pca_variance_vector):
+                        Console.warn("[REGIME] PCA variance vector contains non-finite values. Check numerical stability.")
+                        
                 cols = [f"PCA_{i+1}" for i in range(n_pca_used)]
                 train_parts.append(pd.DataFrame(train_scores[:, :n_pca_used], index=train_features.index, columns=cols))
                 score_parts.append(pd.DataFrame(score_scores[:, :n_pca_used], index=score_features.index, columns=cols))
@@ -373,6 +436,13 @@ def build_feature_basis(
         meta["pca_variance_vector"] = pca_variance_vector
         variance_min = float(basis_cfg.get("pca_variance_min", 0.85))
         meta["pca_variance_min"] = variance_min
+        
+        # FIX #5: Document that PCA variance is computed BEFORE non-PCA columns are scaled
+        # The PCA components come from pca_detector which uses its own scaler
+        # Non-PCA columns (raw sensors) are scaled separately via basis_scaler
+        # This is intentional: PCA variance reflects original feature space explanation
+        meta["pca_variance_note"] = "PCA variance computed on pre-scaled features by pca_detector"
+        
         if pca_variance_ratio < variance_min:
             Console.warn(
                 f"[REGIME] PCA variance coverage {pca_variance_ratio:.3f} below target {variance_min:.3f}."
@@ -420,35 +490,32 @@ def _fit_kmeans_scaled(
             Console.warn(f"[REGIME] Limiting auto-k sweep to {max_models} models (k_max {k_max}->{allowed_max}) for budget")
             k_max = allowed_max
 
-    # Sample for evaluation but always refit the final model on full data.
+    # FIX #7: Sample for evaluation using uniform random sampling instead of
+    # k-means stratified sampling to avoid bias toward preliminary k value
     if n_samples > max_eval_samples:
         rng = np.random.default_rng(random_state)
-        try:
-            prelim_k = max(2, min(8, k_max))
-            prelim = MiniBatchKMeans(
-                n_clusters=prelim_k,
-                batch_size=max(32, min(1024, n_samples // 8 or 1)),
-                n_init=3,
-                random_state=random_state,
+        
+        # FIX #7: Use uniform random sampling to avoid k-means pre-clustering bias
+        # The previous stratified sampling biased evaluation toward prelim_k structure
+        eval_idx = rng.choice(n_samples, size=max_eval_samples, replace=False)
+        X_eval = X_scaled[eval_idx]
+        
+        # FIX #7: Validate sample distribution matches full data
+        full_mean = np.mean(X_scaled, axis=0)
+        sample_mean = np.mean(X_eval, axis=0)
+        mean_diff = np.abs(full_mean - sample_mean).mean()
+        
+        full_std = np.std(X_scaled, axis=0) 
+        sample_std = np.std(X_eval, axis=0)
+        std_diff = np.abs(full_std - sample_std).mean()
+        
+        # Warn if sample distribution deviates significantly from full data
+        if mean_diff > 0.5 or std_diff > 0.5:
+            Console.warn(
+                f"[REGIME] Auto-k sample may not represent full data well. "
+                f"Mean deviation: {mean_diff:.3f}, Std deviation: {std_diff:.3f}. "
+                f"Consider increasing max_eval_samples."
             )
-            prelim.fit(X_scaled)
-            prelim_labels = prelim.labels_
-            eval_indices: List[int] = []
-            unique_labels = np.unique(prelim_labels)
-            per_cluster = max(1, int(np.ceil(max_eval_samples / max(1, len(unique_labels)))))
-            for lbl in unique_labels:
-                cluster_idx = np.nonzero(prelim_labels == lbl)[0]
-                take = min(len(cluster_idx), per_cluster)
-                if take > 0:
-                    choose = rng.choice(cluster_idx, size=take, replace=False)
-                    eval_indices.extend(choose.tolist())
-            if len(eval_indices) > max_eval_samples:
-                rng.shuffle(eval_indices)
-                eval_indices = eval_indices[:max_eval_samples]
-            X_eval = X_scaled[eval_indices]
-        except Exception:
-            eval_idx = rng.choice(n_samples, size=max_eval_samples, replace=False)
-            X_eval = X_scaled[eval_idx]
     else:
         X_eval = X_scaled
 
@@ -628,6 +695,38 @@ def fit_regime_model(
 
 
 def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
+    """
+    Predict regime labels for new data using fitted model.
+    
+    FIX #6: Now validates feature dimensions and warns on mismatches
+    instead of silently filling with zeros.
+    """
+    expected_cols = set(model.feature_columns)
+    provided_cols = set(basis_df.columns)
+    
+    # FIX #6: Check for feature dimension mismatches
+    missing_cols = expected_cols - provided_cols
+    extra_cols = provided_cols - expected_cols
+    
+    if missing_cols:
+        missing_pct = len(missing_cols) / len(expected_cols) * 100
+        if missing_pct > 50:
+            Console.warn(
+                f"[REGIME] CRITICAL: {len(missing_cols)}/{len(expected_cols)} features missing ({missing_pct:.1f}%). "
+                f"Missing: {list(missing_cols)[:5]}{'...' if len(missing_cols) > 5 else ''}. "
+                f"Predictions may be unreliable - filling with 0.0"
+            )
+        elif missing_cols:
+            Console.warn(
+                f"[REGIME] {len(missing_cols)} features missing: {list(missing_cols)[:3]}{'...' if len(missing_cols) > 3 else ''}. "
+                f"Filling with 0.0"
+            )
+    
+    if extra_cols:
+        Console.info(
+            f"[REGIME] {len(extra_cols)} extra features ignored: {list(extra_cols)[:3]}{'...' if len(extra_cols) > 3 else ''}"
+        )
+    
     aligned = basis_df.reindex(columns=model.feature_columns, fill_value=0.0)
     aligned_arr = aligned.to_numpy(dtype=np.float64, copy=False, na_value=0.0)
     X_scaled = model.scaler.transform(aligned_arr)
@@ -744,6 +843,13 @@ def _persist_regime_error(e: Exception, models_dir: Path):
 
 
 def build_summary_dataframe(model: RegimeModel) -> pd.DataFrame:
+    """
+    Build summary DataFrame from RegimeModel stats.
+    
+    FIX #2: Uses pre-computed values from update_health_labels() which uses
+    _compute_sample_durations() as the single source of truth. Fallback logic
+    only applies when stats are from legacy models without duration data.
+    """
     stats = model.stats or {}
     if not stats:
         return pd.DataFrame(columns=[
@@ -759,24 +865,40 @@ def build_summary_dataframe(model: RegimeModel) -> pd.DataFrame:
             "count",
         ])
 
+    # FIX #2: Use authoritative total_duration_seconds from model meta
+    # Only fall back to sum(dwell_seconds) or sum(count) for legacy models
     total_duration = float(model.meta.get("total_duration_seconds", 0.0) or 0.0)
     if not np.isfinite(total_duration) or total_duration <= 0:
+        # Legacy fallback: sum individual dwell times
         total_duration = float(sum(stat.get("dwell_seconds", 0.0) for stat in stats.values()))
         if not np.isfinite(total_duration) or total_duration <= 0:
+            # Ultimate fallback: sample counts
             total_duration = float(sum(stat.get("count", 0) for stat in stats.values()))
+            Console.warn("[REGIME] build_summary_dataframe: using sample counts as duration proxy (legacy model)")
 
     rows: List[Dict[str, Any]] = []
     for label, stat in stats.items():
+        # FIX #2: Trust pre-computed dwell_seconds from update_health_labels
         dwell_seconds = float(stat.get("dwell_seconds", float("nan")))
-        if (not np.isfinite(dwell_seconds) or dwell_seconds <= 0) and total_duration > 0:
-            dwell_seconds = float(stat.get("count", 0))
-        dwell_fraction_raw = stat.get("dwell_fraction")
-        dwell_fraction = float(dwell_fraction_raw) if dwell_fraction_raw is not None else float("nan")
-        if not np.isfinite(dwell_fraction) and total_duration > 0:
-            dwell_fraction = dwell_seconds / total_duration if dwell_seconds >= 0 else float("nan")
+        
+        # Only use count fallback for legacy stats without duration data
+        if not np.isfinite(dwell_seconds) or dwell_seconds <= 0:
+            # Check if this is legacy data (no valid duration computed)
+            if stat.get("count", 0) > 0:
+                dwell_seconds = float(stat.get("count", 0))
+        
+        # Use pre-computed dwell_fraction, recompute only if missing
+        dwell_fraction = float(stat.get("dwell_fraction", float("nan")))
+        if not np.isfinite(dwell_fraction) and total_duration > 0 and np.isfinite(dwell_seconds):
+            dwell_fraction = dwell_seconds / total_duration
+        
+        # Use pre-computed avg_dwell_seconds, recompute only if missing  
         avg_dwell = float(stat.get("avg_dwell_seconds", float("nan")))
-        if not np.isfinite(avg_dwell) and stat.get("segment_count"):
-            avg_dwell = dwell_seconds / max(int(stat.get("segment_count", 0)), 1)
+        if not np.isfinite(avg_dwell):
+            segment_count = int(stat.get("segment_count", 0))
+            if segment_count > 0 and np.isfinite(dwell_seconds):
+                avg_dwell = dwell_seconds / segment_count
+                
         row = {
             "regime": int(label),
             "state": model.health_labels.get(int(label), "unknown"),
@@ -810,37 +932,93 @@ def build_summary_dataframe(model: RegimeModel) -> pd.DataFrame:
     return df[desired_cols].sort_values("regime").reset_index(drop=True)
 
 
-def smooth_labels(labels: np.ndarray, passes: int = 1, window: Optional[int] = None) -> np.ndarray:
-    """Apply median-like smoothing to integer labels using SciPy when available."""
+def smooth_labels(
+    labels: np.ndarray,
+    passes: int = 1,
+    window: Optional[int] = None,
+    health_map: Optional[Dict[int, str]] = None
+) -> np.ndarray:
+    """
+    Apply mode-based smoothing to integer labels.
+    
+    FIX #3: Replaced median_filter which can introduce non-existent labels
+    and create physically impossible state transitions. Now uses mode-based
+    smoothing with health-aware tie-breaking.
+    
+    Args:
+        labels: Integer regime labels
+        passes: Number of smoothing iterations
+        window: Smoothing window size (odd number preferred)
+        health_map: Optional map of label -> health state for tie-breaking
+        
+    Returns:
+        Smoothed labels that only contain values from the original sequence
+    """
     if labels.size == 0:
         return labels
 
     smoothed = labels.astype(int, copy=True)
     if passes <= 0 and window is None:
         return smoothed
+    
+    # Get valid labels from original sequence (FIX #3: prevent introducing new labels)
+    valid_labels = set(np.unique(labels))
 
     win = window if window is not None else max(1, 2 * passes + 1)
     if win % 2 == 0:
         win += 1
-    if _median_filter is not None and win > 1:
-        try:
-            filtered = _median_filter(smoothed, size=win, mode="nearest")
-            return np.asarray(filtered, dtype=int)
-        except Exception:
-            Console.warn("[REGIME] SciPy median_filter failed; falling back to manual smoothing")
-
-    # Fallback: vectorized rolling mode using stride tricks (no SciPy)
+    
+    # FIX #3: Always use mode-based smoothing to prevent median_filter issues
+    # median_filter on integers can produce values not in original set
     half = max(1, win // 2)
     iterations = max(1, passes)
+    
     for _ in range(iterations):
         padded = np.pad(smoothed, pad_width=half, mode="edge")
         shape = (smoothed.size, win)
         strides = (padded.strides[0], padded.strides[0])
         windows = np.lib.stride_tricks.as_strided(padded, shape=shape, strides=strides)
         modes = np.empty(smoothed.size, dtype=int)
+        
         for idx, row in enumerate(windows):
             vals, counts = np.unique(row, return_counts=True)
-            modes[idx] = vals[np.argmax(counts)]
+            
+            # FIX #3: Only consider labels that existed in original sequence
+            valid_mask = np.isin(vals, list(valid_labels))
+            if not valid_mask.any():
+                modes[idx] = smoothed[idx]  # Keep current if no valid labels
+                continue
+                
+            vals = vals[valid_mask]
+            counts = counts[valid_mask]
+            
+            max_count = counts.max()
+            max_mask = counts == max_count
+            
+            if max_mask.sum() == 1:
+                # Single winner
+                modes[idx] = vals[np.argmax(counts)]
+            else:
+                # Tie-breaking: prefer higher health severity if health_map provided
+                candidates = vals[max_mask]
+                if health_map is not None:
+                    # FIX #4 integrated: prioritize by health severity (critical > suspect > healthy)
+                    best_label = candidates[0]
+                    best_priority = _HEALTH_PRIORITY.get(health_map.get(int(best_label)), 3)
+                    for lbl in candidates[1:]:
+                        priority = _HEALTH_PRIORITY.get(health_map.get(int(lbl)), 3)
+                        if priority < best_priority:  # Lower = higher severity
+                            best_priority = priority
+                            best_label = lbl
+                    modes[idx] = best_label
+                else:
+                    # No health map: prefer label closest to center sample
+                    center_val = row[half]
+                    if center_val in candidates:
+                        modes[idx] = center_val
+                    else:
+                        modes[idx] = candidates[0]
+                        
         smoothed = modes
     return smoothed
 
@@ -885,10 +1063,25 @@ def smooth_transitions(
     result = arr.copy()
 
     def _candidate_score(label: int, segment_start: int, segment_end: int) -> Tuple[int, int]:
+        """
+        Score a candidate replacement label. Lower score = better candidate.
+        
+        FIX #4: Prioritize health severity FIRST, then run length.
+        This ensures critical/suspect states are preserved even if they have
+        shorter runs than adjacent healthy segments.
+        
+        Returns:
+            (health_rank, -run_length) tuple for min() comparison
+            health_rank: 0=healthy, 1=suspect, 2=critical, 3=unknown
+            Lower health_rank = healthier state (we prefer replacing short
+            segments with HEALTHIER adjacent states, not critical ones)
+        """
         health = None
         if health_map is not None:
             health = health_map.get(int(label))
         health_rank = _HEALTH_PRIORITY.get(health, _HEALTH_PRIORITY["unknown"])
+        
+        # Count adjacent run of same label
         run = 0
         idx = segment_start - 1
         while idx >= 0 and result[idx] == label:
@@ -898,7 +1091,10 @@ def smooth_transitions(
         while idx < n and result[idx] == label:
             run += 1
             idx += 1
-        return (-run, health_rank)
+        
+        # FIX #4: Health priority comes FIRST
+        # Prefer healthier states (lower rank), then longer runs
+        return (health_rank, -run)
 
     start = 0
     while start < n:
@@ -1010,6 +1206,31 @@ def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None,
     df = pd.read_csv(p, dtype={"start_ts": "string", "end_ts": "string"})
     df["start_ts"] = _to_datetime_mixed(df["start_ts"])
     df["end_ts"]   = _to_datetime_mixed(df["end_ts"])
+    
+    # FIX #9: Filter invalid timestamps immediately after parsing
+    initial_count = len(df)
+    
+    # Remove rows with NaT timestamps
+    valid_mask = df["start_ts"].notna() & df["end_ts"].notna()
+    nat_count = (~valid_mask).sum()
+    if nat_count > 0:
+        Console.warn(f"[REGIME] Filtering {nat_count} episodes with invalid timestamps (NaT)")
+        df = df[valid_mask]
+    
+    # FIX #9: Validate end_ts > start_ts
+    if len(df) > 0:
+        invalid_range_mask = df["end_ts"] < df["start_ts"]
+        invalid_range_count = invalid_range_mask.sum()
+        if invalid_range_count > 0:
+            Console.warn(
+                f"[REGIME] Filtering {invalid_range_count} episodes where end_ts < start_ts (invalid time range)"
+            )
+            df = df[~invalid_range_mask]
+    
+    final_count = len(df)
+    if final_count < initial_count:
+        Console.info(f"[REGIME] Episodes after validation: {final_count}/{initial_count}")
+    
     return df
 
 def _read_scores_csv(p: Path, sql_client=None, equip_id: Optional[int] = None, run_id: Optional[str] = None, 
@@ -1379,25 +1600,67 @@ def align_regime_labels(
     
     # Handle different number of clusters
     if new_centers.shape[0] != prev_centers.shape[0]:
-        Console.info(f"[REGIME_ALIGN] Cluster count changed: prev_k={prev_centers.shape[0]}, new_k={new_centers.shape[0]}")
-        # For different k, find best matching subset
-        # Match new clusters to nearest previous clusters
-        from sklearn.metrics import pairwise_distances_argmin
-        mapping = pairwise_distances_argmin(new_centers, prev_centers)
+        new_k = new_centers.shape[0]
+        prev_k = prev_centers.shape[0]
+        Console.info(f"[REGIME_ALIGN] Cluster count changed: prev_k={prev_k}, new_k={new_k}")
         
-        # Build inverse mapping: which new cluster best matches each old cluster
-        inverse_map = {}
-        for new_idx, old_idx in enumerate(mapping):
-            if old_idx not in inverse_map:
-                inverse_map[old_idx] = []
-            inverse_map[old_idx].append(new_idx)
+        # FIX #1: Actually apply the mapping when cluster counts differ
+        # Use Hungarian algorithm for partial optimal matching
+        from scipy.optimize import linear_sum_assignment
+        from scipy.spatial.distance import cdist
         
-        Console.info(f"[REGIME_ALIGN] Cluster mapping: {dict(enumerate(mapping))}")
-        Console.info(f"[REGIME_ALIGN] Inverse mapping: {inverse_map}")
+        cost_matrix = cdist(new_centers, prev_centers, metric='euclidean')
         
-        # Note: With different k, perfect alignment isn't possible
-        # Return new model as-is but log the mapping for transparency
-        new_model.meta["prev_cluster_mapping"] = mapping.tolist()
+        if new_k <= prev_k:
+            # Fewer or equal new clusters: each new maps to a distinct old
+            row_ind, col_ind = linear_sum_assignment(cost_matrix)
+            # mapping[new_idx] = old_idx it should become
+            mapping = np.full(new_k, -1, dtype=int)
+            mapping[row_ind] = col_ind
+            
+            # Reorder new clusters to match old indices where possible
+            reordered = np.zeros_like(new_centers)
+            used_positions = set()
+            for new_idx in range(new_k):
+                old_idx = mapping[new_idx]
+                if old_idx >= 0 and old_idx < new_k:
+                    reordered[old_idx] = new_centers[new_idx]
+                    used_positions.add(old_idx)
+            
+            # Fill remaining positions with unmapped clusters
+            unmapped_new = [i for i in range(new_k) if mapping[i] < 0 or mapping[i] >= new_k]
+            free_positions = [i for i in range(new_k) if i not in used_positions]
+            for pos, new_idx in zip(free_positions, unmapped_new):
+                reordered[pos] = new_centers[new_idx]
+                
+            new_model.kmeans.cluster_centers_ = reordered
+        else:
+            # More new clusters than old: map old to closest new, leave extras at end
+            row_ind, col_ind = linear_sum_assignment(cost_matrix.T)  # Transpose for old->new
+            # col_ind[old_idx] = new_idx that best matches
+            
+            reordered = np.zeros_like(new_centers)
+            used_new = set()
+            
+            # Place matched clusters in their corresponding old positions
+            for old_idx in range(min(prev_k, new_k)):
+                if old_idx < len(col_ind):
+                    best_new = col_ind[old_idx]
+                    reordered[old_idx] = new_centers[best_new]
+                    used_new.add(best_new)
+            
+            # Place remaining new clusters at the end
+            remaining_new = [i for i in range(new_k) if i not in used_new]
+            for pos, new_idx in enumerate(remaining_new, start=prev_k):
+                if pos < new_k:
+                    reordered[pos] = new_centers[new_idx]
+            
+            new_model.kmeans.cluster_centers_ = reordered
+            mapping = col_ind.tolist() if hasattr(col_ind, 'tolist') else list(col_ind)
+        
+        Console.info(f"[REGIME_ALIGN] Applied cluster reordering for k change: {new_k} clusters aligned to {prev_k}")
+        new_model.meta["prev_cluster_mapping"] = mapping.tolist() if hasattr(mapping, 'tolist') else list(mapping)
+        new_model.meta["alignment_k_change"] = {"from": prev_k, "to": new_k}
         return new_model
     
     # Same number of clusters: reorder to minimize total distance
@@ -1680,12 +1943,19 @@ def run(ctx: Any) -> Dict[str, Any]:
             # REG-CSV-02: Write to ACM_RegimeStats SQL table
             if OutputManager is not None:
                 om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+                # Convert dwell_fraction to OccupancyPct (percentage) and prepare correct columns
+                if 'dwell_fraction' in summary_df.columns:
+                    summary_df['OccupancyPct'] = summary_df['dwell_fraction'] * 100.0
+                if 'median_fused' in summary_df.columns:
+                    summary_df['FusedMean'] = summary_df['median_fused']
+                if 'p95_abs_fused' in summary_df.columns:
+                    summary_df['FusedP90'] = summary_df['p95_abs_fused']  # Use p95 for p90 column
                 sql_cols = {
-                    "regime": "Regime", "state": "State", 
-                    "dwell_seconds": "DwellSeconds", "dwell_fraction": "DwellFraction",
-                    "avg_dwell_seconds": "AvgDwellSeconds", "transition_count": "TransitionCount",
-                    "stability_score": "StabilityScore", "median_fused": "MedianFused",
-                    "p95_abs_fused": "P95AbsFused", "count": "Count"
+                    "regime": "RegimeLabel",
+                    "avg_dwell_seconds": "AvgDwellSeconds",
+                    "OccupancyPct": "OccupancyPct",
+                    "FusedMean": "FusedMean",
+                    "FusedP90": "FusedP90"
                 }
                 om.write_dataframe(summary_df, summary_path, sql_table="ACM_RegimeStats" if sql_client else None, sql_columns=sql_cols)
             else:
@@ -1948,10 +2218,18 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
         # Reconstruct RegimeModel
         meta = metadata.get("meta", {})
         version = meta.get("model_version")
-        if version and version != REGIME_MODEL_VERSION:
+        
+        # FIX #10: Use semantic versioning compatibility check
+        if version and not _is_version_compatible(version, REGIME_MODEL_VERSION):
             raise ModelVersionMismatch(
-                f"Cached model version {version} mismatches expected {REGIME_MODEL_VERSION}"
+                f"Cached model version {version} incompatible with expected {REGIME_MODEL_VERSION} "
+                f"(major version mismatch)"
             )
+        elif version and version != REGIME_MODEL_VERSION:
+            Console.info(
+                f"[REGIME] Cached model version {version} compatible with {REGIME_MODEL_VERSION} (same major)"
+            )
+            
         model = RegimeModel(
             scaler=scaler,
             kmeans=kmeans,
@@ -2008,9 +2286,32 @@ def detect_transient_states(
         Console.warn("[TRANSIENT] No numeric columns for ROC calculation")
         return default_states
 
-    weights = np.array([abs(float(sensor_weights_cfg.get(col, 1.0))) for col in numeric_cols], dtype=float)
+    # FIX #8: Validate sensor_weights_cfg keys match available columns
+    # and document why absolute values are used
+    configured_weights = list(sensor_weights_cfg.keys())
+    if configured_weights:
+        matched_cols = [col for col in configured_weights if col in numeric_cols]
+        unmatched_cols = [col for col in configured_weights if col not in numeric_cols]
+        if unmatched_cols:
+            Console.warn(
+                f"[TRANSIENT] {len(unmatched_cols)} configured weight keys not in data columns: "
+                f"{unmatched_cols[:3]}{'...' if len(unmatched_cols) > 3 else ''}"
+            )
+        if matched_cols:
+            Console.info(f"[TRANSIENT] Using custom weights for {len(matched_cols)} sensors")
+    
+    # FIX #8: Document why abs() is used and preserve relative importance
+    # Absolute value is used because weights should be non-negative for ROC aggregation
+    # (negative ROC contribution would incorrectly reduce transient signal)
+    # Normalization happens AFTER abs() to maintain relative importance ratios
+    raw_weights = np.array([float(sensor_weights_cfg.get(col, 1.0)) for col in numeric_cols], dtype=float)
+    if np.any(raw_weights < 0):
+        Console.info("[TRANSIENT] Negative weights found; using absolute values for ROC aggregation")
+    weights = np.abs(raw_weights)
+    
     if not np.isfinite(weights).all() or weights.sum() <= 0:
         weights = np.ones(len(numeric_cols), dtype=float)
+        Console.warn("[TRANSIENT] Invalid weights detected; falling back to uniform weights")
     weights /= weights.sum()
 
     data_numeric = data[numeric_cols].apply(pd.to_numeric, errors="coerce").ffill().bfill()

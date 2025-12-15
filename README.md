@@ -34,7 +34,7 @@ ACM watches every asset through several analytical "heads" instead of a single a
 ## How it works
 
 1. **Ingestion layer:** Baseline (train) and batch (score) inputs come from CSV files or a SQL source that populate the `data/` directory. Configuration values live in `configs/config_table.csv`, while SQL credentials are in `configs/sql_connection.ini`. ACM infers the equipment code (`--equip`) and determines whether to stay in file mode or engage SQL mode.
-2. **Feature engineering:** `core.fast_features` delivers vectorized transforms (windowing, FFT, correlations, etc.) and can leverage Polars acceleration when available.
+2. **Feature engineering:** `core.fast_features` delivers vectorized transforms (windowing, FFT, correlations, etc.) and uses Polars acceleration by default. The switch is governed by `fusion.features.polars_threshold` (rows per batch). Current setting: `polars_threshold = 10`, effectively enabling Polars for all standard batch sizes.
 3. **Detectors:** Each head (Mahalanobis, PCA SPE/T2, Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual, correlation/drift monitors, CUSUM-style trackers) produces interpretable scores, and episode culprits highlight which tag groups caused the response.
 4. **Fusion & tuning:** `core.fuse` blends scores under configurable weights while `core.analytics.AdaptiveTuning` adjusts thresholds and logs every change via `core.config_history_writer`.
 5. **Forecasting & RUL:** `core.forecasting` generates health trajectories, failure probability curves, RUL estimates, and physical sensor forecasts. **NEW in v10.0.0**: Continuous forecasting with exponential blending eliminates per-batch duplication; hazard-based RUL provides survival probability curves with EWMA smoothing; state persistence tracks forecast evolution across batches (see [Continuous Learning](#continuous-learning--forecasting) section).
@@ -55,7 +55,7 @@ ACM's configuration is stored in `configs/config_table.csv` (238 parameters) and
 **Feature Engineering (`features.*`)**
 - `window`: Rolling window size for feature extraction (default: 16)
 - `fft_bands`: Frequency bands for FFT decomposition
-- `polars_threshold`: Row count to trigger Polars acceleration (default: 5000)
+- `polars_threshold`: Row count to trigger Polars acceleration (currently 10 to force Polars on typical batch sizes)
 
 **Detectors & Models (`models.*`)**
 - `pca.*`: PCA configuration (n_components=5, randomized SVD)
@@ -135,10 +135,29 @@ ACM's configuration is stored in `configs/config_table.csv` (238 parameters) and
 2. Run `python scripts/sql/populate_acm_config.py` to sync changes to SQL
 3. Commit changes to version control
 
+Quick resume after interruption:
+
+```powershell
+python scripts/sql_batch_runner.py --equip WFA_TURBINE_0 --tick-minutes 1440 --resume
+```
+
 **Equipment-Specific Overrides**
 - Global defaults: `EquipID=0`
 - FD_FAN overrides: `EquipID=1` (e.g., `mahl.regularization=1.0`, `episodes.cpd.k_sigma=4.0`)
 - GAS_TURBINE overrides: `EquipID=2621` (e.g., `timestamp_col=Ts`, `tick_minutes=1440`)
+- ELECTRIC_MOTOR overrides: `EquipID=8634` (e.g., `sampling_secs=60` for 1-minute data cadence)
+
+**CRITICAL: Parameters Most Likely to Need Per-Equipment Tuning**
+
+| Parameter | Why Tune? | Signs You Need to Tune |
+|-----------|-----------|------------------------|
+| **`data.sampling_secs`** | Must match equipment's native data cadence | "Insufficient data: N rows" despite SP returning many more rows |
+| `data.timestamp_col` | Some assets use different column names | Data loading fails or returns empty |
+| `models.mahl.regularization` | Ill-conditioned covariance matrices | "High condition number" warnings |
+| `thresholds.self_tune.clip_z` | Detector saturation | "High saturation (X%)" warnings |
+| `episodes.cpd.k_sigma` | Too many/few episodes detected | "High anomaly rate" warnings or missed events |
+
+For the complete configuration reference with all 200+ parameters, see `docs/ACM_SYSTEM_OVERVIEW.md` Section 20.
 
 **Configuration History**
 All adaptive tuning changes are logged to `ACM_ConfigHistory` via `core.config_history_writer.ConfigHistoryWriter`. Includes timestamp, parameter path, old/new values, reason, and UpdatedBy tag.

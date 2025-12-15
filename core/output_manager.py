@@ -1929,17 +1929,63 @@ class OutputManager:
         return long
 
     def _generate_regime_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Compute simple regime statistics: counts and dwell (approx by consecutive runs).
-        Returns DataFrame for ACM_RegimeStats.
+        """Compute regime statistics: occupancy, dwell time, fused score stats.
+        Returns DataFrame for ACM_RegimeStats with correct column names.
         """
         if scores_df is None or len(scores_df) == 0 or "regime_label" not in scores_df.columns:
-            return pd.DataFrame(columns=["RunID","EquipID","RegimeLabel","Count"])
+            return pd.DataFrame(columns=["RunID", "EquipID", "RegimeLabel", "OccupancyPct", "AvgDwellSeconds", "FusedMean", "FusedP90"])
+        
         regimes = pd.to_numeric(scores_df["regime_label"], errors="coerce")
+        fused = pd.to_numeric(scores_df.get("fused", pd.Series(dtype=float)), errors="coerce")
         regimes = regimes.dropna().astype(int)
-        counts = regimes.value_counts().sort_index()
+        
+        # Total points for occupancy calculation
+        total_points = len(regimes)
+        if total_points == 0:
+            return pd.DataFrame(columns=["RunID", "EquipID", "RegimeLabel", "OccupancyPct", "AvgDwellSeconds", "FusedMean", "FusedP90"])
+        
+        # Estimate dt_hours from timestamp index
+        if hasattr(scores_df.index, 'to_series'):
+            ts = scores_df.index.to_series()
+            if len(ts) > 1:
+                dt_hours = float((ts.diff().median().total_seconds()) / 3600.0)
+            else:
+                dt_hours = 0.5  # default 30 min
+        else:
+            dt_hours = 0.5
+        
         out = []
-        for label, cnt in counts.items():
-            out.append({"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "RegimeLabel": int(cast(Any, label)), "Count": int(cast(Any, cnt))})
+        for label in sorted(regimes.unique()):
+            mask = regimes == label
+            count = int(mask.sum())
+            occupancy_pct = float(count / total_points * 100.0)
+            
+            # Estimate average dwell time (consecutive points in same regime)
+            # Simple approximation: total time in regime / number of transitions into regime
+            regime_transitions = (mask.astype(int).diff().fillna(0) == 1).sum()
+            if regime_transitions > 0:
+                avg_dwell_seconds = float((count * dt_hours * 3600) / regime_transitions)
+            else:
+                avg_dwell_seconds = float(count * dt_hours * 3600)  # All in one segment
+            
+            # Fused score stats for this regime
+            fused_in_regime = fused[mask].dropna()
+            if len(fused_in_regime) > 0:
+                fused_mean = float(fused_in_regime.mean())
+                fused_p90 = float(fused_in_regime.quantile(0.90))
+            else:
+                fused_mean = 0.0
+                fused_p90 = 0.0
+            
+            out.append({
+                "RunID": self.run_id,
+                "EquipID": int(self.equip_id or 0),
+                "RegimeLabel": int(label),
+                "OccupancyPct": round(occupancy_pct, 2),
+                "AvgDwellSeconds": round(avg_dwell_seconds, 1),
+                "FusedMean": round(fused_mean, 4),
+                "FusedP90": round(fused_p90, 4)
+            })
         return pd.DataFrame(out)
 
     def _generate_daily_fused_profile(self, scores_df: pd.DataFrame) -> pd.DataFrame:

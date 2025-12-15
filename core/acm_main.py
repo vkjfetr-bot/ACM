@@ -376,7 +376,7 @@ def _compute_regime_volatility(regime_labels: np.ndarray, window: int = 20) -> f
 def _get_equipment_id(equipment_name: str) -> int:
     """
     Convert equipment name to numeric ID for asset-specific config.
-    For SQL mode, map known equipment to their database IDs.
+    Queries the Equipment table in SQL to get the actual EquipID.
     
     Returns:
         0 for global defaults, >0 for specific equipment
@@ -384,17 +384,32 @@ def _get_equipment_id(equipment_name: str) -> int:
     if not equipment_name:
         return 0
     
-    # SQL mode: use actual database IDs for known equipment
-    sql_equipment_mapping = {
-        'FD_FAN': 1,
-        'GAS_TURBINE': 2621,
-        # Add other equipment mappings as needed
-    }
-    
-    if equipment_name in sql_equipment_mapping:
-        return sql_equipment_mapping[equipment_name]
+    # Try to query Equipment table for the actual ID (direct connection)
+    try:
+        import pyodbc
+        import configparser
+        from pathlib import Path as P
+        
+        config_path = P(__file__).resolve().parent.parent / "configs" / "sql_connection.ini"
+        if config_path.exists():
+            config = configparser.ConfigParser()
+            config.read(config_path)
+            server = config.get('acm', 'server')
+            database = config.get('acm', 'database')
+            driver = config.get('acm', 'driver', fallback='ODBC Driver 18 for SQL Server')
+            
+            conn_str = f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};Trusted_Connection=yes;TrustServerCertificate=yes"
+            with pyodbc.connect(conn_str) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equipment_name,))
+                row = cur.fetchone()
+                if row:
+                    return int(row[0])
+    except Exception:
+        pass  # Fall through to hash-based fallback
     
     # Fallback: Generate deterministic ID from equipment name (1-9999 range)
+    # This ensures consistent IDs for equipment not yet in the database
     import hashlib
     hash_val = int(hashlib.md5(equipment_name.encode()).hexdigest(), 16)
     equip_id = (hash_val % 9999) + 1  # Range: 1-9999
