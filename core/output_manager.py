@@ -83,7 +83,9 @@ ALLOWED_TABLES = {
     'ACM_RUL_ByRegime',           # Per-regime RUL estimates with degradation rates
     'ACM_RegimeHazard',           # Per-regime hazard rates and survival probabilities
     'ACM_ForecastContext',        # Unified forecast context with OMR/drift/regime state
-    'ACM_AdaptiveThresholds_ByRegime'  # Per-regime adaptive thresholds
+    'ACM_AdaptiveThresholds_ByRegime',  # Per-regime adaptive thresholds
+    # v10.2.0 Resource monitoring
+    'ACM_ResourceMetrics',        # Per-section CPU/memory/time metrics
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
