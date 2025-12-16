@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Tuple, Optional, Sequence
 
 # Suppress benign numpy/pandas overflow warnings during variance calculations
 # These occur with large sensor values but produce correct results
-warnings.filterwarnings("ignore", category=RuntimeWarning, message="overflow encountered")
+# Use broad pattern to catch all overflow-related warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*overflow.*")
 
 import numpy as np
 import pandas as pd
