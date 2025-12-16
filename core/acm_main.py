@@ -10,7 +10,7 @@ import threading
 import warnings
 from datetime import datetime
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# NOTE: Parallel fitting with ThreadPoolExecutor removed v10.2.0 - causes BLAS/OpenMP deadlocks
 from typing import Any, Dict, List, Tuple, Optional, Sequence
 
 # Suppress benign numpy/pandas overflow warnings during variance calculations
@@ -1974,116 +1974,91 @@ def main() -> None:
                     regime_model.train_hash = cached_regime_hash
 
         # Fit models if not loaded from cache (MHAL removed v9.1.0)
+        # NOTE: Sequential fitting to avoid BLAS/OpenMP thread deadlocks with ThreadPoolExecutor
         if not all([ar1_detector or not ar1_enabled, 
                     pca_detector or not pca_enabled, 
                     iforest_detector or not iforest_enabled]):
             
-            with T.section("train.parallel_fit"):
-                Console.info("[PARALLEL] Starting parallel detector fitting...")
+            with T.section("train.detector_fit"):
+                Console.info("[MODEL] Starting detector fitting...")
                 fit_start_time = time.perf_counter()
                 
-                def _fit_ar1_task(c, d): 
-                    return AR1Detector(ar1_cfg=c).fit(d)
-                def _fit_pca_task(c, d): 
-                    return correlation.PCASubspaceDetector(pca_cfg=c).fit(d)
-                def _fit_iforest_task(c, d): 
-                    return outliers.IsolationForestDetector(if_cfg=c).fit(d)
-                def _fit_gmm_task(c, d): 
-                    return outliers.GMMDetector(gmm_cfg=c).fit(d)
-                def _fit_omr_task(c, d): 
-                    return OMRDetector(cfg=c).fit(d)
-
-                futures = {}
-                # Limit workers to avoid OOM or connection issues (usually I/O bound on DB or CPU bound on numpy)
-                # 4 workers is a safe default for typical ACM workloads
-                max_workers = min(4, os.cpu_count() or 4)
+                # AR1 Detector
+                if ar1_enabled and not ar1_detector:
+                    with T.section("fit.ar1"):
+                        ar1_cfg = cfg.get("models", {}).get("ar1", {}) or {}
+                        ar1_detector = AR1Detector(ar1_cfg=ar1_cfg).fit(train)
+                        Console.info("[AR1] Detector fitted")
                 
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    if ar1_enabled and not ar1_detector:
-                         futures[executor.submit(_fit_ar1_task, (cfg.get("models", {}).get("ar1", {}) or {}), train)] = 'ar1'
-                    
-                    if pca_enabled and not pca_detector:
-                         futures[executor.submit(_fit_pca_task, (cfg.get("models", {}).get("pca", {}) or {}), train)] = 'pca'
-                    
-                    # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
-                         
-                    if iforest_enabled and not iforest_detector:
-                         futures[executor.submit(_fit_iforest_task, (cfg.get("models", {}).get("iforest", {}) or {}), train)] = 'iforest'
-
-                    if gmm_enabled and not gmm_detector:
-                        gmm_cfg = (cfg.get("models", {}).get("gmm", {}) or {})
+                # PCA Subspace Detector
+                if pca_enabled and not pca_detector:
+                    with T.section("fit.pca"):
+                        pca_cfg = cfg.get("models", {}).get("pca", {}) or {}
+                        pca_detector = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
+                        Console.info(f"[PCA] Subspace detector fitted with {pca_detector.pca.n_components_} components.")
+                        # Cache TRAIN raw PCA scores to eliminate double computation in calibration
+                        pca_train_spe, pca_train_t2 = pca_detector.score(train)
+                        Console.info(f"[PCA] Cached train scores: SPE={len(pca_train_spe)} samples, T²={len(pca_train_t2)} samples")
+                        if output_manager:
+                            output_manager.write_pca_metrics(
+                                pca_detector=pca_detector,
+                                tables_dir=tables_dir,
+                                enable_sql=(sql_client is not None)
+                            )
+                
+                # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
+                
+                # Isolation Forest Detector
+                if iforest_enabled and not iforest_detector:
+                    with T.section("fit.iforest"):
+                        if_cfg = cfg.get("models", {}).get("iforest", {}) or {}
+                        iforest_detector = outliers.IsolationForestDetector(if_cfg=if_cfg).fit(train)
+                        Console.info("[IFOREST] Detector fitted")
+                
+                # GMM Detector
+                if gmm_enabled and not gmm_detector:
+                    with T.section("fit.gmm"):
+                        gmm_cfg = cfg.get("models", {}).get("gmm", {}) or {}
                         gmm_cfg.setdefault("covariance_type", "full")
                         gmm_cfg.setdefault("reg_covar", 1e-3)
                         gmm_cfg.setdefault("n_init", 3)
                         gmm_cfg.setdefault("random_state", 42)
-                        futures[executor.submit(_fit_gmm_task, gmm_cfg, train)] = 'gmm'
-                        
-                    if omr_enabled and not omr_detector:
-                        futures[executor.submit(_fit_omr_task, (cfg.get("models", {}).get("omr", {}) or {}), train)] = 'omr'
-
-                    # Process results as they complete
-                    for future in as_completed(futures):
-                        name = futures[future]
-                        try:
-                            res = future.result()
-                            
-                            if name == 'ar1': 
-                                ar1_detector = res
-                            
-                            elif name == 'pca': 
-                                pca_detector = res
-                                Console.info(f"[PCA] Subspace detector fitted with {pca_detector.pca.n_components_} components.")
-                                # Cache TRAIN raw PCA scores to eliminate double computation in calibration
-                                pca_train_spe, pca_train_t2 = pca_detector.score(train)
-                                Console.info(f"[PCA] Cached train scores: SPE={len(pca_train_spe)} samples, T²={len(pca_train_t2)} samples")
-                                if output_manager:
-                                    output_manager.write_pca_metrics(
-                                        pca_detector=pca_detector,
-                                        tables_dir=tables_dir,
-                                        enable_sql=(sql_client is not None)
+                        gmm_detector = outliers.GMMDetector(gmm_cfg=gmm_cfg).fit(train)
+                        Console.info("[GMM] Detector fitted")
+                
+                # OMR Detector
+                if omr_enabled and not omr_detector:
+                    with T.section("fit.omr"):
+                        omr_cfg = cfg.get("models", {}).get("omr", {}) or {}
+                        omr_detector = OMRDetector(cfg=omr_cfg).fit(train)
+                        # OMR-UPGRADE: Capture diagnostics and write to SQL
+                        if omr_detector._is_fitted and sql_client:
+                            try:
+                                omr_diagnostics = omr_detector.get_diagnostics()
+                                if omr_diagnostics.get("fitted"):
+                                    diag_df = pd.DataFrame([{
+                                        "RunID": run_id,
+                                        "EquipID": equip_id,
+                                        "ModelType": omr_diagnostics["model_type"],
+                                        "NComponents": omr_diagnostics["n_components"],
+                                        "TrainSamples": omr_diagnostics["n_samples"],
+                                        "TrainFeatures": omr_diagnostics["n_features"],
+                                        "TrainResidualStd": omr_diagnostics["train_residual_std"],
+                                        "CalibrationStatus": "VALID",
+                                        "FitTimestamp": pd.Timestamp.now()
+                                    }])
+                                    output_manager.write_dataframe(
+                                        diag_df,
+                                        run_dir / "tables" / "omr_diagnostics.csv",
+                                        sql_table="ACM_OMR_Diagnostics",
+                                        add_created_at=True
                                     )
-                            
-                            # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
-                                    
-                            elif name == 'iforest': 
-                                iforest_detector = res
-                                
-                            elif name == 'gmm': 
-                                gmm_detector = res
-                                
-                            elif name == 'omr':
-                                omr_detector = res
-                                # OMR-UPGRADE: Capture diagnostics and write to SQL
-                                if omr_detector._is_fitted and sql_client:
-                                    try:
-                                        omr_diagnostics = omr_detector.get_diagnostics()
-                                        if omr_diagnostics.get("fitted"):
-                                            diag_df = pd.DataFrame([{
-                                                "RunID": run_id,
-                                                "EquipID": equip_id,
-                                                "ModelType": omr_diagnostics["model_type"],
-                                                "NComponents": omr_diagnostics["n_components"],
-                                                "TrainSamples": omr_diagnostics["n_samples"],
-                                                "TrainFeatures": omr_diagnostics["n_features"],
-                                                "TrainResidualStd": omr_diagnostics["train_residual_std"],
-                                                "CalibrationStatus": "VALID",
-                                                "FitTimestamp": pd.Timestamp.now()
-                                            }])
-                                            output_manager.write_dataframe(
-                                                diag_df,
-                                                run_dir / "tables" / "omr_diagnostics.csv",
-                                                sql_table="ACM_OMR_Diagnostics",
-                                                add_created_at=True
-                                            )
-                                            Console.info(f"[OMR] Diagnostics written: {omr_diagnostics['model_type'].upper()} model")
-                                    except Exception as e:
-                                        Console.warn(f"[OMR] Failed to write diagnostics: {e}")
-                                        
-                        except Exception as e:
-                            Console.error(f"[PARALLEL] Failed to fit {name}: {e}")
-                            raise
+                                    Console.info(f"[OMR] Diagnostics written: {omr_diagnostics['model_type'].upper()} model")
+                            except Exception as e:
+                                Console.warn(f"[OMR] Failed to write diagnostics: {e}")
+                        Console.info("[OMR] Detector fitted")
 
-            Console.info(f"[PARALLEL] All detectors fitted in {time.perf_counter()-fit_start_time:.2f}s")
+                Console.info(f"[MODEL] All detectors fitted in {time.perf_counter()-fit_start_time:.2f}s")
 
         # Validate required detectors are present (skip disabled ones) - MHAL removed v9.1.0
         required_detectors = []
