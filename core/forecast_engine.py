@@ -290,7 +290,7 @@ class ForecastEngine:
                     Console.warn(f"[ForecastEngine] Regime-conditioned forecasting skipped: {e}")
             
             # Step 10: Update state with diagnostics (M9)
-            state.model_params = degradation_model.get_parameters()
+            state.model_coefficients_json = degradation_model.get_parameters()
             state.updated_at = datetime.now()
             
             # Store diagnostics in state for persistence
@@ -409,9 +409,9 @@ class ForecastEngine:
         )
         
         # Warm-start from previous state if available
-        if state.model_params:
+        if state.model_coefficients_json:
             try:
-                model.set_parameters(state.model_params)
+                model.set_parameters(state.model_coefficients_json)
                 Console.info("[ForecastEngine] Warm-started model from previous state")
             except Exception as e:
                 Console.warn(f"[ForecastEngine] Failed to warm-start model: {e}")
@@ -636,15 +636,9 @@ class ForecastEngine:
                 'CreatedAt': datetime.now()
             })
             
-            # Create temp CSV path for OutputManager signature
-            from pathlib import Path
-            temp_dir = Path("artifacts") / f"equip_{self.equip_id}" / "forecast"
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            health_path = temp_dir / f"health_forecast_{self.run_id}.csv"
-            
             self.output_manager.write_dataframe(
                 df_health_forecast,
-                file_path=health_path,
+                artifact_name='acm_health_forecast',
                 sql_table='ACM_HealthForecast',
                 add_created_at=False
             )
@@ -661,10 +655,9 @@ class ForecastEngine:
                 'CreatedAt': datetime.now()
             })
             
-            failure_path = temp_dir / f"failure_forecast_{self.run_id}.csv"
             self.output_manager.write_dataframe(
                 df_failure_forecast,
-                file_path=failure_path,
+                artifact_name='acm_failure_forecast',
                 sql_table='ACM_FailureForecast',
                 add_created_at=False
             )
@@ -755,10 +748,9 @@ class ForecastEngine:
                 'CreatedAt': [datetime.now()]
             })
             
-            rul_path = temp_dir / f"rul_summary_{self.run_id}.csv"
             self.output_manager.write_dataframe(
                 df_rul,
-                file_path=rul_path,
+                artifact_name='acm_rul_summary',
                 sql_table='ACM_RUL',
                 add_created_at=False
             )
@@ -769,10 +761,9 @@ class ForecastEngine:
             # NEW: ACM_SensorForecast - Physical sensor forecasts
             sensor_forecast_df = self._generate_sensor_forecasts(sensor_attributions, forecast_results)
             if sensor_forecast_df is not None and not sensor_forecast_df.empty:
-                sensor_path = temp_dir / f"sensor_forecast_{self.run_id}.csv"
                 self.output_manager.write_dataframe(
                     sensor_forecast_df,
-                    file_path=sensor_path,
+                    artifact_name='acm_sensor_forecast',
                     sql_table='ACM_SensorForecast',
                     add_created_at=False
                 )
@@ -808,10 +799,9 @@ class ForecastEngine:
                     )
                     if mvar_result is not None and not mvar_result.forecast_df.empty:
                         # Write multivariate forecasts to SQL
-                        mvar_path = temp_dir / f"multivariate_forecast_{self.run_id}.csv"
                         self.output_manager.write_dataframe(
                             mvar_result.forecast_df,
-                            file_path=mvar_path,
+                            artifact_name='acm_multivariate_forecast',
                             sql_table='ACM_MultivariateForecast',
                             add_created_at=True
                         )

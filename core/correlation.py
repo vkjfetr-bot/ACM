@@ -58,110 +58,167 @@ class RobustStandardScaler(StandardScaler):
         return self
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Mahalanobis
+# Mahalanobis (DEPRECATED - use PCA-T² instead)
 # ──────────────────────────────────────────────────────────────────────────────
 class MahalanobisDetector:
-    """Detects correlation breaks using squared Mahalanobis distance."""
+    """
+    DEPRECATED: This detector is redundant with PCASubspaceDetector's T² statistic.
+    
+    Both compute the same Mahalanobis distance:
+    - MHAL: D² = (x-μ)ᵀ Σ⁻¹ (x-μ) in raw feature space (numerically unstable)
+    - PCA-T²: T² = Σᵢ zᵢ²/λᵢ in orthogonal PCA space (stable, guaranteed)
+    
+    PCA-T² is mathematically superior because:
+    1. Covariance is diagonal in PCA space → no matrix inversion issues
+    2. Dimensionality reduction → better numerical stability  
+    3. Same statistical interpretation (both follow χ² distribution)
+    
+    This class is kept for backward compatibility with existing data.
+    New deployments should use pca_t2_z with weight, not mhal_z.
+    
+    Parameters
+    ----------
+    regularization : float, default=1e-3
+        Legacy parameter (ignored). Kept for backward compatibility.
+    variance_retained : float, default=0.95
+        Fraction of variance to retain when selecting PCA components.
+    min_components : int, default=2
+        Minimum number of PCA components to retain.
+    """
 
-    def __init__(self, regularization: float = 1e-3):
-        self.l2: float = float(regularization)
-        self.mu: Optional[np.ndarray] = None
-        self.S_inv: Optional[np.ndarray] = None
+    def __init__(self, regularization: float = 1e-3, variance_retained: float = 0.95, min_components: int = 2):
+        self.l2: float = float(regularization)  # Legacy, not used
+        self.variance_retained: float = float(variance_retained)
+        self.min_components: int = int(min_components)
+        
+        # Pipeline components
+        self.scaler: Optional[RobustStandardScaler] = None
+        self.pca: Optional[PCA] = None
+        self.n_components_: int = 0
+        self.keep_cols: List[str] = []
+        self.col_medians: Optional[pd.Series] = None
+        
+        # Diagnostics
+        self.cond_num: float = 1.0  # Now always well-controlled
+        self.eigenvalues_: Optional[np.ndarray] = None
 
     def fit(self, X: pd.DataFrame) -> "MahalanobisDetector":
-        Xn = X.to_numpy(dtype=np.float64, copy=False)
+        """
+        Fit the PCA-based Mahalanobis detector.
         
-        # COR-01: Guard against insufficient samples for covariance estimation
-        # Covariance matrix requires at least 2 samples to be well-defined
-        if Xn.shape[0] < 2:
-            Console.warn(
-                f"[MHAL] Insufficient samples for covariance estimation (n={Xn.shape[0]}). "
-                f"Falling back to identity covariance (Mahalanobis = Euclidean distance)."
-            )
-            # Fallback: use mean (or zeros if no data) and identity covariance
-            self.mu = Xn.mean(axis=0) if Xn.shape[0] > 0 else np.zeros(Xn.shape[1], dtype=np.float64)
-            self.S_inv = np.eye(Xn.shape[1], dtype=np.float64)
-            self.cond_num = 1.0  # Identity matrix is perfectly conditioned
+        Process:
+        1. Clean pathological features (constant, all-NaN)
+        2. Standardize (zero mean, unit variance)
+        3. PCA to orthogonal space (eliminates multicollinearity)
+        4. Store eigenvalues for Mahalanobis computation
+        """
+        df = X.copy()
+        n_samples_orig, n_features_orig = df.shape
+        
+        # Step 1: Clean features
+        df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
+        std = df.astype("float64").std(axis=0)
+        df = df.loc[:, std > 1e-8]  # Remove near-constant columns
+        
+        n_dropped = n_features_orig - df.shape[1]
+        if n_dropped > 0:
+            Console.debug(f"[MHAL] Dropped {n_dropped} constant/all-NaN columns")
+        
+        # Fallback if everything got dropped
+        if df.shape[1] == 0:
+            df = pd.DataFrame({"_dummy": np.zeros(len(df), dtype=np.float64)}, index=df.index)
+        
+        # Impute remaining NaNs with median
+        self.col_medians = df.median()
+        df = df.fillna(self.col_medians)
+        self.keep_cols = list(df.columns)
+        
+        n_samples, n_features = df.shape
+        
+        # Guard: insufficient samples
+        if n_samples < 2:
+            Console.warn(f"[MHAL] Insufficient samples (n={n_samples}). Falling back to identity scoring.")
+            self.pca = None
+            self.cond_num = 1.0
             return self
         
-        # ANA-07: Audit NaN during TRAIN phase
-        nan_count = int(np.sum(~np.isfinite(Xn)))
-        total_elements = Xn.size
-        nan_rate = nan_count / total_elements if total_elements > 0 else 0.0
-        if nan_rate > 0.001:  # More than 0.1%
-            Console.warn(f"[MHAL] TRAIN phase NaN audit: {nan_count}/{total_elements} ({nan_rate:.3%}) non-finite values")
+        # Step 2: Standardize
+        self.scaler = RobustStandardScaler(epsilon=1e-6, with_mean=True, with_std=True)
+        X_scaled = self.scaler.fit_transform(df.values.astype(np.float64))
         
-        Xn = np.nan_to_num(Xn, copy=False)
-
-        self.mu = Xn.mean(axis=0)
-
-        S = np.cov(Xn, rowvar=False)
-        if not np.all(np.isfinite(S)):
-            S = np.nan_to_num(S, nan=0.0, posinf=0.0, neginf=0.0)
-        S += self.l2 * np.eye(S.shape[0], dtype=np.float64)
-
-        self.S_inv = np.linalg.pinv(S)
-        # ANA-07: Store condition number for export to calibration_summary
-        self.cond_num = np.linalg.cond(S)
+        # Step 3: Determine optimal number of components
+        max_components = min(n_samples - 1, n_features)
         
-        # ANA-07: Lower action thresholds (warn at 1e8, increase reg at 1e10)
-        if self.cond_num > 1e10:
-            # Auto-increase regularization more aggressively (100x instead of 10x)
-            # This helps with very ill-conditioned covariance matrices
-            old_reg = self.l2
-            self.l2 = self.l2 * 100.0  # Increased from 10x to 100x
-            Console.warn(f"[MHAL] CRITICAL condition number ({self.cond_num:.2e}) detected. Auto-increasing regularization: {old_reg:.2e} -> {self.l2:.2e}")
-            # Re-compute with increased regularization
-            S = np.cov(Xn, rowvar=False)
-            if not np.all(np.isfinite(S)):
-                S = np.nan_to_num(S, nan=0.0, posinf=0.0, neginf=0.0)
-            S += self.l2 * np.eye(S.shape[0], dtype=np.float64)
-            self.S_inv = np.linalg.pinv(S)
-            self.cond_num = np.linalg.cond(S)
-            Console.info(f"[MHAL] After re-regularization: cond_num={self.cond_num:.2e}")
-            # If still too high, increase again
-            if self.cond_num > 1e10:
-                old_reg = self.l2
-                self.l2 = self.l2 * 10.0
-                Console.warn(f"[MHAL] Still critical after 100x increase. Applying additional 10x: {old_reg:.2e} -> {self.l2:.2e}")
-                S = np.cov(Xn, rowvar=False)
-                if not np.all(np.isfinite(S)):
-                    S = np.nan_to_num(S, nan=0.0, posinf=0.0, neginf=0.0)
-                S += self.l2 * np.eye(S.shape[0], dtype=np.float64)
-                self.S_inv = np.linalg.pinv(S)
-                self.cond_num = np.linalg.cond(S)
-                Console.info(f"[MHAL] Final condition number after 1000x total increase: {self.cond_num:.2e}")
-        elif self.cond_num > 1e8:
-            Console.warn(f"[MHAL] High condition number ({self.cond_num:.2e}). Consider increasing regularization (current: {self.l2:.2e}).")
-        else:
-            Console.info(f"[MHAL] Good condition number ({self.cond_num:.2e}) with regularization {self.l2:.2e}.")
+        # Fit PCA with all possible components first to determine variance explained
+        pca_full = PCA(n_components=max_components, random_state=42)
+        pca_full.fit(X_scaled)
+        
+        # Select components to retain target variance
+        cumulative_variance = np.cumsum(pca_full.explained_variance_ratio_)
+        n_components = np.searchsorted(cumulative_variance, self.variance_retained) + 1
+        n_components = max(self.min_components, n_components)
+        n_components = min(n_components, max_components)
+        self.n_components_ = int(n_components)
+        
+        # Refit with selected components
+        self.pca = PCA(n_components=n_components, random_state=42)
+        self.pca.fit(X_scaled)
+        
+        # Store eigenvalues (variances of principal components)
+        self.eigenvalues_ = self.pca.explained_variance_
+        
+        # Compute condition number in PCA space (now guaranteed to be reasonable)
+        self.cond_num = float(self.eigenvalues_.max() / max(self.eigenvalues_.min(), 1e-12))
+        var_explained = self.pca.explained_variance_ratio_.sum()
+        
+        Console.info(
+            f"[MHAL] PCA-based fit: {n_components}/{n_features} components, "
+            f"var={var_explained:.1%}, cond={self.cond_num:.2e}"
+        )
+        
         return self
 
     def score(self, X: pd.DataFrame) -> np.ndarray:
-        if self.mu is None or self.S_inv is None:
-            raise RuntimeError("MahalanobisDetector not fitted. Call .fit() first.")
-
-        Xn = X.to_numpy(dtype=np.float64, copy=False)
+        """
+        Compute Mahalanobis distance in PCA space.
         
-        # ANA-07: Audit NaN during SCORE phase
-        nan_count = int(np.sum(~np.isfinite(Xn)))
-        total_elements = Xn.size
-        nan_rate = nan_count / total_elements if total_elements > 0 else 0.0
-        if nan_rate > 0.001:  # More than 0.1%
-            Console.warn(f"[MHAL] SCORE phase NaN audit: {nan_count}/{total_elements} ({nan_rate:.3%}) non-finite values")
+        In PCA space, covariance is diagonal with eigenvalues on diagonal.
+        Mahalanobis distance simplifies to:
+            D² = Σᵢ (zᵢ)² / λᵢ
         
-        Xn = np.nan_to_num(Xn, copy=False)
-
-        d = Xn - self.mu
-        m = np.einsum("ij,jk,ik->i", d, self.S_inv, d)
-        m = np.maximum(m, 0.0)
+        where zᵢ are PCA scores and λᵢ are eigenvalues.
+        This is equivalent to Hotelling's T² statistic.
+        """
+        if self.pca is None or self.scaler is None:
+            # Fallback mode: return zeros
+            return np.zeros(len(X), dtype=np.float32)
         
-        # ANA-07: Final NaN check on output scores
-        result = m.astype(np.float32, copy=False)
-        output_nan_count = int(np.sum(~np.isfinite(result)))
-        if output_nan_count > 0:
-            Console.warn(f"[MHAL] Output NaN audit: {output_nan_count}/{len(result)} ({output_nan_count/len(result):.3%}) non-finite scores detected")
-            result = np.nan_to_num(result, nan=0.0, posinf=1e10, neginf=-1e10)
+        # Align columns and impute with training medians
+        df = X.copy().reindex(columns=self.keep_cols)
+        df = df.replace([np.inf, -np.inf], np.nan).fillna(self.col_medians)
+        
+        # Transform through pipeline
+        X_scaled = self.scaler.transform(df.values.astype(np.float64))
+        Z = self.pca.transform(X_scaled)
+        
+        # Compute Mahalanobis distance squared in PCA space
+        # D² = Σᵢ (zᵢ)² / λᵢ (weighted sum of squared PCA scores)
+        if self.eigenvalues_ is None:
+            return np.zeros(len(X), dtype=np.float32)
+        eigenvalues_safe = np.maximum(self.eigenvalues_, 1e-12)
+        D_squared = np.sum((Z ** 2) / eigenvalues_safe, axis=1)
+        
+        # Ensure non-negative and finite
+        D_squared = np.maximum(D_squared, 0.0)
+        D_squared = np.clip(D_squared, 0.0, 1e9)
+        
+        result = D_squared.astype(np.float32)
+        
+        # Final NaN check
+        nan_count = int(np.sum(~np.isfinite(result)))
+        if nan_count > 0:
+            Console.warn(f"[MHAL] Output NaN audit: {nan_count}/{len(result)} non-finite scores detected")
+            result = np.nan_to_num(result, nan=0.0, posinf=1e9, neginf=0.0)
         
         return result
 

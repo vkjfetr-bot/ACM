@@ -469,7 +469,6 @@ def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] =
     except Exception as e:
         Console.warn(f"[REGIME_STATE] Failed to load state from SQL: {e}")
         return None
-        return None
 
 
 # ============================================================================
@@ -563,7 +562,8 @@ class ModelVersionManager:
         - Serializes all model types to binary using joblib
         - Stores comprehensive metadata as JSON
         - Uses atomic transactions (rollback on any failure)
-        - Handles special model types (ar1_params, mhal_params, omr_model)
+        - Handles special model types (ar1_params, omr_model)
+        - Note: mhal_params removed v9.1.0 (MHAL deprecated)
         """
         Console.info(f"[MODEL-SQL] Saving models to SQL ModelRegistry v{version}...")
         
@@ -951,31 +951,41 @@ class ModelVersionManager:
     
     def list_versions(self) -> List[Dict[str, Any]]:
         """
-        List all available model versions with metadata.
+        List all available model versions with metadata from SQL ModelRegistry.
         
         Returns:
             List of version metadata dicts
         """
         versions = []
-        for v_dir in sorted(self.models_root.glob("v*")):
-            if not v_dir.is_dir():
-                continue
+        
+        if not self.sql_client or self.equip_id is None:
+            Console.warn("[MODEL] Cannot list versions - SQL client/equip_id missing")
+            return versions
+        
+        try:
+            cur = self.sql_client.cursor()
+            cur.execute("""
+                SELECT DISTINCT Version, MIN(EntryDateTime) AS FirstSaved, COUNT(*) AS ModelCount
+                FROM ModelRegistry 
+                WHERE EquipID = ?
+                GROUP BY Version
+                ORDER BY Version DESC
+            """, (self.equip_id,))
             
-            try:
-                v_num = int(v_dir.name[1:])
-            except ValueError:
-                Console.warn(f"[MODEL] Skipping malformed model directory: {v_dir.name}")
-                continue
+            rows = cur.fetchall()
+            cur.close()
             
-            manifest_path = v_dir / "manifest.json"
-            if manifest_path.exists():
-                with open(manifest_path, "r") as f:
-                    manifest = json.load(f)
-                    versions.append({
-                        "version": v_num,
-                        "path": v_dir,
-                        "manifest": manifest
-                    })
+            for row in rows:
+                versions.append({
+                    "version": int(row[0]),
+                    "saved_at": str(row[1]) if row[1] else None,
+                    "model_count": int(row[2]),
+                    "source": "sql"
+                })
+            
+            Console.info(f"[MODEL] Found {len(versions)} versions in SQL ModelRegistry")
+        except Exception as e:
+            Console.warn(f"[MODEL] Failed to list versions from SQL: {e}")
         
         return versions
 

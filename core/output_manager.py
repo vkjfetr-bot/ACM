@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
-import warnings
+import warnings 
 from datetime import datetime, timezone
 
 # FOR-DQ-02: Use centralized timestamp normalization
@@ -41,7 +41,8 @@ from utils.timestamp_utils import (
 
 from utils.detector_labels import get_detector_label, format_culprit_label
 
-from utils.logger import Console, Heartbeat
+from utils.acm_logger import ACMLog
+from utils.logger import Heartbeat
 
 # whitelist of SQL tables we will write to (defined early so class methods can use it)
 ALLOWED_TABLES = {
@@ -235,14 +236,12 @@ def _coerce_local_and_filter_future(df: pd.DataFrame, label: str, now_cutoff: pd
     before_drop = len(df)
     df = df[~df.index.isna()]
     if before_drop and len(df) != before_drop:
-        Console.warn(f"[DATA] Dropped {before_drop - len(df)} rows with invalid timestamps from {label}")
+        ACMLog.warn("DATA", f"Dropped {before_drop - len(df)} rows with invalid timestamps from {label}")
 
     future_mask = df.index > now_cutoff
     future_rows = int(future_mask.sum())
     if future_rows:
-        Console.warn(
-            f"[DATA] Dropping {future_rows} future timestamp row(s) from {label} (cutoff={now_cutoff:%Y-%m-%d %H:%M:%S})"
-        )
+        ACMLog.warn("DATA", f"Dropping {future_rows} future timestamp row(s) from {label} (cutoff={now_cutoff:%Y-%m-%d %H:%M:%S})")
         df = df[~future_mask]
 
     return df, tz_stripped, future_rows
@@ -619,7 +618,7 @@ class OutputManager:
             }
         }
 
-        Console.info(f"[OUTPUT] Manager initialized (batch_size={batch_size}, batching={'ON' if enable_batching else 'OFF'}, sql_cache={sql_health_cache_seconds}s, io_workers={max_io_workers}, flush={batch_flush_rows} rows/{batch_flush_seconds}s, max_futures={max_in_flight_futures})")
+        ACMLog.output(f"Manager initialized (batch_size={batch_size}, batching={'ON' if enable_batching else 'OFF'}, sql_cache={sql_health_cache_seconds}s, io_workers={max_io_workers}, flush={batch_flush_rows} rows/{batch_flush_seconds}s, max_futures={max_in_flight_futures})")
     
     @contextmanager
     def batched_transaction(self):
@@ -647,23 +646,23 @@ class OutputManager:
         start_time = time.time()
         
         try:
-            Console.info("[OUTPUT] Starting batched transaction")
+            ACMLog.output("Starting batched transaction")
             yield
             # Commit at end of transaction
             try:
                 if hasattr(self.sql_client, "commit"):
                     self.sql_client.commit()
-                    Console.info(f"[OUTPUT] Called sql_client.commit()")
+                    ACMLog.output("Called sql_client.commit()")
                 elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
                     if not getattr(self.sql_client.conn, "autocommit", True):
                         self.sql_client.conn.commit()
-                        Console.info(f"[OUTPUT] Called sql_client.conn.commit()")
+                        ACMLog.output("Called sql_client.conn.commit()")
                     else:
-                        Console.warn(f"[OUTPUT] Autocommit is ON - no explicit commit needed")
+                        ACMLog.warn("OUTPUT", "Autocommit is ON - no explicit commit needed")
                 elapsed = time.time() - start_time
-                Console.info(f"[OUTPUT] Batched transaction committed ({elapsed:.2f}s)")
+                ACMLog.output(f"Batched transaction committed ({elapsed:.2f}s)")
             except Exception as e:
-                Console.error(f"[OUTPUT] Batched transaction commit failed: {e}")
+                ACMLog.error("OUTPUT", f"Batched transaction commit failed: {e}")
                 raise
         except Exception as e:
             # Rollback on error
@@ -672,7 +671,7 @@ class OutputManager:
                     self.sql_client.rollback()
                 elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "rollback"):
                     self.sql_client.conn.rollback()
-                Console.error(f"[OUTPUT] Batched transaction rolled back: {e}")
+                ACMLog.error("OUTPUT", f"Batched transaction rolled back: {e}")
             except:
                 pass
             raise
@@ -712,7 +711,7 @@ class OutputManager:
         # CSV mode: Cold-start mode: If no training data, use first N% of score data for training
         cold_start_mode = False
         if not train_path and score_path:
-            Console.info("[DATA] Cold-start mode: No training data provided, will split score data")
+            ACMLog.data("Cold-start mode: No training data provided, will split score data")
             cold_start_mode = True
         elif not train_path or not score_path:
             raise ValueError("[DATA] Please set data.train_csv and data.score_csv in config.")
@@ -738,7 +737,7 @@ class OutputManager:
         # COLD-02: Configurable cold-start split ratio (default 0.6 = 60% train, 40% score)
         cold_start_split_ratio = float(_cfg_get(data_cfg, "cold_start_split_ratio", 0.6))
         if not (0.1 <= cold_start_split_ratio <= 0.9):
-            Console.warn(f"[DATA] Invalid cold_start_split_ratio={cold_start_split_ratio}, using default 0.6")
+            ACMLog.warn("DATA", f"Invalid cold_start_split_ratio={cold_start_split_ratio}, using default 0.6")
             cold_start_split_ratio = 0.6
         
         # COLD-03: Minimum samples validation (default 500)
@@ -761,10 +760,10 @@ class OutputManager:
             
             # COLD-03: Warn if training samples below recommended minimum
             if len(train_raw) < min_train_samples:
-                Console.warn(f"[DATA] Cold-start training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)")
-                Console.warn(f"[DATA] Model quality may be degraded. Consider: more data, higher split_ratio (current: {cold_start_split_ratio:.2f})")
+                ACMLog.warn("DATA", f"Cold-start training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)")
+                ACMLog.warn("DATA", f"Model quality may be degraded. Consider: more data, higher split_ratio (current: {cold_start_split_ratio:.2f})")
             
-            Console.info(f"[DATA] Cold-start split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows")
+            ACMLog.data(f"Cold-start split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows")
             hb.stop()
         else:
             hb = Heartbeat("Reading CSVs (train & score)", next_hint="parse timestamps", eta_hint=10).start()
@@ -797,8 +796,8 @@ class OutputManager:
                 # Already warned during split
                 pass
             else:
-                Console.warn(f"[DATA] Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)")
-                Console.warn(f"[DATA] Model quality may be degraded. Consider providing more training data.")
+                ACMLog.warn("DATA", f"Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)")
+                ACMLog.warn("DATA", "Model quality may be degraded. Consider providing more training data.")
 
         # Keep numeric only (same set across train/score)
         hb = Heartbeat("Selecting numeric sensor columns", next_hint="cadence check", eta_hint=4).start()
@@ -825,7 +824,7 @@ class OutputManager:
 
         native_train = _native_cadence_secs(cast(pd.DatetimeIndex, train.index))
         if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
-            Console.warn(f"[WARN] Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) — skipping to avoid upsample.")
+            ACMLog.warn("DATA", f"Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) — skipping to avoid upsample.")
             sampling_secs = None
 
         if sampling_secs is not None:
@@ -841,7 +840,7 @@ class OutputManager:
             safe_sampling = float(sampling_secs) if sampling_secs is not None else 1.0
             approx_rows = int(span_secs / max(1.0, safe_sampling)) + 1
             if len(train) and approx_rows > explode_guard_factor * len(train):
-                Console.warn(f"[WARN] Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.")
+                ACMLog.warn("DATA", f"Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.")
                 will_resample = False
 
         if will_resample:
@@ -894,13 +893,13 @@ class OutputManager:
         # Only used during coldstart - regular batch mode uses ALL data for scoring
         cold_start_split_ratio = float(_cfg_get(data_cfg, "cold_start_split_ratio", 0.6))
         if not (0.1 <= cold_start_split_ratio <= 0.9):
-            Console.warn(f"[DATA] Invalid cold_start_split_ratio={cold_start_split_ratio}, using default 0.6")
+            ACMLog.warn("DATA", f"Invalid cold_start_split_ratio={cold_start_split_ratio}, using default 0.6")
             cold_start_split_ratio = 0.6
         
         min_train_samples = int(_cfg_get(data_cfg, "min_train_samples", 500))
         
-        Console.info(f"[DATA] Loading from SQL historian: {equipment_name}")
-        Console.info(f"[DATA] Time range: {start_utc} to {end_utc}")
+        ACMLog.data(f"Loading from SQL historian: {equipment_name}")
+        ACMLog.data(f"Time range: {start_utc} to {end_utc}")
         
         # Call stored procedure to get all data for time range
         # Pass EquipmentName directly - SP will resolve to correct data table (e.g., FD_FAN_Data)
@@ -926,10 +925,10 @@ class OutputManager:
             # Convert to DataFrame
             df_all = pd.DataFrame.from_records(rows, columns=columns)
             
-            Console.info(f"[DATA] Retrieved {len(df_all)} rows from SQL historian")
+            ACMLog.data(f"Retrieved {len(df_all)} rows from SQL historian")
             
         except Exception as e:
-            Console.error(f"[DATA] Failed to load from SQL historian: {e}")
+            ACMLog.error("DATA", f"Failed to load from SQL historian: {e}")
             raise
         finally:
             try:
@@ -947,7 +946,7 @@ class OutputManager:
         # Robust timestamp handling for SQL historian: if configured column is missing
         # but the standard EntryDateTime column is present, fall back to it.
         if ts_col not in df_all.columns and "EntryDateTime" in df_all.columns:
-            Console.warn(
+            ACMLog.warn(
                 f"[DATA] Timestamp column '{ts_col}' not found in SQL historian results; "
                 "falling back to 'EntryDateTime'."
             )
@@ -964,15 +963,15 @@ class OutputManager:
             
             # Warn if training samples below minimum
             if len(train_raw) < min_train_samples:
-                Console.warn(f"[DATA] Training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)")
-                Console.warn(f"[DATA] Model quality may be degraded. Consider: wider time window, higher split_ratio (current: {cold_start_split_ratio:.2f})")
+                ACMLog.warn("DATA", f"Training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)")
+                ACMLog.warn("DATA", f"Model quality may be degraded. Consider: wider time window, higher split_ratio (current: {cold_start_split_ratio:.2f})")
             
-            Console.info(f"[DATA] COLDSTART Split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows")
+            ACMLog.data(f"COLDSTART Split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows")
         else:
             # REGULAR BATCH MODE: Use ALL data for scoring, load baseline from cache
             train_raw = pd.DataFrame()  # Empty train, will be loaded from baseline_buffer
             score_raw = df_all.copy()
-            Console.info(f"[DATA] BATCH MODE: All {len(score_raw)} rows allocated to scoring (baseline from cache)")
+            ACMLog.data(f"BATCH MODE: All {len(score_raw)} rows allocated to scoring (baseline from cache)")
         
         hb.stop()
         
@@ -999,7 +998,7 @@ class OutputManager:
         
         # Validate training sample count
         if len(train) < min_train_samples:
-            Console.warn(f"[DATA] Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)")
+            ACMLog.warn("DATA", f"Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)")
         
         # Keep numeric only (same set across train/score)
         hb = Heartbeat("Selecting numeric sensor columns", next_hint="cadence check", eta_hint=2).start()
@@ -1013,7 +1012,7 @@ class OutputManager:
             train = pd.DataFrame(columns=kept)  # Empty train with correct columns
             score = score[kept]
             score = score.astype(np.float32)
-            Console.info(f"[DATA] BATCH MODE: Train empty (will load from baseline_buffer), using all {len(kept)} score columns")
+            ACMLog.data(f"BATCH MODE: Train empty (will load from baseline_buffer), using all {len(kept)} score columns")
         else:
             # COLDSTART MODE or TRAIN EXISTS: Use intersection of train/score columns
             train_num = _infer_numeric_cols(train)
@@ -1027,7 +1026,7 @@ class OutputManager:
         
         hb.stop()
         
-        Console.info(f"[DATA] Kept {len(kept)} numeric columns, dropped {len(dropped)} non-numeric")
+        ACMLog.data(f"Kept {len(kept)} numeric columns, dropped {len(dropped)} non-numeric")
         
         # Cadence check + resampling (same logic as CSV mode)
         _sampling = data_cfg.get("sampling_secs", 1)
@@ -1052,7 +1051,7 @@ class OutputManager:
         
         native_train = _native_cadence_secs(cast(pd.DatetimeIndex, train.index))
         if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
-            Console.warn(f"[WARN] Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) — skipping to avoid upsample.")
+            ACMLog.warn("DATA", f"Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) — skipping to avoid upsample.")
             sampling_secs = None
         
         if sampling_secs is not None:
@@ -1068,7 +1067,7 @@ class OutputManager:
             safe_sampling = float(sampling_secs) if sampling_secs is not None else 1.0
             approx_rows = int(span_secs / max(1.0, safe_sampling)) + 1
             if len(train) and approx_rows > explode_guard_factor * len(train):
-                Console.warn(f"[WARN] Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.")
+                ACMLog.warn("DATA", f"Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.")
                 will_resample = False
 
         if will_resample:
@@ -1094,7 +1093,7 @@ class OutputManager:
             dup_timestamps_removed=0
         )
         
-        Console.info(f"[DATA] SQL historian load complete: {len(train)} train + {len(score)} score = {len(train) + len(score)} total rows")
+        ACMLog.data(f"SQL historian load complete: {len(train)} train + {len(score)} score = {len(train) + len(score)} total rows")
         return train, score, meta
     
     def _check_sql_health(self) -> bool:
@@ -1121,7 +1120,7 @@ class OutputManager:
             self._sql_health_cache = (now, False)
             self.stats['sql_health_checks'] += 1
             self.stats['sql_failures'] += 1
-            Console.error(f"[OUTPUT] SQL health check failed: {e}")
+            ACMLog.error("OUTPUT", f"SQL health check failed: {e}")
             return False
         finally:
             try:
@@ -1155,7 +1154,7 @@ class OutputManager:
         num_only = out.select_dtypes(include=[np.number])
         inf_count = np.isinf(num_only.values).sum() if not num_only.empty else 0
         if inf_count > 0:
-            Console.warn(f"[OUTPUT] Replaced {int(inf_count)} Inf/-Inf values with None for SQL compatibility")
+            ACMLog.warn("OUTPUT", f"Replaced {int(inf_count)} Inf/-Inf values with None for SQL compatibility")
 
         # Replace in one pass
         out = out.replace({np.inf: None, -np.inf: None})
@@ -1208,7 +1207,7 @@ class OutputManager:
     
     def write_dataframe(self, 
                        df: pd.DataFrame, 
-                       file_path: Path,
+                       artifact_name: str,
                        sql_table: Optional[str] = None,
                        sql_columns: Optional[Dict[str, str]] = None,
                        non_numeric_cols: Optional[set] = None,
@@ -1219,22 +1218,17 @@ class OutputManager:
         
         Args:
             df: DataFrame to write
-            file_path: Path for CSV file (used only for cache key)
+            artifact_name: Logical name for the artifact (used for caching/logging)
             sql_table: Optional SQL table name
             sql_columns: Optional column mapping for SQL (df_col -> sql_col)
             non_numeric_cols: Set of columns to treat as non-numeric for SQL
             add_created_at: Whether to add CreatedAt timestamp column for SQL
             allow_repair: OUT-17: If False, block SQL write when required fields missing instead of auto-repairing
-            **csv_kwargs: Ignored (legacy)
             
         Returns:
             Dictionary with write results and metadata
         """
         start_time = time.time()
-        
-        # path normalization
-        if not isinstance(file_path, Path):
-            file_path = Path(file_path)
         
         result = {
             'file_written': False,
@@ -1245,7 +1239,7 @@ class OutputManager:
         
         # OUT-18: Check if auto-flush needed before write
         if self._should_auto_flush():
-            Console.info(f"[OUTPUT] Auto-flushing batch (rows={self._current_batch.total_rows}, age={time.time() - self._current_batch.created_at:.1f}s)")
+            ACMLog.output(f"Auto-flushing batch (rows={self._current_batch.total_rows}, age={time.time() - self._current_batch.created_at:.1f}s)")
             self.flush()
         
         # OUT-18: Apply backpressure if too many in-flight operations
@@ -1266,18 +1260,9 @@ class OutputManager:
                     if sql_columns:
                         # First, select only columns that are in the mapping (source columns)
                         mapped_source_cols = [col for col in sql_columns.keys() if col in sql_df.columns]
-                        Console.info(f"[DEBUG_MAP] sql_columns.keys()={list(sql_columns.keys())}")
-                        Console.info(f"[DEBUG_MAP] sql_df.columns={list(sql_df.columns)}")
-                        Console.info(f"[DEBUG_MAP] mapped_source_cols={mapped_source_cols}")
-                        if not sql_df.empty:
-                            Console.info(f"[DEBUG_MAP] First row before filter: {sql_df.iloc[0].to_dict()}")
                         sql_df = sql_df[mapped_source_cols]
-                        if not sql_df.empty:
-                            Console.info(f"[DEBUG_MAP] First row after filter: {sql_df.iloc[0].to_dict()}")
                         # Then rename to target SQL column names
                         sql_df = sql_df.rename(columns=sql_columns)
-                        if not sql_df.empty:
-                            Console.info(f"[DEBUG_MAP] First row after rename: {sql_df.iloc[0].to_dict()}")
                     
                     # Add metadata columns (required for all SQL tables)
                     # Preserve existing RunID if already present (e.g., hazard table with truncated ID)
@@ -1289,7 +1274,7 @@ class OutputManager:
                     sql_df, repair_info = self._apply_sql_required_defaults(sql_table, sql_df, allow_repair)
                     # MED-02: Log what was repaired for observability
                     if repair_info.get('repairs_needed'):
-                        Console.debug(f"[SCHEMA] Applied defaults to {sql_table}: {repair_info.get('missing_fields')}")
+                        ACMLog.output(f"[SCHEMA] Applied defaults to {sql_table}: {repair_info.get('missing_fields')}")
                     
                     # OUT-17: Block write if repairs needed but not allowed
                     if not allow_repair and repair_info['repairs_needed']:
@@ -1313,7 +1298,7 @@ class OutputManager:
                                     if not getattr(self.sql_client.conn, "autocommit", True):
                                         self.sql_client.conn.commit()
                         except Exception as del_ex:
-                            Console.warn(f"[OUTPUT] Pre-delete failed for {sql_table}: {del_ex}")
+                            ACMLog.warn("OUTPUT", f"Pre-delete failed for {sql_table}: {del_ex}")
 
                     # FORECAST-UPSERT-05: Route forecast tables to MERGE upsert methods (v10 schema)
                     if sql_table == "ACM_HealthForecast":
@@ -1335,7 +1320,7 @@ class OutputManager:
                         self.stats['sql_writes'] += 1
                     
                 except Exception as e:
-                    Console.warn(f"[OUTPUT] SQL write failed for {sql_table}: {e}")
+                    ACMLog.warn("OUTPUT", f"SQL write failed for {sql_table}: {e}")
                     result['error'] = str(e)
                     self.stats['sql_failures'] += 1
             elif not sql_table:
@@ -1343,7 +1328,7 @@ class OutputManager:
                 return result
             
         except Exception as e:
-            Console.error(f"[OUTPUT] Failed to write {file_path}: {e}")
+            ACMLog.error("OUTPUT", f"Failed to process artifact {artifact_name}: {e}")
             result['error'] = str(e)
             raise
         
@@ -1352,8 +1337,8 @@ class OutputManager:
             self.stats['write_time'] += elapsed
             
             # FCST-15: Cache DataFrame for downstream modules (lightweight)
-            cache_key = file_path.name  # e.g., "scores.csv"
-            self._artifact_cache[cache_key] = df
+            # Use artifact_name directly as key
+            self._artifact_cache[artifact_name] = df
         
         return result
 
@@ -1403,7 +1388,7 @@ class OutputManager:
                             if not getattr(self.sql_client.conn, "autocommit", True):
                                 self.sql_client.conn.commit()
                 except Exception as del_ex:
-                    Console.warn(f"[OUTPUT] delete_existing failed for {table_name}: {del_ex}")
+                    ACMLog.warn("OUTPUT", f"delete_existing failed for {table_name}: {del_ex}")
 
             # Route known upsert tables (v10 schema)
             if table_name == "ACM_HealthForecast":
@@ -1418,7 +1403,7 @@ class OutputManager:
             # Default: bulk insert
             return self._bulk_insert_sql(table_name, sql_df)
         except Exception as e:
-            Console.warn(f"[OUTPUT] write_table failed for {table_name}: {e}")
+            ACMLog.warn("OUTPUT", f"write_table failed for {table_name}: {e}")
             return 0
 
     def _apply_sql_required_defaults(self, table_name: str, df: pd.DataFrame, allow_repair: bool = True) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -1497,7 +1482,7 @@ class OutputManager:
             # Debug-level only - applying defaults is expected behavior, not a warning
             pass  # Console.debug(f"[SCHEMA] {table_name}: applied defaults {filled}")
         if not allow_repair and repair_info['repairs_needed']:
-            Console.warn(f"[SCHEMA] {table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}")
+            ACMLog.warn("OUTPUT", f"[SCHEMA] {table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}")
             
         return out, repair_info
 
@@ -1521,7 +1506,7 @@ class OutputManager:
             exists = _table_exists(cursor_factory, table_name)
             self._table_exists_cache[table_name] = bool(exists)
         if not exists:
-            Console.warn(f"[OUTPUT] Skipping write: table dbo.[{table_name}] not found")
+            ACMLog.warn("OUTPUT", f"Skipping write: table dbo.[{table_name}] not found")
             return 0
 
         cur = cursor_factory()
@@ -1565,19 +1550,19 @@ class OutputManager:
                             (self.run_id,)
                         ).rowcount
                     if rows_deleted and rows_deleted > 0:
-                        Console.info(f"[OUTPUT] Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
+                        ACMLog.output(f"Deleted {rows_deleted} existing rows from {table_name} for RunID={self.run_id}, EquipID={self.equip_id}")
             except Exception as del_ex:
-                Console.warn(f"[OUTPUT] Standard pre-delete for {table_name} failed: {del_ex}")
+                ACMLog.warn("OUTPUT", f"Standard pre-delete for {table_name} failed: {del_ex}")
 
             # Note: RUL tables are already covered by standardized pre-delete above.
 
             # only insert columns that actually exist in the table
             columns = [c for c in df.columns if c in table_cols]
-            Console.info(f"[DEBUG_BULK] table={table_name}, df.columns={list(df.columns)}")
-            Console.info(f"[DEBUG_BULK] table={table_name}, table_cols={list(table_cols)[:20]}")  # First 20
-            Console.info(f"[DEBUG_BULK] table={table_name}, columns (filtered)={columns}")
+            ACMLog.output(f"[DEBUG_BULK] table={table_name}, df.columns={list(df.columns)}")
+            ACMLog.output(f"[DEBUG_BULK] table={table_name}, table_cols={list(table_cols)[:20]}")  # First 20
+            ACMLog.output(f"[DEBUG_BULK] table={table_name}, columns (filtered)={columns}")
             if not df.empty:
-                Console.info(f"[DEBUG_BULK] First row values: {df.iloc[0].to_dict()}")
+                ACMLog.output(f"[DEBUG_BULK] First row values: {df.iloc[0].to_dict()}")
             cols_str = ", ".join(f"[{c}]" for c in columns)
             placeholders = ", ".join(["?"] * len(columns))
             insert_sql = f"INSERT INTO dbo.[{table_name}] ({cols_str}) VALUES ({placeholders})"
@@ -1606,9 +1591,9 @@ class OutputManager:
                         # Log if any conversions failed
                         null_count = df_clean[col].isna().sum()
                         if null_count > 0:
-                            Console.warn(f"[OUTPUT] {null_count} timestamps failed to parse in column {col}")
+                            ACMLog.warn("OUTPUT", f"{null_count} timestamps failed to parse in column {col}")
                     except Exception as ex:
-                        Console.warn(f"[OUTPUT] Timestamp conversion failed for {col}: {ex}")
+                        ACMLog.warn("OUTPUT", f"Timestamp conversion failed for {col}: {ex}")
                         pass  # Not a timestamp column, skip conversion
             
             # Replace extreme float values BEFORE replacing NaN (so we can use .abs())
@@ -1622,7 +1607,7 @@ class OutputManager:
                         # CRIT-06: Lower extreme threshold to 1e38 for SQL safety
                         extreme_mask = valid_mask & (df_clean[col].abs() > 1e38)
                         if extreme_mask.any():
-                            Console.warn(f"[OUTPUT] Replacing {extreme_mask.sum()} extreme float values in {table_name}.{col}")
+                            ACMLog.warn("OUTPUT", f"Replacing {extreme_mask.sum()} extreme float values in {table_name}.{col}")
                             df_clean.loc[extreme_mask, col] = None
             
             # Replace Inf with None, then replace all NaN with None for SQL NULL
@@ -1639,10 +1624,10 @@ class OutputManager:
                 except Exception as batch_error:
                     # Log failed batch with first few records for debugging
                     sample = batch[:3] if len(batch) > 3 else batch
-                    Console.error(f"[OUTPUT] Batch insert failed for {table_name} (sample: {sample}): {batch_error}")
+                    ACMLog.error("OUTPUT", f"Batch insert failed for {table_name} (sample: {sample}): {batch_error}")
                     raise
         except Exception as e:
-            Console.error(f"[OUTPUT] SQL insert failed for {table_name}: {e}")
+            ACMLog.error("OUTPUT", f"SQL insert failed for {table_name}: {e}")
             raise
         finally:
             try:
@@ -1660,10 +1645,10 @@ class OutputManager:
                     if not getattr(self.sql_client.conn, "autocommit", True):
                         self.sql_client.conn.commit()
             except Exception as e:
-                Console.error(f"[OUTPUT] SQL commit failed for {table_name}: {e}")
+                ACMLog.error("OUTPUT", f"SQL commit failed for {table_name}: {e}")
                 raise
 
-        Console.info(f"[OUTPUT] SQL insert to {table_name}: {inserted} rows")
+        ACMLog.output(f"SQL insert to {table_name}: {inserted} rows")
         return inserted
 
     
@@ -1689,17 +1674,17 @@ class OutputManager:
         """
         cached = self._artifact_cache.get(table_name)
         if cached is not None:
-            Console.info(f"[OUTPUT] Retrieved {table_name} from artifact cache ({len(cached)} rows)")
+            ACMLog.output(f"Retrieved {table_name} from artifact cache ({len(cached)} rows)")
             return cached.copy()  # Return copy to prevent mutation
         else:
-            Console.warn(f"[OUTPUT] Table {table_name} not found in artifact cache")
+            ACMLog.warn("OUTPUT", f"Table {table_name} not found in artifact cache")
             return None
     
     def clear_artifact_cache(self) -> None:
         """Clear the artifact cache to free memory."""
         count = len(self._artifact_cache)
         self._artifact_cache.clear()
-        Console.info(f"[OUTPUT] Cleared artifact cache ({count} tables)")
+        ACMLog.output(f"Cleared artifact cache ({count} tables)")
     
     def list_cached_tables(self) -> List[str]:
         """Return list of tables currently in the artifact cache."""
@@ -1887,9 +1872,17 @@ class OutputManager:
             })
         return pd.DataFrame(rows)
 
-    def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame) -> pd.DataFrame:
-        """Melt OMR contributions wide DataFrame to long format.
+    def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame, 
+                                          top_n: int = 15) -> pd.DataFrame:
+        """Melt OMR contributions wide DataFrame to long format, keeping only TOP N contributors per timestamp.
+        
+        This optimization reduces storage by ~95% for equipment with many sensors (e.g., 792 sensors → 15 per timestamp).
         Expected input columns end with '_contrib'; outputs columns: Timestamp, SensorName, ContributionScore, ContributionPct.
+        
+        Args:
+            scores_df: Scores DataFrame with omr_z column
+            omr_contributions: Wide-format OMR contributions (columns = sensors)
+            top_n: Number of top contributors to keep per timestamp (default 15)
         """
         if omr_contributions is None or len(omr_contributions) == 0:
             return pd.DataFrame(columns=["Timestamp","SensorName","ContributionScore","ContributionPct","OMR_Z","RunID","EquipID"])
@@ -1909,10 +1902,16 @@ class OutputManager:
         # Replace NaN/NULL with 0.0 before any downstream processing
         long["ContributionScore"] = pd.to_numeric(long["ContributionScore"], errors="coerce").fillna(0.0)
         
+        # PERF-FIX: Keep only TOP N contributors per timestamp to reduce storage by ~95%
+        # Sort by absolute contribution score (descending) and keep top N per timestamp
+        long["AbsContrib"] = long["ContributionScore"].abs()
+        long = long.sort_values(["Timestamp", "AbsContrib"], ascending=[True, False])
+        long = long.groupby("Timestamp").head(top_n).drop(columns=["AbsContrib"])
+        
         # Calculate ContributionPct: percentage of total contribution at each timestamp
         long["ContributionPct"] = 0.0
         if not long.empty and "ContributionScore" in long.columns:
-            # Group by timestamp and calculate percentage
+            # Group by timestamp and calculate percentage (now only for top N)
             long["ContributionPct"] = long.groupby("Timestamp")["ContributionScore"].transform(
                 lambda x: (x / x.sum() * 100) if x.sum() != 0 else 0.0
             )
@@ -2103,7 +2102,7 @@ class OutputManager:
             return self._bulk_insert_sql('ACM_Scores_Long', long_df)
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] write_scores_ts failed: {e}")
+            ACMLog.warn("OUTPUT", f"write_scores_ts failed: {e}")
             return 0
     
     def write_drift_ts(self, df: pd.DataFrame, run_id: str) -> int:
@@ -2142,7 +2141,7 @@ class OutputManager:
             return self._bulk_insert_sql('ACM_DriftSeries', sql_df)
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] write_drift_ts failed: {e}")
+            ACMLog.warn("OUTPUT", f"write_drift_ts failed: {e}")
             return 0
     
     def write_anomaly_events(self, df: pd.DataFrame, run_id: str) -> int:
@@ -2189,7 +2188,7 @@ class OutputManager:
             return self._bulk_insert_sql('ACM_Anomaly_Events', sql_df)
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] write_anomaly_events failed: {e}")
+            ACMLog.warn("OUTPUT", f"write_anomaly_events failed: {e}")
             return 0
     
     def write_regime_episodes(self, df: pd.DataFrame, run_id: str) -> int:
@@ -2229,7 +2228,7 @@ class OutputManager:
             return self._bulk_insert_sql('ACM_Regime_Episodes', sql_df)
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] write_regime_episodes failed: {e}")
+            ACMLog.warn("OUTPUT", f"write_regime_episodes failed: {e}")
             return 0
     
     def write_pca_model(self, model_data: Dict[str, Any]) -> int:
@@ -2250,7 +2249,7 @@ class OutputManager:
             return self._bulk_insert_sql('ACM_PCA_Models', sql_df)
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] write_pca_model failed: {e}")
+            ACMLog.warn("OUTPUT", f"write_pca_model failed: {e}")
             return 0
     
     def write_pca_loadings(self, df: pd.DataFrame, run_id: str) -> int:
@@ -2273,7 +2272,7 @@ class OutputManager:
             return self._bulk_insert_sql('ACM_PCA_Loadings', sql_df)
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] write_pca_loadings failed: {e}")
+            ACMLog.warn("OUTPUT", f"write_pca_loadings failed: {e}")
             return 0
     
     def write_pca_metrics(self, pca_detector=None, tables_dir=None, enable_sql=True, df=None, run_id=None) -> int:
@@ -2334,14 +2333,12 @@ class OutputManager:
             elif df is not None:
                 # Legacy path: DataFrame must have ComponentName and MetricType columns
                 if 'ComponentName' not in df.columns or 'MetricType' not in df.columns:
-                    Console.warn(
-                        "[OUTPUT] write_pca_metrics legacy path requires ComponentName and MetricType columns. "
-                        "Provided DataFrame has columns: " + str(list(df.columns))
-                    )
+                    ACMLog.warn("OUTPUT", "write_pca_metrics legacy path requires ComponentName and MetricType columns. "
+                                 + "Provided DataFrame has columns: " + str(list(df.columns)))
                     return 0
                 sql_df = df.copy()
             else:
-                Console.warn("[OUTPUT] write_pca_metrics called without pca_detector or df")
+                ACMLog.warn("OUTPUT", "write_pca_metrics called without pca_detector or df")
                 return 0
             
             # Use MERGE upsert to handle duplicate keys gracefully
@@ -2365,7 +2362,7 @@ class OutputManager:
         required_cols = ['RunID', 'EquipID', 'ComponentName', 'MetricType']
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
-            Console.warn(f"[OUTPUT] _upsert_pca_metrics missing required columns: {missing_cols}")
+            ACMLog.warn("OUTPUT", f"_upsert_pca_metrics missing required columns: {missing_cols}")
             return 0
         
         try:
@@ -2388,10 +2385,10 @@ class OutputManager:
                     )
                     deleted_count += cursor.rowcount
                 except Exception as del_err:
-                    Console.warn(f"[OUTPUT] DELETE failed for {row['ComponentName']}/{row['MetricType']}: {del_err}")
+                    ACMLog.warn("OUTPUT", f"DELETE failed for {row['ComponentName']}/{row['MetricType']}: {del_err}")
             
             if deleted_count > 0:
-                Console.info(f"[OUTPUT] Deleted {deleted_count} existing PCA metric rows before upsert")
+                ACMLog.info("OUTPUT", f"Deleted {deleted_count} existing PCA metric rows before upsert")
             
             # Prepare bulk insert data
             insert_sql = """
@@ -2419,7 +2416,7 @@ class OutputManager:
             return len(rows_to_insert)
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_pca_metrics failed: {e}")
+            ACMLog.warn("OUTPUT", f"_upsert_pca_metrics failed: {e}")
             if self.sql_client and self.sql_client.conn:
                 try:
                     self.sql_client.conn.rollback()
@@ -2439,7 +2436,7 @@ class OutputManager:
             # Bulk insert is standard for forecast tables in v10
             return self._bulk_insert_sql('ACM_HealthForecast', df)
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_health_forecast failed: {e}")
+            ACMLog.warn("OUTPUT", f"_upsert_health_forecast failed: {e}")
             return 0
     
     def _upsert_failure_forecast(self, df: pd.DataFrame) -> int:
@@ -2453,7 +2450,7 @@ class OutputManager:
         try:
             return self._bulk_insert_sql('ACM_FailureForecast', df)
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_failure_forecast failed: {e}")
+            ACMLog.warn("OUTPUT", f"_upsert_failure_forecast failed: {e}")
             return 0
     
     def _upsert_detector_forecast_ts(self, df: pd.DataFrame) -> int:
@@ -2536,7 +2533,7 @@ class OutputManager:
             return row_count
             
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_detector_forecast_ts failed: {e}")
+            ACMLog.warn("OUTPUT", f"_upsert_detector_forecast_ts failed: {e}")
             return 0
     
     def _upsert_sensor_forecast(self, df: pd.DataFrame) -> int:
@@ -2550,7 +2547,7 @@ class OutputManager:
         try:
             return self._bulk_insert_sql('ACM_SensorForecast', df)
         except Exception as e:
-            Console.warn(f"[OUTPUT] _upsert_sensor_forecast failed: {e}")
+            ACMLog.warn("OUTPUT", f"_upsert_sensor_forecast failed: {e}")
             return 0
     
     def write_run_stats(self, stats_data: Dict[str, Any]) -> int:
@@ -2569,7 +2566,7 @@ class OutputManager:
             sql_df = pd.DataFrame([row])
             return self._bulk_insert_sql('ACM_Run_Stats', sql_df)
         except Exception as e:
-            Console.error(f"[OUTPUT] write_run_stats failed: {e}")
+            ACMLog.error("OUTPUT", f"write_run_stats failed: {e}")
             return 0
     
     def write_scores(self, 
@@ -2631,9 +2628,9 @@ class OutputManager:
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
         
         # DEBUG: Log episode DataFrame columns and first row
-        Console.info(f"[EPISODES] DEBUG: Columns={list(episodes_for_output.columns)}")
+        ACMLog.info("EPISODES", f"DEBUG: Columns={list(episodes_for_output.columns)}")
         if not episodes_for_output.empty:
-            Console.info(f"[EPISODES] DEBUG: First episode={episodes_for_output.iloc[0].to_dict()}")
+            ACMLog.info("EPISODES", f"DEBUG: First episode={episodes_for_output.iloc[0].to_dict()}")
         
         # SCHEMA-FIX: Individual episodes go to ACM_EpisodeDiagnostics (not ACM_Episodes which is run-level summary)
         sql_table = "ACM_EpisodeDiagnostics" if enable_sql else None
@@ -2706,9 +2703,9 @@ class OutputManager:
                 episodes_for_output['status'] = 'CLOSED'
         
         # DEBUG: Show what we're writing  
-        Console.info(f"[EPISODES] DEBUG: Columns before write={list(episodes_for_output.columns)}")
+        ACMLog.info("EPISODES", f"DEBUG: Columns before write={list(episodes_for_output.columns)}")
         if not episodes_for_output.empty:
-            Console.info(f"[EPISODES] DEBUG: First row before write: severity={episodes_for_output.iloc[0].get('severity')}, peak_z={episodes_for_output.iloc[0].get('peak_fused_z')}, dominant={episodes_for_output.iloc[0].get('dominant_sensor')}")
+            ACMLog.info("EPISODES", f"DEBUG: First row before write: severity={episodes_for_output.iloc[0].get('severity')}, peak_z={episodes_for_output.iloc[0].get('peak_fused_z')}, dominant={episodes_for_output.iloc[0].get('dominant_sensor')}")
         
         result = self.write_dataframe(
             episodes_for_output,
@@ -2734,7 +2731,7 @@ class OutputManager:
                 }])
                 self._bulk_insert_sql('ACM_Episodes', summary)
             except Exception as summary_err:
-                Console.warn(f"[EPISODES] Failed to write summary to ACM_Episodes: {summary_err}")
+                ACMLog.warn("EPISODES", f"Failed to write summary to ACM_Episodes: {summary_err}")
         
         return result
     
@@ -2758,10 +2755,10 @@ class OutputManager:
         self.flush()  # OUT-18: Use flush() for DRY
         
         stats = self.get_stats()
-        Console.info(f"[OUTPUT] Finalized: {stats['files_written']} files, "
-                    f"{stats['sql_writes']} SQL ops, "
-                    f"{stats['total_rows']} total rows, "
-                    f"{stats['avg_write_time']:.3f}s avg write time")
+        ACMLog.info("OUTPUT", f"Finalized: {stats['files_written']} files, "
+                f"{stats['sql_writes']} SQL ops, "
+                f"{stats['total_rows']} total rows, "
+                f"{stats['avg_write_time']:.3f}s avg write time")
         
         return stats
 
@@ -2789,7 +2786,7 @@ class OutputManager:
         
         PERFORMANCE: Uses batched transaction for all SQL writes to minimize commit overhead.
         """
-        Console.info("[ANALYTICS] Generating comprehensive analytics tables...")
+        ACMLog.info("ANALYTICS", "Generating comprehensive analytics tables...")
         table_count = 0
         sql_count = 0
         
@@ -2851,6 +2848,10 @@ class OutputManager:
                 if omr_contributions is not None and not omr_contributions.empty:
                     try:
                         omr_long = self._generate_omr_contributions_long(scores_df, omr_contributions)
+                        # OMR-FIX: Ensure no NULL scores (causes SQL constraint violation)
+                        if "ContributionScore" in omr_long.columns:
+                            omr_long["ContributionScore"] = omr_long["ContributionScore"].fillna(0.0)
+                        
                         result = self.write_dataframe(
                             omr_long,
                             tables_dir / "omr_contributions_long.csv",
@@ -2861,7 +2862,7 @@ class OutputManager:
                         table_count += 1
                         if result.get('sql_written'): sql_count += 1
                     except Exception as e:
-                        Console.warn(f"[ANALYTICS] Failed to write omr_contributions_long.csv: {e}")
+                        ACMLog.warn("ANALYTICS", f"Failed to write omr_contributions_long.csv: {e}")
 
                 # Fusion quality snapshot (weights + basic stats)
                 try:
@@ -2878,11 +2879,11 @@ class OutputManager:
                     else:
                         table_count += 1
                 except Exception as e:
-                    Console.warn(f"[ANALYTICS] Failed to write fusion_quality_report.csv: {e}")
+                    ACMLog.warn("ANALYTICS", f"Failed to write fusion_quality_report.csv: {e}")
                 
                 # TIER-A: Regime tables (if available, no fused dependency)
                 if has_regimes:
-                    Console.info("[ANALYTICS] Writing Tier-A regime tables...")
+                    ACMLog.info("ANALYTICS", "Writing Tier-A regime tables...")
                     regime_occ_df = self._generate_regime_occupancy(scores_df)
                     result = self.write_dataframe(regime_occ_df, tables_dir / "regime_occupancy.csv",
                                                 sql_table="ACM_RegimeOccupancy" if force_sql else None,
@@ -2906,12 +2907,12 @@ class OutputManager:
                 
                 # ANA-12: If fused missing, return after Tier-A/B tables
                 if not has_fused:
-                    Console.warn("[ANALYTICS] No fused scores - Tier-C (health, defects, episodes) tables skipped")
-                    Console.info(f"[ANALYTICS] Wrote {table_count} Tier-A/B tables ({sql_count} to SQL)")
+                    ACMLog.warn("ANALYTICS", "No fused scores - Tier-C (health, defects, episodes) tables skipped")
+                    ACMLog.info("ANALYTICS", f"Wrote {table_count} Tier-A/B tables ({sql_count} to SQL)")
                     return {"csv_tables": table_count, "sql_tables": sql_count}
                 
                 # TIER-C: Fused-dependent tables (all below require 'fused' column)
-                Console.info("[ANALYTICS] Writing Tier-C fused-dependent tables...")
+                ACMLog.info("ANALYTICS", "Writing Tier-C fused-dependent tables...")
                 
                 # 1. Health Timeline (enhanced with smoothing and quality flags)
                 health_df = self._generate_health_timeline(scores_df, cfg)
@@ -3277,14 +3278,14 @@ class OutputManager:
                     except Exception as e:
                         Console.warn(f"[ANALYTICS] Failed to write data_quality to SQL: {e}")
                 
-                Console.info(f"[ANALYTICS] Generated {table_count} comprehensive analytics tables")
-                Console.info(f"[ANALYTICS] Written {sql_count} tables to SQL database")
+                ACMLog.info("ANALYTICS", f"Generated {table_count} comprehensive analytics tables")
+                ACMLog.info("ANALYTICS", f"Written {sql_count} tables to SQL database")
                 return {"csv_tables": table_count, "sql_tables": sql_count}
                 
             except Exception as e:
-                Console.warn(f"[ANALYTICS] Comprehensive table generation failed: {e}")
+                ACMLog.warn("ANALYTICS", f"Comprehensive table generation failed: {e}")
                 import traceback
-                Console.warn(f"[ANALYTICS] Error traceback: {traceback.format_exc()}")
+                ACMLog.warn("ANALYTICS", f"Error traceback: {traceback.format_exc()}")
                 return {"csv_tables": table_count, "sql_tables": sql_count}
 
     def _generate_regime_stability(self, scores_df: pd.DataFrame) -> pd.DataFrame:
@@ -4526,14 +4527,12 @@ class OutputManager:
             with self.sql_client.cursor() as cur:
                 cur.executemany(insert_sql, params)
             
-            Console.info(
-                f"Threshold metadata written: {threshold_type} = "
-                f"{threshold_value if not isinstance(threshold_value, dict) else f'{len(threshold_value)} regimes'} "
-                f"({calculation_method})"
-            )
+            ACMLog.info("THRESHOLD", f"Threshold metadata written: {threshold_type} = "
+                        f"{threshold_value if not isinstance(threshold_value, dict) else f'{len(threshold_value)} regimes'} "
+                        f"({calculation_method})")
             
         except Exception as e:
-            Console.error(f"Failed to write threshold metadata: {e}")
+            ACMLog.error("THRESHOLD", f"Failed to write threshold metadata: {e}")
     
     def read_threshold_metadata(
         self,
@@ -4567,7 +4566,7 @@ class OutputManager:
             )
         """
         if self.sql_client is None:
-            Console.warn("SQL client not available - cannot read threshold metadata")
+            ACMLog.warn("THRESHOLD", "SQL client not available - cannot read threshold metadata")
             return None
             
         try:
@@ -4607,7 +4606,7 @@ class OutputManager:
                 return None
                 
         except Exception as e:
-            Console.error(f"Failed to read threshold metadata: {e}")
+            ACMLog.error("THRESHOLD", f"Failed to read threshold metadata: {e}")
             return None
 
     # ========================================================================
@@ -4647,7 +4646,7 @@ class OutputManager:
         
         self._ensure_dataframe_columns(df, 'ACM_RUL_ByRegime')
         self.write_dataframe(df, 'ACM_RUL_ByRegime')
-        Console.info(f"RUL by regime written: {len(df)} regimes")
+        ACMLog.info("RUL", f"RUL by regime written: {len(df)} regimes")
 
     def write_regime_hazard(
         self,
@@ -4686,7 +4685,7 @@ class OutputManager:
         
         self._ensure_dataframe_columns(df, 'ACM_RegimeHazard')
         self.write_dataframe(df, 'ACM_RegimeHazard')
-        Console.info(f"Regime hazard written: {len(df)} records")
+        ACMLog.info("RUL", f"Regime hazard written: {len(df)} records")
 
     def write_forecast_context(
         self,
@@ -4734,7 +4733,7 @@ class OutputManager:
         
         self._ensure_dataframe_columns(df, 'ACM_ForecastContext')
         self.write_dataframe(df, 'ACM_ForecastContext')
-        Console.info(f"Forecast context written: {len(df)} records")
+        ACMLog.info("RUL", f"Forecast context written: {len(df)} records")
 
     def write_adaptive_thresholds_by_regime(
         self,
@@ -4769,7 +4768,7 @@ class OutputManager:
         
         self._ensure_dataframe_columns(df, 'ACM_AdaptiveThresholds_ByRegime')
         self.write_dataframe(df, 'ACM_AdaptiveThresholds_ByRegime')
-        Console.info(f"Adaptive thresholds by regime written: {len(df)} records")
+        ACMLog.info("RUL", f"Adaptive thresholds by regime written: {len(df)} records")
 
     def load_regime_hazard_stats(
         self,

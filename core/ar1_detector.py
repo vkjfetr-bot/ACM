@@ -72,6 +72,11 @@ class AR1Detector:
             self._is_fitted = True
             return self
         
+        # Collect warnings to batch-report at end (avoid 100s of individual SQL inserts)
+        near_constant_cols = []
+        clamped_cols = []
+        insufficient_cols = []
+        
         for c in X.columns:
             col = X[c].to_numpy(copy=False, dtype=np.float32)
             finite = np.isfinite(col)
@@ -101,15 +106,15 @@ class AR1Detector:
                 if abs(den) >= 1e-9:
                     phi = num / den
             else:
-                Console.warn(f"[AR1] Column '{c}': near-constant signal; using phi=0")
+                near_constant_cols.append(c)
             
             if abs(phi) > self._phi_cap:
                 original_phi = phi
                 phi = float(np.sign(phi) * self._phi_cap)
-                Console.warn(f"[AR1] Column '{c}': phi={original_phi:.3f} clamped to {phi:.3f}")
+                clamped_cols.append((c, original_phi, phi))
             
             if len(x) < MIN_FORECAST_SAMPLES:
-                Console.warn(f"[AR1] Column '{c}': only {len(x)} samples; coefficients may be unstable")
+                insufficient_cols.append((c, len(x)))
             
             self.phimap[c] = (phi, mu)
             
@@ -122,6 +127,18 @@ class AR1Detector:
             resid_for_sd = resid[1:] if resid.size > 1 else resid
             sd = float(np.std(resid_for_sd))
             self.sdmap[c] = max(sd, self._sd_floor)
+        
+        # Emit batched warnings (single SQL insert instead of 100s)
+        if near_constant_cols:
+            n = len(near_constant_cols)
+            sample = near_constant_cols[:3]
+            Console.warn(f"[AR1] {n} near-constant columns (phi=0): {sample}{'...' if n > 3 else ''}")
+        if clamped_cols:
+            n = len(clamped_cols)
+            Console.warn(f"[AR1] {n} columns with phi clamped to +/-{self._phi_cap}")
+        if insufficient_cols:
+            n = len(insufficient_cols)
+            Console.warn(f"[AR1] {n} columns with <{MIN_FORECAST_SAMPLES} samples (unstable coefficients)")
         
         self._is_fitted = True
         return self
@@ -146,6 +163,13 @@ class AR1Detector:
         
         if n == 0 or X.shape[1] == 0:
             return (np.zeros(0, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(0, dtype=np.float32)
+        
+        # EARLY EXIT: If >80% of columns are near-constant, return zeros to prevent hang on pathological data
+        near_constant_count = sum(1 for (phi, _) in self.phimap.values() if abs(phi) < 1e-6)
+        total_count = len(self.phimap)
+        if total_count > 0 and near_constant_count > total_count * 0.8:
+            Console.warn(f"[AR1] Early exit: {near_constant_count}/{total_count} columns near-constant (>{80}%) - returning zero scores to prevent hang")
+            return (np.zeros(n, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(n, dtype=np.float32)
         
         for c in X.columns:
             series = X[c].to_numpy(copy=False, dtype=np.float32)

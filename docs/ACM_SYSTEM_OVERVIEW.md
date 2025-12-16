@@ -2,14 +2,13 @@
 
 This handbook is a complete, implementation-level walkthrough of ACM V10 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
 
-**Current Version:** v10.0.0 - Production Release with Continuous Forecasting
+**Current Version:** v10.2.0 - MHAL Deprecated, Simplified 6-Detector Architecture
 
 ### Recent Deltas (Dec 2025)
-- Forecast/RUL refactor is underway: `core/forecast_engine.py` becomes primary, `forecasting_legacy.py` is being quarantined. Expect call sites in `acm_main.py` to switch to the new API.
-- FD_FAN historian data is now time-shifted (2023-10-15 → 2025-09-14). Adjust dashboard time ranges and validation scripts accordingly.
-- Quick SQL visibility: use `scripts/check_dashboard_tables.py`, `scripts/check_table_counts.py`, or `scripts/validate_all_tables.py` for row counts and ranges; `scripts/check_tables_existence.py` for existence checks.
+- **v10.2.0**: Mahalanobis detector deprecated - mathematically redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable in orthogonal space. Simplified to 6 active detectors.
+- Scripts cleanup: Single-purpose analysis/check/debug scripts archived to `scripts/archive/`. Schema updater remains: `scripts/sql/export_comprehensive_schema.py`.
+- Forecast/RUL refactor complete: `core/forecast_engine.py` is primary.
 - Schema reference: `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` (authoritative ACM table/column definitions).
-- Active dashboard JSON for fixes: `grafana_dashboards/ACM Claude Generated To Be Fixed.json`; others are archived.
 
 ### v10.0.0 Major Changes from v9.0.0
 - **Continuous Forecasting Architecture**: Exponential temporal blending eliminates per-batch forecast duplication; single continuous health forecast line per equipment with 12-hour decay window
@@ -36,8 +35,8 @@ This handbook is a complete, implementation-level walkthrough of ACM V10 for new
 ```
         +--------------+    +-----------------+    +----------------+    +--------------------+
         | Ingestion    |    | Feature Builder |    | Detector Heads |    | Fusion & Episodes  |
-        | (CSV / SQL)  | -> | (fast_features) | -> | (PCA/MHAL/IF/GMM|
-        | acm_main     |    |                 |    |  AR1/OMR/etc.)  |    |  (fuse)            |
+        | (CSV / SQL)  | -> | (fast_features) | -> | (PCA/IF/GMM/   | -> |  (fuse)            |
+        | acm_main     |    |                 |    |  AR1/OMR)      |    |                    |
         +--------------+    +-----------------+    +----------------+    +--------------------+
                |                       |                       |                      |
                v                       v                       v                      v
@@ -47,6 +46,7 @@ This handbook is a complete, implementation-level walkthrough of ACM V10 for new
         +--------------+    | regime/adaptive)|    +----------------+    +--------------------+
                                                \                                        |
                                                 \-> Forecast/RUL (forecasting, rul_*) <-/
+```
 ```
 
 * **acm_main.py** is the orchestrator: it loads config, ingests data, cleans/guards, builds features, fits and scores detectors, fuses, detects episodes, computes drift/regimes, writes analytics, and finalizes (including SQL logging and metadata).
@@ -233,7 +233,7 @@ Mode decision and migration:
 - **Baseline buffer:** seeds TRAIN from SQL `ACM_BaselineBuffer`, local `baseline_buffer.csv`, or SCORE head when baseline thin.
 - **Guardrails:** overlap checks, low-variance sensors, data quality export (`tables/data_quality.csv` or SQL `ACM_DataQuality`), cadence checks.
 - **Features:** `fast_features.compute_basic_features` with Polars fast-path; uses TRAIN medians to impute SCORE (prevents leakage).
-- **Heads fit/score:** PCA (PCASubspaceDetector), Mahalanobis, IsolationForest, GMM, AR1 (forecasting.AR1Detector), OMR (core.omr), optional River streaming. Reuses cached detectors when signature matches.
+- **Heads fit/score:** PCA (PCASubspaceDetector), IsolationForest, GMM, AR1 (forecasting.AR1Detector), OMR (core.omr), optional River streaming. Reuses cached detectors when signature matches. Note: Mahalanobis deprecated v10.2.0.
 - **Regimes:** builds feature basis (PCA scores + optional raw tags), clusters with MiniBatchKMeans, smooths labels, transient detection, per-regime stats; supports load/save of regime model.
 - **Calibration:** z-score calibration per head (ScoreCalibrator), optional per-regime thresholds (DET-07), adaptive thresholds (adaptive_thresholds.py).
 - **Fusion:** `fuse.Fuser.fuse` combines z streams under configured weights; auto-tunes weights via episode separability (tune_detector_weights).
@@ -248,15 +248,28 @@ Mode decision and migration:
 - Spectral/lag: `rolling_spectral_energy`, `rolling_xcorr`, `rolling_pairwise_lag`, `compute_basic_features(_pl)`.
 - Fills missing values with medians/ffill/bfill; Polars acceleration when available, pandas fallback otherwise. Uses TRAIN-derived fill values for SCORE to prevent leakage.
 
-### Detectors
+### Detectors (6 Active Heads - v10.2.0)
+
+Each detector answers a specific "what's wrong?" question:
+
+| Detector | Z-Score | What's Wrong? | Fault Types |
+|----------|---------|---------------|-------------|
+| **AR1** | `ar1_z` | "A sensor is drifting/spiking" | Sensor degradation, control loop issues, actuator wear |
+| **PCA-SPE** | `pca_spe_z` | "Sensors are decoupled" | Mechanical coupling loss, thermal expansion, structural fatigue |
+| **PCA-T²** | `pca_t2_z` | "Operating point is abnormal" | Process upset, load imbalance, off-design operation |
+| **IForest** | `iforest_z` | "This is a rare state" | Novel failure mode, rare transient, unknown condition |
+| **GMM** | `gmm_z` | "Doesn't match known clusters" | Regime transition, mode confusion, startup/shutdown anomaly |
+| **OMR** | `omr_z` | "Sensors don't predict each other" | Fouling, wear, misalignment, calibration drift |
+
 - **Correlation (`core/correlation.py`):**
-  - `MahalanobisDetector`: ridge-regularized covariance with NaN audits; guards ill-conditioning and under-sampled cases.
-  - `PCASubspaceDetector`: cleans non-finite, drops constants, scales, fits PCA; returns SPE (Q) and T2; handles low-sample fallback.
+  - `MahalanobisDetector`: DEPRECATED v10.2.0 - redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable because covariance is diagonal in PCA space.
+  - `PCASubspaceDetector`: cleans non-finite, drops constants, scales, fits PCA; returns SPE (Q) and T²; handles low-sample fallback.
 - **Outliers (`core/outliers.py`):**
   - `IsolationForestDetector`: fits/uses scikit IF, stores columns, optional quantile threshold when contamination numeric.
   - `GMMDetector`: BIC-driven component selection, variance guards, scaling; returns neg log-likelihood style scores.
 - **OMR (`core/omr.py`):**
   - Multivariate reconstruction error via PLS/linear ensemble/PCA. Features auto model selection, diagnostics, per-sensor contribution extraction, z clipping, min sample guards.
+- **AR1 (`core/ar1_detector.py`):** Per-sensor AR(1) residual detector for temporal pattern anomalies.
 - **Forecasting/RUL (`core/forecasting.py`, `core/rul_estimator.py`, `core/enhanced_rul_estimator.py`):**
   - **Health & Failure Forecasting:** Exponential smoothing with bootstrap confidence intervals, adaptive parameters (alpha/beta), quality gates (blocks SPARSE/FLAT/NOISY but allows GAPPY data for historical replay)
   - **Physical Sensor Forecasting:** Predicts future values for top 10 changing sensors using LinearTrend or VAR (Vector AutoRegression) methods; includes confidence intervals and regime awareness

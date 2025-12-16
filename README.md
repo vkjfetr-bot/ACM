@@ -2,15 +2,15 @@
 
 ACM V10 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, predictive forecasting, and flexible outputs so that engineers can understand what is changing, when it started, which sensors or regimes are responsible, and what will happen next.
 
-**Current Version:** v10.0.0 - Production Release with Enhanced Forecasting
+**Current Version:** v10.2.0 - MHAL Deprecated, Simplified 6-Detector Architecture
 
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
 ### Recent Updates (Dec 2025)
-- Forecast/RUL work is moving into `core/forecast_engine.py` and the new degradation/RUL stack; `forecasting_legacy.py` is being phased out. Wire new calls in `acm_main.py` as the refactor lands.
-- SQL historian sample for FD_FAN is time-shifted (2023-10-15 → 2025-09-14). Set Grafana ranges accordingly when validating dashboards or forecasts.
-- Quick SQL/Grafana sanity scripts: `scripts/check_dashboard_tables.py`, `scripts/check_table_counts.py`, `scripts/check_tables_existence.py`, `scripts/validate_all_tables.py`.
-- Active dashboard under repair: `grafana_dashboards/ACM Claude Generated To Be Fixed.json` (keep others archived).
+- **v10.2.0**: Mahalanobis detector deprecated - was mathematically redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable. Simplified to 6 active detectors.
+- Forecast/RUL work is in `core/forecast_engine.py` and the new degradation/RUL stack.
+- SQL historian sample for FD_FAN is time-shifted (2023-10-15 → 2025-09-14). Set Grafana ranges accordingly.
+- **Scripts cleanup**: Single-purpose analysis/check/debug scripts archived to `scripts/archive/`. Schema updater script remains: `scripts/sql/export_comprehensive_schema.py`.
 
 ### v10.0.0 Release Highlights
 - **🚀 Continuous Forecasting with Exponential Blending**: Health forecasts now evolve smoothly across batch runs using exponential temporal blending (tau=12h), eliminating per-batch duplication in Grafana dashboards. Single continuous forecast line per equipment with automatic state persistence and version tracking (v807→v813 validated).
@@ -29,13 +29,24 @@ For a complete, implementation-level walkthrough (architecture, modules, configs
 
 ## What ACM is
 
-ACM watches every asset through several analytical "heads" instead of a single anomaly score. Each head covers a different signal property - temporal self-consistency, covariance structure, clustering shifts, rare local patterns, and model residuals - so ACM can characterize oscillations, fouling, regime changes, sensor jumps, and broken cross-variable couplings. Drift tracking, adaptive tuning, and episode culprits make the outcomes actionable.
+ACM watches every asset through six analytical "heads" instead of a single anomaly score. Each head answers a specific "what's wrong?" question:
+
+| Detector | Z-Score | What's Wrong? | Fault Types |
+|----------|---------|---------------|-------------|
+| **AR1** | `ar1_z` | "A sensor is drifting/spiking" | Sensor degradation, control loop issues, actuator wear |
+| **PCA-SPE** | `pca_spe_z` | "Sensors are decoupled" | Mechanical coupling loss, thermal expansion, structural fatigue |
+| **PCA-T²** | `pca_t2_z` | "Operating point is abnormal" | Process upset, load imbalance, off-design operation |
+| **IForest** | `iforest_z` | "This is a rare state" | Novel failure mode, rare transient, unknown condition |
+| **GMM** | `gmm_z` | "Doesn't match known clusters" | Regime transition, mode confusion, startup/shutdown anomaly |
+| **OMR** | `omr_z` | "Sensors don't predict each other" | Fouling, wear, misalignment, calibration drift |
+
+Drift tracking, adaptive tuning, and episode culprits make the outcomes actionable.
 
 ## How it works
 
 1. **Ingestion layer:** Baseline (train) and batch (score) inputs come from CSV files or a SQL source that populate the `data/` directory. Configuration values live in `configs/config_table.csv`, while SQL credentials are in `configs/sql_connection.ini`. ACM infers the equipment code (`--equip`) and determines whether to stay in file mode or engage SQL mode.
 2. **Feature engineering:** `core.fast_features` delivers vectorized transforms (windowing, FFT, correlations, etc.) and uses Polars acceleration by default. The switch is governed by `fusion.features.polars_threshold` (rows per batch). Current setting: `polars_threshold = 10`, effectively enabling Polars for all standard batch sizes.
-3. **Detectors:** Each head (Mahalanobis, PCA SPE/T2, Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual, correlation/drift monitors, CUSUM-style trackers) produces interpretable scores, and episode culprits highlight which tag groups caused the response.
+3. **Detectors:** Each head (PCA SPE/T², Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual, drift/CUSUM monitors) produces interpretable scores, and episode culprits highlight which tag groups caused the response. Note: Mahalanobis detector deprecated in v10.2.0 (redundant with PCA-T²).
 4. **Fusion & tuning:** `core.fuse` blends scores under configurable weights while `core.analytics.AdaptiveTuning` adjusts thresholds and logs every change via `core.config_history_writer`.
 5. **Forecasting & RUL:** `core.forecasting` generates health trajectories, failure probability curves, RUL estimates, and physical sensor forecasts. **NEW in v10.0.0**: Continuous forecasting with exponential blending eliminates per-batch duplication; hazard-based RUL provides survival probability curves with EWMA smoothing; state persistence tracks forecast evolution across batches (see [Continuous Learning](#continuous-learning--forecasting) section).
 6. **Outputs:** `core.output_manager.OutputManager` writes CSV/PNG artifacts, SQL run logs, Grafana-ready dashboards, forecast tables (ACM_HealthForecast, ACM_FailureForecast, ACM_SensorForecast, ACM_RUL, **ACM_HealthForecast_Continuous**, **ACM_FailureHazard_TS**), and stores models in `artifacts/{equip}/models`. SQL runners call `usp_ACM_StartRun`/`usp_ACM_FinalizeRun` when the config enables it.
@@ -62,13 +73,13 @@ ACM's configuration is stored in `configs/config_table.csv` (238 parameters) and
 - `ar1.*`: AR1 detector settings (window=256, alpha=0.05)
 - `iforest.*`: Isolation Forest (n_estimators=100, contamination=0.01)
 - `gmm.*`: Gaussian Mixture Models (k_min=2, k_max=3, BIC search enabled)
-- `mahl.regularization`: Mahalanobis regularization to prevent ill-conditioning
 - `omr.*`: Overall Model Residual (auto model selection, n_components=5)
 - `use_cache`: Enable model caching via ModelVersionManager
 - `auto_retrain.*`: Automatic retraining thresholds (max_anomaly_rate=0.25, max_drift_score=2.0, max_model_age_hours=720)
+- Note: `mahl.*` deprecated in v10.2.0 - MHAL redundant with PCA-T²
 
 **Fusion & Weights (`fusion.*`)**
-- `weights.*`: Detector contribution weights (ar1_z=0.2, iforest_z=0.2, gmm_z=0.1, pca_spe_z=0.2, mhal_z=0.2, omr_z=0.10)
+- `weights.*`: Detector contribution weights (pca_spe_z=0.30, pca_t2_z=0.20, ar1_z=0.20, iforest_z=0.15, omr_z=0.10, gmm_z=0.05). Note: mhal_z=0.0 (deprecated v10.2.0)
 - `per_regime`: Enable per-regime fusion (default: True)
 - `auto_tune.*`: Adaptive weight tuning (enabled, learning_rate=0.3, temperature=1.5)
 
@@ -153,7 +164,6 @@ python scripts/sql_batch_runner.py --equip WFA_TURBINE_0 --tick-minutes 1440 --r
 |-----------|-----------|------------------------|
 | **`data.sampling_secs`** | Must match equipment's native data cadence | "Insufficient data: N rows" despite SP returning many more rows |
 | `data.timestamp_col` | Some assets use different column names | Data loading fails or returns empty |
-| `models.mahl.regularization` | Ill-conditioned covariance matrices | "High condition number" warnings |
 | `thresholds.self_tune.clip_z` | Detector saturation | "High saturation (X%)" warnings |
 | `episodes.cpd.k_sigma` | Too many/few episodes detected | "High anomaly rate" warnings or missed events |
 
@@ -198,7 +208,7 @@ For complete parameter descriptions and implementation details, see `docs/ACM_SY
 All analytical signals evolve correctly across batches:
 - **Drift Tracking**: CUSUM detector with P95 threshold per batch (coldstart windowing approach)
 - **Regime Evolution**: MiniBatchKMeans with auto-k selection and quality scoring (Calinski-Harabasz, silhouette)
-- **Detector Correlation**: 28 pairwise correlations tracked across 7+ detectors (AR1, PCA-SPE/T2, Mahal, IForest, GMM, OMR)
+- **Detector Correlation**: 21 pairwise correlations tracked across 6 detectors (AR1, PCA-SPE/T², IForest, GMM, OMR)
 - **Adaptive Thresholds**: Quantile/MAD/hybrid methods with PR-AUC based throttling prevents over-tuning
 - **Health Forecasting**: Exponential smoothing with 168-hour horizon (7 days ahead)
 - **Sensor Forecasting**: VAR(3) models for 9 critical sensors with lag-3 dependencies
@@ -261,27 +271,33 @@ ACM decides between file and SQL mode based on the configuration (see `core/sql_
 
 ## Feature highlights
 
-- **Multi-head detectors:** Mahalanobis, PCA (SPE/T2), Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual (OMR), and drift/CUSUM monitors provide complementary signals.
+- **Six-head detector ensemble:** PCA (SPE/T²), Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual (OMR), and drift/CUSUM monitors provide complementary fault-type signals.
 - **High-performance feature engineering:** `core.fast_features` uses vectorized pandas routines and optional Polars acceleration for FFTs, correlations, and windowed statistics.
 - **Fusion & adaptive tuning:** `core.fuse` weights detector heads, `core.analytics.AdaptiveTuning` adjusts thresholds, and `core.config_history_writer` records every auto-tune event.
 - **SQL-first and CSV-ready outputs:** `core.output_manager` writes CSVs, PNGs, SQL sink logs, run metadata, episode culprits, detector score bundles, and correlates results with Grafana dashboards in `grafana_dashboards/`.
 - **Operator-friendly diagnostics:** Episode culprits, drift-aware hysteresis, and `core.run_metadata_writer` provide health indices, fault signatures, and explanation cues for downstream visualization.
-- **Automation & testing helpers:** SQL scripts (`scripts/sql/*.sql`), population helpers (`scripts/sql/populate_acm_config.py`), and regression tests under `scripts/sql/test_*` cover dual-write and mode-loading scenarios.
 
 ## Operator quick links
 
 - System handbook (full architecture, modules, configs, ops): `docs/ACM_SYSTEM_OVERVIEW.md`
 - SQL batch runner for historian-backed continuous mode: `scripts/sql_batch_runner.py`
+- Schema documentation (authoritative): `python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md`
 - Data/config sources: `configs/config_table.csv`, `configs/sql_connection.ini`
 - Artifacts and caches: `artifacts/{EQUIP}/run_<ts>/`, `artifacts/{EQUIP}/models/`
 - Grafana/dashboard assets: `grafana_dashboards/`
+- Archived single-purpose scripts: `scripts/archive/`
 
 ## Supporting directories
 
 - `core/`: pipeline implementations (detectors, fusion, analytics, output manager, SQL client).
 - `configs/`: configuration tables plus SQL connection templates.
 - `data/`: default baseline/batch CSVs used in smoke tests.
-- `scripts/sql/`: helpers and integration tests for SQL mode.
-- `docs/` and `grafana_dashboards/`: design notes, integration plans, dashboards, and operator guides. Only `grafana_dashboards/ACM Claude Generated To Be Fixed.json` remains active; all other dashboards live under `grafana_dashboards/archive/` with a move log in `grafana_dashboards/archive/ARCHIVE_LOG.md`.
+- `scripts/`: batch runners and SQL helpers. Key scripts:
+  - `sql_batch_runner.py`: Main batch orchestration
+  - `sql/export_comprehensive_schema.py`: Schema documentation generator (authoritative)
+  - `sql/populate_acm_config.py`: Sync config to SQL
+  - `sql/verify_acm_connection.py`: Test SQL connectivity
+  - `archive/`: Archived single-purpose analysis/debug scripts
+- `docs/` and `grafana_dashboards/`: design notes, integration plans, dashboards, and operator guides.
 
 For more detail on SQL integration, dashboards, or specific detectors, consult the markdown files under `docs/` and `grafana_dashboards/docs/`.
