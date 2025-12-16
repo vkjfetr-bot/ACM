@@ -657,8 +657,9 @@ class SQLBatchRunner:
         try:
             assert process.stdout is not None
             for line in process.stdout:
-                # Stream child output through Console to keep logs consistent
-                Console.info(line.rstrip("\n"), equipment=equip_name, stream="acm_main")
+                # Stream child output directly to stdout (already has timestamp/level from ACMLog)
+                # Don't use Console.info() which would add duplicate timestamp/level prefix
+                print(line.rstrip("\n"), flush=True)
                 captured_lines.append(line)
         except KeyboardInterrupt:
             process.kill()
