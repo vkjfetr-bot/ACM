@@ -191,16 +191,33 @@ class ACMLog:
     console and SQL sink (if attached).
     """
     
-    # Thread-local storage for context (run_id, equip_id)
+    # Thread-local storage for context (run_id, equip_id, batch info)
     _context = threading.local()
     
     @classmethod
-    def set_context(cls, run_id: Optional[str] = None, equip_id: Optional[int] = None) -> None:
-        """Set thread-local context for all subsequent logs."""
+    def set_context(
+        cls, 
+        run_id: Optional[str] = None, 
+        equip_id: Optional[int] = None,
+        batch_num: Optional[int] = None,
+        batch_total: Optional[int] = None
+    ) -> None:
+        """Set thread-local context for all subsequent logs.
+        
+        Args:
+            run_id: Current run UUID
+            equip_id: Equipment ID from SQL
+            batch_num: Current batch number (0-indexed internally, displayed as 1-indexed)
+            batch_total: Total number of batches in this run
+        """
         if run_id is not None:
             cls._context.run_id = run_id
         if equip_id is not None:
             cls._context.equip_id = equip_id
+        if batch_num is not None:
+            cls._context.batch_num = batch_num
+        if batch_total is not None:
+            cls._context.batch_total = batch_total
     
     @classmethod
     def get_run_id(cls) -> Optional[str]:
@@ -210,12 +227,25 @@ class ACMLog:
     def get_equip_id(cls) -> Optional[int]:
         return getattr(cls._context, 'equip_id', None)
     
+    @classmethod
+    def get_batch_info(cls) -> Optional[str]:
+        """Get batch info string like 'batch=2/4' for display."""
+        batch_num = getattr(cls._context, 'batch_num', None)
+        batch_total = getattr(cls._context, 'batch_total', None)
+        if batch_num is not None:
+            display_num = batch_num + 1  # Convert to 1-indexed for display
+            if batch_total is not None:
+                return f"batch={display_num}/{batch_total}"
+            return f"batch={display_num}"
+        return None
+    
     # =========================================================================
     # CORE LOGGING METHODS
     # =========================================================================
     
-    @staticmethod
+    @classmethod
     def _log(
+        cls,
         level: str,
         category: str,
         message: str,
@@ -225,9 +255,21 @@ class ACMLog:
         """Internal logging method.
         
         Formats message with category prefix and routes to Console + SQL sink.
+        Automatically appends batch info if set in context.
         """
         # Format message with category prefix
         formatted_msg = f"[{category}] {message}"
+        
+        # Add batch info to kwargs if available and not already present
+        batch_info = cls.get_batch_info()
+        if batch_info and 'batch' not in kwargs:
+            # Parse batch info and add to kwargs for display
+            batch_num = getattr(cls._context, 'batch_num', None)
+            batch_total = getattr(cls._context, 'batch_total', None)
+            if batch_num is not None:
+                kwargs['batch'] = batch_num + 1  # 1-indexed for display
+            if batch_total is not None:
+                kwargs['batch_total'] = batch_total
         
         # Route to appropriate Console method
         if level == "DEBUG":

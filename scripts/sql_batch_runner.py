@@ -632,12 +632,17 @@ class SQLBatchRunner:
         env["ACM_FORCE_SQL_MODE"] = "1"
         env["ACM_BATCH_MODE"] = "1"
         # Propagate start-from-beginning intent to forecasting layer (used to force full-history model init)
+        # Note: batch_num is 0-indexed internally; display as 1-indexed for users
+        display_batch = batch_num + 1
         if self.start_from_beginning and batch_num == 0:
             env["ACM_FORECAST_FULL_HISTORY_MODE"] = "1"
-            Console.info(f"[BATCH] {equip_name}: Batch 0 in start-from-beginning mode - will perform coldstart split and train fresh models", equipment=equip_name, batch_num=batch_num)
+            Console.info(f"[BATCH] {equip_name}: First batch (start-from-beginning) - will perform coldstart split and train fresh models", equipment=equip_name, batch_num=display_batch)
         else:
-            Console.info(f"[BATCH] {equip_name}: Batch {batch_num} - will load existing models and evolve incrementally", equipment=equip_name, batch_num=batch_num)
+            Console.info(f"[BATCH] {equip_name}: Batch {display_batch} - will load existing models and evolve incrementally", equipment=equip_name, batch_num=display_batch)
         env["ACM_BATCH_NUM"] = str(batch_num)
+        # Pass total batches info (if known) so acm_main can display "batch X/Y"
+        if hasattr(self, '_current_total_batches'):
+            env["ACM_BATCH_TOTAL"] = str(self._current_total_batches)
 
         # Stream child output live so devs can see progress (instead of buffering everything).
         process = subprocess.Popen(
@@ -825,6 +830,9 @@ class SQLBatchRunner:
                 total_batches = int(total_minutes / self.tick_minutes) if self.tick_minutes > 0 else 0
         
         Console.info(f"[BATCH] {equip_name}: Processing {total_batches} batch(es) ({self.tick_minutes}-minute windows)", equipment=equip_name, total_batches=total_batches, tick_minutes=self.tick_minutes)
+        
+        # Store total for passing to child processes
+        self._current_total_batches = total_batches
         
         # Process batches
         batch_num = 0

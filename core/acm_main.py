@@ -823,15 +823,24 @@ def main() -> None:
     # Batch numbering uses absolute count from progress file, not loop counter
     # Frequency control: batch_num % interval == 0 works indefinitely
     
-    # Get batch number from environment (set by sql_batch_runner)
+    # Get batch number and total from environment (set by sql_batch_runner)
     batch_num = int(os.getenv("ACM_BATCH_NUM", "0"))
+    batch_total_str = os.getenv("ACM_BATCH_TOTAL")
+    batch_total = int(batch_total_str) if batch_total_str else None
+    
+    # Set batch context for all ACMLog messages (displays as 1-indexed)
+    ACMLog.set_context(batch_num=batch_num, batch_total=batch_total)
     
     # Store batch number in config for access throughout pipeline
     if "runtime" not in cfg:
         cfg["runtime"] = {}
     cfg["runtime"]["batch_num"] = batch_num
+    if batch_total:
+        cfg["runtime"]["batch_total"] = batch_total
 
-    ACMLog.info("RUN", f"Inside Main Now")
+    # Log batch info at startup
+    batch_display = f"{batch_num + 1}/{batch_total}" if batch_total else str(batch_num + 1)
+    ACMLog.info("RUN", f"Inside Main Now (batch {batch_display})")
     ACMLog.info("RUN", f"--- Starting ACM V5 for {equip} ---")
     ACMLog.info("CFG", f"storage_backend=SQL_ONLY")
     ACMLog.info("CFG", f"batch_mode={BATCH_MODE}  |  continuous_learning={CONTINUOUS_LEARNING}")
