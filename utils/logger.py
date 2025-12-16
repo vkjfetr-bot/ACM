@@ -118,12 +118,8 @@ class Logger:
     
     def set_output(self, file_path: Optional[Path]) -> None:
         """DEPRECATED: File output disabled in SQL-only mode. This is a no-op."""
-        if file_path:
-            print(f"[WARNING] File logging disabled - ignoring log file path: {file_path}", file=sys.stderr)
+        # File output is disabled in SQL-only mode. No-op.
     
-    @property
-    def ascii_only(self) -> bool:
-        return self._ascii_only
 
     def clear_module_levels(self) -> None:
         """Remove all module-specific level overrides."""
@@ -153,6 +149,16 @@ class Logger:
         with self._sink_lock:
             self._sinks = [s for s in self._sinks if s is not sink]
 
+    # Internal context keys that should not appear in console output
+    _INTERNAL_CONTEXT_KEYS = {
+        "module", "skip_sql", "detector_name", "step_name", "duration_ms",
+        "row_count", "col_count", "run_id", "equip_id", "error_type", 
+        "error_detail", "model_type", "model_metric", "model_value",
+        "detector_metric", "detector_value", "window_start", "window_end",
+        "baseline_start", "baseline_end", "data_quality_metric", 
+        "data_quality_value", "stage", "context", "command"
+    }
+    
     def _format_message(self, level: LogLevel, msg: str, context: Dict[str, Any], ts: datetime) -> str:
         """Format a log message according to the current format."""
         if self._format == LogFormat.JSON:
@@ -162,14 +168,18 @@ class Logger:
                 "message": msg,
             }
             if context:
-                record["context"] = context
+                # Convert context dict to a string for JSON output
+                record["context"] = json.dumps(context, ensure_ascii=True)
             return json.dumps(record, ensure_ascii=True)
         else:
-            # Text format
+            # Text format - filter out internal context keys for cleaner console output
             timestamp = ts.strftime("%Y-%m-%d %H:%M:%S")
             context_str = ""
             if context:
-                context_str = " " + " ".join(f"{k}={v}" for k, v in context.items())
+                # Filter to user-visible context only
+                visible_ctx = {k: v for k, v in context.items() if k not in self._INTERNAL_CONTEXT_KEYS}
+                if visible_ctx:
+                    context_str = " " + " ".join(f"{k}={v}" for k, v in visible_ctx.items())
             return f"[{timestamp}] [{level.name}] {msg}{context_str}"
 
     def _log(self, level: LogLevel, msg: str, **context: Any) -> None:
@@ -192,11 +202,11 @@ class Logger:
         
         # Write to console with Unicode error handling
         try:
-            print(formatted, file=stream)
+            stream.write(formatted + "\n")
         except UnicodeEncodeError:
             # Fallback: Replace non-ASCII characters with ASCII equivalents
             safe_formatted = formatted.encode(stream.encoding or 'ascii', errors='replace').decode(stream.encoding or 'ascii')
-            print(safe_formatted, file=stream)
+            stream.write(safe_formatted + "\n")
         
         # SQL-ONLY MODE: File writing removed, only sinks (SQL + stdout)
         
@@ -277,87 +287,6 @@ class Logger:
 _logger = Logger()
 
 
-class Console:
-    """Unified console logger interface - wraps the global Logger instance.
-    
-    This maintains backward compatibility with existing code while providing
-    access to enhanced logging features.
-    """
-    
-    @staticmethod
-    def debug(msg: str, **context: Any) -> None:
-        """Log a debug message."""
-        _logger.debug(msg, **context)
-    
-    @staticmethod
-    def info(msg: str, **context: Any) -> None:
-        """Log an info message."""
-        _logger.info(msg, **context)
-    
-    @staticmethod
-    def ok(msg: str, **context: Any) -> None:
-        """Log a success message."""
-        _logger.ok(msg, **context)
-    
-    @staticmethod
-    def warn(msg: str, **context: Any) -> None:
-        """Log a warning message."""
-        _logger.warn(msg, **context)
-    
-    @staticmethod
-    def warning(msg: str, **context: Any) -> None:
-        """Alias for warn()."""
-        _logger.warning(msg, **context)
-    
-    @staticmethod
-    def error(msg: str, **context: Any) -> None:
-        """Log an error message."""
-        _logger.error(msg, **context)
-    
-    @staticmethod
-    def critical(msg: str, **context: Any) -> None:
-        """Log a critical message."""
-        _logger.critical(msg, **context)
-    
-    @staticmethod
-    def set_level(level: str | LogLevel) -> None:
-        """Set the minimum log level."""
-        _logger.set_level(level)
-    
-    @staticmethod
-    def set_format(fmt: str | LogFormat) -> None:
-        """Set the output format."""
-        _logger.set_format(fmt)
-    
-    @staticmethod
-    def set_output(file_path: Optional[Path]) -> None:
-        """Set the file output path."""
-        _logger.set_output(file_path)
-    
-    @staticmethod
-    def ascii_only() -> bool:
-        """Return whether ASCII-only mode is enabled."""
-        return _logger.ascii_only
-    
-    @staticmethod
-    def set_module_level(module: str, level: str | LogLevel) -> None:
-        """Set log level for a specific module."""
-        _logger.set_module_level(module, level)
-    
-    @staticmethod
-    def clear_module_levels() -> None:
-        """Clear all module-specific level overrides."""
-        _logger.clear_module_levels()
-    
-    @staticmethod
-    def add_sink(sink: Callable[[Dict[str, Any]], None]) -> None:
-        """Register a structured log sink."""
-        _logger.add_sink(sink)
-    
-    @staticmethod
-    def remove_sink(sink: Callable[[Dict[str, Any]], None]) -> None:
-        """Remove a structured log sink."""
-        _logger.remove_sink(sink)
 
 
 class Heartbeat:
@@ -420,7 +349,7 @@ class Heartbeat:
         if not self._enabled:
             return self
         
-        Console.info(f"[..] {self.label} ...", skip_sql=True)
+        _logger.info(f"[..] {self.label} ...", skip_sql=True)
         self._started = True
         self._thr.start()
         return self
@@ -435,7 +364,7 @@ class Heartbeat:
             self._thr.join(timeout=0.1)
         
         took = time.perf_counter() - self._t0
-        Console.ok(f"[OK] {self.label} done in {took:.2f}s", skip_sql=True)
+        _logger.ok(f"[OK] {self.label} done in {took:.2f}s", skip_sql=True)
     
     def _run(self) -> None:
         """Background thread that updates progress."""
@@ -446,7 +375,7 @@ class Heartbeat:
             nxt = f" | next: {self.next_hint}" if self.next_hint else ""
             
             spinner_char = self._spinner[i % len(self._spinner)]
-            Console.info(f"[..] {spinner_char} {self.label}{eta}{nxt}", skip_sql=True)
+            _logger.info(f"[..] {spinner_char} {self.label}{eta}{nxt}", skip_sql=True)
             i += 1
 
 
@@ -455,7 +384,11 @@ def jsonl_logger(path: Path) -> Callable[[Dict[str, Any]], None]:
     DEPRECATED: File logging disabled in SQL-only mode.
     Returns a no-op function that discards all log records.
     """
-    print(f"[WARNING] jsonl_logger() called with path={path} but file logging is disabled", file=sys.stderr)
+    # File logging is disabled in SQL-only mode. No-op.
     def write(obj: Dict[str, Any]) -> None:
         pass  # No-op in SQL-only mode
     return write
+
+
+# Alias for backward compatibility with code that uses Console
+Console = _logger

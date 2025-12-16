@@ -257,6 +257,8 @@ def extract_data_quality_score(data_quality_path=None, sql_client=None, run_id=N
                     rows = cur.fetchall()
                 
                 if rows:
+                    # Fix: Convert pyodbc.Row objects to tuples to ensure pandas infers shape correctly
+                    rows = [tuple(r) for r in rows]
                     df = pd.DataFrame(rows, columns=["sensor", "train_null_pct", "score_null_pct"])
                     # Average null rate across train and score
                     avg_null_pct = (df["train_null_pct"].mean() + df["score_null_pct"].mean()) / 2.0
@@ -383,4 +385,83 @@ def write_retrain_metadata(
             sql_client.conn.rollback()
         except Exception:
             pass
+        return False
+
+
+def write_timer_stats(
+    sql_client,
+    run_id: str,
+    equip_id: int,
+    batch_num: int,
+    timings: dict
+) -> bool:
+    """
+    Write detailed timer stats to ACM_RunTimers table.
+    
+    Args:
+        sql_client: Active SQL client
+        run_id: Current RunID
+        equip_id: Equipment ID
+        batch_num: Current batch number
+        timings: Dictionary of {section_name: duration_seconds}
+        
+    Returns:
+        bool: True if successful
+    """
+    if not sql_client or not timings:
+        return False
+        
+    try:
+        # Create table if not exists (Lazy migration)
+        # In prod, this should be a migration script, but for dev speed we do it here
+        create_table_sql = """
+        IF OBJECT_ID('dbo.ACM_RunTimers', 'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.ACM_RunTimers (
+                TimerID INT IDENTITY(1,1) PRIMARY KEY,
+                RunID VARCHAR(50) NOT NULL,
+                EquipID INT NOT NULL,
+                BatchNum INT DEFAULT 0,
+                Section VARCHAR(100) NOT NULL,
+                DurationSeconds FLOAT NOT NULL,
+                CreatedAt DATETIME DEFAULT GETUTCDATE(),
+                INDEX IX_ACM_RunTimers_RunID (RunID),
+                INDEX IX_ACM_RunTimers_EquipID (EquipID)
+            )
+        END
+        """
+        
+        insert_sql = """
+        INSERT INTO dbo.ACM_RunTimers (RunID, EquipID, BatchNum, Section, DurationSeconds)
+        VALUES (?, ?, ?, ?, ?)
+        """
+        
+        # Flatten timings to list of tuples
+        # T.timings values might be floats or tuples, usually floats in this system
+        rows = []
+        for name, duration in timings.items():
+            # Handle if duration is complex object (unlikely in simple Timer)
+            try:
+                val = float(duration)
+                rows.append((run_id, int(equip_id), int(batch_num), str(name), val))
+            except (ValueError, TypeError):
+                continue
+                
+        if not rows:
+            return False
+            
+        with sql_client.cursor() as cur:
+            # check/create table first
+            cur.execute(create_table_sql)
+            
+            # fast insert
+            cur.fast_executemany = True
+            cur.executemany(insert_sql, rows)
+            
+        sql_client.conn.commit()
+        Console.debug(f"[PERF] Wrote {len(rows)} timer records to ACM_RunTimers")
+        return True
+        
+    except Exception as e:
+        Console.warn(f"[PERF] Failed to write timer stats: {e}")
         return False

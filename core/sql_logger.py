@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -10,14 +12,37 @@ from utils.logger import Console
 
 
 class SqlLogSink:
-    """Structured log sink that writes Console output to dbo.ACM_RunLogs."""
+    """Structured log sink that writes Console output to dbo.ACM_RunLogs.
+    
+    IMPORTANT: The caller (acm_main.py) must pass a DEDICATED sql_client connection
+    that is not shared with other operations. This avoids "Connection is busy" errors.
+    
+    Thread-safety is handled internally via a lock for concurrent log writes.
+    """
 
     def __init__(self, sql_client, run_id: Optional[str], equip_id: Optional[int], table: str = "ACM_RunLogs"):
-        self.sql_client = sql_client
+        """
+        Initialize the SQL log sink.
+        
+        Args:
+            sql_client: A DEDICATED SQLClient instance (not shared with main operations).
+                       The caller is responsible for creating a separate connection.
+            run_id: The current run ID to tag all log entries.
+            equip_id: The equipment ID to tag all log entries.
+            table: The SQL table name for logs (default: ACM_RunLogs).
+        """
+        self._sql_client = sql_client
+        self._lock = threading.Lock()  # Thread-safe logging
         self.run_id = run_id
         self.equip_id = equip_id
         self.table = table
+        self._closed = False
         self._ensure_table()
+
+    @property
+    def sql_client(self):
+        """Return the SQL client for logging operations."""
+        return self._sql_client
 
     def _ensure_column(self, cur, column: str, definition: str) -> None:
         """Add a column to the log table if it is missing."""
@@ -268,7 +293,11 @@ class SqlLogSink:
         }
 
     def __call__(self, record: Dict[str, Any]) -> None:
-        """Insert a log record into SQL (best-effort, no exceptions raised)."""
+        """Insert a log record into SQL (best-effort, no exceptions raised).
+        
+        Uses thread-safe locking and dedicated connection to avoid 
+        'Connection is busy' errors during concurrent operations.
+        """
         try:
             # Skip ephemeral progress messages (heartbeats, spinners)
             context = record.get("context") or {}
@@ -300,52 +329,57 @@ class SqlLogSink:
             # Fallback: if module inference failed (shows utils.logger), use parsed tag/stage/step
             if (module is None or module == "utils.logger"):
                 module = structured.get("event_type") or structured.get("stage") or structured.get("step_name") or module
-            cur = self.sql_client.cursor()
-            cur.execute(
-                f"""
-                INSERT INTO dbo.{self.table}
-                (RunID, EquipID, LoggedAt, LoggedLocal, LoggedLocalNaive, Level, Module, EventType, Stage, StepName, DurationMs, [RowCount], [ColCount], WindowSize, BatchStart, BatchEnd, BaselineStart, BaselineEnd, DataQualityMetric, DataQualityValue, LeakageFlag, ParamsJson, Message, Context)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    self.run_id,
-                    self.equip_id,
-                    logged_at,
-                    logged_local,
-                    logged_local_naive,
-                    record.get("level"),
-                    module,
-                    structured["event_type"],
-                    structured["stage"],
-                    structured["step_name"],
-                    structured["duration_ms"],
-                    structured["row_count"],
-                    structured["col_count"],
-                    structured["window_size"],
-                    structured["batch_start"],
-                    structured["batch_end"],
-                    structured["baseline_start"],
-                    structured["baseline_end"],
-                    structured["data_quality_metric"],
-                    structured["data_quality_value"],
-                    structured["leakage_flag"],
-                    structured["params_json"],
-                    message,
-                    context_json,
-                ),
-            )
-            cur.close()
-            try:
-                if hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
-                    if not getattr(self.sql_client.conn, "autocommit", True):
-                        self.sql_client.conn.commit()
-            except Exception:
-                pass
+            
+            # Thread-safe SQL insert with dedicated connection
+            with self._lock:
+                cur = self.sql_client.cursor()
+                try:
+                    cur.execute(
+                        f"""
+                        INSERT INTO dbo.{self.table}
+                        (RunID, EquipID, LoggedAt, LoggedLocal, LoggedLocalNaive, Level, Module, EventType, Stage, StepName, DurationMs, [RowCount], [ColCount], WindowSize, BatchStart, BatchEnd, BaselineStart, BaselineEnd, DataQualityMetric, DataQualityValue, LeakageFlag, ParamsJson, Message, Context)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            self.run_id,
+                            self.equip_id,
+                            logged_at,
+                            logged_local,
+                            logged_local_naive,
+                            record.get("level"),
+                            module,
+                            structured["event_type"],
+                            structured["stage"],
+                            structured["step_name"],
+                            structured["duration_ms"],
+                            structured["row_count"],
+                            structured["col_count"],
+                            structured["window_size"],
+                            structured["batch_start"],
+                            structured["batch_end"],
+                            structured["baseline_start"],
+                            structured["baseline_end"],
+                            structured["data_quality_metric"],
+                            structured["data_quality_value"],
+                            structured["leakage_flag"],
+                            structured["params_json"],
+                            message,
+                            context_json,
+                        ),
+                    )
+                finally:
+                    cur.close()
+                # Commit if not autocommit
+                try:
+                    if hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                        if not getattr(self.sql_client.conn, "autocommit", True):
+                            self.sql_client.conn.commit()
+                except Exception:
+                    pass
         except Exception as exc:
             # Never raise from a log sink, but print to stderr for diagnostics
-            import sys
             print(f"[SQL_LOG_SINK_ERROR] Failed to log to SQL: {exc}", file=sys.stderr)
 
     def close(self) -> None:
-        """Compatibility shim; nothing to close."""
-        return
+        """Mark the sink as closed. Connection lifecycle is managed by the caller."""
+        self._closed = True

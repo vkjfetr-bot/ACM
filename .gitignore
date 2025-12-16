@@ -27,22 +27,24 @@ logs/
 
 ## Data files (large, local-only)
 data/
-data/**/*.csv
-*.csv
 
-## Output and visualization files
+## Output visualization files
 **/*.png
-**/*.json
-**/output/
 
 ## Local configs with credentials
 configs/sql_connection.ini
 
-# Also ignore nested artifact dirs and backups
+## Nested artifact dirs and backups
 **/artifacts/
 ACM_V6_BACKUP_*/
 
-# Temporary audit and analysis documents
-*.html
-Comprehensive Audit of Regime Identifi.md
-Master ACM Backlog � Analytics & Forec.md
+## Archive folder (historical docs - tracked but organized)
+# docs/archive/ is tracked intentionally
+
+## Root directory protection - stray files
+/*.html
+/*.log
+/*.txt
+/*.sql
+/*.tsv
+/*.pdf

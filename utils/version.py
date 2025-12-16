@@ -17,8 +17,8 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "10.1.0"
-__version_date__ = "2025-12-11"  # v10.1.0: Multivariate Forecasting with VAR, Episode-Regime Correlation, Improved Health Tracking
+__version__ = "10.2.0"
+__version_date__ = "2025-12-16"  # v10.2.0: MHAL Detector Deprecated, Simplified to 6 Active Detectors
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))
@@ -206,13 +206,8 @@ ROLLBACK PROCEDURE:
   3. Redeploy v9.0.0 code
   4. Rollback time: <5 minutes schema, ~45 minutes data re-run
 
-NEXT VERSION (v10.1.0 planned):
-  - ExponentialDecayModel and WeibullModel degradation models
-  - ROC curve analysis for optimal failure threshold selection
-  - Multi-armed bandit for alpha auto-tuning (Thompson Sampling)
-  - Partition routing for state write contention reduction
-
 VERSION HISTORY:
+  v10.1.0 → v10.2.0: MHAL deprecated, simplified to 6 active detectors
   v9.0.0 → v10.0.0: Unified forecasting architecture, 11→4 tables, adaptive config, 1000-equipment scale
   v8.2.0 → v9.0.0: Major production release with P0 fixes
   v7.x: Legacy versions (archived)
@@ -220,6 +215,63 @@ VERSION HISTORY:
 AUTHOR: ACM Development Team
 DATE: 2025-12-04
 GIT_TAG: v10.0.0 (to be created after merge)
+"""
+
+# v10.2.0 Release Notes
+RELEASE_NOTES_V10_2 = """
+ACM v10.2.0 - MHAL Deprecation & Detector Simplification (2025-12-16)
+
+SUMMARY:
+  Removed Mahalanobis detector from active pipeline - it was mathematically redundant 
+  with PCA-T² (both compute Mahalanobis distance, but PCA-T² is numerically stable).
+
+BREAKING CHANGES:
+  ⚠ mhal_z no longer computed (fusion weight set to 0.0)
+  ⚠ mhal_params no longer saved to model registry
+  ⚠ Legacy mhal_z columns in SQL tables will stop receiving new data
+
+DETECTOR ARCHITECTURE (6 Active Detectors):
+  Each detector answers a specific "what's wrong?" question:
+  
+  | Detector | Z-Score   | Fault Type                              |
+  |----------|-----------|----------------------------------------|
+  | AR1      | ar1_z     | Sensor drift, control loop issues      |
+  | PCA-SPE  | pca_spe_z | Correlation/coupling breakdown         |
+  | PCA-T²   | pca_t2_z  | Operating point far from center        |
+  | IForest  | iforest_z | Rare/novel operating conditions        |
+  | GMM      | gmm_z     | Distribution shift, mode confusion     |
+  | OMR      | omr_z     | Sensor relationship violations         |
+
+MATHEMATICAL JUSTIFICATION:
+  - Mahalanobis D² = (x-μ)ᵀΣ⁻¹(x-μ) in raw feature space
+  - PCA-T² = Σᵢ zᵢ²/λᵢ in PCA space (orthogonal components)
+  - These are mathematically equivalent (same distance metric)
+  - PCA-T² is numerically stable: covariance is diagonal in PCA space
+  - MHAL suffered from ill-conditioned covariance with multicollinearity
+
+DEFAULT FUSION WEIGHTS (v10.2.0):
+  pca_spe_z: 0.30  (correlation breaks)
+  pca_t2_z:  0.20  (multivariate outliers - replaces MHAL)
+  ar1_z:     0.20  (temporal patterns)
+  iforest_z: 0.15  (rare states)
+  omr_z:     0.10  (sensor relationships)
+  gmm_z:     0.05  (distribution anomalies)
+  mhal_z:    0.00  (DEPRECATED)
+
+CODE CHANGES:
+  - core/acm_main.py: Removed all mhal_detector references
+  - core/correlation.py: MahalanobisDetector marked DEPRECATED in docstring
+  - utils/detector_labels.py: Updated mhal_z description to show deprecated
+  - core/model_persistence.py: Removed mhal_params from persistence
+  - scripts/test_model_registry.py: Removed mhal_params from test data
+
+MIGRATION:
+  No database migration required. Existing mhal_z columns will simply
+  receive NULL or 0 values going forward.
+
+AUTHOR: ACM Development Team
+DATE: 2025-12-16
+GIT_TAG: v10.2.0
 """
 
 # v9.0.0 Release Notes (archived)

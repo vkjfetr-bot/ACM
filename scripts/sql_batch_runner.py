@@ -264,9 +264,13 @@ class SQLBatchRunner:
         analytical tables so a dev batch run starts from a clean slate.
         """
         try:
+            tables_list = sorted(ALLOWED_TABLES)
+            total_tables = len(tables_list)
+            Console.info(f"[RESET] Truncating {total_tables} ACM output tables for EquipID={equip_id}...", equip_id=equip_id, total_tables=total_tables)
             with self._get_sql_connection() as conn:
                 cur = conn.cursor()
-                for table in sorted(ALLOWED_TABLES):
+                deleted_count = 0
+                for idx, table in enumerate(tables_list, 1):
                     try:
                         cur.execute(
                             f"IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL "
@@ -274,10 +278,16 @@ class SQLBatchRunner:
                             f"DELETE FROM dbo.{table} WHERE EquipID = ?",
                             (equip_id,),
                         )
+                        rows_deleted = cur.rowcount
+                        if rows_deleted > 0:
+                            deleted_count += 1
                     except Exception as tbl_err:
                         Console.warn(f"[WARN] Failed to truncate {table} for EquipID={equip_id}: {tbl_err}", table=table, error=str(tbl_err))
+                    # Progress indicator every 10 tables
+                    if idx % 10 == 0:
+                        Console.info(f"[RESET] Truncated {idx}/{total_tables} tables...", progress=idx, total=total_tables)
                 conn.commit()
-            Console.info(f"[DEV] Truncated SQL outputs for EquipID={equip_id}", equip_id=equip_id)
+            Console.info(f"[RESET] Truncated {deleted_count} tables with data for EquipID={equip_id}", equip_id=equip_id, tables_truncated=deleted_count)
         except Exception as e:
             Console.warn(f"[WARN] Failed to truncate outputs for EquipID={equip_id}: {e}", error=str(e))
 
