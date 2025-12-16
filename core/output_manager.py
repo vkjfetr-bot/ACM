@@ -996,8 +996,8 @@ class OutputManager:
         tz_stripped_total = tz_stripped_train + tz_stripped_score
         future_rows_total = future_train + future_score
         
-        # Validate training sample count
-        if len(train) < min_train_samples:
+        # Validate training sample count (skip in batch mode - train comes from baseline_buffer)
+        if len(train) < min_train_samples and is_coldstart:
             ACMLog.warn("DATA", f"Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)")
         
         # Keep numeric only (same set across train/score)

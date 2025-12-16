@@ -1018,11 +1018,14 @@ def main() -> None:
             
             # Cold-start mode: If no baseline provided, will bootstrap from batch data
             train_csv_provided = "train_csv" in cfg.get("data", {}) or args.train_csv
-            if not train_csv_provided:
-                Console.info("[DATA] Cold-start mode: No baseline provided, will bootstrap from batch data")
-            else:
-                Console.info(f"[DATA] Using baseline (train_csv): {cfg.get('data', {}).get('train_csv', 'N/A')}")
-            Console.info(f"[DATA] Using batch (score_csv): {cfg.get('data', {}).get('score_csv', 'N/A')}")
+            if not SQL_MODE:
+                # File mode: Log CSV paths being used
+                if not train_csv_provided:
+                    Console.info("[DATA] Cold-start mode: No baseline provided, will bootstrap from batch data")
+                else:
+                    Console.info(f"[DATA] Using baseline (train_csv): {cfg.get('data', {}).get('train_csv', 'N/A')}")
+                Console.info(f"[DATA] Using batch (score_csv): {cfg.get('data', {}).get('score_csv', 'N/A')}")
+            # SQL mode: Don't log CSV paths - we load from historian
 
             if SQL_MODE:
                 # SQL mode: Use smart coldstart with retry logic
