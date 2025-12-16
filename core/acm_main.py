@@ -2213,61 +2213,51 @@ def main() -> None:
         
         # PERF-03: Only score enabled detectors
         # CRITICAL FIX #6: Replace NaN with 0 after all detector .score() calls to prevent NaN propagation
-        # Parallel Scoring
-        score_futures = {}
-        # Parallel Scoring
-        score_futures = {}
-        with T.section("score.parallel_score"):
-            ACMLog.info("PARALLEL", "Starting parallel detector scoring...")
+        # NOTE: Sequential scoring to avoid BLAS/OpenMP thread deadlocks with ThreadPoolExecutor
+        with T.section("score.detector_score"):
+            ACMLog.info("MODEL", "Starting detector scoring...")
             score_start_time = time.perf_counter()
             
-            # Max workers reused from fitting block if available, else default
-            if 'max_workers' not in locals():
-                max_workers = min(4, os.cpu_count() or 4)
-                
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                if ar1_enabled and ar1_detector:
-                     score_futures[executor.submit(ar1_detector.score, score)] = 'ar1'
-                
-                if pca_enabled and pca_detector:
-                     score_futures[executor.submit(pca_detector.score, score)] = 'pca'
-                
-                # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
-                
-                if iforest_enabled and iforest_detector:
-                     score_futures[executor.submit(iforest_detector.score, score)] = 'iforest'
-                
-                if gmm_enabled and gmm_detector:
-                     score_futures[executor.submit(gmm_detector.score, score)] = 'gmm'
-                
-                # Store OMR contributions outside frame (pandas doesn't support custom attributes)
-                if omr_enabled and omr_detector:
-                     score_futures[executor.submit(omr_detector.score, score, return_contributions=True)] = 'omr'
-                
-                # Collect results
-                for future in as_completed(score_futures):
-                    name = score_futures[future]
-                    try:
-                        res = future.result()
-                        if name == 'ar1':
-                            frame["ar1_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                        elif name == 'pca':
-                            pca_spe, pca_t2 = res
-                            frame["pca_spe"] = pd.Series(pca_spe, index=frame.index).fillna(0)
-                            frame["pca_t2"] = pd.Series(pca_t2, index=frame.index).fillna(0)
-                        elif name == 'iforest':
-                            frame["iforest_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                        elif name == 'gmm':
-                            frame["gmm_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                        elif name == 'omr':
-                            omr_z, omr_contributions = res
-                            frame["omr_raw"] = pd.Series(omr_z, index=frame.index).fillna(0)
-                            omr_contributions_data = omr_contributions
-                    except Exception as e:
-                        ACMLog.error("PARALLEL", f"Failed to score {name}: {e}")
-                        raise
+            # AR1 Detector
+            if ar1_enabled and ar1_detector:
+                with T.section("score.ar1"):
+                    res = ar1_detector.score(score)
+                    frame["ar1_raw"] = pd.Series(res, index=frame.index).fillna(0)
+                    ACMLog.info("AR1", "Detector scored")
+            
+            # PCA Subspace Detector
+            if pca_enabled and pca_detector:
+                with T.section("score.pca"):
+                    pca_spe, pca_t2 = pca_detector.score(score)
+                    frame["pca_spe"] = pd.Series(pca_spe, index=frame.index).fillna(0)
+                    frame["pca_t2"] = pd.Series(pca_t2, index=frame.index).fillna(0)
+                    ACMLog.info("PCA", "Detector scored")
+            
+            # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
+            
+            # Isolation Forest Detector
+            if iforest_enabled and iforest_detector:
+                with T.section("score.iforest"):
+                    res = iforest_detector.score(score)
+                    frame["iforest_raw"] = pd.Series(res, index=frame.index).fillna(0)
+                    ACMLog.info("IFOREST", "Detector scored")
+            
+            # GMM Detector
+            if gmm_enabled and gmm_detector:
+                with T.section("score.gmm"):
+                    res = gmm_detector.score(score)
+                    frame["gmm_raw"] = pd.Series(res, index=frame.index).fillna(0)
+                    ACMLog.info("GMM", "Detector scored")
+            
+            # OMR Detector (store contributions outside frame - pandas doesn't support custom attributes)
+            if omr_enabled and omr_detector:
+                with T.section("score.omr"):
+                    omr_z, omr_contributions = omr_detector.score(score, return_contributions=True)
+                    frame["omr_raw"] = pd.Series(omr_z, index=frame.index).fillna(0)
+                    omr_contributions_data = omr_contributions
+                    ACMLog.info("OMR", "Detector scored")
         
-        ACMLog.info("PARALLEL", f"All detectors scored in {time.perf_counter()-score_start_time:.2f}s")
+        ACMLog.info("MODEL", f"All detectors scored in {time.perf_counter()-score_start_time:.2f}s")
         
         hb.stop()
 
