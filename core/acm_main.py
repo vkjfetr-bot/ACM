@@ -1985,6 +1985,7 @@ def main() -> None:
                 
                 # AR1 Detector
                 if ar1_enabled and not ar1_detector:
+                    Console.info("[MODEL] Fitting AR1 detector...")
                     with T.section("fit.ar1"):
                         ar1_cfg = cfg.get("models", {}).get("ar1", {}) or {}
                         ar1_detector = AR1Detector(ar1_cfg=ar1_cfg).fit(train)
@@ -1992,6 +1993,7 @@ def main() -> None:
                 
                 # PCA Subspace Detector
                 if pca_enabled and not pca_detector:
+                    Console.info("[MODEL] Fitting PCA detector...")
                     with T.section("fit.pca"):
                         pca_cfg = cfg.get("models", {}).get("pca", {}) or {}
                         pca_detector = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
@@ -2010,6 +2012,7 @@ def main() -> None:
                 
                 # Isolation Forest Detector
                 if iforest_enabled and not iforest_detector:
+                    Console.info("[MODEL] Fitting IForest detector...")
                     with T.section("fit.iforest"):
                         if_cfg = cfg.get("models", {}).get("iforest", {}) or {}
                         iforest_detector = outliers.IsolationForestDetector(if_cfg=if_cfg).fit(train)
@@ -2017,6 +2020,7 @@ def main() -> None:
                 
                 # GMM Detector
                 if gmm_enabled and not gmm_detector:
+                    Console.info("[MODEL] Fitting GMM detector (may take time with large data)...")
                     with T.section("fit.gmm"):
                         gmm_cfg = cfg.get("models", {}).get("gmm", {}) or {}
                         gmm_cfg.setdefault("covariance_type", "full")
@@ -2028,6 +2032,7 @@ def main() -> None:
                 
                 # OMR Detector
                 if omr_enabled and not omr_detector:
+                    Console.info("[MODEL] Fitting OMR detector...")
                     with T.section("fit.omr"):
                         omr_cfg = cfg.get("models", {}).get("omr", {}) or {}
                         omr_detector = OMRDetector(cfg=omr_cfg).fit(train)
