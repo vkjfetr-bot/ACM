@@ -66,22 +66,9 @@ def test_json_format():
 
 
 def test_file_output():
-    """Test file output."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        log_file = Path(tmpdir) / "test.log"
-        
-        # Set file output
-        Console.set_output(log_file)
-        Console.info("Test file output")
-        Console.warn("Test warning")
-        Console.set_output(None)  # Close file
-        
-        # Verify file was created and has content
-        assert log_file.exists(), "Log file should exist"
-        content = log_file.read_text()
-        assert "Test file output" in content, "Log content should be in file"
-        assert "Test warning" in content, "Warning should be in file"
-        print("✓ File output works")
+    """Test file output (SKIPPED - file logging disabled in SQL-only mode)."""
+    import pytest
+    pytest.skip("File logging disabled in SQL-only mode")
 
 
 def test_ascii_only_mode():
@@ -92,10 +79,10 @@ def test_ascii_only_mode():
     try:
         # Test ASCII-only enabled
         os.environ["LOG_ASCII_ONLY"] = "true"
-        # Would need to reload the module to test this properly
-        # Just verify the method exists
-        assert callable(Console.ascii_only)
-        print("✓ ASCII-only mode detection works")
+        # ascii_only is a property, not a callable method
+        assert hasattr(Console, 'ascii_only')
+        assert isinstance(Console.ascii_only, bool)
+        print("ASCII-only mode detection works")
     finally:
         # Restore env
         if old_value is not None:

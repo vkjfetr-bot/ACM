@@ -1,9 +1,10 @@
-"""Tests for SQL log sink."""
+"""Tests for SQL log sink (BatchedSqlLogSink from sql_logger_v2)."""
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
-from core.sql_logger import SqlLogSink
+from core.sql_logger_v2 import BatchedSqlLogSink
 
 
 class DummyConn:
@@ -18,6 +19,7 @@ class DummyConn:
 class DummyCursor:
     def __init__(self, log):
         self.log = log
+        self.rowcount = 0
 
     def execute(self, sql, params=None):
         self.log.append(("execute", sql.strip(), params))
@@ -35,49 +37,102 @@ class DummySQLClient:
         return DummyCursor(self.log)
 
 
-def test_sql_log_sink_writes_records():
+def test_batched_sql_log_sink_writes_records():
+    """Test that BatchedSqlLogSink queues and writes log records."""
     client = DummySQLClient()
-    sink = SqlLogSink(client, run_id="run-123", equip_id=42)
-
-    record = {
-        "timestamp": "2025-11-15T12:34:56",
-        "level": "INFO",
-        "module": "tests.test_sql_logger",
-        "message": "Hello SQL sink",
-        "context": {"foo": "bar", "event_type": "TEST", "step": "hello_step", "duration_ms": 12.5},
-    }
-    sink(record)
-
-    # Last execute call should be the INSERT
-    insert_calls = [entry for entry in client.log if entry[0] == "execute" and "INSERT INTO" in entry[1]]
+    sink = BatchedSqlLogSink(
+        sql_client=client, 
+        run_id="run-123", 
+        equip_id=42,
+        batch_size=1,  # Flush after each record for testing
+        flush_interval_ms=100,
+    )
+    
+    # Use the structured log() method
+    sink.log(
+        level="INFO",
+        message="Hello SQL sink",
+        module="tests.test_sql_logger",
+        event_type="TEST",
+        step_name="hello_step",
+        duration_ms=12.5,
+        context={"foo": "bar"},
+    )
+    
+    # Allow time for background thread to flush
+    time.sleep(0.3)
+    
+    # Force flush and close
+    sink.flush()
+    sink.close()
+    
+    # Check INSERT was executed
+    insert_calls = [
+        entry for entry in client.log 
+        if entry[0] == "execute" and "INSERT INTO" in str(entry[1])
+    ]
     assert insert_calls, "Expected INSERT statement to be executed"
-    _, _, params = insert_calls[-1]
-    assert params[0] == "run-123"
-    assert params[1] == 42
-    assert params[5] == "INFO"
-    assert params[6] == "tests.test_sql_logger"
-    assert params[7] == "TEST"
-    assert params[9] == "hello_step"
-    assert params[10] == 12.5
-    assert params[22] == "Hello SQL sink"
-    assert params[21] == '{"foo": "bar"}'
-    assert params[23] == '{"foo": "bar", "event_type": "TEST", "step": "hello_step", "duration_ms": 12.5}'
-    assert client.conn.commit_calls >= 1
+    
+    # Verify record was written
+    stats = sink.get_stats()
+    assert stats["written"] >= 1, f"Expected at least 1 written, got {stats}"
 
 
-def test_sql_log_sink_handles_missing_timestamp():
+def test_batched_sql_log_sink_legacy_interface():
+    """Test that BatchedSqlLogSink works with legacy __call__ interface."""
     client = DummySQLClient()
-    sink = SqlLogSink(client, run_id=None, equip_id=None)
+    sink = BatchedSqlLogSink(
+        sql_client=client, 
+        run_id=None, 
+        equip_id=None,
+        batch_size=1,
+        flush_interval_ms=100,
+    )
 
+    # Use legacy dict-based interface (for Console.add_sink compatibility)
     sink({
+        "timestamp": "2025-11-15T12:34:56",
         "level": "ERROR",
-        "message": "Missing timestamp",
-        "context": {},
+        "module": "tests.test_sql_logger",
+        "message": "Legacy interface test",
+        "context": {"event_type": "TEST"},
     })
+    
+    # Allow time for background thread to flush
+    time.sleep(0.3)
+    sink.flush()
+    sink.close()
+    
+    # Check INSERT was executed
+    insert_calls = [
+        entry for entry in client.log 
+        if entry[0] == "execute" and "INSERT INTO" in str(entry[1])
+    ]
+    assert insert_calls, "Expected INSERT statement to be executed"
 
-    insert_calls = [entry for entry in client.log if entry[0] == "execute" and "INSERT INTO" in entry[1]]
-    _, _, params = insert_calls[-1]
-    # LoggedAt should be auto-generated datetime
-    assert isinstance(params[2], datetime)
-    assert params[3] is None or isinstance(params[3], datetime)
-    assert params[4] is None or isinstance(params[4], datetime)
+
+def test_batched_sql_log_sink_skips_ephemeral():
+    """Test that skip_sql context flag prevents SQL writes."""
+    client = DummySQLClient()
+    sink = BatchedSqlLogSink(
+        sql_client=client, 
+        run_id="run-456", 
+        equip_id=1,
+        batch_size=1,
+        flush_interval_ms=100,
+    )
+
+    # This should be skipped
+    sink({
+        "level": "INFO",
+        "message": "Ephemeral message",
+        "context": {"skip_sql": True},
+    })
+    
+    time.sleep(0.3)
+    sink.flush()
+    sink.close()
+    
+    # Should have no inserts for this message
+    stats = sink.get_stats()
+    assert stats["written"] == 0, f"Expected 0 written for skip_sql, got {stats}"

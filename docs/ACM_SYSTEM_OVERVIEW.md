@@ -66,7 +66,8 @@ This handbook is a complete, implementation-level walkthrough of ACM V10 for new
   - `core/regimes.py`, `core/drift.py`, `core/fuse.py`, `core/fast_features.py`, `core/outliers.py`, `core/correlation.py`: Detector heads and feature plumbing used by `acm_main`.
   - `core/sql_client.py`: Thin pyodbc wrapper used by SQL mode (SP calls, retries).
   - `core/smart_coldstart.py`: Coldstart retry/orchestration when SQL historian is sparse.
-  - `utils/logger.py`, `utils/timer.py`: Console logging, SQL sink integration, heartbeat, timing helpers.
+  - `core/observability.py`: Consolidated observability stack (OpenTelemetry traces/metrics, structlog logging, Pyroscope profiling). See `docs/OBSERVABILITY.md`.
+  - `utils/logger.py`, `utils/timer.py`: Base Console logging, SQL sink integration, heartbeat, timing helpers.
   - Feature builder implementation detail: `core/fast_features.py` prefers Polars over pandas by default. The threshold `fusion.features.polars_threshold` is set to 10 to aggressively route feature computations through Polars for performance.
 
 - **Persistence & SQL assets**

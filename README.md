@@ -2,11 +2,12 @@
 
 ACM V10 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, predictive forecasting, and flexible outputs so that engineers can understand what is changing, when it started, which sensors or regimes are responsible, and what will happen next.
 
-**Current Version:** v10.2.0 - MHAL Deprecated, Simplified 6-Detector Architecture
+**Current Version:** v10.3.0 - Consolidated Observability Stack (OpenTelemetry + structlog + Pyroscope)
 
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
 ### Recent Updates (Dec 2025)
+- **v10.3.0**: Consolidated observability stack with OpenTelemetry (traces/metrics), structlog (structured logging), and Grafana Pyroscope (profiling). See `docs/OBSERVABILITY.md`.
 - **v10.2.0**: Mahalanobis detector deprecated - was mathematically redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable. Simplified to 6 active detectors.
 - Forecast/RUL work is in `core/forecast_engine.py` and the new degradation/RUL stack.
 - SQL historian sample for FD_FAN is time-shifted (2023-10-15 → 2025-09-14). Set Grafana ranges accordingly.
@@ -237,7 +238,8 @@ All analytical signals evolve correctly across batches:
 
 1. **Prepare the environment**
    - `python -m venv .venv` (Python >= 3.11) and `pip install -U pip`.
-   - `pip install -r requirements.txt` or `pip install .` to satisfy NumPy, pandas, scikit-learn, matplotlib, seaborn, PyYAML, pyodbc, joblib, and other dependencies listed in `pyproject.toml`.
+   - `pip install -r requirements.txt` or `pip install .` to satisfy NumPy, pandas, scikit-learn, matplotlib, seaborn, PyYAML, pyodbc, joblib, structlog, and other dependencies listed in `pyproject.toml`.
+   - **Optional observability packages**: `pip install -e ".[observability]"` for OpenTelemetry + Pyroscope.
 2. **Provide config and data**
    - Ensure `configs/config_table.csv` defines the equipment-specific parameters (paths, sampling rate, models, SQL mode flag). Override per run with `--config <file>` if needed.
    - Place baseline data (`train_csv`) and batch data (`score_csv`) under `data/` or point to SQL tables.
@@ -246,6 +248,54 @@ All analytical signals evolve correctly across batches:
    - Add `--train-csv data/baseline.csv` and `--score-csv data/batch.csv` to override the defaults defined in the config table.
    - Artifacts written to SQL tables. Cached detector bundles in SQL (`ACM_ModelRegistry`) or `artifacts/{equip}/models/` for reuse.
    - SQL mode is on by default; set env `ACM_FORCE_FILE_MODE=1` to force file mode.
+
+## Observability Stack (v10.3.0+)
+
+ACM uses a modern observability stack built on open standards. See `docs/OBSERVABILITY.md` for full details.
+
+### Components
+
+| Signal | Tool | Backend | Purpose |
+|--------|------|---------|---------|
+| **Traces** | OpenTelemetry SDK | Grafana Tempo | Distributed tracing, request flow |
+| **Metrics** | OpenTelemetry SDK | Grafana Mimir | Performance metrics, counters |
+| **Logs** | structlog | Grafana Loki + SQL | Structured JSON logs |
+| **Profiling** | Grafana Pyroscope | Pyroscope | Continuous CPU/memory flamegraphs |
+
+### Quick Start
+
+```python
+from core.observability import init_observability, get_logger, acm_log
+
+# Initialize at startup
+init_observability(service_name="acm-batch")
+
+# Structured logging
+log = get_logger()
+log.info("batch_started", equipment="FD_FAN", rows=1500)
+
+# Category-aware logging
+acm_log.run("Pipeline started")
+acm_log.perf("detector.fit", duration_ms=234.5)
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | OTLP collector (e.g., Grafana Alloy) |
+| `ACM_PYROSCOPE_ENDPOINT` | none | Pyroscope server for profiling |
+| `ACM_LOG_FORMAT` | `json` | Log format: `json` or `console` |
+
+### Installation
+
+```powershell
+# Base (included in requirements)
+pip install structlog
+
+# Full observability (optional)
+pip install -e ".[observability]"
+```
 
 ## Batch mode details
 

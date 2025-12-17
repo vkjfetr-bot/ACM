@@ -23,12 +23,31 @@ dependencies = [
   "statsmodels>=0.14",
   "scipy>=1.12",
   "psutil>=5.9",  # Resource monitoring
+  "structlog>=24.0",  # Structured logging
 ]
 
 [project.optional-dependencies]
 dev = [
   "ruff>=0.6",
   "mypy>=1.10",
+  "py-spy>=0.4",  # Ad-hoc profiling
+  "scalene>=1.5",  # CPU+memory profiling
+]
+# OpenTelemetry instrumentation (optional - requires Grafana LGTM stack)
+telemetry = [
+  "opentelemetry-api>=1.25",
+  "opentelemetry-sdk>=1.25",
+  "opentelemetry-exporter-otlp-proto-http>=1.25",
+  "opentelemetry-semantic-conventions>=0.46b0",
+]
+# Continuous profiling with Grafana Pyroscope
+profiling = [
+  "pyroscope-io>=0.8",
+]
+# Full observability stack
+observability = [
+  "acm-v4[telemetry]",
+  "acm-v4[profiling]",
 ]
 # For optional Rust bridge builds (if you decide to ship a wheel later)
 rust = ["maturin>=1.6"]

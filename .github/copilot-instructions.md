@@ -39,6 +39,8 @@ ACM/
 |   +-- acm_main.py       # Pipeline orchestrator (entry point)
 |   +-- output_manager.py # All CSV/PNG/SQL writes (ALLOWED_TABLES)
 |   +-- sql_client.py     # SQL Server connectivity
+|   +-- observability.py  # Consolidated observability (OpenTelemetry + structlog + Pyroscope)
+|   +-- sql_logger_v2.py  # Batched SQL log sink
 |   +-- omr.py            # Overall Model Residual detector
 |   +-- correlation.py    # Correlation-based detector
 |   +-- outliers.py       # Statistical outlier detection
