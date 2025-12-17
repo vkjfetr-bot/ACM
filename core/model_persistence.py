@@ -645,7 +645,7 @@ class ModelVersionManager:
                 Console.warn(f"[MODEL-SQL] Transaction rolled back - no models saved")
             else:
                 self.sql_client.conn.commit()
-                Console.info(f"[MODEL-SQL] ✓ Committed {saved_count}/{len(models)} models to SQL ModelRegistry v{version}")
+                Console.info(f"[MODEL-SQL] OK Committed {saved_count}/{len(models)} models to SQL ModelRegistry v{version}")
                 
         except Exception as e:
             Console.warn(f"[MODEL-SQL] Critical error during save, rolling back: {e}")

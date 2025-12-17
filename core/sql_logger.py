@@ -171,23 +171,30 @@ class SqlLogSink:
             leakage_flag = bool(ctx.get("leakage"))
 
         # Parse leading bracket tag for event type and step (e.g., "[TIMER] fill_missing 0.002s")
-        tag_match = re.match(r"^\[(?P<tag>[A-Z0-9_]+)\]\s*(?P<body>.*)$", message)
+        # Match both UPPERCASE tags (e.g., [PERF]) and CamelCase/MixedCase (e.g., [DegradationModel])
+        tag_match = re.match(r"^\[(?P<tag>[A-Za-z0-9_]+)\]\s*(?P<body>.*)$", message)
         message_body = message
         if tag_match:
             message_body = tag_match.group("body")
+            tag_value = tag_match.group("tag")
             if not event_type:
-                event_type = tag_match.group("tag")
+                # Normalize: keep as-is for short tags, otherwise use first word of the tag
+                event_type = tag_value.upper() if len(tag_value) <= 12 else tag_value[:12].upper()
             if not step_name:
                 body_tokens = message_body.strip().split()
                 if body_tokens:
                     step_name = body_tokens[0]
-            
-            # Derive stage from step_name if it contains dots (e.g., "outputs.comprehensive_analytics" -> "outputs")
-            if not stage and step_name and "." in step_name:
-                stage = step_name.split(".")[0]
-            # Fallback: use event_type as stage if we still don't have one
-            elif not stage and event_type:
-                stage = event_type.lower()
+            # Also use the tag as the stage if it looks like a module name (CamelCase)
+            if not stage:
+                if tag_value[0].isupper() and any(c.islower() for c in tag_value):
+                    # CamelCase module name - use as stage
+                    stage = tag_value
+                elif step_name and "." in step_name:
+                    # Dotted step name - use first part as stage
+                    stage = step_name.split(".")[0]
+                else:
+                    # Fallback: use event_type as stage
+                    stage = event_type.lower() if event_type else None
 
         # Simple duration parse from message suffix (e.g., "0.123s")
         if duration_ms is None:
@@ -326,9 +333,10 @@ class SqlLogSink:
             message = str(record.get("message", ""))[:4000]
             structured = self._extract_structured_fields(record)
             module = record.get("module")
-            # Fallback: if module inference failed (shows utils.logger), use parsed tag/stage/step
-            if (module is None or module == "utils.logger"):
-                module = structured.get("event_type") or structured.get("stage") or structured.get("step_name") or module
+            # Fallback: if module inference failed (shows utils.logger or __main__), use parsed stage
+            if module in (None, "utils.logger", "__main__"):
+                # Prefer Stage (CamelCase module name) over event_type
+                module = structured.get("stage") or structured.get("event_type") or structured.get("step_name") or module
             
             # Thread-safe SQL insert with dedicated connection
             with self._lock:

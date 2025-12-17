@@ -420,9 +420,10 @@ class ScoreCalibrator:
     and computes a threshold at a given quantile `q`.
     Can compute either a single global threshold or per-regime thresholds.
     """
-    def __init__(self, q: float = 0.98, self_tune_cfg: Optional[Dict[str, Any]] = None):
+    def __init__(self, q: float = 0.98, self_tune_cfg: Optional[Dict[str, Any]] = None, name: str = "detector"):
         self.q = float(q)
         self.self_tune_cfg = self_tune_cfg or {}
+        self.name = name
         self.med = 0.0
         self.mad = 1.0
         self.scale = 1.0
@@ -434,6 +435,12 @@ class ScoreCalibrator:
     def fit(self, x: np.ndarray, regime_labels: Optional[np.ndarray] = None) -> "ScoreCalibrator":
         x_finite = x[np.isfinite(x)]
         if x_finite.size == 0:
+            Console.warn("[CAL] No finite values in calibration data - using defaults")
+            return self
+
+        # FUSE-FIX-03: Validate input data has reasonable variation
+        if x_finite.size < 10:
+            Console.warn(f"[CAL] Insufficient samples ({x_finite.size}) for reliable calibration - using defaults")
             return self
 
         self.med = float(np.median(x_finite))
@@ -468,7 +475,28 @@ class ScoreCalibrator:
         else:
             # Standard quantile-based threshold
             self.q_thresh = float(np.quantile(x_finite, self.q))
+        
+        # FUSE-FIX-04: Validate and clamp threshold to reasonable range
+        # Thresholds should be in a sensible range for z-scores/raw anomaly metrics
+        min_thresh = float(self.self_tune_cfg.get("min_threshold", 0.001))
+        max_thresh = float(self.self_tune_cfg.get("max_threshold", 1000.0))
+        
+        if not np.isfinite(self.q_thresh):
+            Console.warn(f"[CAL:{self.name}] Non-finite threshold computed ({self.q_thresh}) - using fallback 3.0")
+            self.q_thresh = 3.0
+        elif self.q_thresh <= 0:
+            Console.debug(f"[CAL:{self.name}] Non-positive threshold ({self.q_thresh:.6f}) - clamping to {min_thresh}")
+            self.q_thresh = min_thresh
+        elif self.q_thresh > max_thresh:
+            Console.debug(f"[CAL:{self.name}] Extreme threshold ({self.q_thresh:.2f}) - clamping to {max_thresh}")
+            self.q_thresh = max_thresh
+        
         self.q_z = (self.q_thresh - self.med) / self.scale if self.scale > 1e-9 else 1.0
+        
+        # FUSE-FIX-05: Clamp q_z to reasonable z-score range
+        if not np.isfinite(self.q_z) or abs(self.q_z) > 20.0:
+            Console.debug(f"[CAL:{self.name}] Extreme q_z ({self.q_z:.2f}) - clamping to ±20")
+            self.q_z = float(np.clip(self.q_z, -20.0, 20.0)) if np.isfinite(self.q_z) else 3.0
 
         # Per-regime thresholding
         if regime_labels is not None and regime_labels.size == x.size:

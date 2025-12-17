@@ -70,7 +70,8 @@ def parse_culprits_string(culprits_str: str) -> List[Dict[str, Any]]:
 def write_episode_culprits(
     sql_client,
     run_id: str,
-    episodes: pd.DataFrame
+    episodes: pd.DataFrame,
+    equip_id: Optional[int] = None
 ) -> bool:
     """
     Write episode culprits to ACM_EpisodeCulprits table.
@@ -79,6 +80,7 @@ def write_episode_culprits(
         sql_client: SQL connection client
         run_id: Unique run identifier (UUID)
         episodes: Episodes dataframe with episode_id and culprits columns
+        equip_id: Equipment ID for the culprits records
     
     Returns:
         bool: True if write succeeded, False otherwise
@@ -119,7 +121,8 @@ def write_episode_culprits(
                     "unknown",
                     None,
                     None,
-                    1
+                    1,
+                    equip_id
                 ))
                 continue
             
@@ -144,18 +147,19 @@ def write_episode_culprits(
                     detector_label,
                     sensor_name,
                     contribution_pct,
-                    rank
+                    rank,
+                    equip_id
                 ))
         
         if not records:
             Console.info("[CULPRITS] No culprit records to write")
             return True
         
-        # Build bulk insert statement
+        # Build bulk insert statement (include EquipID for proper filtering)
         insert_sql = """
         INSERT INTO dbo.ACM_EpisodeCulprits (
-            RunID, EpisodeID, DetectorType, SensorName, ContributionPct, Rank
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            RunID, EpisodeID, DetectorType, SensorName, ContributionPct, Rank, EquipID
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """
         
         # Execute bulk insert
@@ -259,7 +263,8 @@ def write_episode_culprits_enhanced(
     sql_client,
     run_id: str,
     episodes: pd.DataFrame,
-    scores_df: pd.DataFrame
+    scores_df: pd.DataFrame,
+    equip_id: Optional[int] = None
 ) -> bool:
     """
     Enhanced version that computes detector contributions from scores.
@@ -269,6 +274,7 @@ def write_episode_culprits_enhanced(
         run_id: Unique run identifier (UUID)
         episodes: Episodes dataframe
         scores_df: Scores dataframe with detector z-scores
+        equip_id: Equipment ID for the culprits records
     
     Returns:
         bool: True if write succeeded, False otherwise
@@ -288,7 +294,7 @@ def write_episode_culprits_enhanced(
         
         if len(culprits_df) == 0:
             Console.warn("[CULPRITS] No culprit contributions computed, falling back to string parsing")
-            return write_episode_culprits(sql_client, run_id, episodes)
+            return write_episode_culprits(sql_client, run_id, episodes, equip_id)
         
         # Build records for bulk insert
         records = []
@@ -299,18 +305,19 @@ def write_episode_culprits_enhanced(
                 str(row["detector"]),
                 str(row["sensor"]) if pd.notna(row["sensor"]) else None,
                 float(row["contribution_pct"]) if pd.notna(row["contribution_pct"]) else None,
-                int(row["rank"])
+                int(row["rank"]),
+                equip_id
             ))
         
         if not records:
             Console.info("[CULPRITS] No culprit records to write")
             return True
         
-        # Build bulk insert statement
+        # Build bulk insert statement (include EquipID for proper filtering)
         insert_sql = """
         INSERT INTO dbo.ACM_EpisodeCulprits (
-            RunID, EpisodeID, DetectorType, SensorName, ContributionPct, Rank
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            RunID, EpisodeID, DetectorType, SensorName, ContributionPct, Rank, EquipID
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """
         
         # Execute bulk insert

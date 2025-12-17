@@ -113,16 +113,15 @@ VALUES
     
     (0, 'detectors', 'detectors.mhal.enabled', 'true', 'bool', 'SYSTEM', 'Initial seed');
 
--- Fusion weights
+-- Fusion weights (active detectors only)
 INSERT INTO ACM_Config (EquipID, Category, ParamPath, ParamValue, ValueType, UpdatedBy, ChangeReason)
 VALUES
-    (0, 'fusion', 'fusion.weights.ar1_z', '0.2', 'float', 'SYSTEM', 'Initial seed'),
-    (0, 'fusion', 'fusion.weights.iforest_z', '0.2', 'float', 'SYSTEM', 'Initial seed'),
-    (0, 'fusion', 'fusion.weights.gmm_z', '0.1', 'float', 'SYSTEM', 'Initial seed'),
-    (0, 'fusion', 'fusion.weights.pca_spe_z', '0.2', 'float', 'SYSTEM', 'Initial seed'),
-    (0, 'fusion', 'fusion.weights.mhal_z', '0.2', 'float', 'SYSTEM', 'Initial seed'),
-    (0, 'fusion', 'fusion.weights.river_hst_z', '0.1', 'float', 'SYSTEM', 'Initial seed'),
-    (0, 'fusion', 'fusion.weights.pca_t2_z', '0.0', 'float', 'SYSTEM', 'Initial seed - noisy, disabled'),
+    (0, 'fusion', 'fusion.weights.ar1_z', '0.20', 'float', 'SYSTEM', 'Initial seed'),
+    (0, 'fusion', 'fusion.weights.iforest_z', '0.15', 'float', 'SYSTEM', 'Initial seed'),
+    (0, 'fusion', 'fusion.weights.gmm_z', '0.05', 'float', 'SYSTEM', 'Initial seed'),
+    (0, 'fusion', 'fusion.weights.pca_spe_z', '0.30', 'float', 'SYSTEM', 'Initial seed'),
+    (0, 'fusion', 'fusion.weights.pca_t2_z', '0.20', 'float', 'SYSTEM', 'Initial seed'),
+    (0, 'fusion', 'fusion.weights.omr_z', '0.10', 'float', 'SYSTEM', 'Initial seed'),
     
     (0, 'fusion', 'fusion.cooldown', '10', 'int', 'SYSTEM', 'Initial seed'),
     (0, 'fusion', 'fusion.min_silent_gap', '10', 'int', 'SYSTEM', 'Initial seed'),

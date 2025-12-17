@@ -73,8 +73,8 @@ class MahalanobisDetector:
     2. Dimensionality reduction → better numerical stability  
     3. Same statistical interpretation (both follow χ² distribution)
     
-    This class is kept for backward compatibility with existing data.
-    New deployments should use pca_t2_z with weight, not mhal_z.
+    DEPRECATED: This detector is no longer used in ACM v10.2.0+.
+    Use pca_t2_z instead (same Mahalanobis distance, better stability).
     
     Parameters
     ----------
@@ -209,8 +209,9 @@ class MahalanobisDetector:
         D_squared = np.sum((Z ** 2) / eigenvalues_safe, axis=1)
         
         # Ensure non-negative and finite
+        # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
         D_squared = np.maximum(D_squared, 0.0)
-        D_squared = np.clip(D_squared, 0.0, 1e9)
+        D_squared = np.clip(D_squared, 0.0, 1e6)
         
         result = D_squared.astype(np.float32)
         
@@ -218,7 +219,7 @@ class MahalanobisDetector:
         nan_count = int(np.sum(~np.isfinite(result)))
         if nan_count > 0:
             Console.warn(f"[MHAL] Output NaN audit: {nan_count}/{len(result)} non-finite scores detected")
-            result = np.nan_to_num(result, nan=0.0, posinf=1e9, neginf=0.0)
+            result = np.nan_to_num(result, nan=0.0, posinf=1e6, neginf=0.0)
         
         return result
 
@@ -244,22 +245,30 @@ class PCASubspaceDetector:
 
     def fit(self, X: pd.DataFrame) -> "PCASubspaceDetector":
         """Fit scaler + PCA on TRAIN safely."""
+        from utils.logger import Console
+        Console.info(f"[PCA] fit() entry: input shape={X.shape}")
         df = X.copy()
+        Console.info(f"[PCA] After copy: shape={df.shape}")
 
         # Drop fully non-finite columns, then near-constants
         df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
+        Console.info(f"[PCA] After drop non-finite: shape={df.shape}")
         std = df.astype("float64").std(axis=0)
         df = df.loc[:, std > 1e-6]
+        Console.info(f"[PCA] After drop near-constants: shape={df.shape}")
 
         # If everything got dropped, inject a safe dummy feature
         if df.shape[1] == 0:
             df = pd.DataFrame({"_dummy": np.zeros(len(df), dtype=np.float64)}, index=df.index)
 
         # Impute + clip (guard wild magnitudes)
+        Console.info("[PCA] Computing medians for imputation...")
         self.col_medians = df.median()
+        Console.info(f"[PCA] Imputing and clipping {df.shape[1]} columns...")
         df = df.fillna(self.col_medians).clip(lower=-1e6, upper=1e6)
 
         self.keep_cols = list(df.columns)
+        Console.info(f"[PCA] Prepared {len(self.keep_cols)} features for PCA")
         
         # COR-02: Guard against insufficient samples for PCA after feature filtering
         # PCA requires at least 2 samples to compute meaningful components
@@ -274,7 +283,11 @@ class PCASubspaceDetector:
             return self
 
         # Scale
-        Xs = self.scaler.fit_transform(df.values.astype(np.float64, copy=False))
+        Console.info(f"[PCA] Scaling data: converting to float64...")
+        data_float = df.values.astype(np.float64, copy=False)
+        Console.info(f"[PCA] Fitting scaler on {data_float.shape} array...")
+        Xs = self.scaler.fit_transform(data_float)
+        Console.info(f"[PCA] Scaling complete: output shape={Xs.shape}")
 
         # Choose a safe n_components
         n_samples, n_features = Xs.shape
@@ -284,9 +297,11 @@ class PCASubspaceDetector:
         except Exception:
             user_nc = 5
         k = int(max(1, min(user_nc, n_features, max(1, n_samples - 1))))
+        Console.info(f"[PCA] Using {k} components (n_samples={n_samples}, n_features={n_features})")
         
         # Incremental path (CPU only)
         if self.cfg.get("incremental", False):
+            Console.info("[PCA] Using IncrementalPCA mode")
             from sklearn.decomposition import IncrementalPCA
             self.pca = IncrementalPCA(  # type: ignore[assignment]
                 n_components=k,
@@ -294,12 +309,18 @@ class PCASubspaceDetector:
             )
             # partial_fit in batches
             bs = self.pca.batch_size or 256  # type: ignore[attr-defined]
+            Console.info(f"[PCA] Partial fitting in batches of {bs}...")
             for i in range(0, n_samples, bs):
-                self.pca.partial_fit(Xs[i:i+bs])  # type: ignore[attr-defined]
+                batch_end = min(i+bs, n_samples)
+                Console.info(f"[PCA] Batch {i}-{batch_end} of {n_samples}")
+                self.pca.partial_fit(Xs[i:batch_end])  # type: ignore[attr-defined]
+            Console.info("[PCA] IncrementalPCA fitting complete")
         else:
             # Default batch path
+            Console.info(f"[PCA] Starting standard PCA.fit() with svd_solver='full' on ({n_samples} x {n_features})...")
             self.pca = PCA(n_components=k, svd_solver="full", random_state=17)
             self.pca.fit(Xs)
+            Console.info("[PCA] Standard PCA.fit() complete")
             
         return self
 
@@ -318,8 +339,8 @@ class PCASubspaceDetector:
         Z = self.pca.transform(Xs)
         X_hat = self.pca.inverse_transform(Z)
         spe = np.sum((Xs - X_hat) ** 2, axis=1)
-        # Clamp outrageous but finite values to keep float32 cast safe
-        spe = np.clip(spe, 0.0, 1e9)
+        # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
+        spe = np.clip(spe, 0.0, 1e6)
 
         # Hotelling T² (guard tiny eigenvalues)
         ev = getattr(self.pca, "explained_variance_", None)
@@ -329,13 +350,14 @@ class PCASubspaceDetector:
             ev = np.maximum(np.asarray(ev, dtype=np.float64), 1e-12)
             # Compute per-component then clamp to avoid huge-but-finite spikes
             t2_comp = (Z ** 2) / ev
-            # Robust per-component clamp (protects rare degenerate modes)
-            t2_comp = np.clip(t2_comp, 0.0, 1e9)
+            # CAL-FIX-01: Reduced clip from 1e9 to 1e6
+            t2_comp = np.clip(t2_comp, 0.0, 1e6)
             t2 = np.sum(t2_comp, axis=1)
 
         # Final sanitization and clamp before float32 cast
-        spe = np.nan_to_num(spe, nan=0.0, posinf=1e9, neginf=0.0)
-        t2  = np.nan_to_num(t2,  nan=0.0, posinf=1e9, neginf=0.0)
-        t2  = np.clip(t2, 0.0, 1e9)
+        # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
+        spe = np.nan_to_num(spe, nan=0.0, posinf=1e6, neginf=0.0)
+        t2  = np.nan_to_num(t2,  nan=0.0, posinf=1e6, neginf=0.0)
+        t2  = np.clip(t2, 0.0, 1e6)
 
         return spe.astype(np.float32, copy=False), t2.astype(np.float32, copy=False)

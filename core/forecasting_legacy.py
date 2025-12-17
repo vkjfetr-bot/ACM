@@ -2221,9 +2221,9 @@ def run_enhanced_forecasting_sql(
         cur.execute(
             """
             SELECT Timestamp,
-                   ar1_z, pca_spe_z, pca_t2_z, mhal_z,
-                   iforest_z, gmm_z, cusum_z, drift_z,
-                   hst_z, river_hst_z, fused
+                   ar1_z, pca_spe_z, pca_t2_z,
+                   iforest_z, gmm_z, omr_z, cusum_z, drift_z,
+                   hst_z, fused
             FROM dbo.ACM_Scores_Wide
             WHERE EquipID = ?
             ORDER BY Timestamp
@@ -2245,13 +2245,12 @@ def run_enhanced_forecasting_sql(
         "ar1_z",
         "pca_spe_z",
         "pca_t2_z",
-        "mhal_z",
         "iforest_z",
         "gmm_z",
+        "omr_z",
         "cusum_z",
         "drift_z",
         "hst_z",
-        "river_hst_z",
         "fused",
     ]
     df_scores = pd.DataFrame.from_records(rows, columns=cols)

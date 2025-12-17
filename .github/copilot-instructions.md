@@ -79,11 +79,56 @@ ACM/
 - Use `sqlcmd -S "server\instance" -d database -E -Q "..."` for queries
 - Use T-SQL functions: `DATEADD`, `DATEDIFF`, `TOP`, `CAST`, `ROUND`, `COALESCE`
 - NEVER use: `LIMIT` (use `TOP`), `DATE_TRUNC` (use `DATEADD/DATEDIFF`), `FORMAT()` for time series
+- **NEVER use reserved words as aliases**: `End`, `RowCount`, `Count`, `Date`, `Time`, `Order`, `Group`
+- **Safe aliases**: `EndTimeStr`, `TotalRows`, `TotalCount`, `DateValue`, `TimeValue`, `OrderNum`, `GroupName`
 
 ### PowerShell 5.1 Rules
 - Use `;` for command chaining (NOT `&&`)
 - Use `Select-Object -Last 20` (NOT `tail -n 20`)
 - Script params: `-Parameter value`; Python args: `--arg value`
+
+### CRITICAL: Python Command-Line Execution in PowerShell (Windows)
+**NEVER use inline Python with complex strings in PowerShell `python -c "..."` commands:**
+
+❌ **FORBIDDEN PATTERNS:**
+```powershell
+# NEVER: f-strings with nested quotes break PowerShell parsing
+python -c "import x; conn = x.connect(f'DRIVER={{{var}}}')"
+
+# NEVER: Multi-line strings in -c flag
+python -c "
+import module
+code here
+"
+
+# NEVER: Dictionary/config access in f-strings
+python -c "s = config['acm']; print(f'x={s[\"key\"]}')"
+```
+
+✅ **ALWAYS USE THESE PATTERNS:**
+```powershell
+# ✓ Create a temporary .py script file instead
+$code = @'
+import module
+# Multi-line code here
+'@
+$code | Out-File -Encoding UTF8 temp_script.py
+python temp_script.py
+Remove-Item temp_script.py
+
+# ✓ Use scripts/ folder for any non-trivial Python
+# Create scripts/verify_something.py, then:
+python scripts/verify_something.py
+
+# ✓ For simple one-liners, avoid f-strings entirely
+python -c "import sys; print(sys.version)"
+```
+
+**WHY THIS MATTERS:**
+- PowerShell interprets `{`, `}`, `$`, `"`, `'`, `\` as special characters
+- F-strings with nested quotes create unescapable parsing conflicts
+- Multi-line strings in `-c` fail due to PowerShell's line continuation rules
+- **Solution: Always create a .py file for anything beyond trivial one-liners**
 
 ### Grafana Dashboard Rules
 - Time series: Return raw `DATETIME` columns (not `FORMAT()` strings)
@@ -126,6 +171,29 @@ pytest tests/test_progress_tracking.py
 ---
 
 ## Critical Rules (MUST FOLLOW)
+
+### NON-VIOLATABLE TESTING RULES
+**CRITICAL: These rules are ABSOLUTE and may NEVER be violated:**
+
+1. **ONLY WAY TO TEST ACM IS BATCH MODE**
+   - The ONLY way to test ACM functionality is to run it in batch mode with `python scripts/sql_batch_runner.py`
+   - NEVER create single-use diagnostic scripts to test ACM functionality
+   - Run full batches to test the entire data flow end-to-end
+
+2. **DIAGNOSIS IS THROUGH LOGGING ONLY**
+   - Problems are diagnosed by reading ACM_RunLogs in SQL or console output
+   - Add proper logging at the point where issues occur
+   - NEVER create standalone scripts to "check" or "validate" ACM behavior
+
+3. **ALLOWED TESTING SCRIPTS**
+   - `python -c "import module; print('OK')"` - Test imports only
+   - `sqlcmd -S ... -Q "SELECT ..."` - Read data from SQL tables
+   - That's it. No other diagnostic scripts allowed.
+
+4. **FORECASTING MUST ALWAYS WORK**
+   - Forecasting must work in ALL modes: batch, single-run, streaming
+   - NEVER skip forecasting because "data is missing" - populate the data
+   - All required tables (ACM_SensorNormalized_TS, ACM_RegimeTimeline, etc.) MUST be populated
 
 ### Documentation Policy
 - **NEVER** create new markdown/HTML files unless explicitly requested
@@ -197,7 +265,9 @@ pytest tests/test_progress_tracking.py
 | GMM | `gmm_z` | Gaussian mixture model |
 | OMR | `omr_z` | Overall model residual |
 
-Note: MHAL (Mahalanobis) was removed in v10.2.0 as redundant with PCA-T2.
+**Removed Detectors**:
+- `mhal_z` (Mahalanobis): Removed - redundant with PCA-T2
+- `river_hst_z` (River HST): Removed - not implemented, streaming detector not needed
 
 ---
 
@@ -371,10 +441,17 @@ ACM dashboards should default to 5 years: `"from": "now-5y"`
 |----------|-------|---------|
 | SQL columns | `ACM_RUL.LowerBound` | `ACM_RUL.P10_LowerBound` |
 | SQL columns | `ACM_RUL.UpperBound` | `ACM_RUL.P90_UpperBound` |
+| SQL reserved words | `AS End` | `AS EndTimeStr` (avoid reserved words) |
+| SQL reserved words | `AS RowCount` | `AS TotalRows` (RowCount conflicts) |
+| SQL column names | `StartTime` on ACM_Runs | `StartedAt` (check schema first!) |
+| SQL aliases | `COUNT(*) as RowCount` | `COUNT(*) as TotalRows` |
 | Time series | `FORMAT(time, 'yyyy-MM-dd')` | Return raw `DATETIME` |
 | Time series | `ORDER BY time DESC` | `ORDER BY time ASC` |
 | PowerShell | `command1 && command2` | `command1; command2` |
 | PowerShell | `tail -n 20` | `Select-Object -Last 20` |
+| PowerShell | `python -c "f'{var}'"` | Create `.py` file instead |
+| Python inline | Multi-line in `-c` flag | **ALWAYS create script file** |
+| Python inline | F-strings with `{}` or quotes | **ALWAYS create script file** |
 | Grafana | `"spanNulls": true` | `"spanNulls": 3600000` |
 | RUL queries | `ORDER BY RUL_Hours ASC` | `ORDER BY CreatedAt DESC` |
 

@@ -1560,11 +1560,6 @@ class OutputManager:
 
             # only insert columns that actually exist in the table
             columns = [c for c in df.columns if c in table_cols]
-            ACMLog.output(f"[DEBUG_BULK] table={table_name}, df.columns={list(df.columns)}")
-            ACMLog.output(f"[DEBUG_BULK] table={table_name}, table_cols={list(table_cols)[:20]}")  # First 20
-            ACMLog.output(f"[DEBUG_BULK] table={table_name}, columns (filtered)={columns}")
-            if not df.empty:
-                ACMLog.output(f"[DEBUG_BULK] First row values: {df.iloc[0].to_dict()}")
             cols_str = ", ".join(f"[{c}]" for c in columns)
             placeholders = ", ".join(["?"] * len(columns))
             insert_sql = f"INSERT INTO dbo.[{table_name}] ({cols_str}) VALUES ({placeholders})"
@@ -2057,7 +2052,19 @@ class OutputManager:
     # and sql_analytics_writer.py with a unified interface
     
     def write_scores_ts(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write scores timeseries to ACM_Scores_Long table."""
+        """Write scores timeseries to ACM_Scores_Long table.
+        
+        SQL Schema for ACM_Scores_Long:
+            - Id (BIGINT, identity)
+            - RunID (UNIQUEIDENTIFIER)
+            - EquipID (INT)
+            - Timestamp (DATETIME2)
+            - SensorName (NVARCHAR(128)) - sensor being scored, NULL for detector-level
+            - DetectorName (NVARCHAR(64)) - detector name (ar1, pca_spe, etc.)
+            - Score (FLOAT) - z-score value
+            - Threshold (FLOAT) - threshold used for this detector
+            - IsAnomaly (BIT) - whether score exceeds threshold
+        """
         if not self._check_sql_health():
             return 0
             
@@ -2067,20 +2074,27 @@ class OutputManager:
             if sql_df.empty:
                 return 0
 
-            # Case A: already long from melt_scores_long
+            # Case A: already long from melt_scores_long (legacy format)
             if {'EntryDateTime', 'Sensor', 'Value'}.issubset(set(sql_df.columns)):
                 sql_df = sql_df.rename(columns={
                     'EntryDateTime': 'Timestamp',
-                    'Sensor': 'DetectorType',
-                    'Value': 'ZScore'
+                    'Sensor': 'DetectorName',  # Map to correct SQL column
+                    'Value': 'Score'  # Map to correct SQL column
                 })
                 # Ensure required metadata exists
                 if 'RunID' not in sql_df.columns:
                     sql_df['RunID'] = run_id
                 if 'EquipID' not in sql_df.columns:
                     sql_df['EquipID'] = self.equip_id or 0
+                # Add missing columns with defaults
+                if 'SensorName' not in sql_df.columns:
+                    sql_df['SensorName'] = None  # Detector-level scores, no specific sensor
+                if 'Threshold' not in sql_df.columns:
+                    sql_df['Threshold'] = 3.0  # Default threshold
+                if 'IsAnomaly' not in sql_df.columns:
+                    sql_df['IsAnomaly'] = (sql_df['Score'].abs() >= 3.0).astype(int)
                 sql_df['Timestamp'] = pd.to_datetime(sql_df['Timestamp']).dt.tz_localize(None)
-                sql_df = sql_df.dropna(subset=['ZScore'])
+                sql_df = sql_df.dropna(subset=['Score'])
                 return self._bulk_insert_sql('ACM_Scores_Long', sql_df)
 
             # Case B: wide — melt to long
@@ -2092,15 +2106,19 @@ class OutputManager:
             long_df = sql_df.melt(
                 id_vars=['Timestamp'],
                 value_vars=detector_cols,
-                var_name='DetectorType',
-                value_name='ZScore'
+                var_name='DetectorName',  # Map to correct SQL column
+                value_name='Score'  # Map to correct SQL column
             )
-            # Normalize names
-            long_df['DetectorType'] = long_df['DetectorType'].str.replace('_z', '', regex=False)
+            # Normalize detector names (remove _z suffix)
+            long_df['DetectorName'] = long_df['DetectorName'].str.replace('_z', '', regex=False)
             long_df['Timestamp'] = pd.to_datetime(long_df['Timestamp']).dt.tz_localize(None)
             long_df['RunID'] = run_id
             long_df['EquipID'] = self.equip_id or 0
-            long_df = long_df.dropna(subset=['ZScore'])
+            # Add missing columns with defaults
+            long_df['SensorName'] = None  # Detector-level scores, no specific sensor
+            long_df['Threshold'] = 3.0  # Default threshold
+            long_df['IsAnomaly'] = (long_df['Score'].abs() >= 3.0).astype(int)
+            long_df = long_df.dropna(subset=['Score'])
             return self._bulk_insert_sql('ACM_Scores_Long', long_df)
             
         except Exception as e:
@@ -2596,8 +2614,8 @@ class OutputManager:
         score_columns = {
             "timestamp": "Timestamp",
             "ar1_z": "ar1_z", "pca_spe_z": "pca_spe_z", "pca_t2_z": "pca_t2_z",
-            "mhal_z": "mhal_z", "iforest_z": "iforest_z", "gmm_z": "gmm_z",
-            "cusum_z": "cusum_z", "drift_z": "drift_z", "hst_z": "hst_z", "river_hst_z": "river_hst_z", "fused": "fused",
+            "iforest_z": "iforest_z", "gmm_z": "gmm_z",
+            "cusum_z": "cusum_z", "drift_z": "drift_z", "hst_z": "hst_z", "fused": "fused",
             "regime_label": "regime_label", "transient_state": "transient_state"
         }
         
@@ -2628,11 +2646,6 @@ class OutputManager:
         
         # Prepare episodes for output
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
-        
-        # DEBUG: Log episode DataFrame columns and first row
-        ACMLog.info("EPISODES", f"DEBUG: Columns={list(episodes_for_output.columns)}")
-        if not episodes_for_output.empty:
-            ACMLog.info("EPISODES", f"DEBUG: First episode={episodes_for_output.iloc[0].to_dict()}")
         
         # SCHEMA-FIX: Individual episodes go to ACM_EpisodeDiagnostics (not ACM_Episodes which is run-level summary)
         sql_table = "ACM_EpisodeDiagnostics" if enable_sql else None
@@ -2705,7 +2718,7 @@ class OutputManager:
                 episodes_for_output['status'] = 'CLOSED'
         
         # DEBUG: Show what we're writing  
-        ACMLog.info("EPISODES", f"DEBUG: Columns before write={list(episodes_for_output.columns)}")
+        # Columns ready for write to ACM_EpisodeDiagnostics
         if not episodes_for_output.empty:
             ACMLog.info("EPISODES", f"DEBUG: First row before write: severity={episodes_for_output.iloc[0].get('severity')}, peak_z={episodes_for_output.iloc[0].get('peak_fused_z')}, dominant={episodes_for_output.iloc[0].get('dominant_sensor')}")
         

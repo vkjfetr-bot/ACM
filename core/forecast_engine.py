@@ -760,7 +760,9 @@ class ForecastEngine:
             
             # NEW: ACM_SensorForecast - Physical sensor forecasts
             sensor_forecast_df = self._generate_sensor_forecasts(sensor_attributions, forecast_results)
-            if sensor_forecast_df is not None and not sensor_forecast_df.empty:
+            has_sensor_data = sensor_forecast_df is not None and not sensor_forecast_df.empty
+            
+            if has_sensor_data and sensor_forecast_df is not None:
                 self.output_manager.write_dataframe(
                     sensor_forecast_df,
                     artifact_name='acm_sensor_forecast',
@@ -771,10 +773,11 @@ class ForecastEngine:
                 Console.info(f"[ForecastEngine] Wrote sensor forecasts for {len(sensor_attributions)} sensors")
             
             # v10.1.0: Multivariate forecasting with VAR model
+            # Only run if sensor data exists (same table as _generate_sensor_forecasts)
             enable_multivariate = self.config_mgr.get_config(
                 self.equip_id, 'forecasting.multivariate.enabled', True
             )
-            if enable_multivariate and len(sensor_attributions) >= 2:
+            if enable_multivariate and has_sensor_data and len(sensor_attributions) >= 2:
                 try:
                     from core.multivariate_forecast import MultivariateSensorForecaster
                     var_max_lag = int(self.config_mgr.get_config(
@@ -848,6 +851,20 @@ class ForecastEngine:
         """
         tables_written = []
         
+        # FAST EARLY-EXIT: Check if regime data exists before creating forecaster
+        # This avoids wasting time in batch mode when no regime data is available
+        try:
+            check_query = """
+                SELECT TOP 1 1 FROM ACM_RegimeTimeline WHERE EquipID = ?
+            """
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(check_query, (self.equip_id,))
+                if not cur.fetchone():
+                    # No regime data - return immediately without warnings
+                    return tables_written
+        except Exception:
+            pass  # If check fails, proceed with normal flow
+        
         try:
             # Create regime-conditioned forecaster
             conditioned = RegimeConditionedForecaster(
@@ -868,7 +885,7 @@ class ForecastEngine:
             # Compute per-regime stats
             regime_stats = conditioned.compute_regime_stats(lookback_days=90)
             if not regime_stats:
-                Console.warn("[ForecastEngine] No regime stats available - skipping conditioned forecast")
+                # Silent return - early check at function start should prevent this path
                 return tables_written
             
             # Estimate RUL per regime
@@ -926,6 +943,20 @@ class ForecastEngine:
             None if no sensor data available or forecasting fails
         """
         try:
+            # FAST EARLY-EXIT: Check if ACM_SensorNormalized_TS has ANY data for this equipment
+            # This avoids wasting 10-20 seconds on empty table queries in batch mode
+            try:
+                check_query = """
+                    SELECT TOP 1 1 FROM ACM_SensorNormalized_TS WHERE EquipID = ?
+                """
+                with self.sql_client.get_cursor() as cur:
+                    cur.execute(check_query, (self.equip_id,))
+                    if not cur.fetchone():
+                        # No data exists - return immediately without warnings
+                        return None
+            except Exception:
+                pass  # If check fails, proceed with normal flow
+            
             # Try to import statsmodels, but fall back to simple moving average if unavailable
             try:
                 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -968,7 +999,7 @@ class ForecastEngine:
             cursor.close()
             
             if not rows:
-                Console.warn("[ForecastEngine] No sensor data found in ACM_SensorNormalized_TS for forecasting")
+                # Silent return - early check at function start should prevent this path
                 return None
             
             # Convert to DataFrame - use ZScore as the value to forecast
@@ -1239,7 +1270,7 @@ class RegimeConditionedForecaster:
                 rows = cur.fetchall()
             
             if not rows:
-                Console.warn(f"[RegimeConditioned] No historical data for regime stats")
+                # Silent return - early check in _run_regime_conditioned_forecasting should catch this
                 self._regime_stats = {}
                 return self._regime_stats
             

@@ -16,12 +16,8 @@ DETECTOR_LABELS = {
     'iforest': 'Rare State (IsolationForest)',
     'gmm_z': 'Density Anomaly (GMM)',
     'gmm': 'Density Anomaly (GMM)',
-    'mhal_z': 'Multivariate Distance (Mahalanobis)',
-    'mhal': 'Multivariate Distance (Mahalanobis)',
     'omr_z': 'Baseline Consistency (OMR)',
     'omr': 'Baseline Consistency (OMR)',
-    'river_hst_z': 'Streaming Anomaly (River)',
-    'river_hst': 'Streaming Anomaly (River)',
     'fused_z': 'Fused Multi-Detector',
     'fused': 'Fused Multi-Detector'
 }
@@ -38,12 +34,8 @@ DETECTOR_LABELS_SQL = {
     'iforest': 'Rare State (IsolationForest)',
     'gmm_z': 'Density Anomaly (GMM)',
     'gmm': 'Density Anomaly (GMM)',
-    'mhal_z': 'Multivariate Distance (Mahalanobis)',
-    'mhal': 'Multivariate Distance (Mahalanobis)',
     'omr_z': 'Baseline Consistency (OMR)',
     'omr': 'Baseline Consistency (OMR)',
-    'river_hst_z': 'Streaming Anomaly (River)',
-    'river_hst': 'Streaming Anomaly (River)',
     'fused_z': 'Fused Multi-Detector',
     'fused': 'Fused Multi-Detector'
 }
@@ -60,12 +52,8 @@ DETECTOR_LABELS_SHORT = {
     'iforest': 'Rare State (IF)',
     'gmm_z': 'Density (GMM)',
     'gmm': 'Density (GMM)',
-    'mhal_z': 'Distance (Mahal)',
-    'mhal': 'Distance (Mahal)',
     'omr_z': 'Baseline (OMR)',
     'omr': 'Baseline (OMR)',
-    'river_hst_z': 'Streaming (River)',
-    'river_hst': 'Streaming (River)',
     'fused_z': 'Fused',
     'fused': 'Fused'
 }
@@ -74,12 +62,10 @@ DETECTOR_LABELS_SHORT = {
 DETECTOR_DESCRIPTIONS = {
     'ar1_z': 'Autoregressive(1) model detecting trend breaks, spikes, and time-series discontinuities in individual sensors',
     'pca_spe_z': 'Principal Component Analysis Squared Prediction Error detecting correlation pattern breaks across sensor groups',
-    'pca_t2_z': "Principal Component Analysis Hotelling's T² detecting multivariate outliers in the principal component space (replaces MHAL)",
+    'pca_t2_z': "Principal Component Analysis Hotelling's T² detecting multivariate outliers in the principal component space",
     'iforest_z': 'Isolation Forest ensemble detecting rare operational states through partition-based anomaly scoring',
     'gmm_z': 'Gaussian Mixture Model detecting density-based anomalies by measuring likelihood under learned distributions',
-    'mhal_z': 'DEPRECATED: Redundant with PCA-T². Both compute Mahalanobis distance, but PCA-T² is numerically stable.',
     'omr_z': 'Overall Model Residual detecting deviations from learned sensor relationships using multivariate regression',
-    'river_hst_z': 'River Half-Space Trees streaming anomaly detection for real-time incremental learning scenarios',
     'fused_z': 'Weighted fusion of all detector scores combining multiple detection algorithms for robust anomaly identification'
 }
 
@@ -90,9 +76,7 @@ DETECTOR_CATEGORIES = {
     'pca_t2_z': 'Multivariate',
     'iforest_z': 'Ensemble',
     'gmm_z': 'Probabilistic',
-    'mhal_z': 'Multivariate',
     'omr_z': 'Meta-Detector',
-    'river_hst_z': 'Streaming',
     'fused_z': 'Fusion'
 }
 

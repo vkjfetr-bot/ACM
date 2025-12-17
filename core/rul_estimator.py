@@ -204,6 +204,11 @@ class RULEstimator:
         """
         Run Monte Carlo simulations with stochastic noise and regime transitions.
         
+        VECTORIZED IMPLEMENTATION (v10.2.1):
+        - Generates all N simulations in parallel using numpy broadcasting
+        - Reduces time from O(N * steps) Python loops to O(1) numpy operations
+        - Only falls back to per-simulation loop when regime transitions are needed
+        
         For each simulation:
         1. Add Gaussian noise to baseline forecast: health[t] = baseline[t] + N(0, σ²)
         2. If regime transition model provided, simulate regime jumps using semi-Markov
@@ -230,8 +235,42 @@ class RULEstimator:
         Returns:
             Array of time-to-failure values (hours) from N simulations
         """
-        simulation_times = []
+        n_steps = len(baseline_forecast)
         n_regimes = regime_transition_matrix.shape[0] if regime_transition_matrix is not None else 0
+        
+        # FAST PATH: No regime transitions - fully vectorized
+        if regime_transition_matrix is None or regime_degradation_rates is None or n_regimes == 0:
+            # Generate all noise at once: (n_simulations, n_steps)
+            noise_matrix = np.random.normal(0, model_std, size=(self.n_simulations, n_steps))
+            
+            # Broadcast baseline to all simulations and add noise
+            health_trajectories = baseline_forecast[np.newaxis, :] + noise_matrix
+            
+            # Clamp to valid range [0, 100]
+            health_trajectories = np.clip(health_trajectories, 0.0, 100.0)
+            
+            # Vectorized time-to-failure: find first crossing of threshold
+            # Create boolean mask where health < threshold
+            below_threshold = health_trajectories < self.failure_threshold
+            
+            # Find first True index per simulation (argmax on boolean gives first True)
+            # If no True, argmax returns 0, so we need to check
+            has_failure = np.any(below_threshold, axis=1)
+            first_failure_idx = np.argmax(below_threshold, axis=1)
+            
+            # Convert to time (hours)
+            # For simulations with failure: (idx + 1) * dt_hours
+            # For simulations without failure: max_steps * dt_hours
+            simulation_times = np.where(
+                has_failure,
+                (first_failure_idx + 1) * dt_hours,
+                max_steps * dt_hours
+            )
+            
+            return simulation_times.astype(float)
+        
+        # SLOW PATH: With regime transitions (requires per-simulation loop)
+        simulation_times = []
         
         for _ in range(self.n_simulations):
             # Initialize regime for this simulation
@@ -284,6 +323,8 @@ class RULEstimator:
         """
         Find time when health first crosses failure threshold.
         
+        VECTORIZED (v10.2.1): Uses np.argmax on boolean array for O(1) numpy op.
+        
         Args:
             health_trajectory: Simulated health trajectory
             dt_hours: Time step (hours)
@@ -292,12 +333,14 @@ class RULEstimator:
         Returns:
             Time to failure (hours), or max_horizon if never fails
         """
-        for i, health in enumerate(health_trajectory):
-            if health < self.failure_threshold:
-                return (i + 1) * dt_hours
+        # Vectorized threshold crossing detection
+        below_threshold = health_trajectory < self.failure_threshold
+        if np.any(below_threshold):
+            first_idx = np.argmax(below_threshold)
+            return float((first_idx + 1) * dt_hours)
         
         # Never crosses threshold within forecast horizon
-        return max_steps * dt_hours
+        return float(max_steps * dt_hours)
     
     def _agresti_coull_adjustment(
         self,

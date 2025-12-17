@@ -700,7 +700,7 @@ class SQLBatchRunner:
             self._inspect_last_run_outputs(equip_name)
         return success, outcome
     
-    def _process_coldstart(self, equip_name: str, *, dry_run: bool = False) -> bool:
+    def _process_coldstart(self, equip_name: str, *, dry_run: bool = False) -> tuple[bool, Optional[datetime]]:
         """Process coldstart phase for equipment.
         
         Continuously runs ACM until coldstart completes or max attempts reached.
@@ -720,7 +720,7 @@ class SQLBatchRunner:
         min_ts, max_ts = self._get_data_range(equip_name)
         if not min_ts or not max_ts:
             Console.error(f"[COLDSTART] {equip_name}: No data available in historian", equipment=equip_name)
-            return False
+            return False, None
         
         Console.info(f"[COLDSTART] {equip_name}: Historical data range: {min_ts} to {max_ts}", equipment=equip_name, min_ts=min_ts, max_ts=max_ts)
         
@@ -730,6 +730,7 @@ class SQLBatchRunner:
         # For a 24h window, we want [00:00:00, 23:59:59] not [00:00:00, 00:00:00]
         coldstart_end = min_ts + timedelta(minutes=self.tick_minutes) - timedelta(seconds=1)
         
+        last_processed_end: Optional[datetime] = None
         for attempt in range(1, self.max_coldstart_attempts + 1):
             Console.info(f"\n[COLDSTART] {equip_name}: Attempt {attempt}/{self.max_coldstart_attempts}", equipment=equip_name, attempt=attempt, max_attempts=self.max_coldstart_attempts)
             
@@ -737,13 +738,17 @@ class SQLBatchRunner:
             is_complete, accum_rows, req_rows = self._check_coldstart_status(equip_name)
             if is_complete:
                 Console.ok(f"[COLDSTART] {equip_name}: Coldstart COMPLETE!", equipment=equip_name)
-                return True
+                # If models already existed before any processing this run, we may not
+                # have a concrete window end; return whatever we last computed (likely None)
+                return True, last_processed_end
             
             Console.info(f"[COLDSTART] {equip_name}: Status - {accum_rows}/{req_rows} rows accumulated", equipment=equip_name, accumulated=accum_rows, required=req_rows)
             Console.info(f"[COLDSTART] {equip_name}: Processing window [{coldstart_start} to {coldstart_end})", equipment=equip_name, start=coldstart_start, end=coldstart_end)
             
             # Run ACM batch with historical time window
             success, outcome = self._run_acm_batch(equip_name, start_time=coldstart_start, end_time=coldstart_end, dry_run=dry_run)
+            # Track the last processed coldstart window end so batch phase can continue after it
+            last_processed_end = coldstart_end
             
             if not success and outcome == "FAIL":
                 Console.error(f"[COLDSTART] {equip_name}: Attempt {attempt} FAILED (error)", equipment=equip_name, attempt=attempt)
@@ -758,7 +763,7 @@ class SQLBatchRunner:
                 is_complete, _, _ = self._check_coldstart_status(equip_name)
                 if is_complete:
                     Console.ok(f"[COLDSTART] {equip_name}: Coldstart COMPLETE!", equipment=equip_name)
-                    return True
+                    return True, last_processed_end
                 else:
                     Console.info(f"[COLDSTART] {equip_name}: Making progress, continuing...", equipment=equip_name)
                     # Advance window for next coldstart attempt
@@ -769,7 +774,7 @@ class SQLBatchRunner:
                         coldstart_end = max_ts
         
         Console.warn(f"[COLDSTART] {equip_name}: Max attempts ({self.max_coldstart_attempts}) reached without completion", equipment=equip_name, max_attempts=self.max_coldstart_attempts)
-        return False
+        return False, last_processed_end
     
     def _process_batches(self, equip_name: str, start_from: Optional[datetime] = None, 
                         *, dry_run: bool = False, resume: bool = False) -> int:
@@ -924,10 +929,27 @@ class SQLBatchRunner:
                 # and subsequent batches evolve those models incrementally.
                 Console.info(f"[RESET] Deleting all existing models (SQL + filesystem) for {equip_name}", equipment=equip_name)
                 self._delete_models_for_equip(equip_id)
+                self._reset_progress_to_beginning(equip_id)
             else:
                 self._set_tick_minutes(equip_id, self.tick_minutes)
-            if self.start_from_beginning and not resume:
-                self._reset_progress_to_beginning(equip_id)
+            
+            # CRITICAL: Adjust tick_minutes AFTER inference if max_batches specified
+            # This ensures coldstart uses the same batch size as regular processing
+            if self.max_batches is not None and self.max_batches > 0:
+                min_ts, max_ts = self._get_data_range(equip_name)
+                if min_ts and max_ts:
+                    total_minutes = max((max_ts - min_ts).total_seconds() / 60, 0)
+                    total_batches = int(total_minutes / self.tick_minutes) if self.tick_minutes > 0 else 0
+                    if total_batches > self.max_batches:
+                        new_tick = int(math.ceil(total_minutes / self.max_batches)) or self.tick_minutes
+                        if new_tick > self.tick_minutes:
+                            Console.info(
+                                f"[CONFIG] {equip_name}: Adjusting tick_minutes from {self.tick_minutes} "
+                                f"to {new_tick} to honor max-batches={self.max_batches} (applies to coldstart AND batches)",
+                                equipment=equip_name, old_tick=self.tick_minutes, new_tick=new_tick, max_batches=self.max_batches
+                            )
+                            self.tick_minutes = new_tick
+                            self._set_tick_minutes(equip_id, new_tick)
         else:
             Console.warn(f"[PRECHECK] {equip_name}: EquipID not found in dbo.Equipment; downstream writes will fail", equipment=equip_name)
 
@@ -941,9 +963,11 @@ class SQLBatchRunner:
         
         if resume and coldstart_complete:
             Console.info(f"[INFO] {equip_name}: Coldstart already complete, skipping to batch processing", equipment=equip_name)
+            coldstart_last_end: Optional[datetime] = None
         else:
             # Phase 1: Coldstart
-            if not self._process_coldstart(equip_name, dry_run=dry_run):
+            cs_ok, coldstart_last_end = self._process_coldstart(equip_name, dry_run=dry_run)
+            if not cs_ok:
                 Console.error(f"[ERROR] {equip_name}: Coldstart failed", equipment=equip_name)
                 return False
             
@@ -954,7 +978,17 @@ class SQLBatchRunner:
                 self._save_progress(progress)
         
         # Phase 2: Batch processing
-        batches = self._process_batches(equip_name, dry_run=dry_run, resume=resume)
+        # If we just completed coldstart during this run, start the batch phase
+        # immediately after the coldstart window to avoid reprocessing the same window.
+        start_from_ts: Optional[datetime] = None
+        try:
+            # Only honor coldstart_last_end when we executed coldstart above and not in resume-fast path
+            if not (resume and coldstart_complete) and 'coldstart_last_end' in locals() and coldstart_last_end is not None:
+                start_from_ts = coldstart_last_end + timedelta(seconds=1)
+        except Exception:
+            start_from_ts = None
+
+        batches = self._process_batches(equip_name, start_from=start_from_ts, dry_run=dry_run, resume=resume)
         
         elapsed_time = time.time() - start_time
         elapsed_minutes = int(elapsed_time / 60)
