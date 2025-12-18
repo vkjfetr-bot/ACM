@@ -1,4 +1,4 @@
-"""
+﻿"""
 Sensor Attribution via Counterfactual Analysis (v10.0.0)
 
 Identifies which sensors contribute most to failure risk via counterfactual analysis.
@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 @dataclass

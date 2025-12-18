@@ -1,4 +1,4 @@
-"""
+﻿"""
 Comprehensive Test Suite for SQL Mode Continuous Learning Architecture
 Tests all 10 implemented tasks (SQL-CL-01 through SQL-CL-10)
 """
@@ -14,7 +14,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 class ContinuousLearningTestSuite:
     def __init__(self):

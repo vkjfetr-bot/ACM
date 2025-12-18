@@ -1,4 +1,4 @@
-"""
+﻿"""
 ACM Episode Culprits Writer
 
 Writes episode-level fault attribution to ACM_EpisodeCulprits table for:
@@ -14,7 +14,7 @@ import re
 from typing import List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 from utils.detector_labels import get_detector_label, format_culprit_label
 
 
@@ -87,15 +87,15 @@ def write_episode_culprits(
     """
     
     if sql_client is None:
-        Console.warn("[CULPRITS] No SQL client provided, skipping ACM_EpisodeCulprits write")
+        Console.warn("No SQL client provided, skipping ACM_EpisodeCulprits write", component="CULPRITS")
         return False
     
     if episodes is None or len(episodes) == 0:
-        Console.info("[CULPRITS] No episodes to process for culprits")
+        Console.info("No episodes to process for culprits", component="CULPRITS")
         return True
     
     if "culprits" not in episodes.columns:
-        Console.warn("[CULPRITS] Episodes dataframe missing 'culprits' column")
+        Console.warn("Episodes dataframe missing 'culprits' column", component="CULPRITS")
         return False
     
     try:
@@ -152,7 +152,7 @@ def write_episode_culprits(
                 ))
         
         if not records:
-            Console.info("[CULPRITS] No culprit records to write")
+            Console.info("No culprit records to write", component="CULPRITS")
             return True
         
         # Build bulk insert statement (include EquipID for proper filtering)
@@ -170,11 +170,11 @@ def write_episode_culprits(
         # Commit
         sql_client.conn.commit()
         
-        Console.info(f"[CULPRITS] Wrote {len(records)} culprit records to ACM_EpisodeCulprits for {len(episodes)} episodes")
+        Console.info(f"Wrote {len(records)} culprit records to ACM_EpisodeCulprits for {len(episodes)} episodes", component="CULPRITS")
         return True
         
     except Exception as e:
-        Console.error(f"[CULPRITS] Failed to write ACM_EpisodeCulprits: {e}")
+        Console.error(f"Failed to write ACM_EpisodeCulprits: {e}", component="CULPRITS")
         try:
             sql_client.conn.rollback()
         except:
@@ -202,7 +202,7 @@ def compute_detector_contributions(
     detector_cols = [c for c in scores_df.columns if c.endswith('_z')]
     
     if not detector_cols:
-        Console.warn("[CULPRITS] No detector z-score columns found for contribution calculation")
+        Console.warn("No detector z-score columns found for contribution calculation", component="CULPRITS")
         return pd.DataFrame()
     
     records = []
@@ -254,7 +254,7 @@ def compute_detector_contributions(
                 })
     
     except Exception as e:
-        Console.warn(f"[CULPRITS] Contribution calculation failed: {e}")
+        Console.warn(f"Contribution calculation failed: {e}", component="CULPRITS")
     
     return pd.DataFrame(records)
 
@@ -281,11 +281,11 @@ def write_episode_culprits_enhanced(
     """
     
     if sql_client is None:
-        Console.warn("[CULPRITS] No SQL client provided, skipping ACM_EpisodeCulprits write")
+        Console.warn("No SQL client provided, skipping ACM_EpisodeCulprits write", component="CULPRITS")
         return False
     
     if episodes is None or len(episodes) == 0:
-        Console.info("[CULPRITS] No episodes to process for culprits")
+        Console.info("No episodes to process for culprits", component="CULPRITS")
         return True
     
     try:
@@ -293,7 +293,7 @@ def write_episode_culprits_enhanced(
         culprits_df = compute_detector_contributions(scores_df, episodes)
         
         if len(culprits_df) == 0:
-            Console.warn("[CULPRITS] No culprit contributions computed, falling back to string parsing")
+            Console.warn("No culprit contributions computed, falling back to string parsing", component="CULPRITS")
             return write_episode_culprits(sql_client, run_id, episodes, equip_id)
         
         # Build records for bulk insert
@@ -310,7 +310,7 @@ def write_episode_culprits_enhanced(
             ))
         
         if not records:
-            Console.info("[CULPRITS] No culprit records to write")
+            Console.info("No culprit records to write", component="CULPRITS")
             return True
         
         # Build bulk insert statement (include EquipID for proper filtering)
@@ -328,11 +328,11 @@ def write_episode_culprits_enhanced(
         # Commit
         sql_client.conn.commit()
         
-        Console.info(f"[CULPRITS] Wrote {len(records)} enhanced culprit records to ACM_EpisodeCulprits")
+        Console.info(f"Wrote {len(records)} enhanced culprit records to ACM_EpisodeCulprits", component="CULPRITS")
         return True
         
     except Exception as e:
-        Console.error(f"[CULPRITS] Failed to write enhanced ACM_EpisodeCulprits: {e}")
+        Console.error(f"Failed to write enhanced ACM_EpisodeCulprits: {e}", component="CULPRITS")
         try:
             sql_client.conn.rollback()
         except:

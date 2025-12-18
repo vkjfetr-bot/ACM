@@ -1,4 +1,4 @@
-# core/river_models.py
+﻿# core/river_models.py
 """
 Online machine learning models using the River library.
 """
@@ -15,7 +15,7 @@ except ImportError:
     anomaly = compose = feature_extraction = preprocessing = None  # type: ignore
     HAS_RIVER = False
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 class StreamingAR:
@@ -62,7 +62,7 @@ class RiverTAD:
                 seed=int(self.cfg.get("seed", 42))
             ))
         )
-        Console.info(f"[RIVER] Initialized HalfSpaceTrees pipeline for {len(features)} features.")
+        Console.info(f"Initialized HalfSpaceTrees pipeline for {len(features)} features.", component="RIVER")
 
     def score(self, X: pd.DataFrame) -> np.ndarray:
         """
@@ -75,7 +75,7 @@ class RiverTAD:
         if self.pipeline is None:
             numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
             if not numeric_cols:
-                Console.warn("[RIVER] No numeric columns available for streaming detector.")
+                Console.warn("No numeric columns available for streaming detector.", component="RIVER")
                 return np.zeros(len(X), dtype=np.float32)
             self._init_pipeline(numeric_cols)
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Health Timeline Loader and Quality Assessment (v10.0.0)
 
 Replaces scattered health loading logic from rul_engine.py and forecasting.py.
@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 class HealthQuality(Enum):

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Generate ACM installation SQL scripts from the current database state.
 
 Outputs:
@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 OUTPUT_DIR = ROOT / "install" / "sql"

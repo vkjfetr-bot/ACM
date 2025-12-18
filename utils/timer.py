@@ -1,8 +1,13 @@
 # utils/timer.py
 """Performance timing utilities for ACM.
 
-Provides section-based timing with automatic summary at exit.
-Integrates with the enhanced logging system.
+Provides section-based timing with:
+- OTEL trace spans (parent-child hierarchy in Tempo)
+- OTEL metrics (histograms in Prometheus)
+- Console output (text or JSON format)
+- Summary at exit
+
+v2.0: Now uses core.observability.Span for proper trace integration.
 """
 from __future__ import annotations
 import atexit
@@ -10,55 +15,146 @@ import time
 import os
 import functools
 import json
-from typing import Any, Callable, Dict
+from datetime import datetime
+from typing import Any, Callable, Dict, Optional
 
-# Import Console for consistent logging
+# Import from unified observability module
+_Span: Optional[type] = None
+_record_section_fn: Optional[Callable] = None
+_equipment_context: str = ""
+_Console: Optional[type] = None
+_log_timer_fn: Optional[Callable] = None
+
 try:
-    from utils.logger import Console
-except Exception as exc:
-    raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {exc}") from exc
+    from core.observability import Span as _OtelSpan, Console, log_timer as _otel_log_timer
+    _Span = _OtelSpan
+    _Console = Console
+    _log_timer_fn = _otel_log_timer
+except ImportError:
+    pass
+
+
+def enable_timer_metrics(equipment: str = "") -> None:
+    """Enable OTEL metrics recording for Timer sections."""
+    global _equipment_context
+    _equipment_context = equipment
+
+
+def set_timer_equipment(equipment: str) -> None:
+    """Set the equipment context for timer metrics."""
+    global _equipment_context
+    _equipment_context = equipment
+
 
 class Timer:
-    """Lightweight stage timer. Usage:
-       T = Timer();  with T.section("load_data"): ...;  T.log("custom", extra="info")
+    """Lightweight stage timer with OTEL integration.
+    
+    Usage:
+       T = Timer()
+       with T.section("load_data"):
+           df = load_data()
+       T.log("custom", extra="info")
+    
+    Each section creates:
+    - An OTEL span (visible in Grafana Tempo)
+    - A metric recording (visible in Prometheus)
+    - Console output (text or JSON)
     
     Environment variables:
         ACM_TIMINGS: Enable/disable timing output (default: 1)
-        LOG_FORMAT: Output format (text|json) - inherited from logger
+        LOG_FORMAT: Output format (text|json)
     """
     def __init__(self, enable: bool | None = None):
         self.enable = bool(int(os.getenv("ACM_TIMINGS", "1"))) if enable is None else enable
-        self.sections: Dict[str, float] = {}
         self.totals: Dict[str, float] = {}
-        self._stack: list[str] = []
+        self._active_spans: Dict[str, Any] = {}  # name -> (span, start_time)
         self._t0 = time.perf_counter()
         self._json_mode = os.getenv("LOG_FORMAT", "text").lower() == "json"
         atexit.register(self._print_summary)
 
     def section(self, name: str):
+        """Start a timed section. Returns a context manager.
+        
+        Creates an OTEL span for proper trace hierarchy.
+        """
         if not self.enable:
             return _NullContext()
-        self.sections[name] = time.perf_counter()
-        self._stack.append(name)
-        return _Close(self, name)
+        return _TracedSection(self, name)
 
-    def end(self, name: str):
-        if not self.enable: 
+    def _start_section(self, name: str) -> Any:
+        """Internal: start tracking a section."""
+        start_time = time.perf_counter()
+        span = None
+        
+        # Create OTEL span if available
+        if _Span:
+            span = _Span(name)
+            span.__enter__()
+        
+        self._active_spans[name] = (span, start_time)
+        return span
+
+    def _end_section(self, name: str) -> float:
+        """Internal: end a section and record metrics."""
+        if name not in self._active_spans:
             return 0.0
-        t1 = time.perf_counter()
-        t0 = self.sections.pop(name, t1)
-        dur = t1 - t0
-        self.totals[name] = self.totals.get(name, 0.0) + dur
+        
+        span, start_time = self._active_spans.pop(name)
+        duration = time.perf_counter() - start_time
+        
+        # Accumulate for summary
+        self.totals[name] = self.totals.get(name, 0.0) + duration
+        
+        # End OTEL span (this also records metrics via Span.__exit__)
+        if span:
+            span.__exit__(None, None, None)
+        elif _record_section_fn:
+            # Fallback: just record metric without span
+            try:
+                _record_section_fn(name, duration, _equipment_context)
+            except Exception:
+                pass
+        
+        # Console output (only if NOT using Span which does its own logging)
+        # Span.__exit__ already emits structured log event
+        if not span:
+            self._log_section(name, duration)
+        
+        return duration
+
+    def _get_timestamp(self) -> str:
+        """Get timestamp (UTC by default for observability consistency)."""
+        # Use UTC for consistency with OTEL stack
+        return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+    def _log_section(self, name: str, duration: float) -> None:
+        """Output section timing to console (fallback when Span not available).
+        
+        Also pushes structured log to Loki with log_type='timer'.
+        """
+        # Extract parent from hierarchical name (e.g., "fit.pca" -> "fit")
+        parts = name.split(".")
+        parent = parts[0] if parts else name
         
         if self._json_mode:
-            Console.info(json.dumps({
-                "timer": name,
-                "duration_s": round(dur, 3),
-                "event": "section_end"
+            print(json.dumps({
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "level": "INFO",
+                "log_type": "timer",
+                "section": name,
+                "parent": parent,
+                "duration_s": round(duration, 6),
+                "equipment": _equipment_context,
             }))
+        elif _Console:
+            # Push structured timer log to Loki
+            if _log_timer_fn:
+                _log_timer_fn(section=name, duration_s=duration, parent=parent)
+            # Console output only (skip_loki=True since log_timer_fn handles Loki)
+            _Console.info(f"{name:<30} {duration:7.3f}s", skip_loki=True)
         else:
-            Console.info(f"[TIMER] {name:<20} {dur:7.3f}s")
-        return dur
+            timestamp = self._get_timestamp()
+            print(f"[{timestamp}] [INFO] [TIMER] {name:<30} {duration:7.3f}s")
 
     def wrap(self, name: str):
         """Decorator: @T.wrap('features') on a function."""
@@ -71,47 +167,87 @@ class Timer:
         return deco
 
     def log(self, name: str, **kv: Any):
+        """Log a message with optional key-value pairs."""
         if not self.enable: 
             return
         
         if self._json_mode:
-            data = {"timer": name, "event": "log"}
+            data = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "event_type": "timer_log",
+                "section": name,
+            }
             data.update(kv)
-            Console.info(json.dumps(data))
-        else:
+            print(json.dumps(data))
+        elif _Console:
             extra = " ".join(f"{k}={v}" for k, v in kv.items())
-            Console.info(f"[TIMER] {name:<20} {extra}".rstrip())
+            _Console.info(f"[TIMER] {name:<20} {extra}".rstrip())
+        else:
+            timestamp = self._get_timestamp()
+            extra = " ".join(f"{k}={v}" for k, v in kv.items())
+            print(f"[{timestamp}] [INFO] [TIMER] {name:<20} {extra}".rstrip())
 
     def _print_summary(self):
+        """Print summary of all sections at exit."""
         if not self.enable: 
             return
         total = time.perf_counter() - self._t0
         
         if self._json_mode:
-            # JSON summary
             sections = [
                 {"name": k, "duration_s": round(v, 3), "percent": round((v / total) * 100.0, 1)}
                 for k, v in sorted(self.totals.items(), key=lambda x: -x[1])
             ]
-            Console.info(json.dumps({
-                "event": "timer_summary",
+            print(json.dumps({
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "log_type": "timer_summary",
                 "total_duration_s": round(total, 3),
                 "sections": sections
             }))
-        else:
-            # Text summary
+        elif _Console:
             if self.totals:
-                Console.info("[TIMER] -- Summary ------------------------------")
+                # Log summary header (not a timer, just informational)
+                _Console.info("-- Timer Summary ------------------------------")
                 for k, v in sorted(self.totals.items(), key=lambda x: -x[1]):
                     pct = (v / total) * 100.0 if total > 0 else 0.0
-                    Console.info(f"[TIMER] {k:<20} {v:7.3f}s ({pct:5.1f}%)")
-            Console.info(f"[TIMER] total_run            {total:7.3f}s")
+                    parts = k.split(".")
+                    parent = parts[0] if parts else k
+                    # Push structured timer to Loki (skip console's Loki push to avoid duplicates)
+                    if _log_timer_fn:
+                        _log_timer_fn(section=k, duration_s=v, pct=pct, parent=parent, total_s=total)
+                    # Console output only (skip_loki=True since log_timer_fn handles Loki)
+                    _Console.info(f"{k:<30} {v:7.3f}s ({pct:5.1f}%)", skip_loki=True)
+            # Log total run as structured timer
+            if _log_timer_fn:
+                _log_timer_fn(section="total_run", duration_s=total, parent="total_run", total_s=total)
+            _Console.info(f"total_run                      {total:7.3f}s", skip_loki=True)
+        else:
+            timestamp = self._get_timestamp()
+            if self.totals:
+                print(f"[{timestamp}] [INFO] [TIMER] -- Summary ------------------------------")
+                for k, v in sorted(self.totals.items(), key=lambda x: -x[1]):
+                    pct = (v / total) * 100.0 if total > 0 else 0.0
+                    print(f"[{timestamp}] [INFO] [TIMER] {k:<30} {v:7.3f}s ({pct:5.1f}%)")
+            print(f"[{timestamp}] [INFO] [TIMER] total_run                      {total:7.3f}s")
 
-class _Close:
-    def __init__(self, T: Timer, name: str): self.T, self.name = T, name
-    def __enter__(self): return self
-    def __exit__(self, exc_type, exc, tb): self.T.end(self.name)
+
+class _TracedSection:
+    """Context manager for timed sections with OTEL span support."""
+    
+    def __init__(self, timer: Timer, name: str):
+        self.timer = timer
+        self.name = name
+    
+    def __enter__(self):
+        self.timer._start_section(self.name)
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.timer._end_section(self.name)
+        return False
+
 
 class _NullContext:
+    """No-op context manager when timing is disabled."""
     def __enter__(self): return self
     def __exit__(self, *a): return False

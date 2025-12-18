@@ -1,4 +1,4 @@
-"""
+﻿"""
 Forecast Engine Orchestrator (v10.0.0)
 
 Unified forecasting and RUL estimation engine replacing duplicate logic from:
@@ -66,7 +66,7 @@ from core.sensor_attribution import SensorAttributor
 from core.metrics import compute_comprehensive_metrics, log_metrics_summary, compute_forecast_diagnostics, log_forecast_diagnostics
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 # ========================================================================

@@ -1,98 +1,131 @@
 """
-ACM Observability Module - Consolidated instrumentation for traces, metrics, logs, and profiling.
+ACM Unified Observability v4.0
 
-This module provides a unified interface for all observability concerns:
-- Traces: OpenTelemetry SDK with OTLP export to Grafana Tempo
-- Metrics: OpenTelemetry SDK with OTLP export to Grafana Mimir/Prometheus
-- Logs: structlog with JSON output, trace correlation, SQL sink
-- Profiling: Grafana Pyroscope integration for continuous flamegraphs
+Built on standard libraries: structlog + rich + OpenTelemetry.
 
-Usage:
-    from core.observability import init_observability, get_tracer, get_meter, get_logger
-    
-    # Initialize at application startup
-    init_observability(
-        service_name="acm-batch",
-        otlp_endpoint="http://localhost:4318",  # Grafana Alloy
-        pyroscope_endpoint="http://localhost:4040",  # Optional
-    )
-    
-    # Get instrumentation handles
-    tracer = get_tracer()
-    meter = get_meter()
-    log = get_logger()
-    
-    # Use in code
-    @tracer.start_as_current_span("process_batch")
-    def process_batch(equipment: str, df):
-        log.info("batch_started", equipment=equipment, rows=len(df))
-        # ...
+COMPONENTS:
+- structlog: Structured logging with processors
+- rich: Colorful console output, progress indicators
+- OpenTelemetry: Traces to Tempo, Metrics to Prometheus, Logs to Loki
 
-Environment Variables:
-    OTEL_EXPORTER_OTLP_ENDPOINT: OTLP collector endpoint (default: http://localhost:4318)
-    OTEL_SERVICE_NAME: Service name for traces/metrics (default: acm)
-    OTEL_SDK_DISABLED: Disable OpenTelemetry entirely (default: false)
-    OTEL_TRACES_SAMPLER_ARG: Trace sampling ratio (default: 1.0 = 100%)
-    ACM_PYROSCOPE_ENDPOINT: Pyroscope server endpoint (optional)
-    ACM_LOG_FORMAT: Log output format - json or console (default: json)
-    ACM_LOG_LEVEL: Minimum log level (default: INFO)
+API:
+    from core.observability import log, Console, Span, traced, Progress, init
 
-Architecture:
-    ┌─────────────────────────────────────────────────────────────┐
-    │  ACM Python Application                                      │
-    │  ┌─────────────────┐ ┌─────────────────┐ ┌────────────────┐ │
-    │  │ OTel SDK        │ │ structlog       │ │ Pyroscope SDK  │ │
-    │  │ (traces+metrics)│ │ (JSON logs)     │ │ (profiling)    │ │
-    │  └────────┬────────┘ └────────┬────────┘ └───────┬────────┘ │
-    └───────────┼───────────────────┼──────────────────┼──────────┘
-                │ OTLP              │ SQL + stdout     │ HTTP
-                ▼                   ▼                  ▼
-    ┌───────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-    │  Grafana Alloy    │  │ ACM_RunLogs SQL │  │ Pyroscope       │
-    │  (collector)      │  │ + Loki          │  │ Server          │
-    └─────────┬─────────┘  └─────────────────┘  └─────────────────┘
-              │
-              ▼
-    ┌─────────────────┐
-    │ Tempo (traces)  │
-    │ Mimir (metrics) │
-    └─────────────────┘
+    # Initialize at startup (optional - works without init for basic logging)
+    init(equipment="FD_FAN", equip_id=1, run_id="abc-123")
+
+    # Logging - uses structlog
+    log.info("Loaded data", rows=5000)
+    log.warning("Low variance", sensors=3)
+    log.error("SQL failed", table="ACM_Scores")
+
+    # Console - backwards compatible wrapper
+    Console.info("[DATA] Loaded 5000 rows")
+    Console.warn("Warning message")
+
+    # Progress - uses rich.progress (replaces Heartbeat)
+    with Progress("Loading data") as p:
+        for i in range(100):
+            # work
+            p.advance()
+
+    # Spans - OpenTelemetry traces
+    with Span("fit.pca"):
+        model.fit(X)
+
+    @traced("score.gmm")
+    def score_gmm(X):
+        return gmm.score(X)
 """
 from __future__ import annotations
 
 import atexit
+import functools
 import logging
 import os
+import queue
 import sys
 import threading
+import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime
-from enum import IntEnum
-from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, Generator, Optional, TypeVar
 
-# Optional imports with graceful fallbacks
-try:
-    import structlog
-    STRUCTLOG_AVAILABLE = True
-except ImportError:
-    STRUCTLOG_AVAILABLE = False
-    structlog = None
+# =============================================================================
+# STRUCTLOG + COLORAMA SETUP (Rich doesn't work reliably when piped)
+# =============================================================================
+
+import structlog
+import colorama
+from colorama import Fore, Back, Style
+
+# Initialize colorama - strip=False ensures colors even when piped
+colorama.init(autoreset=True, strip=False)
+
+# Color definitions for different log elements
+class _Colors:
+    """Color constants for console output."""
+    # Timestamp colors
+    DATE = Fore.YELLOW  # Gold-ish
+    TIME = Fore.CYAN    # Blue-ish
+    # Level colors
+    INFO = Fore.CYAN + Style.BRIGHT
+    WARN = Fore.YELLOW + Style.BRIGHT
+    ERROR = Fore.RED + Style.BRIGHT
+    OK = Fore.GREEN + Style.BRIGHT
+    DEBUG = Style.DIM
+    STATUS = Fore.MAGENTA + Style.BRIGHT  # Console-only status (purple/magenta)
+    # Message
+    MSG = Fore.WHITE
+    RESET = Style.RESET_ALL
+
+# Configure structlog
+def _configure_structlog():
+    """Configure structlog with console output."""
+    
+    # Processors for structlog
+    processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
+        structlog.dev.ConsoleRenderer(colors=True),
+    ]
+    
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+_configure_structlog()
+
+# Global logger
+log = structlog.get_logger("acm")
+
+
+# =============================================================================
+# OPENTELEMETRY (OPTIONAL)
+# =============================================================================
 
 try:
-    from opentelemetry import trace, metrics
+    from opentelemetry import trace as otel_trace
+    from opentelemetry import metrics as otel_metrics
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+    from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader, AggregationTemporality
     from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-    from opentelemetry.trace import Status, StatusCode
+    from opentelemetry.trace import Status, StatusCode, SpanKind
     OTEL_AVAILABLE = True
 except ImportError:
     OTEL_AVAILABLE = False
-    trace = None
-    metrics = None
+    otel_trace = None
+    otel_metrics = None
+    StatusCode = None
+    Status = None
+    AggregationTemporality = None
 
 try:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -102,901 +135,1139 @@ except ImportError:
     OTEL_EXPORTERS_AVAILABLE = False
 
 try:
-    import pyroscope
-    PYROSCOPE_AVAILABLE = True
+    from opentelemetry._logs import set_logger_provider
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+    OTEL_LOGS_AVAILABLE = True
 except ImportError:
-    PYROSCOPE_AVAILABLE = False
-    pyroscope = None
-
-# =============================================================================
-# LOG LEVELS
-# =============================================================================
-
-class LogLevel(IntEnum):
-    """Log levels matching Python stdlib."""
-    DEBUG = 10
-    INFO = 20
-    WARNING = 30
-    ERROR = 40
-    CRITICAL = 50
+    OTEL_LOGS_AVAILABLE = False
 
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-@dataclass
-class ObservabilityConfig:
-    """Configuration for observability stack."""
-    # Service identification
-    service_name: str = "acm"
+# OTLP HTTP endpoint (Alloy/Collector on port 4318)
+DEFAULT_OTLP_ENDPOINT = "http://localhost:4318"
+# Loki native push endpoint
+DEFAULT_LOKI_ENDPOINT = "http://localhost:3100"
+# Prometheus remote-write endpoint  
+DEFAULT_PROMETHEUS_ENDPOINT = "http://localhost:9090"
+
+class _Config:
+    """Runtime configuration."""
+    service_name: str = "acm-pipeline"
     service_version: str = "10.3.0"
-    environment: str = "development"
-    
-    # OpenTelemetry
-    otlp_endpoint: Optional[str] = None
-    enable_tracing: bool = True
-    enable_metrics: bool = True
-    trace_sample_rate: float = 1.0  # 1.0 = 100%, 0.1 = 10%
-    metrics_export_interval_ms: int = 60000  # 1 minute
-    
-    # Profiling
-    pyroscope_endpoint: Optional[str] = None
-    enable_profiling: bool = False
-    profiling_sample_rate: int = 100  # Hz
-    
-    # Logging
-    log_format: str = "json"  # "json" or "console"
-    log_level: str = "INFO"
-    enable_sql_sink: bool = True
-    
-    # SQL sink config (for BatchedSqlLogSink)
-    sql_client: Any = None
-    run_id: Optional[str] = None
-    equip_id: Optional[int] = None
-    
-    @classmethod
-    def from_env(cls) -> "ObservabilityConfig":
-        """Load configuration from environment variables."""
-        return cls(
-            service_name=os.getenv("OTEL_SERVICE_NAME", "acm"),
-            service_version=os.getenv("ACM_VERSION", "10.2.0"),
-            environment=os.getenv("ACM_ENVIRONMENT", "development"),
-            otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-            enable_tracing=os.getenv("OTEL_SDK_DISABLED", "false").lower() != "true",
-            enable_metrics=os.getenv("OTEL_SDK_DISABLED", "false").lower() != "true",
-            trace_sample_rate=float(os.getenv("OTEL_TRACES_SAMPLER_ARG", "1.0")),
-            pyroscope_endpoint=os.getenv("ACM_PYROSCOPE_ENDPOINT"),
-            enable_profiling=bool(os.getenv("ACM_PYROSCOPE_ENDPOINT")),
-            log_format=os.getenv("ACM_LOG_FORMAT", "json"),
-            log_level=os.getenv("ACM_LOG_LEVEL", "INFO"),
-        )
+    otlp_endpoint: str = DEFAULT_OTLP_ENDPOINT
+    loki_endpoint: str = DEFAULT_LOKI_ENDPOINT
+    prometheus_endpoint: str = DEFAULT_PROMETHEUS_ENDPOINT
+    equipment: str = ""
+    equip_id: int = 0
+    run_id: str = ""
+    batch_num: int = 0
+    batch_total: int = 0
 
-
-# =============================================================================
-# GLOBAL STATE
-# =============================================================================
-
-_initialized = False
-_config: Optional[ObservabilityConfig] = None
-_tracer_provider: Optional[Any] = None
-_meter_provider: Optional[Any] = None
-_sql_sink: Optional[Any] = None
-_structlog_logger: Optional[Any] = None
-
-# Thread-local context for run/equipment/batch info
-_context = threading.local()
-
-
-# =============================================================================
-# STRUCTLOG PROCESSORS
-# =============================================================================
-
-def _add_otel_context(logger: Any, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Add OpenTelemetry trace/span IDs to log records for correlation."""
-    if OTEL_AVAILABLE and trace:
-        span = trace.get_current_span()
-        if span and span.is_recording():
-            ctx = span.get_span_context()
-            event_dict["trace_id"] = format(ctx.trace_id, "032x")
-            event_dict["span_id"] = format(ctx.span_id, "016x")
-    return event_dict
-
-
-def _add_acm_context(logger: Any, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Add ACM-specific context (run_id, equip_id, batch info)."""
-    run_id = getattr(_context, "run_id", None)
-    equip_id = getattr(_context, "equip_id", None)
-    batch_num = getattr(_context, "batch_num", None)
-    batch_total = getattr(_context, "batch_total", None)
-    
-    if run_id:
-        event_dict["run_id"] = run_id
-    if equip_id:
-        event_dict["equip_id"] = equip_id
-    if batch_num is not None:
-        event_dict["batch"] = batch_num + 1  # 1-indexed for display
-        if batch_total is not None:
-            event_dict["batch_total"] = batch_total
-    
-    return event_dict
-
-
-def _add_category_prefix(logger: Any, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Add category prefix to message for console output compatibility."""
-    category = event_dict.pop("category", None)
-    if category:
-        event_dict["category"] = category
-        # Optionally prefix message for console readability
-        if _config and _config.log_format == "console":
-            event_dict["event"] = f"[{category}] {event_dict.get('event', '')}"
-    return event_dict
-
-
-# =============================================================================
-# SQL LOG SINK (bridges to BatchedSqlLogSink)
-# =============================================================================
-
-class StructlogSqlSink:
-    """Bridges structlog to BatchedSqlLogSink for SQL persistence."""
-    
-    def __init__(self, sql_sink: Any):
-        self._sql_sink = sql_sink
-    
-    def __call__(self, logger: Any, method_name: str, event_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Process log record and send to SQL sink."""
-        if self._sql_sink is None:
-            # Fall through to next processor
-            return event_dict
-        
-        # Extract fields for SQL
-        try:
-            self._sql_sink.log(
-                level=event_dict.get("level", "INFO").upper(),
-                message=event_dict.get("event", ""),
-                module=event_dict.get("logger", None),
-                event_type=event_dict.get("category", None),
-                step_name=event_dict.get("step_name", None),
-                duration_ms=event_dict.get("duration_ms", None),
-                row_count=event_dict.get("row_count", None),
-                col_count=event_dict.get("col_count", None),
-                context=event_dict,
-            )
-        except Exception:
-            pass  # Don't let logging errors crash the application
-        
-        return event_dict
+_config = _Config()
+_tracer: Optional[Any] = None
+_meter: Optional[Any] = None
+_loki_pusher: Optional["_LokiPusher"] = None
+_initialized: bool = False
+_shutdown_called: bool = False
+_sql_sink: Optional["_SqlLogSink"] = None
+_metrics: Dict[str, Any] = {}
+_init_lock = threading.Lock()
 
 
 # =============================================================================
 # INITIALIZATION
 # =============================================================================
 
-def init_observability(
-    service_name: Optional[str] = None,
-    otlp_endpoint: Optional[str] = None,
-    pyroscope_endpoint: Optional[str] = None,
-    sql_client: Any = None,
-    run_id: Optional[str] = None,
-    equip_id: Optional[int] = None,
-    config: Optional[ObservabilityConfig] = None,
-    **kwargs,
+def init(
+    equipment: str = "",
+    equip_id: int = 0,
+    run_id: str = "",
+    sql_client: Optional[Any] = None,
+    service_name: str = "acm-pipeline",
+    otlp_endpoint: str = DEFAULT_OTLP_ENDPOINT,
+    loki_endpoint: str = DEFAULT_LOKI_ENDPOINT,
+    # Legacy param - maps to otlp_endpoint
+    tempo_endpoint: Optional[str] = None,
+    enable_tracing: bool = True,
+    enable_metrics: bool = True,
+    enable_loki: bool = True,
 ) -> None:
-    """
-    Initialize the observability stack.
-    
-    Call this once at application startup. Safe to call multiple times
-    (subsequent calls update context but don't reinitialize providers).
+    """Initialize observability stack.
     
     Args:
-        service_name: Service name for traces/metrics (default: from env or "acm")
-        otlp_endpoint: OTLP collector endpoint (default: from env)
-        pyroscope_endpoint: Pyroscope server endpoint (optional)
-        sql_client: SQL client for log persistence (optional)
-        run_id: Current run UUID for log context
-        equip_id: Equipment ID for log context
-        config: Full configuration object (overrides other args)
-        **kwargs: Additional config overrides
+        equipment: Equipment name (e.g., "FD_FAN")
+        equip_id: Equipment ID in database
+        run_id: Unique run identifier
+        sql_client: Optional SQLClient for ACM_RunLogs sink
+        service_name: OpenTelemetry service name
+        tempo_endpoint: Tempo OTLP endpoint (default: http://localhost:4321)
+        loki_endpoint: Loki push endpoint (default: http://localhost:3100)
+        enable_tracing: Enable trace export to Tempo
+        enable_metrics: Enable metric export via OTEL
+        enable_loki: Enable log push to Loki
     """
-    global _initialized, _config, _tracer_provider, _meter_provider, _sql_sink, _structlog_logger
+    global _initialized, _tracer, _meter, _sql_sink, _loki_pusher, _config, _metrics
     
-    # Build config
-    if config is None:
-        config = ObservabilityConfig.from_env()
+    # Handle legacy tempo_endpoint param
+    if tempo_endpoint is not None:
+        otlp_endpoint = tempo_endpoint
     
-    # Override with explicit args
-    if service_name:
-        config.service_name = service_name
-    if otlp_endpoint:
-        config.otlp_endpoint = otlp_endpoint
-    if pyroscope_endpoint:
-        config.pyroscope_endpoint = pyroscope_endpoint
-        config.enable_profiling = True
-    if sql_client:
-        config.sql_client = sql_client
-    if run_id:
-        config.run_id = run_id
-    if equip_id is not None:
-        config.equip_id = equip_id
-    
-    # Apply kwargs
-    for key, value in kwargs.items():
-        if hasattr(config, key):
-            setattr(config, key, value)
-    
-    _config = config
-    
-    # Update thread-local context
-    set_context(run_id=run_id, equip_id=equip_id)
-    
-    # Only initialize providers once
-    if _initialized:
-        return
-    
-    # Initialize OpenTelemetry
-    if OTEL_AVAILABLE and OTEL_EXPORTERS_AVAILABLE and config.otlp_endpoint:
-        resource = Resource.create({
-            SERVICE_NAME: config.service_name,
-            "service.version": config.service_version,
-            "deployment.environment": config.environment,
-        })
+    with _init_lock:
+        if _initialized:
+            return
         
-        # Traces
-        if config.enable_tracing:
-            _tracer_provider = TracerProvider(resource=resource)
-            _tracer_provider.add_span_processor(
+        # Update config
+        _config.service_name = service_name
+        _config.otlp_endpoint = otlp_endpoint
+        _config.loki_endpoint = loki_endpoint
+        _config.equipment = equipment
+        _config.equip_id = equip_id
+        _config.run_id = run_id
+        
+        # Bind context to structlog
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(
+            equipment=equipment,
+            equip_id=equip_id,
+            run_id=run_id,
+        )
+        
+        # SQL log sink
+        if sql_client is not None:
+            _sql_sink = _SqlLogSink(sql_client, run_id, equip_id)
+        
+        # Loki log pusher (native Loki API, not OTLP)
+        if enable_loki:
+            _loki_pusher = _LokiPusher(
+                endpoint=f"{loki_endpoint}/loki/api/v1/push",
+                labels={
+                    "app": "acm",
+                    "service": service_name, 
+                    "equipment": equipment or "unknown"
+                },
+            )
+            if _loki_pusher._connected:
+                Console.ok(f"[OTEL] Loki logs -> {loki_endpoint}")
+            else:
+                Console.warn(f"[OTEL] Loki not connected at {loki_endpoint}")
+        
+        # OpenTelemetry setup for tracing
+        if not OTEL_AVAILABLE or not OTEL_EXPORTERS_AVAILABLE:
+            _initialized = True
+            return
+        
+        resource = Resource.create({SERVICE_NAME: service_name})
+        
+        # Tracing via OTLP
+        if enable_tracing:
+            trace_provider = TracerProvider(resource=resource)
+            trace_provider.add_span_processor(
                 BatchSpanProcessor(
-                    OTLPSpanExporter(endpoint=f"{config.otlp_endpoint}/v1/traces")
+                    OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
                 )
             )
-            trace.set_tracer_provider(_tracer_provider)
+            otel_trace.set_tracer_provider(trace_provider)
+            _tracer = otel_trace.get_tracer(service_name)
+            Console.ok(f"[OTEL] Traces -> {otlp_endpoint}/v1/traces")
         
-        # Metrics
-        if config.enable_metrics:
-            reader = PeriodicExportingMetricReader(
-                OTLPMetricExporter(endpoint=f"{config.otlp_endpoint}/v1/metrics"),
-                export_interval_millis=config.metrics_export_interval_ms,
-            )
-            _meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
-            metrics.set_meter_provider(_meter_provider)
-    
-    # Initialize Pyroscope
-    if PYROSCOPE_AVAILABLE and config.enable_profiling and config.pyroscope_endpoint:
-        pyroscope.configure(
-            application_name=config.service_name,
-            server_address=config.pyroscope_endpoint,
-            sample_rate=config.profiling_sample_rate,
-            detect_subprocesses=False,
-            oncpu=True,
-            gil_only=True,
-            tags={
-                "environment": config.environment,
-                "version": config.service_version,
-            }
-        )
-    
-    # Initialize SQL sink
-    if config.enable_sql_sink and config.sql_client:
-        try:
-            from core.sql_logger_v2 import BatchedSqlLogSink
-            _sql_sink = BatchedSqlLogSink(
-                sql_client=config.sql_client,
-                run_id=config.run_id,
-                equip_id=config.equip_id,
-            )
-        except ImportError:
-            _sql_sink = None
-    
-    # Initialize structlog
-    if STRUCTLOG_AVAILABLE:
-        processors: List[Any] = [
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            _add_otel_context,
-            _add_acm_context,
-            _add_category_prefix,
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-        ]
+        # Metrics via OTLP
+        if enable_metrics:
+            try:
+                # Import instrument types for temporality mapping
+                from opentelemetry.sdk.metrics import Counter, Histogram, UpDownCounter, ObservableCounter, ObservableUpDownCounter, ObservableGauge
+                
+                # Use CUMULATIVE temporality for Prometheus compatibility
+                # Delta temporality (default) doesn't work with Prometheus
+                cumulative_temporality = {
+                    Counter: AggregationTemporality.CUMULATIVE,
+                    Histogram: AggregationTemporality.CUMULATIVE,
+                    UpDownCounter: AggregationTemporality.CUMULATIVE,
+                    ObservableCounter: AggregationTemporality.CUMULATIVE,
+                    ObservableUpDownCounter: AggregationTemporality.CUMULATIVE,
+                    ObservableGauge: AggregationTemporality.CUMULATIVE,
+                }
+                
+                metric_exporter = OTLPMetricExporter(
+                    endpoint=f"{otlp_endpoint}/v1/metrics",
+                    preferred_temporality=cumulative_temporality,
+                )
+                metric_reader = PeriodicExportingMetricReader(
+                    metric_exporter,
+                    export_interval_millis=10000,  # Export every 10s for faster feedback
+                )
+                meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+                otel_metrics.set_meter_provider(meter_provider)
+                _meter = otel_metrics.get_meter(service_name)
+                
+                # ===== TIMING METRICS =====
+                _metrics["stage_duration"] = _meter.create_histogram(
+                    "acm_stage_duration_seconds",
+                    description="Duration of pipeline stages (hierarchical: fit.pca, score.gmm, etc.)",
+                    unit="s",
+                )
+                _metrics["run_duration"] = _meter.create_histogram(
+                    "acm_run_duration_seconds",
+                    description="Total run duration",
+                    unit="s",
+                )
+                
+                # ===== COUNTER METRICS =====
+                _metrics["runs"] = _meter.create_counter(
+                    "acm_runs_total",
+                    description="Run outcomes by status (OK/FAIL/NOOP)",
+                )
+                _metrics["batches"] = _meter.create_counter(
+                    "acm_batches_total",
+                    description="Total batches processed",
+                )
+                _metrics["rows_processed"] = _meter.create_counter(
+                    "acm_rows_processed_total",
+                    description="Total rows processed",
+                )
+                _metrics["sql_ops"] = _meter.create_counter(
+                    "acm_sql_ops_total",
+                    description="SQL operations by table",
+                )
+                _metrics["coldstarts"] = _meter.create_counter(
+                    "acm_coldstarts_total",
+                    description="Coldstart completions",
+                )
+                _metrics["episodes"] = _meter.create_counter(
+                    "acm_episodes_total",
+                    description="Anomaly episodes detected",
+                )
+                _metrics["errors"] = _meter.create_counter(
+                    "acm_errors_total",
+                    description="Errors by type",
+                )
+                _metrics["model_refits"] = _meter.create_counter(
+                    "acm_model_refits_total",
+                    description="Model refit/retrain events",
+                )
+                
+                # ===== GAUGE METRICS (current values) =====
+                _metrics["health_score"] = _meter.create_gauge(
+                    "acm_health_score",
+                    description="Current equipment health score (0-100)",
+                )
+                _metrics["rul_hours"] = _meter.create_gauge(
+                    "acm_rul_hours",
+                    description="Remaining useful life in hours",
+                )
+                _metrics["active_defects"] = _meter.create_gauge(
+                    "acm_active_defects",
+                    description="Number of active defects",
+                )
+                _metrics["fused_z"] = _meter.create_gauge(
+                    "acm_fused_z_score",
+                    description="Current fused anomaly z-score",
+                )
+                _metrics["detector_z"] = _meter.create_gauge(
+                    "acm_detector_z_score",
+                    description="Per-detector z-scores (ar1, pca_spe, pca_t2, iforest, gmm, omr)",
+                )
+                _metrics["regime"] = _meter.create_gauge(
+                    "acm_current_regime",
+                    description="Current operating regime ID",
+                )
+                _metrics["data_quality"] = _meter.create_gauge(
+                    "acm_data_quality_score",
+                    description="Data quality score (0-100)",
+                )
+                
+                Console.ok(f"Metrics -> {otlp_endpoint}/v1/metrics", component="OTEL")
+            except Exception as e:
+                Console.warn(f"[OTEL] Metrics setup failed: {e}")
         
-        # Add SQL sink if available
-        if _sql_sink:
-            processors.append(StructlogSqlSink(_sql_sink))
-        
-        # Output format
-        if config.log_format == "console":
-            processors.append(structlog.dev.ConsoleRenderer(colors=True))
-        else:
-            processors.append(structlog.processors.JSONRenderer())
-        
-        structlog.configure(
-            processors=processors,
-            wrapper_class=structlog.stdlib.BoundLogger,
-            context_class=dict,
-            logger_factory=structlog.stdlib.LoggerFactory(),
-            cache_logger_on_first_use=True,
-        )
-        
-        # Set stdlib logging level
-        logging.basicConfig(
-            format="%(message)s",
-            stream=sys.stdout,
-            level=getattr(logging, config.log_level.upper(), logging.INFO),
-        )
-    
-    _initialized = True
-    atexit.register(shutdown)
+        _initialized = True
+        atexit.register(shutdown)
 
 
 def shutdown() -> None:
-    """Flush and shutdown all observability providers."""
-    global _tracer_provider, _meter_provider, _sql_sink
+    """Flush and shutdown all providers."""
+    global _sql_sink, _loki_pusher, _shutdown_called
     
-    if _tracer_provider:
-        try:
-            _tracer_provider.shutdown()
-        except Exception:
-            pass
+    # Prevent double shutdown (atexit may call again)
+    if _shutdown_called:
+        return
+    _shutdown_called = True
     
-    if _meter_provider:
+    # Flush and shutdown OTEL metric provider to ensure final metrics are exported
+    if OTEL_AVAILABLE and otel_metrics is not None:
         try:
-            _meter_provider.shutdown()
+            provider = otel_metrics.get_meter_provider()
+            if hasattr(provider, 'force_flush'):
+                provider.force_flush(timeout_millis=10000)
+            if hasattr(provider, 'shutdown'):
+                provider.shutdown()
         except Exception:
-            pass
+            pass  # Best effort flush
+    
+    # Flush and shutdown OTEL trace provider
+    if OTEL_AVAILABLE and otel_trace is not None:
+        try:
+            provider = otel_trace.get_tracer_provider()
+            if hasattr(provider, 'force_flush'):
+                provider.force_flush(timeout_millis=10000)
+            if hasattr(provider, 'shutdown'):
+                provider.shutdown()
+        except Exception:
+            pass  # Best effort flush
     
     if _sql_sink:
-        try:
-            _sql_sink.close()
-        except Exception:
-            pass
+        _sql_sink.close()
+        _sql_sink = None
+    if _loki_pusher:
+        _loki_pusher.close()
+        _loki_pusher = None
 
-
-# =============================================================================
-# CONTEXT MANAGEMENT
-# =============================================================================
 
 def set_context(
-    run_id: Optional[str] = None,
+    equipment: Optional[str] = None,
     equip_id: Optional[int] = None,
+    run_id: Optional[str] = None,
     batch_num: Optional[int] = None,
     batch_total: Optional[int] = None,
 ) -> None:
-    """
-    Set thread-local context for all subsequent logs/traces.
-    
-    Args:
-        run_id: Current run UUID
-        equip_id: Equipment ID from SQL
-        batch_num: Current batch number (0-indexed internally)
-        batch_total: Total number of batches in this run
-    """
-    if run_id is not None:
-        _context.run_id = run_id
+    """Update context for all subsequent logs."""
+    if equipment is not None:
+        _config.equipment = equipment
     if equip_id is not None:
-        _context.equip_id = equip_id
+        _config.equip_id = equip_id
+    if run_id is not None:
+        _config.run_id = run_id
     if batch_num is not None:
-        _context.batch_num = batch_num
+        _config.batch_num = batch_num
     if batch_total is not None:
-        _context.batch_total = batch_total
+        _config.batch_total = batch_total
     
-    # Update SQL sink context if available
-    if _sql_sink:
-        if run_id is not None:
-            _sql_sink.run_id = run_id
-        if equip_id is not None:
-            _sql_sink.equip_id = equip_id
-
-
-def get_run_id() -> Optional[str]:
-    """Get current run ID from context."""
-    return getattr(_context, "run_id", None)
-
-
-def get_equip_id() -> Optional[int]:
-    """Get current equipment ID from context."""
-    return getattr(_context, "equip_id", None)
+    # Update structlog context
+    structlog.contextvars.bind_contextvars(
+        equipment=_config.equipment,
+        equip_id=_config.equip_id,
+        run_id=_config.run_id,
+        batch_num=_config.batch_num,
+        batch_total=_config.batch_total,
+    )
 
 
 # =============================================================================
-# INSTRUMENTATION GETTERS
+# CONSOLE - Backwards Compatible Wrapper using Colorama
 # =============================================================================
 
-class NoOpTracer:
-    """No-op tracer for when OpenTelemetry is not available."""
+class Console:
+    """
+    Unified logging with structured records.
     
-    def start_as_current_span(self, name: str, **kwargs):
-        @contextmanager
-        def noop_span():
-            yield NoOpSpan()
-        return noop_span()
+    Each log call creates a single LogRecord that is:
+    1. Rendered to console with colors and formatting
+    2. Sent to Loki with proper labels (no regex extraction needed)
     
-    def start_span(self, name: str, **kwargs):
-        return NoOpSpan()
+    Usage:
+        Console.info("Loading data", component="DATA", rows=5000)
+        Console.warn("Low variance", component="MODEL")
+        Console.error("SQL failed", component="SQL", table="ACM_Scores")
+    
+    The `component` parameter becomes:
+    - Console: [INFO] [DATA] Loading data
+    - Loki label: {component="data", level="info"} "Loading data"
+    """
+    
+    @staticmethod
+    def _format_timestamp() -> tuple:
+        """Format current timestamp as (date, time) tuple."""
+        now = datetime.now()
+        return now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S")
+    
+    @staticmethod
+    def _render_console(level: str, level_color: str, message: str, component: Optional[str] = None) -> None:
+        """Render a log record to console with colors."""
+        date, time_str = Console._format_timestamp()
+        
+        # Build the console line
+        timestamp = f"{_Colors.DATE}[{date}{_Colors.RESET} {_Colors.TIME}{time_str}]{_Colors.RESET}"
+        level_tag = f"{level_color}[{level}]{_Colors.RESET}"
+        
+        if component:
+            comp_tag = f"{_Colors.INFO}[{component.upper()}]{_Colors.RESET} "
+        else:
+            comp_tag = ""
+        
+        print(f"{timestamp} {level_tag} {comp_tag}{_Colors.MSG}{message}{_Colors.RESET}")
+    
+    @staticmethod
+    def _send_to_loki(level: str, message: str, component: Optional[str] = None, **kwargs) -> None:
+        """Send structured log to Loki with proper labels."""
+        if not _loki_pusher:
+            return
+        _loki_pusher.log(level, message, component=component, **kwargs)
+    
+    @staticmethod
+    def debug(message: str, component: Optional[str] = None, **kwargs) -> None:
+        """Debug message. Only shown in console, low priority in Loki."""
+        Console._render_console("DEBUG", _Colors.DEBUG, message, component)
+        Console._send_to_loki("debug", message, component, **kwargs)
+    
+    @staticmethod
+    def info(message: str, component: Optional[str] = None, skip_loki: bool = False, **kwargs) -> None:
+        """Info message. Standard operational logging."""
+        Console._render_console("INFO", _Colors.INFO, message, component)
+        if not skip_loki:
+            Console._send_to_loki("info", message, component, **kwargs)
+    
+    @staticmethod
+    def warn(message: str, component: Optional[str] = None, **kwargs) -> None:
+        """Warning message. Something unexpected but not fatal."""
+        Console._render_console("WARN", _Colors.WARN, message, component)
+        Console._send_to_loki("warning", message, component, **kwargs)
+    
+    warning = warn
+    
+    @staticmethod
+    def error(message: str, component: Optional[str] = None, **kwargs) -> None:
+        """Error message. Something failed."""
+        Console._render_console("ERROR", _Colors.ERROR, message, component)
+        Console._send_to_loki("error", message, component, **kwargs)
+    
+    @staticmethod
+    def ok(message: str, component: Optional[str] = None, **kwargs) -> None:
+        """Success message (green). Logs as level=info with tag=success to Loki."""
+        Console._render_console("SUCCESS", _Colors.OK, message, component)
+        kwargs.pop("level", None)  # Avoid conflict
+        Console._send_to_loki("info", message, component, tag="success", **kwargs)
+    
+    @staticmethod
+    def status(message: str) -> None:
+        """Console-only status message (magenta). Does NOT push to Loki.
+        
+        Use for progress indicators, section headers, decorative separators,
+        and operational messages that would pollute log analysis.
+        
+        Examples:
+            Console.status("Processing Equipment: FD_FAN")
+            Console.status("="*60)  # Section divider
+        """
+        date, time_str = Console._format_timestamp()
+        print(f"{_Colors.DATE}[{date}{_Colors.RESET} {_Colors.TIME}{time_str}]{_Colors.RESET} {_Colors.STATUS}>>>{_Colors.RESET} {_Colors.MSG}{message}{_Colors.RESET}")
+        # Intentionally NO Loki push - console only
+    
+    @staticmethod
+    def header(title: str, char: str = "=", width: int = 60) -> None:
+        """Print a section header box. Console-only, no Loki.
+        
+        Example:
+            Console.header("Processing Equipment: FD_FAN")
+            
+        Output:
+            >>> ============================================================
+            >>> Processing Equipment: FD_FAN
+            >>> ============================================================
+        """
+        Console.status(char * width)
+        Console.status(title)
+        Console.status(char * width)
+    
+    @staticmethod  
+    def section(title: str) -> None:
+        """Print a lighter section marker. Console-only, no Loki.
+        
+        Example:
+            Console.section("Starting coldstart")
+            
+        Output:
+            >>> --- Starting coldstart ---
+        """
+        Console.status(f"--- {title} ---")
 
 
-class NoOpSpan:
-    """No-op span for when OpenTelemetry is not available."""
+# =============================================================================
+# PROGRESS / HEARTBEAT - Complete No-Op
+# =============================================================================
+
+class Progress:
+    """
+    No-op progress indicator. All methods are stubs for backward compatibility.
+    """
     
-    def set_attribute(self, key: str, value: Any) -> None:
+    def __init__(self, description: str = "", *args, **kwargs):
         pass
     
-    def set_status(self, status: Any) -> None:
-        pass
-    
-    def record_exception(self, exception: Exception) -> None:
-        pass
-    
-    def is_recording(self) -> bool:
-        return False
-    
-    def get_span_context(self):
-        return None
-    
-    def __enter__(self):
+    def __enter__(self) -> "Progress":
         return self
     
-    def __exit__(self, *args):
+    def __exit__(self, *args) -> None:
         pass
-
-
-class NoOpMeter:
-    """No-op meter for when OpenTelemetry is not available."""
     
-    def create_counter(self, name: str, **kwargs):
-        return NoOpCounter()
+    def start(self) -> "Progress":
+        return self
     
-    def create_histogram(self, name: str, **kwargs):
-        return NoOpHistogram()
-    
-    def create_up_down_counter(self, name: str, **kwargs):
-        return NoOpCounter()
-    
-    def create_gauge(self, name: str, **kwargs):
-        return NoOpGauge()
-
-
-class NoOpCounter:
-    def add(self, value: float, attributes: Optional[Dict[str, Any]] = None) -> None:
+    def stop(self) -> None:
         pass
-
-
-class NoOpHistogram:
-    def record(self, value: float, attributes: Optional[Dict[str, Any]] = None) -> None:
+    
+    def advance(self, amount: float = 1) -> None:
         pass
-
-
-class NoOpGauge:
-    def set(self, value: float, attributes: Optional[Dict[str, Any]] = None) -> None:
-        pass
-
-
-def get_tracer(name: str = "acm") -> Any:
-    """
-    Get an OpenTelemetry tracer.
     
-    Returns a no-op tracer if OpenTelemetry is not available or not initialized.
-    """
-    if OTEL_AVAILABLE and trace:
-        return trace.get_tracer(name)
-    return NoOpTracer()
+    def track(self, iterable, total: Optional[int] = None):
+        yield from iterable
 
 
-def get_meter(name: str = "acm") -> Any:
-    """
-    Get an OpenTelemetry meter.
-    
-    Returns a no-op meter if OpenTelemetry is not available or not initialized.
-    """
-    if OTEL_AVAILABLE and metrics:
-        return metrics.get_meter(name)
-    return NoOpMeter()
-
-
-def get_logger(name: str = "acm") -> Any:
-    """
-    Get a structured logger.
-    
-    Returns a structlog logger if available, otherwise a stdlib logger.
-    """
-    if STRUCTLOG_AVAILABLE and structlog:
-        return structlog.get_logger(name)
-    return logging.getLogger(name)
+# Backwards compatibility alias
+Heartbeat = Progress
 
 
 # =============================================================================
-# CONVENIENCE DECORATORS
+# SPANS - OpenTelemetry Tracing
 # =============================================================================
 
-F = TypeVar("F", bound=Callable[..., Any])
+# Span kind mapping for colorful traces in Tempo
+# Different span kinds get different colors in the trace view
+_SPAN_KIND_MAP = {
+    # CLIENT (blue): External data access, I/O operations
+    "load_data": "CLIENT",
+    "load": "CLIENT",
+    "sql": "CLIENT",
+    "persist": "CLIENT",
+    "write": "CLIENT",
+    # INTERNAL (green): Core processing and algorithms
+    "fit": "INTERNAL",
+    "score": "INTERNAL",
+    "features": "INTERNAL",
+    "models": "INTERNAL",
+    "calibrate": "INTERNAL",
+    "fusion": "INTERNAL",
+    "regimes": "INTERNAL",
+    "forecast": "INTERNAL",
+    "train": "INTERNAL",
+    "compute": "INTERNAL",
+    # SERVER (purple): Entry points and control flow
+    "outputs": "SERVER",
+    "startup": "SERVER",
+    "acm": "SERVER",
+    # PRODUCER (orange): Data generation and preparation
+    "data": "PRODUCER",
+    "baseline": "PRODUCER",
+}
 
 
-def traced(
-    name: Optional[str] = None,
-    attributes: Optional[Dict[str, Any]] = None,
-) -> Callable[[F], F]:
+class Span:
     """
-    Decorator to trace a function.
+    Context manager for OpenTelemetry spans.
     
-    Args:
-        name: Span name (default: function name)
-        attributes: Static attributes to add to span
+    Usage:
+        with Span("fit.pca"):
+            model.fit(X)
     
-    Example:
-        @traced("process_batch", attributes={"component": "detector"})
-        def process_batch(equipment: str, df):
-            ...
+    Spans are colored in Tempo based on span kind:
+    - CLIENT (blue): External calls (SQL, file I/O)
+    - INTERNAL (green): Internal processing
+    - SERVER (purple): Entry points
+    - PRODUCER (orange): Data generation
     """
-    def decorator(func: F) -> F:
-        span_name = name or func.__name__
+    
+    def __init__(self, name: str, **attributes):
+        self.name = name
+        self.attributes = attributes
+        self._span: Optional[Any] = None
+        self._context_token: Optional[Any] = None
+        self._start_time = 0.0
+    
+    def _get_span_kind(self) -> Any:
+        """Determine span kind based on span name prefix."""
+        if not OTEL_AVAILABLE:
+            return None
+        # Get the first part of hierarchical name (e.g., "fit" from "fit.pca")
+        prefix = self.name.split(".")[0]
+        kind_str = _SPAN_KIND_MAP.get(prefix, "INTERNAL")
+        return getattr(SpanKind, kind_str, SpanKind.INTERNAL)
+    
+    def __enter__(self) -> "Span":
+        self._start_time = time.perf_counter()
         
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            tracer = get_tracer()
-            with tracer.start_as_current_span(span_name) as span:
-                if attributes:
-                    for key, value in attributes.items():
-                        span.set_attribute(key, value)
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if OTEL_AVAILABLE and hasattr(span, 'record_exception'):
-                        span.record_exception(e)
-                        span.set_status(Status(StatusCode.ERROR, str(e)))
-                    raise
+        if _tracer is not None:
+            span_kind = self._get_span_kind()
+            # Include equipment in span name for easy identification in Tempo
+            # e.g., "fit.pca" -> "fit.pca:FD_FAN"
+            equip_suffix = f":{_config.equipment}" if _config.equipment else ""
+            span_display_name = f"{self.name}{equip_suffix}"
+            self._span = _tracer.start_span(span_display_name, kind=span_kind)
+            self._context_token = otel_trace.use_span(self._span, end_on_exit=False)
+            self._context_token.__enter__()
+            
+            # Add standard attributes
+            if _config.equipment:
+                self._span.set_attribute("acm.equipment", _config.equipment)
+            if _config.equip_id:
+                self._span.set_attribute("acm.equip_id", _config.equip_id)
+            if _config.run_id:
+                self._span.set_attribute("acm.run_id", _config.run_id)
+            
+            # Add span category for easier filtering
+            self._span.set_attribute("acm.category", self.name.split(".")[0])
+            
+            # Add custom attributes
+            for key, value in self.attributes.items():
+                self._span.set_attribute(f"acm.{key}", value)
         
-        return wrapper  # type: ignore
-    return decorator
-
-
-def timed(
-    step_name: Optional[str] = None,
-    log_result: bool = True,
-) -> Callable[[F], F]:
-    """
-    Decorator to time a function and log performance.
+        return self
     
-    Args:
-        step_name: Step name for logs (default: function name)
-        log_result: Whether to log timing on completion
-    
-    Example:
-        @timed("detector.fit")
-        def fit_detector(df):
-            ...
-    """
-    def decorator(func: F) -> F:
-        name = step_name or func.__name__
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        elapsed = time.perf_counter() - self._start_time
         
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            import time
-            log = get_logger()
-            start = time.perf_counter()
-            try:
-                result = func(*args, **kwargs)
-                if log_result:
-                    duration_ms = (time.perf_counter() - start) * 1000
-                    log.info(
-                        "step_completed",
-                        category="PERF",
-                        step_name=name,
-                        duration_ms=duration_ms,
-                    )
-                return result
-            except Exception as e:
-                duration_ms = (time.perf_counter() - start) * 1000
-                log.error(
-                    "step_failed",
-                    category="PERF",
-                    step_name=name,
-                    duration_ms=duration_ms,
-                    error=str(e),
+        # Record metric with full hierarchical stage name
+        if _meter and "stage_duration" in _metrics:
+            # Split into parent/child for filtering (e.g., "fit.pca" -> parent="fit", stage="fit.pca")
+            parts = self.name.split(".")
+            parent = parts[0] if parts else self.name
+            _metrics["stage_duration"].record(
+                elapsed,
+                {
+                    "stage": self.name,  # Full hierarchical name
+                    "parent": parent,     # Top-level category
+                    "equipment": _config.equipment or "unknown"
+                }
+            )
+            
+            # Also push structured timer log to Loki
+            if _loki_pusher:
+                _loki_pusher.log(
+                    "info",
+                    f"{self.name} completed in {elapsed:.3f}s",
+                    log_type="timer",
+                    section=self.name,
+                    duration_s=round(elapsed, 6),
+                    parent=parent
                 )
-                raise
         
-        return wrapper  # type: ignore
+        # End span
+        if self._span is not None:
+            if exc_val is not None:
+                self._span.set_status(Status(StatusCode.ERROR, str(exc_val)))
+                self._span.record_exception(exc_val)
+            else:
+                self._span.set_status(Status(StatusCode.OK))
+            
+            self._span.end()
+            if self._context_token:
+                self._context_token.__exit__(exc_type, exc_val, exc_tb)
+    
+    def set_attribute(self, key: str, value: Any) -> None:
+        """Add attribute to current span."""
+        if self._span is not None:
+            self._span.set_attribute(key, value)
+
+
+def traced(name: str):
+    """Decorator to trace a function."""
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with Span(name):
+                return func(*args, **kwargs)
+        return wrapper
     return decorator
 
 
 # =============================================================================
-# PROFILING CONTEXT MANAGER
+# METRICS
 # =============================================================================
 
-@contextmanager
-def profile_section(tags: Optional[Dict[str, str]] = None):
-    """
-    Context manager for profiling a code section with Pyroscope.
-    
-    Args:
-        tags: Additional tags to add to the profile
-    
-    Example:
-        with profile_section({"equipment": "FD_FAN", "detector": "omr"}):
-            run_detector()
-    """
-    if PYROSCOPE_AVAILABLE and pyroscope and _config and _config.enable_profiling:
-        with pyroscope.tag_wrapper(tags or {}):
-            yield
-    else:
-        yield
-
-
-# =============================================================================
-# METRICS HELPERS
-# =============================================================================
-
-# Pre-defined metrics for ACM (lazy initialization)
-_batch_counter: Optional[Any] = None
-_batch_duration: Optional[Any] = None
-_rows_processed: Optional[Any] = None
-_detector_duration: Optional[Any] = None
-_health_score: Optional[Any] = None
-
-
-def _ensure_metrics():
-    """Lazily initialize common ACM metrics."""
-    global _batch_counter, _batch_duration, _rows_processed, _detector_duration, _health_score
-    
-    if _batch_counter is not None:
-        return
-    
-    meter = get_meter()
-    
-    _batch_counter = meter.create_counter(
-        "acm.batches.processed",
-        description="Number of batches processed",
-    )
-    
-    _batch_duration = meter.create_histogram(
-        "acm.batch.duration_seconds",
-        description="Batch processing duration in seconds",
-    )
-    
-    _rows_processed = meter.create_counter(
-        "acm.rows.processed",
-        description="Total rows processed",
-    )
-    
-    _detector_duration = meter.create_histogram(
-        "acm.detector.duration_seconds",
-        description="Detector execution duration in seconds",
-    )
-    
-    _health_score = meter.create_gauge(
-        "acm.health.score",
-        description="Equipment health score (0-100)",
-    )
-
-
-def record_batch_processed(
-    equipment: str,
-    duration_seconds: float,
-    rows: int,
-    status: str = "success",
-) -> None:
+def record_batch(equipment: str, rows: int, duration_s: float) -> None:
     """Record batch processing metrics."""
-    _ensure_metrics()
-    attrs = {"equipment": equipment, "status": status}
-    _batch_counter.add(1, attrs)
-    _batch_duration.record(duration_seconds, attrs)
-    _rows_processed.add(rows, {"equipment": equipment})
+    if _meter:
+        if "batches" in _metrics:
+            _metrics["batches"].add(1, {"equipment": equipment})
+        if "rows_processed" in _metrics:
+            _metrics["rows_processed"].add(rows, {"equipment": equipment})
+        if "run_duration" in _metrics:
+            _metrics["run_duration"].record(duration_s, {"equipment": equipment, "type": "batch"})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Batch completed: {rows} rows in {duration_s:.2f}s", equipment=equipment, rows=rows, duration_s=duration_s)
 
 
-def record_detector_duration(
-    detector: str,
-    equipment: str,
-    duration_seconds: float,
-) -> None:
-    """Record detector execution time."""
-    _ensure_metrics()
-    _detector_duration.record(
-        duration_seconds,
-        {"detector": detector, "equipment": equipment}
-    )
+def record_run(equipment: str, outcome: str, duration_s: float) -> None:
+    """Record run outcome metrics."""
+    if _meter:
+        if "runs" in _metrics:
+            _metrics["runs"].add(1, {"equipment": equipment, "outcome": outcome})
+        if "run_duration" in _metrics:
+            _metrics["run_duration"].record(duration_s, {"equipment": equipment, "outcome": outcome})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Run {outcome}: {duration_s:.2f}s", equipment=equipment, outcome=outcome, duration_s=duration_s)
 
 
-def record_health_score(equipment: str, score: float) -> None:
-    """Record current health score."""
-    _ensure_metrics()
-    _health_score.set(score, {"equipment": equipment})
+def record_batch_processed(equipment: str, rows: int = 0, duration_seconds: float = 0.0, **kwargs) -> None:
+    """Record batch rows processed."""
+    if _meter and "rows_processed" in _metrics:
+        _metrics["rows_processed"].add(rows, {"equipment": equipment})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Batch processed: {rows} rows in {duration_seconds:.1f}s", equipment=equipment, rows=rows, duration_seconds=duration_seconds)
 
 
-# =============================================================================
-# CATEGORY-SPECIFIC LOGGING (backwards compatibility with ACMLog)
-# =============================================================================
-
-class ACMLogger:
-    """
-    Category-aware logger for ACM.
-    
-    Provides methods for each ACM log category (RUN, CFG, DATA, etc.)
-    while using structlog under the hood.
-    """
-    
-    def __init__(self, name: str = "acm"):
-        self._name = name
-    
-    def _log(self, level: str, category: str, message: str, **kwargs) -> None:
-        log = get_logger(self._name)
-        method = getattr(log, level.lower(), log.info)
-        method(message, category=category, **kwargs)
-    
-    def run(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log pipeline lifecycle events."""
-        self._log(level, "RUN", message, **kwargs)
-    
-    def cfg(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log configuration events."""
-        self._log(level, "CFG", message, **kwargs)
-    
-    def data(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log data loading and validation events."""
-        self._log(level, "DATA", message, **kwargs)
-    
-    def feat(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log feature engineering events."""
-        self._log(level, "FEAT", message, **kwargs)
-    
-    def model(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log model training/caching events."""
-        self._log(level, "MODEL", message, **kwargs)
-    
-    def score(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log scoring and detection events."""
-        self._log(level, "SCORE", message, **kwargs)
-    
-    def fuse(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log fusion and episode events."""
-        self._log(level, "FUSE", message, **kwargs)
-    
-    def regime(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log regime detection events."""
-        self._log(level, "REGIME", message, **kwargs)
-    
-    def episode(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log episode detection events."""
-        self._log(level, "EPISODE", message, **kwargs)
-    
-    def output(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log output write events."""
-        self._log(level, "OUTPUT", message, **kwargs)
-    
-    def perf(self, step_name: str, duration_ms: float, **kwargs) -> None:
-        """Log performance metrics."""
-        if duration_ms >= 1000:
-            dur_str = f"{duration_ms/1000:.2f}s"
-        else:
-            dur_str = f"{duration_ms:.1f}ms"
-        
-        message = f"{step_name:<25} {dur_str}"
-        if "row_count" in kwargs:
-            message += f" ({kwargs['row_count']:,} rows)"
-        
-        self._log("info", "PERF", message, step_name=step_name, duration_ms=duration_ms, **kwargs)
-    
-    def health(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log health tracking events."""
-        self._log(level, "HEALTH", message, **kwargs)
-    
-    def rul(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log RUL estimation events."""
-        self._log(level, "RUL", message, **kwargs)
-    
-    def forecast(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log forecasting events."""
-        self._log(level, "FORECAST", message, **kwargs)
-    
-    def sql(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log SQL connection/query events."""
-        self._log(level, "SQL", message, **kwargs)
-    
-    def threshold(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log threshold calculation events."""
-        self._log(level, "THRESHOLD", message, **kwargs)
-    
-    def coldstart(self, message: str, level: str = "info", **kwargs) -> None:
-        """Log coldstart events."""
-        self._log(level, "COLDSTART", message, **kwargs)
+def record_health(equipment: str, health: float) -> None:
+    """Record health score metric."""
+    if _meter and "health_score" in _metrics:
+        _metrics["health_score"].set(health, {"equipment": equipment})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Health: {health:.1f}%", equipment=equipment, health=health)
 
 
-# Global ACM logger instance
-acm_log = ACMLogger()
+def record_health_score(equipment: str, health: float) -> None:
+    """Alias for record_health."""
+    record_health(equipment, health)
 
 
-# =============================================================================
-# LOG CLEANUP
-# =============================================================================
+def record_rul(equipment: str, rul_hours: float, p10: float = 0, p50: float = 0, p90: float = 0) -> None:
+    """Record RUL prediction with confidence bounds."""
+    if _meter and "rul_hours" in _metrics:
+        _metrics["rul_hours"].set(rul_hours, {"equipment": equipment, "percentile": "mean"})
+        if p10 > 0:
+            _metrics["rul_hours"].set(p10, {"equipment": equipment, "percentile": "p10"})
+        if p50 > 0:
+            _metrics["rul_hours"].set(p50, {"equipment": equipment, "percentile": "p50"})
+        if p90 > 0:
+            _metrics["rul_hours"].set(p90, {"equipment": equipment, "percentile": "p90"})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"RUL: {rul_hours:.1f}h", equipment=equipment, rul_hours=rul_hours, p10=p10, p50=p50, p90=p90)
 
-def cleanup_old_logs(
-    sql_client: Any,
-    retention_days: int = 30,
-    table_name: str = "ACM_RunLogs",
-) -> int:
-    """
-    Delete old log records from SQL table.
+
+def record_active_defects(equipment: str, count: int) -> None:
+    """Record active defect count."""
+    if _meter and "active_defects" in _metrics:
+        _metrics["active_defects"].set(count, {"equipment": equipment})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Active defects: {count}", equipment=equipment, active_defects=count)
+
+
+def record_episode(equipment: str, count: int = 1, episode_id: str = "", severity: str = "warning") -> None:
+    """Record episode event(s)."""
+    if _meter and "episodes" in _metrics:
+        _metrics["episodes"].add(count, {"equipment": equipment, "severity": severity})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Episode: {count} detected ({severity})", equipment=equipment, episode_id=episode_id, severity=severity, count=count)
+
+
+def record_error(equipment: str, error: str, error_type: str = "unknown") -> None:
+    """Record error event."""
+    if _meter and "errors" in _metrics:
+        _metrics["errors"].add(1, {"equipment": equipment, "error_type": error_type})
+    if _loki_pusher:
+        _loki_pusher.log("error", f"Error: {error}", equipment=equipment, error=error, error_type=error_type)
+
+
+def record_coldstart(equipment: str, status: str = "complete") -> None:
+    """Record coldstart status."""
+    if _meter and "coldstarts" in _metrics and status == "complete":
+        _metrics["coldstarts"].add(1, {"equipment": equipment})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Coldstart: {status}", equipment=equipment, coldstart_status=status)
+
+
+def record_sql_op(table: str = "", operation: str = "", rows: int = 0, 
+                  equipment: str = "", duration_ms: float = 0.0) -> None:
+    """Record SQL operation metrics."""
+    if _meter and "sql_ops" in _metrics:
+        _metrics["sql_ops"].add(1, {"table": table, "operation": operation, "equipment": equipment})
+    if _loki_pusher:
+        _loki_pusher.log("debug", f"SQL: {operation} {table} ({rows} rows, {duration_ms:.1f}ms)", 
+                        table=table, operation=operation, rows=rows, equipment=equipment, duration_ms=duration_ms)
+
+
+def record_detector_scores(equipment: str, scores: dict) -> None:
+    """Record per-detector z-scores.
     
     Args:
-        sql_client: SQL client with cursor() method
-        retention_days: Keep logs newer than this many days
-        table_name: Table to clean up
-    
-    Returns:
-        Number of rows deleted
+        equipment: Equipment name
+        scores: Dict of detector_name -> z_score, e.g.:
+            {"ar1_z": 2.5, "pca_spe_z": 1.2, "fused_z": 3.1}
     """
-    try:
-        cur = sql_client.cursor()
-        cur.execute(f"""
-            DELETE FROM dbo.{table_name}
-            WHERE LoggedAt < DATEADD(DAY, -{retention_days}, GETUTCDATE())
-        """)
-        deleted = cur.rowcount
-        cur.close()
+    if _meter:
+        # Record fused score
+        if "fused_z" in _metrics and "fused_z" in scores:
+            _metrics["fused_z"].set(float(scores["fused_z"]), {"equipment": equipment})
         
-        if hasattr(sql_client, "conn"):
-            sql_client.conn.commit()
+        # Record individual detector scores
+        if "detector_z" in _metrics:
+            for detector in ["ar1_z", "pca_spe_z", "pca_t2_z", "iforest_z", "gmm_z", "omr_z"]:
+                if detector in scores:
+                    _metrics["detector_z"].set(
+                        float(scores[detector]), 
+                        {"equipment": equipment, "detector": detector.replace("_z", "")}
+                    )
+    
+    if _loki_pusher:
+        fused = scores.get("fused_z", 0)
+        _loki_pusher.log("info", f"Detector scores: fused_z={fused:.2f}", 
+                        equipment=equipment, component="detector", **{k: round(v, 3) for k, v in scores.items()})
+
+
+def record_regime(equipment: str, regime_id: int, regime_label: str = "") -> None:
+    """Record current operating regime."""
+    if _meter and "regime" in _metrics:
+        _metrics["regime"].set(regime_id, {"equipment": equipment, "label": regime_label})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Regime: {regime_id} ({regime_label})", 
+                        equipment=equipment, component="regime", regime_id=regime_id, regime_label=regime_label)
+
+
+def record_data_quality(equipment: str, quality_score: float, missing_pct: float = 0.0, 
+                        outlier_pct: float = 0.0, sensors_dropped: int = 0) -> None:
+    """Record data quality metrics."""
+    if _meter and "data_quality" in _metrics:
+        _metrics["data_quality"].set(quality_score, {"equipment": equipment})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Data quality: {quality_score:.1f}%", 
+                        equipment=equipment, component="data",
+                        quality_score=quality_score, missing_pct=missing_pct, 
+                        outlier_pct=outlier_pct, sensors_dropped=sensors_dropped)
+
+
+def record_model_refit(equipment: str, reason: str = "", detector: str = "") -> None:
+    """Record model refit/retrain event."""
+    if _meter and "model_refits" in _metrics:
+        _metrics["model_refits"].add(1, {"equipment": equipment, "reason": reason, "detector": detector})
+    if _loki_pusher:
+        _loki_pusher.log("info", f"Model refit: {detector} ({reason})", 
+                        equipment=equipment, component="model", reason=reason, detector=detector)
+
+
+def log_timer(section: str, duration_s: float, pct: float = 0.0, 
+              parent: str = "", total_s: float = 0.0) -> None:
+    """Log timer section with structured fields for Loki.
+    
+    Args:
+        section: Timer section name (e.g., 'models.persistence.load')
+        duration_s: Duration in seconds
+        pct: Percentage of parent time (optional)
+        parent: Parent section name (optional)
+        total_s: Total run time for percentage calculation (optional)
+    """
+    if _loki_pusher:
+        # Format message with percentage if available
+        if pct > 0:
+            msg = f"{section}: {duration_s:.3f}s ({pct:.1f}%)"
+        else:
+            msg = f"{section}: {duration_s:.3f}s"
         
-        log = get_logger()
-        log.info(
-            "log_cleanup_completed",
-            category="MAINT",
-            table=table_name,
-            retention_days=retention_days,
-            rows_deleted=deleted,
+        _loki_pusher.log(
+            "info", 
+            msg,
+            component="timer",  # Use component for Loki label filtering
+            log_type="timer",
+            section=section,
+            parent=parent if parent else "root"
         )
-        
-        return deleted
-    except Exception as e:
-        log = get_logger()
-        log.warning(
-            "log_cleanup_failed",
-            category="MAINT",
-            table=table_name,
-            error=str(e),
-        )
-        return 0
+
+
+def get_tracer():
+    """Get the OpenTelemetry tracer."""
+    return _tracer
+
+
+def get_meter():
+    """Get the OpenTelemetry meter."""
+    return _meter
+
+
+# OTEL availability flag
+OTEL_AVAILABLE = OTEL_AVAILABLE if "OTEL_AVAILABLE" in dir() else False
 
 
 # =============================================================================
-# EXPORTS
+# LOKI LOG PUSHER (Native Loki API)
+# =============================================================================
+
+import json
+import urllib.request
+import urllib.error
+
+class _LokiPusher:
+    """Push logs to Loki using native push API (not OTLP).
+    
+    Loki uses LABELS for efficient filtering and the log LINE for the message.
+    Labels should contain: level, component (from [BRACKETS]), equip_id, etc.
+    Loki uses LABELS for efficient filtering and the log LINE for the message.
+    Labels are passed as parameters from Console methods - no regex extraction needed.
+    
+    Example output in Grafana:
+        {app="acm", level="info", component="fuse", equip_id="1"} Computing final fusion...
+    
+    Label structure:
+        - app: "acm" (static)
+        - service: service name (static)
+        - equipment: equipment name (static)
+        - level: info/warning/error/debug (per-log)
+        - component: fuse/data/model/sql etc. (per-log, from caller)
+        - equip_id: equipment ID as string (per-log)
+        - run_id: run identifier (per-log, if set)
+        - tag: optional extra tag like "success" (per-log)
+    """
+    
+    def __init__(self, endpoint: str, labels: Dict[str, str], batch_size: int = 20):
+        self._endpoint = endpoint
+        self._base_labels = labels  # Static labels: app, service, equipment
+        self._batch_size = batch_size
+        self._queue: queue.Queue = queue.Queue()
+        self._stop = threading.Event()
+        self._connected = False
+        
+        # Test connection
+        try:
+            req = urllib.request.Request(
+                endpoint.replace("/loki/api/v1/push", "/ready"),
+                method="GET"
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                self._connected = resp.status == 200
+        except Exception:
+            self._connected = False
+        
+        if self._connected:
+            # Background flush thread
+            self._thread = threading.Thread(target=self._flush_loop, daemon=True)
+            self._thread.start()
+    
+    def log(self, level: str, message: str, component: Optional[str] = None, **context) -> None:
+        """Queue a structured log record for Loki.
+        
+        Args:
+            level: Log level (info, warning, error, debug)
+            message: Clean log message (no [COMPONENT] prefix needed)
+            component: Component name (e.g., "DATA", "MODEL", "FUSE")
+            **context: Additional labels (e.g., tag="success")
+        
+        The message is sent as-is. Component becomes a Loki label.
+        No regex extraction - component is passed explicitly from Console methods.
+        """
+        if not self._connected:
+            return
+        
+        # Loki expects nanosecond timestamps
+        ts_ns = str(int(time.time() * 1_000_000_000))
+        
+        # Build dynamic labels (merged with base labels)
+        # Note: Loki labels must be strings
+        labels = {
+            **self._base_labels,
+            "level": level,
+            "component": (component or "general").lower(),
+            "equip_id": str(_config.equip_id) if _config.equip_id else "0",
+        }
+        
+        # Add optional context as labels (must be strings)
+        # Handle known label fields from context
+        if context.get("tag"):
+            labels["tag"] = str(context.pop("tag"))
+        if context.get("log_type"):
+            labels["log_type"] = str(context.pop("log_type"))
+        if context.get("section"):
+            labels["section"] = str(context.pop("section"))
+        if context.get("parent"):
+            labels["parent"] = str(context.pop("parent"))
+        if _config.run_id:
+            labels["run_id"] = _config.run_id
+        
+        # Queue the entry: (timestamp, labels_dict, message)
+        self._queue.put((ts_ns, labels, message))
+    
+    def _flush_loop(self) -> None:
+        """Background thread that flushes logs to Loki."""
+        while not self._stop.is_set():
+            self._flush_batch()
+            time.sleep(2.0)
+        self._flush_batch()  # Final flush
+    
+    def _flush_batch(self) -> None:
+        """Flush queued logs to Loki.
+        
+        Since each log can have different labels (level, component), we need to
+        group them by label set. Loki requires all entries in a stream to have
+        the same labels.
+        
+        New payload format (proper Loki structure):
+        {
+            "streams": [
+                {"stream": {"app":"acm", "level":"info", "component":"fuse"}, "values": [[ts, "msg1"], [ts, "msg2"]]},
+                {"stream": {"app":"acm", "level":"error", "component":"sql"}, "values": [[ts, "error msg"]]}
+            ]
+        }
+        """
+        batch = []
+        while len(batch) < self._batch_size:
+            try:
+                batch.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        
+        if not batch:
+            return
+        
+        # Group by label set (convert dict to frozenset for hashing)
+        # Each entry is (ts_ns, labels_dict, message)
+        streams_map = {}  # type: ignore
+        for ts_ns, labels, message in batch:
+            label_key = frozenset(labels.items())
+            if label_key not in streams_map:
+                streams_map[label_key] = {"labels": labels, "values": []}
+            streams_map[label_key]["values"].append([ts_ns, message])
+        
+        # Build Loki push payload with multiple streams
+        streams_list = []
+        for stream_data in streams_map.values():
+            streams_list.append({
+                "stream": stream_data["labels"],
+                "values": stream_data["values"]
+            })
+        payload = {"streams": streams_list}
+        
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self._endpoint,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                pass  # 204 No Content on success
+        except urllib.error.HTTPError as e:
+            # Log HTTP errors once (don't spam)
+            if not hasattr(self, '_http_error_logged'):
+                print(f"[LOKI] Push failed: {e.code} {e.reason}")
+                self._http_error_logged = True
+        except Exception:
+            pass  # Don't crash on other failures
+    
+    def _flush_all(self) -> None:
+        """Drain the queue completely."""
+        while True:
+            try:
+                self._flush_batch()
+                if self._queue.empty():
+                    break
+            except Exception:
+                break
+    
+    def close(self) -> None:
+        """Stop background thread and flush remaining logs."""
+        self._stop.set()
+        if hasattr(self, "_thread") and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        # Final synchronous flush of any remaining logs
+        self._flush_all()
+
+
+# =============================================================================
+# SQL LOG SINK
+# =============================================================================
+
+class _SqlLogSink:
+    """Batched SQL log sink for ACM_RunLogs table."""
+    
+    def __init__(self, sql_client, run_id: str, equip_id: int, batch_size: int = 50):
+        self._sql_client = sql_client
+        self._run_id = run_id
+        self._equip_id = equip_id
+        self._batch_size = batch_size
+        self._queue: queue.Queue = queue.Queue()
+        self._stop = threading.Event()
+        self._written = 0
+        
+        # Background flush thread
+        self._thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._thread.start()
+    
+    def log(self, level: str, message: str, **context) -> None:
+        """Queue a log record."""
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "level": level,
+            "message": message[:4000],
+            "context": context,
+        }
+        self._queue.put(record)
+    
+    def _flush_loop(self) -> None:
+        """Background thread that flushes logs to SQL."""
+        while not self._stop.is_set():
+            self._flush_batch()
+            time.sleep(2.0)
+        self._flush_batch()  # Final flush
+    
+    def _flush_batch(self) -> None:
+        """Flush queued logs to SQL."""
+        batch = []
+        while len(batch) < self._batch_size:
+            try:
+                batch.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        
+        if not batch:
+            return
+        
+        try:
+            with self._sql_client.cursor() as cur:
+                for record in batch:
+                    cur.execute(
+                        """INSERT INTO ACM_RunLogs 
+                           (RunID, EquipID, LoggedAt, Level, Message, Context)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            self._run_id,
+                            self._equip_id,
+                            record["timestamp"],
+                            record["level"],
+                            record["message"],
+                            str(record.get("context", {})),
+                        )
+                    )
+            self._written += len(batch)
+        except Exception:
+            pass  # Don't crash on log failures
+    
+    def close(self) -> None:
+        """Stop background thread and flush remaining logs."""
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+
+
+# =============================================================================
+# MODULE EXPORTS
 # =============================================================================
 
 __all__ = [
-    # Initialization
-    "init_observability",
+    "init",
     "shutdown",
-    "ObservabilityConfig",
-    
-    # Context
     "set_context",
-    "get_run_id",
-    "get_equip_id",
-    
-    # Instrumentation getters
+    "log",
+    "Console",
+    "Progress",
+    "Heartbeat",  # Alias for Progress
+    "Span",
+    "traced",
+    "record_batch",
+    "record_batch_processed",
+    "record_run",
+    "record_health",
+    "record_health_score",
+    "record_rul",
+    "record_active_defects",
+    "record_episode",
+    "record_error",
+    "record_coldstart",
+    "record_sql_op",
+    "record_detector_scores",
+    "record_regime",
+    "record_data_quality",
+    "record_model_refit",
+    "log_timer",
     "get_tracer",
     "get_meter",
-    "get_logger",
-    
-    # Decorators
-    "traced",
-    "timed",
-    
-    # Profiling
-    "profile_section",
-    
-    # Metrics helpers
-    "record_batch_processed",
-    "record_detector_duration",
-    "record_health_score",
-    
-    # Category logger (backwards compat)
-    "ACMLogger",
-    "acm_log",
-    
-    # Cleanup
-    "cleanup_old_logs",
-    
-    # Log levels
-    "LogLevel",
+    "OTEL_AVAILABLE",
 ]

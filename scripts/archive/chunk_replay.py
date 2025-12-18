@@ -1,4 +1,4 @@
-"""Utility to replay chunked data through ACM sequentially or in parallel.
+﻿"""Utility to replay chunked data through ACM sequentially or in parallel.
 
 Usage examples:
     python chunk_replay.py --equip FD_FAN GAS_TURBINE
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utils.logger import Console
+from core.observability import Console
 
 
 _LOG_PREFIX_HANDLERS = (
@@ -64,7 +64,7 @@ project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from utils.logger import Console
+from core.observability import Console
 
 
 def _discover_assets(chunk_root: Path, requested: Iterable[str] | None) -> List[str]:
@@ -149,7 +149,7 @@ def _build_command(equip: str, chunk_path: Path, *, bootstrap: bool,
 def _run_chunk_command(cmd: List[str], *, dry_run: bool) -> int:
     printable = " ".join(cmd)
     if dry_run:
-        Console.info(f"[DRY] {printable}", mode="dry-run")
+        Console.info(f"{printable}", mode="dry-run", component="DRY")
         return 0
     Console.info(f"[RUN] {printable}", command=printable)
     result = subprocess.run(cmd, check=False)
@@ -270,12 +270,12 @@ def main() -> int:
                 Console.error(f"[ERROR] {equip}: {exc}", equipment=equip, error=str(exc))
 
     if errors:
-        Console.error("[ERROR] One or more chunk replays failed:")
+        Console.error("One or more chunk replays failed:", component="ERROR")
         for line in errors:
             Console.error(f"  - {line}")
         return 1
 
-    Console.ok("[OK] Chunk replay complete")
+    Console.ok("Chunk replay complete", component="OK")
     return 0
 
 

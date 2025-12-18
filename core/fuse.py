@@ -1,4 +1,4 @@
-# core/fuse.py
+﻿# core/fuse.py
 """
 Score fusion, calibration (global or per-regime), and episode detection.
 """
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 from utils.detector_labels import format_culprit_label
 
 import numpy as np
@@ -69,7 +69,7 @@ def tune_detector_weights(
     valid_methods = {"episode_separability", "correlation"}
     method_fallback_reason: Optional[str] = None
     if requested_method not in valid_methods:
-        Console.warn(f"[TUNE] Unknown tuning method '{requested_method_raw}', defaulting to episode_separability")
+        Console.warn(f"Unknown tuning method '{requested_method_raw}', defaulting to episode_separability", component="TUNE")
         tuning_method = "episode_separability"
         method_fallback_reason = "unknown_method"
     else:
@@ -105,7 +105,7 @@ def tune_detector_weights(
     labels: Optional[np.ndarray] = None
     if episodes_df is not None and not episodes_df.empty:
         if fused_index is None or len(fused_index) != n_total:
-            Console.warn("[TUNE] Episodes provided but fused_index missing or misaligned; skipping PR-AUC labeling")
+            Console.warn("Episodes provided but fused_index missing or misaligned; skipping PR-AUC labeling", component="TUNE")
         else:
             try:
                 fused_dt_index = pd.DatetimeIndex(fused_index)
@@ -173,7 +173,7 @@ def tune_detector_weights(
                 det_diag["n_samples"] = n_valid
 
                 if n_valid < min_samples_required:
-                    Console.warn(f"[TUNE] {detector_name}: under-sampled ({n_valid}/{min_samples_required}) - using prior")
+                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required}) - using prior", component="TUNE")
                     prior = float(detector_priors.get(detector_name, 1.0 / max(len(streams), 1)))
                     fallback_score = prior
                     quality_scores[detector_name] = fallback_score
@@ -191,7 +191,7 @@ def tune_detector_weights(
 
                 # Degenerate signal guards
                 if np.allclose(det_clean, 0.0, atol=1e-6):
-                    Console.warn(f"[TUNE] {detector_name}: all zeros - limited separability")
+                    Console.warn(f"{detector_name}: all zeros - limited separability", component="TUNE")
                     prior = float(detector_priors.get(detector_name, 1.0))
                     fallback_score = prior * 0.01
                     quality_scores[detector_name] = fallback_score
@@ -207,7 +207,7 @@ def tune_detector_weights(
 
                 finite_signal = det_clean[np.abs(det_clean) > 1e-6]
                 if finite_signal.size > 0 and np.unique(np.sign(finite_signal)).size == 1:
-                    Console.warn(f"[TUNE] {detector_name}: all same sign - limited separability")
+                    Console.warn(f"{detector_name}: all same sign - limited separability", component="TUNE")
                     prior = float(detector_priors.get(detector_name, 1.0))
                     fallback_score = prior * 0.1
                     quality_scores[detector_name] = fallback_score
@@ -283,7 +283,7 @@ def tune_detector_weights(
                 diagnostics["detector_metrics"][detector_name] = det_diag
 
             except Exception as e:
-                Console.warn(f"[TUNE] {detector_name}: metric calculation failed - {e}")
+                Console.warn(f"{detector_name}: metric calculation failed - {e}", component="TUNE")
                 prior = float(detector_priors.get(detector_name, 0.1))
                 fallback_score = prior
                 quality_scores[detector_name] = fallback_score
@@ -313,7 +313,7 @@ def tune_detector_weights(
     else:
         diagnostics["primary_metric"] = "abs_correlation"
         # Fallback: correlation-based tuning (LEGACY - circular but retained for compatibility)
-        Console.warn("[TUNE] Using legacy correlation-based tuning (circular dependency)")
+        Console.warn("Using legacy correlation-based tuning (circular dependency)", component="TUNE")
         correlations = {}
         
         for detector_name, detector_signal in streams.items():
@@ -322,7 +322,7 @@ def tune_detector_weights(
                 n_valid = int(np.sum(mask))
                 
                 if n_valid < min_samples_required:
-                    Console.warn(f"[TUNE] {detector_name}: under-sampled ({n_valid}/{min_samples_required})")
+                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required})", component="TUNE")
                     correlations[detector_name] = 0.0
                     diagnostics["detector_metrics"][detector_name] = {
                         "n_samples": n_valid,
@@ -350,7 +350,7 @@ def tune_detector_weights(
                     "metric_value": float(abs(corr_f))
                 }
             except Exception as e:
-                Console.warn(f"[TUNE] {detector_name}: correlation failed - {e}")
+                Console.warn(f"{detector_name}: correlation failed - {e}", component="TUNE")
                 correlations[detector_name] = 0.0
                 diagnostics["detector_metrics"][detector_name] = {
                     "status": "error",
@@ -399,7 +399,7 @@ def tune_detector_weights(
     diagnostics["tuned_weights"] = tuned_weights  # Keep for backward compatibility
     
     # Log tuning results
-    Console.info(f"[TUNE] Detector weight auto-tuning ({tuning_method}):")
+    Console.info(f"Detector weight auto-tuning ({tuning_method}):", component="TUNE")
     for detector_name in sorted(tuned_weights.keys()):
         old = current_weights.get(detector_name, 0.0)
         new = tuned_weights[detector_name]
@@ -435,12 +435,12 @@ class ScoreCalibrator:
     def fit(self, x: np.ndarray, regime_labels: Optional[np.ndarray] = None) -> "ScoreCalibrator":
         x_finite = x[np.isfinite(x)]
         if x_finite.size == 0:
-            Console.warn("[CAL] No finite values in calibration data - using defaults")
+            Console.warn("No finite values in calibration data - using defaults", component="CAL")
             return self
 
         # FUSE-FIX-03: Validate input data has reasonable variation
         if x_finite.size < 10:
-            Console.warn(f"[CAL] Insufficient samples ({x_finite.size}) for reliable calibration - using defaults")
+            Console.warn(f"Insufficient samples ({x_finite.size}) for reliable calibration - using defaults", component="CAL")
             return self
 
         self.med = float(np.median(x_finite))
@@ -471,7 +471,7 @@ class ScoreCalibrator:
                 fallback_q = min(0.99, max(self.q, 0.95))
                 q_val = float(np.quantile(x_finite, fallback_q))
             self.q_thresh = float(q_val)
-            Console.info(f"[CAL] Self-tuning enabled. Target FP rate {target_fp_rate:.3%} -> q={auto_q:.4f}, threshold={self.q_thresh:.4f}")
+            Console.info(f"Self-tuning enabled. Target FP rate {target_fp_rate:.3%} -> q={auto_q:.4f}, threshold={self.q_thresh:.4f}", component="CAL")
         else:
             # Standard quantile-based threshold
             self.q_thresh = float(np.quantile(x_finite, self.q))
@@ -501,7 +501,7 @@ class ScoreCalibrator:
         # Per-regime thresholding
         if regime_labels is not None and regime_labels.size == x.size:
             unique_regimes = np.unique(regime_labels)
-            Console.info(f"[CAL] Fitting per-regime thresholds for {len(unique_regimes)} regimes.")
+            Console.info(f"Fitting per-regime thresholds for {len(unique_regimes)} regimes.", component="CAL")
             for r in unique_regimes:
                 mask = (regime_labels == r)
                 x_regime = x[mask]
@@ -606,7 +606,7 @@ class Fuser:
         # Track which detectors from config are missing
         missing = [k for k in self.weights.keys() if k not in keys]
         if missing:
-            Console.info(f"[FUSE] {len(missing)} detector(s) absent at fusion time: {missing}")
+            Console.info(f"{len(missing)} detector(s) absent at fusion time: {missing}", component="FUSE")
         
         lengths = []
         zs: Dict[str, np.ndarray] = {}
@@ -887,9 +887,9 @@ def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict
                 Console.info(f"  k_sigma: {base_k_sigma:.3f} -> {k_sigma:.3f} (std={std:.3f})")
                 Console.info(f"  h_sigma: {base_h_sigma:.3f} -> {h_sigma:.3f} (p50={p50:.3f}, p95={p95:.3f})")
             else:
-                Console.warn("[FUSE] Auto-tune skipped: insufficient data for statistics")
+                Console.warn("Auto-tune skipped: insufficient data for statistics", component="FUSE")
         except Exception as tune_e:
-            Console.warn(f"[FUSE] Auto-tune failed: {tune_e}")
+            Console.warn(f"Auto-tune failed: {tune_e}", component="FUSE")
     
     params = EpisodeParams(
         k_sigma=k_sigma,

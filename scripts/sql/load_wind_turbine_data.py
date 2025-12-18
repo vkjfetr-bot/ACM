@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Script: load_wind_turbine_data.py
 Purpose: Load Wind Turbine SCADA CSV into ACM database
@@ -24,7 +24,7 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 def create_equipment_entry(sql_client: SQLClient, equip_code: str) -> int:
@@ -118,7 +118,7 @@ def load_csv_to_table(
     Returns:
         Number of rows loaded
     """
-    Console.info(f"[LOAD] Reading {csv_path.name}...")
+    Console.info(f"Reading {csv_path.name}...", component="LOAD")
     
     # Read CSV
     df = pd.read_csv(csv_path)
@@ -211,7 +211,7 @@ def verify_global_config(sql_client: SQLClient) -> None:
     """Verify that global parameters (EquipID=0) work for all equipment."""
     
     Console.info("")
-    Console.info("[VERIFY] Checking global configuration coverage...")
+    Console.info("Checking global configuration coverage...", component="VERIFY")
     
     cursor = sql_client.cursor()
     try:
@@ -255,13 +255,13 @@ def main():
     
     # Connect to SQL Server
     try:
-        Console.info("[SQL] Connecting to ACM database...")
+        Console.info("Connecting to ACM database...", component="SQL")
         sql_client = SQLClient.from_ini('acm')
         sql_client.connect()
         Console.info("  [OK] Connected successfully")
         Console.info("")
     except Exception as e:
-        Console.error(f"[SQL] Connection failed: {e}")
+        Console.error(f"Connection failed: {e}", component="SQL")
         return 1
     
     equip_code = "WIND_TURBINE"
@@ -270,17 +270,17 @@ def main():
     
     try:
         # Step 1: Create equipment entry
-        Console.info("[EQUIPMENT] Adding to Equipments master table...")
+        Console.info("Adding to Equipments master table...", component="EQUIPMENT")
         equip_id = create_equipment_entry(sql_client, equip_code)
         Console.info("")
         
         # Step 2: Create data table
-        Console.info("[TABLE] Creating WIND_TURBINE_Data table...")
+        Console.info("Creating WIND_TURBINE_Data table...", component="TABLE")
         create_wind_turbine_table(sql_client)
         Console.info("")
         
         # Step 3: Load CSV data
-        Console.info("[DATA] Loading Wind Turbine SCADA data...")
+        Console.info("Loading Wind Turbine SCADA data...", component="DATA")
         rows = load_csv_to_table(sql_client, csv_path, "WIND_TURBINE_Data")
         Console.info("")
         
@@ -299,12 +299,12 @@ def main():
         Console.info("  To run ACM on this equipment:")
         Console.info(f"    python -m core.acm_main --equip {equip_code}")
         Console.info("")
-        Console.info("[OK] Wind Turbine data import completed successfully!")
+        Console.info("Wind Turbine data import completed successfully!", component="OK")
         
         return 0
         
     except Exception as e:
-        Console.error(f"[ERROR] Failed: {e}")
+        Console.error(f"Failed: {e}", component="ERROR")
         import traceback
         traceback.print_exc()
         return 1

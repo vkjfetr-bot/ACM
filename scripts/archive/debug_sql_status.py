@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 from pathlib import Path
 import pandas as pd
@@ -7,7 +7,7 @@ import pandas as pd
 sys.path.append(os.getcwd())
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 def main():
     try:

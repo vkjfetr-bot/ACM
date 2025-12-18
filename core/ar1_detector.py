@@ -1,4 +1,4 @@
-"""
+﻿"""
 AR(1) Baseline Detector
 =======================
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple, Literal, Optional
 import numpy as np
 import pandas as pd
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 # Minimum samples required for AR(1) model coefficient estimation
 MIN_AR1_SAMPLES = 3
@@ -132,13 +132,13 @@ class AR1Detector:
         if near_constant_cols:
             n = len(near_constant_cols)
             sample = near_constant_cols[:3]
-            Console.warn(f"[AR1] {n} near-constant columns (phi=0): {sample}{'...' if n > 3 else ''}")
+            Console.warn(f"{n} near-constant columns (phi=0): {sample}{'...' if n > 3 else ''}", component="AR1")
         if clamped_cols:
             n = len(clamped_cols)
-            Console.warn(f"[AR1] {n} columns with phi clamped to +/-{self._phi_cap}")
+            Console.warn(f"{n} columns with phi clamped to +/-{self._phi_cap}", component="AR1")
         if insufficient_cols:
             n = len(insufficient_cols)
-            Console.warn(f"[AR1] {n} columns with <{MIN_FORECAST_SAMPLES} samples (unstable coefficients)")
+            Console.warn(f"{n} columns with <{MIN_FORECAST_SAMPLES} samples (unstable coefficients)", component="AR1")
         
         self._is_fitted = True
         return self
@@ -168,7 +168,7 @@ class AR1Detector:
         near_constant_count = sum(1 for (phi, _) in self.phimap.values() if abs(phi) < 1e-6)
         total_count = len(self.phimap)
         if total_count > 0 and near_constant_count > total_count * 0.8:
-            Console.warn(f"[AR1] Early exit: {near_constant_count}/{total_count} columns near-constant (>{80}%) - returning zero scores to prevent hang")
+            Console.warn(f"Early exit: {near_constant_count}/{total_count} columns near-constant (>{80}%) - returning zero scores to prevent hang", component="AR1")
             return (np.zeros(n, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(n, dtype=np.float32)
         
         for c in X.columns:
@@ -179,12 +179,12 @@ class AR1Detector:
             nan_fraction = nan_count / len(series) if len(series) > 0 else 0.0
             
             if nan_fraction > 0.5:
-                Console.warn(f"[AR1] Column '{c}': {nan_fraction*100:.1f}% NaN (>{50}%) - skipping column")
+                Console.warn(f"Column '{c}': {nan_fraction*100:.1f}% NaN (>{50}%) - skipping column", component="AR1")
                 continue
             
             # Log high imputation rates for visibility
             if nan_fraction > 0.2:
-                Console.warn(f"[AR1] Column '{c}': {nan_fraction*100:.1f}% NaN - imputing to mu (high imputation rate)")
+                Console.warn(f"Column '{c}': {nan_fraction*100:.1f}% NaN - imputing to mu (high imputation rate)", component="AR1")
             
             # FOR-CODE-03: Renamed ph -> phi for clarity (autoregressive coefficient)
             phi, mu = self.phimap.get(c, (0.0, float(np.nanmean(series))))

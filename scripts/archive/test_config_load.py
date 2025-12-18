@@ -1,4 +1,4 @@
-# scripts/sql/test_config_load.py
+﻿# scripts/sql/test_config_load.py
 """Test loading config from SQL database."""
 
 import sys
@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from utils.sql_config import get_equipment_config
 import json
-from utils.logger import Console
+from core.observability import Console
 
 
 _LOG_PREFIX_HANDLERS = (

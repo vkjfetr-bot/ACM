@@ -1,4 +1,4 @@
-# core/omr.py
+﻿# core/omr.py
 """
 Overall Model Residual (OMR) - Multivariate health indicator.
 
@@ -305,12 +305,12 @@ class OMRDetector:
         Returns:
             self (fitted)
         """
-        from utils.logger import Console
+        from core.observability import Console, Heartbeat
         
         # Validate input
         is_valid, error_msg = self._validate_input(X)
         if not is_valid:
-            Console.info(f"[OMR] Skipping fit: {error_msg}")
+            Console.info(f"Skipping fit: {error_msg}", component="OMR")
             return self
         
         # Filter to healthy regime if labels provided
@@ -325,7 +325,7 @@ class OMRDetector:
             
             if n_healthy >= self.min_samples:
                 X = X.iloc[healthy_mask]
-                Console.info(f"[OMR] Filtered to healthy regime {healthy_regime}: {n_healthy} samples")
+                Console.info(f"Filtered to healthy regime {healthy_regime}: {n_healthy} samples", component="OMR")
         
         # Prepare data
         X_clean, feature_names = self._prepare_data(X)
@@ -335,7 +335,7 @@ class OMRDetector:
         var = np.var(X_clean, axis=0)
         var_mask = var > self.variance_floor
         if not var_mask.any():
-            Console.warn("[OMR] All features constant; skipping fit")
+            Console.warn("All features constant; skipping fit", component="OMR")
             return self
         X_clean = X_clean[:, var_mask]
         feature_names = [name for name, keep in zip(feature_names, var_mask) if keep]
@@ -344,15 +344,15 @@ class OMRDetector:
         # Check minimum samples
         min_required = max(20, min(self.min_samples // 2, n_features))
         if n_samples < min_required:
-            Console.warn(f"[OMR] Insufficient samples ({n_samples}/{min_required}), skipping fit")
+            Console.warn(f"Insufficient samples ({n_samples}/{min_required}), skipping fit", component="OMR")
             return self
         
         if n_samples < self.min_samples:
-            Console.info(f"[OMR] Proceeding with reduced sample count ({n_samples} < {self.min_samples})")
+            Console.info(f"Proceeding with reduced sample count ({n_samples} < {self.min_samples})", component="OMR")
         
         # Auto-select model type
         selected_model = self._select_model_type(n_samples, n_features)
-        Console.info(f"[OMR] Selected model type: {selected_model.upper()}")
+        Console.info(f"Selected model type: {selected_model.upper()}", component="OMR")
         
         # Fit scaler
         scaler = StandardScaler()
@@ -410,7 +410,7 @@ class OMRDetector:
             )
             
         except Exception as e:
-            Console.error(f"[OMR] Model fitting failed: {e}")
+            Console.error(f"Model fitting failed: {e}", component="OMR")
             import traceback
             Console.error(traceback.format_exc())
             return self
@@ -509,8 +509,8 @@ class OMRDetector:
             X_recon = self._reconstruct_data(X_scaled)
                 
         except Exception as e:
-            from utils.logger import Console
-            Console.error(f"[OMR] Reconstruction failed: {e}")
+            from core.observability import Console, Heartbeat
+            Console.error(f"Reconstruction failed: {e}", component="OMR")
             zeros = np.zeros(len(X), dtype=np.float32)
             if return_contributions:
                 empty_contrib = pd.DataFrame(

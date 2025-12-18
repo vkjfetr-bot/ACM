@@ -1,4 +1,4 @@
-"""
+﻿"""
 Model Versioning & Persistence Module
 =====================================
 Manages trained model storage, versioning, and loading with cold-start resolution.
@@ -52,7 +52,7 @@ from io import BytesIO
 from dataclasses import dataclass, asdict
 import pandas as pd
 import numpy as np
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 # ============================================================================
@@ -114,7 +114,7 @@ class ForecastState:
                 df["Timestamp"] = pd.to_datetime(df["Timestamp"])
             return df
         except Exception as e:
-            Console.warn(f"[FORECAST_STATE] Failed to deserialize forecast horizon: {e}")
+            Console.warn(f"Failed to deserialize forecast horizon: {e}", component="FORECAST_STATE")
             return pd.DataFrame()
     
     @staticmethod
@@ -130,7 +130,7 @@ class ForecastState:
                 df_copy["Timestamp"] = df_copy["Timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S")
             return json.dumps(df_copy.to_dict(orient="records"))
         except Exception as e:
-            Console.warn(f"[FORECAST_STATE] Failed to serialize forecast horizon: {e}")
+            Console.warn(f"Failed to serialize forecast horizon: {e}", component="FORECAST_STATE")
             return "[]"
 
 
@@ -144,7 +144,7 @@ def save_forecast_state(state: ForecastState, equip: str, sql_client) -> None:
         sql_client: SQL client for persistence
     """
     if sql_client is None:
-        Console.error("[FORECAST_STATE] SQL client required for SQL-only mode")
+        Console.error("SQL client required for SQL-only mode", component="FORECAST_STATE")
         return
     
     try:
@@ -191,9 +191,9 @@ def save_forecast_state(state: ForecastState, equip: str, sql_client) -> None:
         if not sql_client.conn.autocommit:
             sql_client.conn.commit()
         
-        Console.info(f"[FORECAST_STATE] Saved state v{state.state_version} to ACM_ForecastState (EquipID={state.equip_id})")
+        Console.info(f"Saved state v{state.state_version} to ACM_ForecastState (EquipID={state.equip_id})", component="FORECAST_STATE")
     except Exception as e:
-        Console.error(f"[FORECAST_STATE] Failed to save state to SQL: {e}")
+        Console.error(f"Failed to save state to SQL: {e}", component="FORECAST_STATE")
 
 
 def load_forecast_state(equip: str, equip_id: int, sql_client) -> Optional[ForecastState]:
@@ -209,11 +209,11 @@ def load_forecast_state(equip: str, equip_id: int, sql_client) -> Optional[Forec
         ForecastState object or None if not found
     """
     if sql_client is None:
-        Console.error("[FORECAST_STATE] SQL client required for SQL-only mode")
+        Console.error("SQL client required for SQL-only mode", component="FORECAST_STATE")
         return None
     
     if equip_id is None:
-        Console.error("[FORECAST_STATE] equip_id required for SQL-only mode")
+        Console.error("equip_id required for SQL-only mode", component="FORECAST_STATE")
         return None
     
     try:
@@ -245,13 +245,13 @@ def load_forecast_state(equip: str, equip_id: int, sql_client) -> Optional[Forec
                 training_window_hours=int(row[9]) if row[9] is not None else 72,
                 forecast_quality=json.loads(row[10]) if row[10] else {}
             )
-            Console.info(f"[FORECAST_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
+            Console.info(f"Loaded state v{state.state_version} from SQL (EquipID={equip_id})", component="FORECAST_STATE")
             return state
         else:
-            Console.info(f"[FORECAST_STATE] No prior forecast state found for EquipID={equip_id}")
+            Console.info(f"No prior forecast state found for EquipID={equip_id}", component="FORECAST_STATE")
             return None
     except Exception as e:
-        Console.error(f"[FORECAST_STATE] Failed to load state from SQL: {e}")
+        Console.error(f"Failed to load state from SQL: {e}", component="FORECAST_STATE")
         return None
 
 
@@ -311,7 +311,7 @@ class RegimeState:
             centers = json.loads(self.cluster_centers_json)
             return np.array(centers)
         except Exception as e:
-            Console.warn(f"[REGIME_STATE] Failed to deserialize cluster centers: {e}")
+            Console.warn(f"Failed to deserialize cluster centers: {e}", component="REGIME_STATE")
             return np.array([])
     
     def get_scaler_params(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -321,7 +321,7 @@ class RegimeState:
             scale = np.array(json.loads(self.scaler_scale_json))
             return mean, scale
         except Exception as e:
-            Console.warn(f"[REGIME_STATE] Failed to deserialize scaler params: {e}")
+            Console.warn(f"Failed to deserialize scaler params: {e}", component="REGIME_STATE")
             return np.array([]), np.array([])
     
     def get_pca_params(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -333,7 +333,7 @@ class RegimeState:
             explained_var = np.array(json.loads(self.pca_explained_variance_json))
             return components, explained_var
         except Exception as e:
-            Console.warn(f"[REGIME_STATE] Failed to deserialize PCA params: {e}")
+            Console.warn(f"Failed to deserialize PCA params: {e}", component="REGIME_STATE")
             return None, None
     
     @staticmethod
@@ -342,7 +342,7 @@ class RegimeState:
         try:
             return json.dumps(arr.tolist())
         except Exception as e:
-            Console.warn(f"[REGIME_STATE] Failed to serialize array: {e}")
+            Console.warn(f"Failed to serialize array: {e}", component="REGIME_STATE")
             return "[]"
 
 
@@ -357,7 +357,7 @@ def save_regime_state(state: RegimeState, artifact_root: Path, equip: str, sql_c
         sql_client: SQL client (REQUIRED)
     """
     if sql_client is None:
-        Console.error("[REGIME_STATE] SQL client required for SQL-only mode")
+        Console.error("SQL client required for SQL-only mode", component="REGIME_STATE")
         return
     
     try:
@@ -406,9 +406,9 @@ def save_regime_state(state: RegimeState, artifact_root: Path, equip: str, sql_c
         if not sql_client.conn.autocommit:
             sql_client.conn.commit()
         
-        Console.info(f"[REGIME_STATE] Saved state v{state.state_version} to ACM_RegimeState (EquipID={state.equip_id})")
+        Console.info(f"Saved state v{state.state_version} to ACM_RegimeState (EquipID={state.equip_id})", component="REGIME_STATE")
     except Exception as e:
-        Console.warn(f"[REGIME_STATE] Failed to save state to SQL: {e}")
+        Console.warn(f"Failed to save state to SQL: {e}", component="REGIME_STATE")
 
 
 def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] = None, sql_client=None) -> Optional[RegimeState]:
@@ -425,7 +425,7 @@ def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] =
         RegimeState object or None if not found
     """
     if sql_client is None or equip_id is None:
-        Console.error("[REGIME_STATE] SQL client and equip_id required for SQL-only mode")
+        Console.error("SQL client and equip_id required for SQL-only mode", component="REGIME_STATE")
         return None
     
     try:
@@ -461,13 +461,13 @@ def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] =
                 config_hash=row[12] or "",
                 regime_basis_hash=row[13] or ""
             )
-            Console.info(f"[REGIME_STATE] Loaded state v{state.state_version} from SQL (EquipID={equip_id})")
+            Console.info(f"Loaded state v{state.state_version} from SQL (EquipID={equip_id})", component="REGIME_STATE")
             return state
         else:
-            Console.info(f"[REGIME_STATE] No existing state found in SQL for EquipID={equip_id}")
+            Console.info(f"No existing state found in SQL for EquipID={equip_id}", component="REGIME_STATE")
             return None
     except Exception as e:
-        Console.warn(f"[REGIME_STATE] Failed to load state from SQL: {e}")
+        Console.warn(f"Failed to load state from SQL: {e}", component="REGIME_STATE")
         return None
 
 
@@ -493,12 +493,12 @@ class ModelVersionManager:
         self.equip_id = equip_id
         
         if not sql_client or equip_id is None:
-            Console.error("[MODEL] SQL client and equip_id required for SQL-only mode")
+            Console.error("SQL client and equip_id required for SQL-only mode", component="MODEL")
     
     def get_latest_version(self) -> Optional[int]:
         """Get the latest model version number from SQL ModelRegistry."""
         if not self.sql_client or self.equip_id is None:
-            Console.warn("[MODEL] Cannot get latest version - SQL client/equip_id missing")
+            Console.warn("Cannot get latest version - SQL client/equip_id missing", component="MODEL")
             return None
         
         return self._get_latest_version_from_sql()
@@ -526,14 +526,14 @@ class ModelVersionManager:
             Version number used
         """
         if not self.sql_client or self.equip_id is None:
-            Console.error("[MODEL] Cannot save models - SQL client/equip_id missing")
+            Console.error("Cannot save models - SQL client/equip_id missing", component="MODEL")
             raise ValueError("SQL client and equip_id required for model persistence")
         
         # Determine version
         if version is None:
             version = self.get_next_version()
         
-        Console.info(f"[MODEL] Saving models to SQL ModelRegistry v{version}")
+        Console.info(f"Saving models to SQL ModelRegistry v{version}", component="MODEL")
         
         # Create manifest
         manifest = {
@@ -547,9 +547,9 @@ class ModelVersionManager:
         # Save to SQL
         try:
             self._save_models_to_sql(models, metadata, version)
-            Console.info(f"[MODEL] Saved {len(models)} models to SQL ModelRegistry v{version}")
+            Console.info(f"Saved {len(models)} models to SQL ModelRegistry v{version}", component="MODEL")
         except Exception as e:
-            Console.error(f"[MODEL-SQL] Failed to save models to SQL: {e}")
+            Console.error(f"Failed to save models to SQL: {e}", component="MODEL-SQL")
             raise
         
         return version
@@ -565,10 +565,10 @@ class ModelVersionManager:
         - Handles special model types (ar1_params, omr_model)
         - Note: mhal_params removed v9.1.0 (MHAL deprecated)
         """
-        Console.info(f"[MODEL-SQL] Saving models to SQL ModelRegistry v{version}...")
+        Console.info(f"Saving models to SQL ModelRegistry v{version}...", component="MODEL-SQL")
         
         if not self.sql_client.conn:
-            Console.warn("[MODEL-SQL] SQL connection not available")
+            Console.warn("SQL connection not available", component="MODEL-SQL")
             return
         
         cursor = self.sql_client.conn.cursor()
@@ -584,11 +584,11 @@ class ModelVersionManager:
             cursor.execute(delete_sql, (self.equip_id, version))
             deleted_count = cursor.rowcount
             if deleted_count > 0:
-                Console.info(f"[MODEL-SQL] Replaced {deleted_count} existing models for v{version}")
+                Console.info(f"Replaced {deleted_count} existing models for v{version}", component="MODEL-SQL")
             
             for model_name, model_obj in models.items():
                 if model_obj is None:
-                    Console.debug(f"[MODEL-SQL]   - Skipping None model: {model_name}")
+                    Console.debug(f"- Skipping None model: {model_name}", component="MODEL-SQL")
                     continue
                 
                 try:
@@ -630,25 +630,25 @@ class ModelVersionManager:
                     ))
                     
                     saved_count += 1
-                    Console.info(f"[MODEL-SQL]   - Saved {model_name} ({len(model_bytes):,} bytes)")
+                    Console.info(f"- Saved {model_name} ({len(model_bytes):,} bytes)", component="MODEL-SQL")
                     
                 except Exception as e:
                     error_msg = f"Failed to save {model_name}: {e}"
                     errors.append(error_msg)
-                    Console.warn(f"[MODEL-SQL]   - {error_msg}")
+                    Console.warn(f"- {error_msg}", component="MODEL-SQL")
                     # Don't break - try to save other models, but will rollback all if any fail
             
             # Commit transaction if all successful
             if errors:
-                Console.warn(f"[MODEL-SQL] Rolling back transaction due to {len(errors)} error(s)")
+                Console.warn(f"Rolling back transaction due to {len(errors)} error(s)", component="MODEL-SQL")
                 self.sql_client.conn.rollback()
-                Console.warn(f"[MODEL-SQL] Transaction rolled back - no models saved")
+                Console.warn(f"Transaction rolled back - no models saved", component="MODEL-SQL")
             else:
                 self.sql_client.conn.commit()
-                Console.info(f"[MODEL-SQL] OK Committed {saved_count}/{len(models)} models to SQL ModelRegistry v{version}")
+                Console.info(f"OK Committed {saved_count}/{len(models)} models to SQL ModelRegistry v{version}", component="MODEL-SQL")
                 
         except Exception as e:
-            Console.warn(f"[MODEL-SQL] Critical error during save, rolling back: {e}")
+            Console.warn(f"Critical error during save, rolling back: {e}", component="MODEL-SQL")
             try:
                 self.sql_client.conn.rollback()
             except Exception:
@@ -669,7 +669,7 @@ class ModelVersionManager:
                 return int(row[0])
             return None
         except Exception as e:
-            Console.warn(f"[MODEL] Failed to get latest version from SQL: {e}")
+            Console.warn(f"Failed to get latest version from SQL: {e}", component="MODEL")
             return None
     
     def _load_models_from_sql(self, version: int) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -685,10 +685,10 @@ class ModelVersionManager:
         Returns:
             Tuple of (models_dict, manifest_dict) or None if not found
         """
-        Console.info(f"[MODEL-SQL] Loading models from SQL ModelRegistry v{version}...")
+        Console.info(f"Loading models from SQL ModelRegistry v{version}...", component="MODEL-SQL")
         
         if not self.sql_client or not self.sql_client.conn:
-            Console.warn("[MODEL-SQL] SQL connection not available")
+            Console.warn("SQL connection not available", component="MODEL-SQL")
             return None
         
         try:
@@ -706,7 +706,7 @@ class ModelVersionManager:
             rows = cursor.fetchall()
             
             if not rows:
-                Console.info(f"[MODEL-SQL] No models found for EquipID={self.equip_id} Version={version}")
+                Console.info(f"No models found for EquipID={self.equip_id} Version={version}", component="MODEL-SQL")
                 return None
             
             models = {}
@@ -730,9 +730,9 @@ class ModelVersionManager:
                         buffer = BytesIO(model_bytes)
                         model_obj = joblib.load(buffer)
                         models[model_type] = model_obj
-                        Console.info(f"[MODEL-SQL]   - Loaded {model_type} ({len(model_bytes):,} bytes)")
+                        Console.info(f"- Loaded {model_type} ({len(model_bytes):,} bytes)", component="MODEL-SQL")
                     except Exception as e:
-                        Console.warn(f"[MODEL-SQL]   - Failed to deserialize {model_type}: {e}")
+                        Console.warn(f"- Failed to deserialize {model_type}: {e}", component="MODEL-SQL")
                         continue
                 
                 # Collect metadata
@@ -743,17 +743,17 @@ class ModelVersionManager:
                         key = model_type.replace("_params", "").replace("_model", "")
                         all_params[key] = params
                     except Exception as e:
-                        Console.warn(f"[MODEL-SQL]   - Failed to parse ParamsJSON for {model_type}: {e}")
+                        Console.warn(f"- Failed to parse ParamsJSON for {model_type}: {e}", component="MODEL-SQL")
                 
                 if stats_json:
                     try:
                         stats = json.loads(stats_json)
                         all_stats.update(stats)  # Merge stats from all models
                     except Exception as e:
-                        Console.warn(f"[MODEL-SQL]   - Failed to parse StatsJSON for {model_type}: {e}")
+                        Console.warn(f"- Failed to parse StatsJSON for {model_type}: {e}", component="MODEL-SQL")
             
             if not models:
-                Console.warn(f"[MODEL-SQL] No models successfully deserialized")
+                Console.warn(f"No models successfully deserialized", component="MODEL-SQL")
                 return None
             
             # Reconstruct manifest from SQL metadata
@@ -770,11 +770,11 @@ class ModelVersionManager:
             if entry_datetime:
                 manifest["entry_datetime"] = str(entry_datetime)
             
-            Console.info(f"[MODEL-SQL] ✓ Loaded {len(models)}/{len(rows)} models from SQL ModelRegistry v{version}")
+            Console.info(f"✓ Loaded {len(models)}/{len(rows)} models from SQL ModelRegistry v{version}", component="MODEL-SQL")
             return models, manifest
             
         except Exception as e:
-            Console.warn(f"[MODEL-SQL] Failed to load models from SQL: {e}")
+            Console.warn(f"Failed to load models from SQL: {e}", component="MODEL-SQL")
             import traceback
             traceback.print_exc()
             return None
@@ -798,21 +798,21 @@ class ModelVersionManager:
         if version is None:
             version = self.get_latest_version()
             if version is None:
-                Console.info("[MODEL] No cached models found - will train from scratch")
+                Console.info("No cached models found - will train from scratch", component="MODEL")
                 return None, None
         
         # SQL-ONLY MODE: Load from SQL ModelRegistry only
         if not self.sql_client or self.equip_id is None:
-            Console.warn("[MODEL] Cannot load models - SQL client/equip_id missing")
+            Console.warn("Cannot load models - SQL client/equip_id missing", component="MODEL")
             return None, None
         
         result = self._load_models_from_sql(version)
         if result:
             sql_models, sql_manifest = result
-            Console.info(f"[MODEL] ✓ Loaded from SQL ModelRegistry successfully")
+            Console.info(f"✓ Loaded from SQL ModelRegistry successfully", component="MODEL")
             return sql_models, sql_manifest
         else:
-            Console.warn(f"[MODEL] Failed to load models from SQL ModelRegistry")
+            Console.warn(f"Failed to load models from SQL ModelRegistry", component="MODEL")
             return None, None
     
     def update_models_incremental(
@@ -845,7 +845,7 @@ class ModelVersionManager:
         updated_models = models.copy()
         updated_count = 0
         
-        Console.info(f"[MODEL] Updating models incrementally with {len(new_data)} new samples")
+        Console.info(f"Updating models incrementally with {len(new_data)} new samples", component="MODEL")
         
         # Update scalers if present and new data is available
         if "scalers" in models and models["scalers"] is not None and not new_data.empty:
@@ -865,11 +865,11 @@ class ModelVersionManager:
                                 scaler.partial_fit(scaler_data)
                                 updated_scalers[detector_name] = scaler
                                 updated_count += 1
-                                Console.info(f"[MODEL]   - Updated scaler for {detector_name}")
+                                Console.info(f"- Updated scaler for {detector_name}", component="MODEL")
                         else:
                             updated_scalers[detector_name] = scaler
                     except Exception as e:
-                        Console.warn(f"[MODEL]   - Failed to update scaler for {detector_name}: {e}")
+                        Console.warn(f"- Failed to update scaler for {detector_name}: {e}", component="MODEL")
                         updated_scalers[detector_name] = scaler
                 else:
                     updated_scalers[detector_name] = scaler
@@ -883,7 +883,7 @@ class ModelVersionManager:
         # - No incremental equivalent for IsolationForest or GMM
         
         if updated_count > 0:
-            Console.info(f"[MODEL] Successfully updated {updated_count} model components")
+            Console.info(f"Successfully updated {updated_count} model components", component="MODEL")
             
             # Save updated models to new version
             metadata = {
@@ -900,7 +900,7 @@ class ModelVersionManager:
             
             return updated_models, version
         else:
-            Console.info("[MODEL] No models support incremental updates, returning original models")
+            Console.info("No models support incremental updates, returning original models", component="MODEL")
             return models, self.get_latest_version() or 1
     
     def check_model_validity(
@@ -959,7 +959,7 @@ class ModelVersionManager:
         versions = []
         
         if not self.sql_client or self.equip_id is None:
-            Console.warn("[MODEL] Cannot list versions - SQL client/equip_id missing")
+            Console.warn("Cannot list versions - SQL client/equip_id missing", component="MODEL")
             return versions
         
         try:
@@ -983,9 +983,9 @@ class ModelVersionManager:
                     "source": "sql"
                 })
             
-            Console.info(f"[MODEL] Found {len(versions)} versions in SQL ModelRegistry")
+            Console.info(f"Found {len(versions)} versions in SQL ModelRegistry", component="MODEL")
         except Exception as e:
-            Console.warn(f"[MODEL] Failed to list versions from SQL: {e}")
+            Console.warn(f"Failed to list versions from SQL: {e}", component="MODEL")
         
         return versions
 
@@ -1058,7 +1058,7 @@ def create_model_metadata(
                 "max": round(float(np.nanmax(values)), 4)
             }
         except Exception as e:
-            Console.warn(f"[META] Failed to compute data stats: {e}")
+            Console.warn(f"Failed to compute data stats: {e}", component="META")
             metadata["data_stats"] = {"error": str(e)}
     
     # AR1 metadata
@@ -1112,7 +1112,7 @@ def create_model_metadata(
                 gmm_meta["aic"] = round(float(gmm.aic(train_data.values)), 2)
                 gmm_meta["lower_bound"] = round(float(gmm.lower_bound_), 2)
             except Exception as e:
-                Console.warn(f"[META] Failed to compute GMM quality metrics: {e}")
+                Console.warn(f"Failed to compute GMM quality metrics: {e}", component="META")
         
         metadata["models"]["gmm"] = gmm_meta
     

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Comprehensive Chart Analysis and Optimization Plan
 Run: 20251105_010417 (15 charts generated, 3.316s, 10.6% of runtime)
@@ -22,7 +22,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 >>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 
-from utils.logger import Console
+from core.observability import Console
 
 chart_dir = Path("artifacts/FD_FAN/run_20251105_010417/charts")
 

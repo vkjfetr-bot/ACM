@@ -1,4 +1,4 @@
-"""
+﻿"""
 ACM Config History Writer
 
 Writes configuration change audit log to ACM_ConfigHistory table for:
@@ -13,7 +13,7 @@ Called whenever ConfigDict.update_param() is invoked.
 from typing import Any, Optional
 from datetime import datetime, timezone
 import json
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 def _ensure_table(sql_client) -> None:
@@ -46,7 +46,7 @@ def _ensure_table(sql_client) -> None:
             pass
     except Exception as e:
         try:
-            Console.warn(f"[CONFIG_HIST] Failed to ensure ACM_ConfigHistory table: {e}")
+            Console.warn(f"Failed to ensure ACM_ConfigHistory table: {e}", component="CONFIG_HIST")
         except Exception:
             pass
 
@@ -79,7 +79,7 @@ def write_config_change(
     """
     
     if sql_client is None:
-        Console.warn("[CONFIG_HIST] No SQL client provided, skipping ACM_ConfigHistory write")
+        Console.warn("No SQL client provided, skipping ACM_ConfigHistory write", component="CONFIG_HIST")
         return False
     _ensure_table(sql_client)
     
@@ -97,7 +97,7 @@ def write_config_change(
         
         # Skip if values are identical (no actual change)
         if old_value_str == new_value_str:
-            Console.info(f"[CONFIG_HIST] Skipping write - no change detected for {parameter_path}")
+            Console.info(f"Skipping write - no change detected for {parameter_path}", component="CONFIG_HIST")
             return True
         
         # Build insert statement
@@ -127,11 +127,11 @@ def write_config_change(
         # Commit
         sql_client.conn.commit()
         
-        Console.info(f"[CONFIG_HIST] Logged config change: {parameter_path} = {new_value} (reason: {change_reason})")
+        Console.info(f"Logged config change: {parameter_path} = {new_value} (reason: {change_reason})", component="CONFIG_HIST")
         return True
         
     except Exception as e:
-        Console.error(f"[CONFIG_HIST] Failed to write ACM_ConfigHistory: {e}")
+        Console.error(f"Failed to write ACM_ConfigHistory: {e}", component="CONFIG_HIST")
         try:
             sql_client.conn.rollback()
         except:
@@ -161,7 +161,7 @@ def write_config_changes_bulk(
     """
     
     if sql_client is None:
-        Console.warn("[CONFIG_HIST] No SQL client provided, skipping bulk write")
+        Console.warn("No SQL client provided, skipping bulk write", component="CONFIG_HIST")
         return False
     _ensure_table(sql_client)
     
@@ -203,7 +203,7 @@ def write_config_changes_bulk(
             ))
         
         if not records:
-            Console.info("[CONFIG_HIST] No actual changes to write (all values unchanged)")
+            Console.info("No actual changes to write (all values unchanged)", component="CONFIG_HIST")
             return True
         
         # Build bulk insert statement
@@ -222,11 +222,11 @@ def write_config_changes_bulk(
         # Commit
         sql_client.conn.commit()
         
-        Console.info(f"[CONFIG_HIST] Logged {len(records)} config changes for RunID={run_id}")
+        Console.info(f"Logged {len(records)} config changes for RunID={run_id}", component="CONFIG_HIST")
         return True
         
     except Exception as e:
-        Console.error(f"[CONFIG_HIST] Failed to write bulk ACM_ConfigHistory: {e}")
+        Console.error(f"Failed to write bulk ACM_ConfigHistory: {e}", component="CONFIG_HIST")
         try:
             sql_client.conn.rollback()
         except:
@@ -291,7 +291,7 @@ def log_auto_tune_changes(
                     "change_reason": "Auto-tuning based on quality assessment"
                 })
         except Exception as e:
-            Console.warn(f"[CONFIG_HIST] Failed to parse tuning action '{action}': {e}")
+            Console.warn(f"Failed to parse tuning action '{action}': {e}", component="CONFIG_HIST")
     
     if not changes:
         return True
@@ -317,9 +317,9 @@ def log_auto_tune_changes(
                     """,
                     (equip_id, f"Auto-tune config changes: {', '.join([c['parameter_path'] for c in changes])}")
                 )
-            Console.info("[AUTO-TUNE] Refit request created to apply config changes next run")
+            Console.info("Refit request created to apply config changes next run", component="AUTO-TUNE")
         except Exception as e:
-            Console.warn(f"[AUTO-TUNE] Failed to create refit request: {e}")
+            Console.warn(f"Failed to create refit request: {e}", component="AUTO-TUNE")
     
     return success
 

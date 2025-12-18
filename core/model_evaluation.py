@@ -1,4 +1,4 @@
-"""
+﻿"""
 Autonomous Model Re-evaluation Module
 =====================================
 Monitors model quality and triggers retraining when performance degrades.
@@ -29,7 +29,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, Tuple, List
 from pathlib import Path
 from datetime import datetime, timezone
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 class ModelQualityMonitor:

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Forecast Quality Metrics (v10.0.0)
 
 Statistical metrics for evaluating forecast quality and model performance.
@@ -21,7 +21,7 @@ from typing import Dict, Optional
 import numpy as np
 from scipy import stats
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 def compute_mae(actual: np.ndarray, forecast: np.ndarray) -> float:

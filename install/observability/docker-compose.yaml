@@ -1,0 +1,109 @@
+# ACM Observability Stack - Docker Compose
+# =========================================
+# This runs Tempo, Pyroscope, and Loki in Docker containers.
+# Grafana is assumed to already be installed natively.
+#
+# Usage:
+#   docker-compose up -d
+#
+# Endpoints:
+#   Tempo API:     http://localhost:3200
+#   Tempo OTLP:    localhost:4317 (gRPC), localhost:4318 (HTTP)
+#   Pyroscope:     http://localhost:4040
+#   Loki:          http://localhost:3100
+
+services:
+  # ============================================================================
+  # Grafana Tempo - Distributed Tracing
+  # ============================================================================
+  tempo:
+    image: grafana/tempo:2.9.0
+    container_name: acm-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "3200:3200"   # Tempo API
+      - "4320:4317"   # OTLP gRPC (remapped to 4320 to avoid Alloy conflict)
+      - "4321:4318"   # OTLP HTTP (remapped to 4321 to avoid Alloy conflict)
+      - "9095:9095"   # Tempo gRPC
+    volumes:
+      - ./tempo-docker.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3200/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Grafana Pyroscope - Continuous Profiling
+  # ============================================================================
+  pyroscope:
+    image: grafana/pyroscope:1.16.0
+    container_name: acm-pyroscope
+    user: "0"  # Run as root to fix permission issues
+    command: ["-config.file=/etc/pyroscope.yaml"]
+    ports:
+      - "4040:4040"   # Pyroscope UI/API
+      - "4041:4041"   # Pyroscope gRPC
+    volumes:
+      - ./pyroscope-docker.yaml:/etc/pyroscope.yaml:ro
+      - pyroscope-data:/var/pyroscope
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4040/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Grafana Loki - Log Aggregation
+  # ============================================================================
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: acm-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "3100:3100"   # Loki API
+    volumes:
+      - ./loki-docker.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Prometheus - Metrics Collection
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: acm-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
+      - "--enable-feature=exemplar-storage"
+    ports:
+      - "9090:9090"   # Prometheus UI/API
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  tempo-data:
+  pyroscope-data:
+  loki-data:
+  prometheus-data:
+
+networks:
+  default:
+    name: acm-observability

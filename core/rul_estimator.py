@@ -1,4 +1,4 @@
-"""
+﻿"""
 RUL Estimator with Monte Carlo Simulation (v10.1.0)
 
 Remaining Useful Life estimation via Monte Carlo degradation simulations.
@@ -26,7 +26,7 @@ from scipy import stats
 
 from core.degradation_model import BaseDegradationModel, DegradationForecast
 from core.failure_probability import compute_failure_statistics
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 @dataclass

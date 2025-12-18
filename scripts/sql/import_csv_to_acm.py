@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 """
 Quick CSV importer for ACM database.
 Usage: python scripts/sql/import_csv_to_acm.py <csv_file> <equip_code> [--ts-col TS]
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import numpy as np
 import pyodbc
-from utils.logger import Console
+from core.observability import Console
 
 
 def get_connection():

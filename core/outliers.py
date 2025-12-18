@@ -1,4 +1,4 @@
-# core/outliers.py
+﻿# core/outliers.py
 """
 Outlier detection module.
 Implements density-based anomaly detectors like Isolation Forest and GMM.
@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 from typing import Any, Dict, Optional, List
 
 
@@ -157,14 +157,14 @@ class GMMDetector:
         var = Xn.var(axis=0)
         self._var_mask = (var > 0)
         if not np.any(self._var_mask):
-            Console.warn("[GMM] All features constant — disabling GMM.")
+            Console.warn("All features constant — disabling GMM.", component="GMM")
             self._is_fitted = False
             return self
         Xn = Xn[:, self._var_mask]
 
         n_samples, n_features = Xn.shape
         if n_features < 1 or n_samples < 2:
-            Console.warn("[GMM] Not enough data after preprocessing — disabling GMM.")
+            Console.warn("Not enough data after preprocessing — disabling GMM.", component="GMM")
             self._is_fitted = False
             return self
 
@@ -187,7 +187,7 @@ class GMMDetector:
                 gm_test.fit(Xs)
                 bics.append(gm_test.bic(Xs))
             safe_k = k_range[np.argmin(bics)]
-            Console.info(f"[GMM] BIC search selected k={safe_k}")
+            Console.info(f"BIC search selected k={safe_k}", component="GMM")
 
         # Simplified trial with configured parameters
         trials = [dict(covariance_type=cov_type, reg_covar=reg_covar)]
@@ -211,7 +211,7 @@ class GMMDetector:
                     self.model = gm
                     self._is_fitted = True
                     self._fitted_params = dict(k=k, **params)
-                    Console.info(f"[GMM] Fitted k={k}, cov={params['covariance_type']}, reg={params['reg_covar']}")
+                    Console.info(f"Fitted k={k}, cov={params['covariance_type']}, reg={params['reg_covar']}", component="GMM")
                     # Calibrate scores on training set for z-score decision_function
                     tr_scores = -gm.score_samples(Xs)
                     self._score_mu_ = float(np.mean(tr_scores))
@@ -222,7 +222,7 @@ class GMMDetector:
                     k -= 1
                     continue
 
-        Console.warn(f"[GMM] Disabled after retries: {last_err}")
+        Console.warn(f"Disabled after retries: {last_err}", component="GMM")
         self._is_fitted = False
         return self
 

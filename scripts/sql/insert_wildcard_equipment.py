@@ -1,4 +1,4 @@
-"""
+﻿"""
 Insert wildcard equipment (EquipID=0) for default config parameters.
 """
 import sys
@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 import pyodbc
 
-from utils.logger import Console
+from core.observability import Console
 
 
 def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: bool = False) -> None:
@@ -41,7 +41,7 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from utils.logger import Console
+from core.observability import Console
 
 >>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 def insert_wildcard_equipment():
@@ -54,7 +54,7 @@ def insert_wildcard_equipment():
     )
     
     try:
-        Console.info("[EQUIP] Connecting to ACM database...")
+        Console.info("Connecting to ACM database...", component="EQUIP")
         conn = pyodbc.connect(conn_str, timeout=10)
         cursor = conn.cursor()
         

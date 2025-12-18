@@ -1,0 +1,1424 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "ACM Observability Dashboard - Prometheus Metrics, Tempo Traces, Loki Logs",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "panels": [],
+      "title": "🎯 SYSTEM HEALTH OVERVIEW",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 80 }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Total Runs (24h)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(increase(acm_runs_total[24h]))",
+          "legendFormat": "Runs"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Successful Runs",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(increase(acm_runs_total{outcome=\"OK\"}[24h]))",
+          "legendFormat": "OK"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Failed Runs",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(increase(acm_runs_total{outcome=\"FAIL\"}[24h]))",
+          "legendFormat": "FAIL"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Rows Processed (24h)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(increase(acm_rows_processed_total[24h]))",
+          "legendFormat": "Rows"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Errors (24h)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(increase(acm_errors_total[24h]))",
+          "legendFormat": "Errors"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "orange", "value": null }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Episodes Detected",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(increase(acm_episodes_total[24h]))",
+          "legendFormat": "Episodes"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 101,
+      "panels": [],
+      "title": "⚡ EQUIPMENT HEALTH METRICS (Prometheus)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Health %",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": 3600000,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "line+area" }
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 10,
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "min", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Equipment Health Score Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "acm_health_score{equipment=~\"$equipment\"}",
+          "legendFormat": "{{equipment}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Hours",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": 3600000,
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 168 },
+              { "color": "green", "value": 720 }
+            ]
+          },
+          "unit": "h"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 11,
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Remaining Useful Life (RUL)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "acm_rul_hours{equipment=~\"$equipment\", percentile=\"mean\"}",
+          "legendFormat": "{{equipment}} (mean)"
+        },
+        {
+          "expr": "acm_rul_hours{equipment=~\"$equipment\", percentile=\"p10\"}",
+          "legendFormat": "{{equipment}} (P10)"
+        },
+        {
+          "expr": "acm_rul_hours{equipment=~\"$equipment\", percentile=\"p90\"}",
+          "legendFormat": "{{equipment}} (P90)"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 14 },
+      "id": 12,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Runs by Outcome",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(acm_runs_total{equipment=~\"$equipment\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "orange", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 14 },
+      "id": 13,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Episodes by Severity",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (severity) (increase(acm_episodes_total{equipment=~\"$equipment\"}[$__rate_interval]))",
+          "legendFormat": "{{severity}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Defects",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": 3600000,
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 14 },
+      "id": 14,
+      "options": {
+        "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Active Defects by Equipment",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "acm_episodes_total{equipment=~\"$equipment\"}",
+          "legendFormat": "{{equipment}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "id": 102,
+      "panels": [],
+      "title": "⏱️ PIPELINE PERFORMANCE (Prometheus)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Duration (s)",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": 3600000,
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 120 }
+            ]
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "id": 20,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Run Duration Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, equipment) (rate(acm_run_duration_seconds_bucket{equipment=~\"$equipment\"}[$__rate_interval])))",
+          "legendFormat": "{{equipment}} (p50)"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, equipment) (rate(acm_run_duration_seconds_bucket{equipment=~\"$equipment\"}[$__rate_interval])))",
+          "legendFormat": "{{equipment}} (p95)"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Duration (s)",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "scheme",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "id": 21,
+      "options": {
+        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "right" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Stage Duration by Pipeline Phase",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (parent) (increase(acm_stage_duration_seconds_sum{equipment=~\"$equipment\"}[$__rate_interval]))",
+          "legendFormat": "{{parent}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "id": 22,
+      "options": {
+        "displayMode": "lcd",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["mean"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "title": "Average Duration by Stage (Top 10)",
+      "type": "bargauge",
+      "targets": [
+        {
+          "expr": "topk(10, sum by (stage) (rate(acm_stage_duration_seconds_sum{equipment=~\"$equipment\"}[1h])) / sum by (stage) (rate(acm_stage_duration_seconds_count{equipment=~\"$equipment\"}[1h])))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Operations",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "id": 23,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "SQL Operations by Table",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (table) (increase(acm_sql_ops_total{equipment=~\"$equipment\"}[$__rate_interval]))",
+          "legendFormat": "{{table}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
+      "id": 103,
+      "panels": [],
+      "title": "🔍 DISTRIBUTED TRACES (Tempo)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "${tempo_ds}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 38 },
+      "id": 30,
+      "options": {
+        "columns": [
+          "traceID",
+          "traceName",
+          "startTime",
+          "duration"
+        ]
+      },
+      "title": "Recent Traces - ACM Pipeline",
+      "type": "traces",
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": [
+            { "id": "service", "operator": "=", "scope": "resource", "tag": "service.name", "value": ["acm-pipeline"] }
+          ]
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "${tempo_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Duration (ms)",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "points",
+            "fillOpacity": 0,
+            "lineWidth": 0,
+            "pointSize": 8,
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "id": 31,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "title": "Trace Duration Scatter Plot",
+      "type": "timeseries",
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "limit": 100,
+          "tableType": "spans",
+          "filters": [
+            { "id": "service", "operator": "=", "scope": "resource", "tag": "service.name", "value": ["acm-pipeline"] }
+          ]
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "${tempo_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "id": 32,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["mean"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "title": "Span Duration by Category",
+      "type": "bargauge",
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "limit": 20,
+          "tableType": "spans",
+          "filters": [
+            { "id": "service", "operator": "=", "scope": "resource", "tag": "service.name", "value": ["acm-pipeline"] }
+          ]
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "id": 104,
+      "panels": [],
+      "title": "📋 LOGS & EVENTS (Loki)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 57 },
+      "id": 40,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "All Logs (Filtered by Component)",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", equipment=~\"$equipment\", component=~\"$component\"} |= \"$log_filter\"",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 65 },
+      "id": 41,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "⚠️ Errors Only",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", level=\"error\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 65 },
+      "id": 42,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "⚡ Warnings Only",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", level=\"warning\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 71 },
+      "id": 43,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Log Volume by Level",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (level) (count_over_time({app=\"acm\", equipment=~\"$equipment\"}[$__interval]))",
+          "legendFormat": "{{level}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "normal" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 71 },
+      "id": 44,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Log Volume by Component",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (component) (count_over_time({app=\"acm\", equipment=~\"$equipment\"}[$__interval]))",
+          "legendFormat": "{{component}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "purple", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 71 },
+      "id": 45,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Log Volume by Equipment",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (equipment) (count_over_time({app=\"acm\"}[$__interval]))",
+          "legendFormat": "{{equipment}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 77 },
+      "id": 105,
+      "panels": [],
+      "title": "⏱️ TIMER BREAKDOWN (Loki)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 78 },
+      "id": 50,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "Timer Events (Section Durations)",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", log_type=\"timer\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 78 },
+      "id": 51,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "Success Events",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", tag=\"success\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 86 },
+      "id": 106,
+      "panels": [],
+      "title": "🔧 COMPONENT DEEP DIVE (Loki)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 87 },
+      "id": 60,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "📊 DATA Component",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"data\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 87 },
+      "id": 61,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "🧠 MODEL Component",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"model\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 87 },
+      "id": 62,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "🔗 FUSE Component",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"fuse\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 93 },
+      "id": 63,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "💾 SQL Component",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"sql\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 93 },
+      "id": 64,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "📈 FORECAST Component",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"forecast\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 93 },
+      "id": 65,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "🚦 REGIME Component",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"regime\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 99 },
+      "id": 107,
+      "panels": [],
+      "title": "🔬 DETECTOR ANALYTICS (Loki)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 100 },
+      "id": 70,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "AR1 Detector Logs",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"ar1\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 100 },
+      "id": 71,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "PCA Detector Logs",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"pca\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 100 },
+      "id": 72,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "OMR Detector Logs",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"omr\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 106 },
+      "id": 108,
+      "panels": [],
+      "title": "🎛️ COLDSTART & MODEL LIFECYCLE",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "purple", "value": null }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 107 },
+      "id": 80,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Coldstart Completions",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (equipment) (increase(acm_coldstarts_total{equipment=~\"$equipment\"}[$__rate_interval]))",
+          "legendFormat": "{{equipment}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${loki_ds}" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 107 },
+      "id": 81,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "title": "Coldstart Logs",
+      "type": "logs",
+      "targets": [
+        {
+          "expr": "{app=\"acm\", component=\"coldstart\", equipment=~\"$equipment\"}",
+          "legendFormat": ""
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["acm", "observability", "prometheus", "tempo", "loki"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "prometheus_ds",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": false, "text": "Tempo", "value": "tempo" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Tempo",
+        "multi": false,
+        "name": "tempo_ds",
+        "options": [],
+        "query": "tempo",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": { "selected": false, "text": "Loki", "value": "loki" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Loki",
+        "multi": false,
+        "name": "loki_ds",
+        "options": [],
+        "query": "loki",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "datasource": { "type": "prometheus", "uid": "${prometheus_ds}" },
+        "definition": "label_values(acm_runs_total, equipment)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Equipment",
+        "multi": true,
+        "name": "equipment",
+        "options": [],
+        "query": { "query": "label_values(acm_runs_total, equipment)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "datasource": { "type": "loki", "uid": "${loki_ds}" },
+        "definition": "label_values({app=\"acm\"}, component)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Component",
+        "multi": true,
+        "name": "component",
+        "options": [],
+        "query": { "query": "label_values({app=\"acm\"}, component)", "refId": "LokiVariableQueryEditor-VariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": false, "text": "", "value": "" },
+        "hide": 0,
+        "label": "Log Filter",
+        "name": "log_filter",
+        "options": [{ "selected": true, "text": "", "value": "" }],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ACM Observability Dashboard",
+  "uid": "acm-observability",
+  "version": 1,
+  "weekStart": ""
+}

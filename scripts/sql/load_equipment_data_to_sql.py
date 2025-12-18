@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Script: load_equipment_data_to_sql.py
 Purpose: Load CSV data into FD_FAN_Data and GAS_TURBINE_Data tables
@@ -25,7 +25,7 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 def load_csv_to_table(
     sql_client: SQLClient,
@@ -45,7 +45,7 @@ def load_csv_to_table(
     Returns:
         Number of rows upserted
     """
-    Console.info(f"[LOAD] Reading {csv_path.name}...")
+    Console.info(f"Reading {csv_path.name}...", component="LOAD")
     
     try:
         # Read CSV
@@ -151,13 +151,13 @@ def main():
     
     # Connect to SQL Server
     try:
-        Console.info("[SQL] Connecting to ACM database...")
+        Console.info("Connecting to ACM database...", component="SQL")
         sql_client = SQLClient.from_ini('acm')
         sql_client.connect()
         Console.info("  [OK] Connected successfully")
         Console.info("")
     except Exception as e:
-        Console.error(f"[SQL] Connection failed: {e}")
+        Console.error(f"Connection failed: {e}", component="SQL")
         return 1
     
     data_dir = project_root / "data"
@@ -167,7 +167,7 @@ def main():
     # =====================================================================
     # Load FD_FAN data
     # =====================================================================
-    Console.info("[FD_FAN] Loading data...")
+    Console.info("Loading data...", component="FD_FAN")
     Console.info("")
     
     try:
@@ -191,17 +191,17 @@ def main():
         total_rows += rows
         Console.info("")
         
-        Console.info("[FD_FAN] [OK] Completed")
+        Console.info("[OK] Completed", component="FD_FAN")
         Console.info("")
         
     except Exception as e:
-        Console.error(f"[FD_FAN] ✗ Failed: {e}")
+        Console.error(f"✗ Failed: {e}", component="FD_FAN")
         return 1
     
     # =====================================================================
     # Load GAS_TURBINE data
     # =====================================================================
-    Console.info("[GAS_TURBINE] Loading data...")
+    Console.info("Loading data...", component="GAS_TURBINE")
     Console.info("")
     
     try:
@@ -225,11 +225,11 @@ def main():
         total_rows += rows
         Console.info("")
         
-        Console.info("[GAS_TURBINE] [OK] Completed")
+        Console.info("[OK] Completed", component="GAS_TURBINE")
         Console.info("")
         
     except Exception as e:
-        Console.error(f"[GAS_TURBINE] ✗ Failed: {e}")
+        Console.error(f"✗ Failed: {e}", component="GAS_TURBINE")
         return 1
     
     # =====================================================================
@@ -277,7 +277,7 @@ def main():
         cursor.close()
     
     Console.info("")
-    Console.info("[OK] All data loaded successfully!")
+    Console.info("All data loaded successfully!", component="OK")
     Console.info("")
     Console.info("Next steps:")
     Console.info("  1. Test SP: scripts/sql/test_historian_sp.sql")

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Common helpers for RUL estimation modules.
 
 RUL-COR-01: Consolidated shared functions from rul_estimator.py and enhanced_rul_estimator.py
@@ -16,7 +16,7 @@ import pandas as pd
 
 # Import Console for logging
 try:
-    from utils.logger import Console
+    from core.observability import Console, Heartbeat
 except ImportError:
     class Console:
         @staticmethod
@@ -92,7 +92,7 @@ def apply_health_timeline_row_limit(df: pd.DataFrame, config: Optional[Any] = No
     df_resampled = df.set_index("Timestamp").resample(downsample_freq).mean()
     df_resampled = df_resampled.dropna().reset_index()
     
-    Console.info(f"[RUL] Downsampled to {len(df_resampled)} rows")
+    Console.info(f"Downsampled to {len(df_resampled)} rows", component="RUL")
     return df_resampled
 
 
@@ -131,7 +131,7 @@ def load_health_timeline(
     if output_manager is not None:
         df = output_manager.get_cached_table("health_timeline.csv")
         if df is not None:
-            Console.info(f"[RUL] Using cached health_timeline.csv from OutputManager ({len(df)} rows)")
+            Console.info(f"Using cached health_timeline.csv from OutputManager ({len(df)} rows)", component="RUL")
             # Normalize column names
             if "Timestamp" in df.columns:
                 ts_col = "Timestamp"
@@ -184,15 +184,15 @@ def load_health_timeline(
                     f"[RUL] No rows in ACM_HealthTimeline for EquipID={equip_id}, RunID={run_id}"
                 )
         except Exception as e:
-            Console.warn(f"[RUL] Failed to load health timeline from SQL: {e}")
+            Console.warn(f"Failed to load health timeline from SQL: {e}", component="RUL")
 
     # Priority 3: Fallback to legacy CSV path (file mode for dev/testing)
     p = tables_dir / "health_timeline.csv"
     if not p.exists():
-        Console.warn(f"[RUL] health_timeline.csv not found in {tables_dir} (no cache, no SQL, no file)")
+        Console.warn(f"health_timeline.csv not found in {tables_dir} (no cache, no SQL, no file)", component="RUL")
         return None
     df = pd.read_csv(p)
-    Console.info(f"[RUL] Loaded health_timeline.csv from file ({len(df)} rows)")
+    Console.info(f"Loaded health_timeline.csv from file ({len(df)} rows)", component="RUL")
     if "Timestamp" in df.columns:
         ts_col = "Timestamp"
     elif "timestamp" in df.columns:

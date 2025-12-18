@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from typing import Optional
 
 from core.output_manager import ALLOWED_TABLES
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 def _table_exists(client: SQLClient, table_name: str) -> bool:
@@ -28,7 +28,7 @@ def _count_rows(client: SQLClient, table_name: str, run_id: str, equip_id: int) 
         row = cur.fetchone()
         return int(row[0]) if row else 0
     except Exception as exc:
-        Console.warn(f"[DUAL-WRITE] Failed to count rows for {table_name}: {exc}")
+        Console.warn(f"Failed to count rows for {table_name}: {exc}", component="DUAL-WRITE")
         return None
     finally:
         cur.close()
@@ -58,10 +58,10 @@ def main() -> None:
 
     run_id = args.run_id or _latest_run_id(client, args.equip)
     if not run_id:
-        Console.error(f"[DUAL-WRITE] No run found for EquipID={args.equip}")
+        Console.error(f"No run found for EquipID={args.equip}", component="DUAL-WRITE")
         return
 
-    Console.info(f"[DUAL-WRITE] Validating dual-write for RunID={run_id} EquipID={args.equip}")
+    Console.info(f"Validating dual-write for RunID={run_id} EquipID={args.equip}", component="DUAL-WRITE")
     total_tables = 0
     rows_written = 0
     missing_tables = []
@@ -69,7 +69,7 @@ def main() -> None:
     for table_name in sorted(ALLOWED_TABLES):
         total_tables += 1
         if not _table_exists(client, table_name):
-            Console.warn(f"[DUAL-WRITE] Missing table {table_name}")
+            Console.warn(f"Missing table {table_name}", component="DUAL-WRITE")
             missing_tables.append(table_name)
             continue
 
@@ -78,11 +78,11 @@ def main() -> None:
             continue
         rows_written += count
         status = "OK" if count > 0 else "EMPTY"
-        Console.info(f"[DUAL-WRITE] {table_name}: {count} rows ({status})")
+        Console.info(f"{table_name}: {count} rows ({status})", component="DUAL-WRITE")
 
-    Console.info(f"[DUAL-WRITE] Tables checked: {total_tables}, Total rows: {rows_written}")
+    Console.info(f"Tables checked: {total_tables}, Total rows: {rows_written}", component="DUAL-WRITE")
     if missing_tables:
-        Console.warn(f"[DUAL-WRITE] Missing tables: {', '.join(missing_tables)}")
+        Console.warn(f"Missing tables: {', '.join(missing_tables)}", component="DUAL-WRITE")
 
 
 if __name__ == "__main__":

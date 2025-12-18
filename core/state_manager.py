@@ -1,4 +1,4 @@
-"""
+﻿"""
 State Management and Adaptive Configuration (v10.0.0)
 
 Manages persistent forecasting state and adaptive configuration system.
@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 import pyodbc
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 @dataclass

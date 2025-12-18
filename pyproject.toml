@@ -24,6 +24,7 @@ dependencies = [
   "scipy>=1.12",
   "psutil>=5.9",  # Resource monitoring
   "structlog>=24.0",  # Structured logging
+  "rich>=13.0",  # Colorful console output, progress bars
 ]
 
 [project.optional-dependencies]

@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 from pathlib import Path
 import pandas as pd
@@ -9,7 +9,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 def analyze_batch_results():
     try:

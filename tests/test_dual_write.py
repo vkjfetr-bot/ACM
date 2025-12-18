@@ -1,4 +1,4 @@
-"""
+﻿"""
 Test script for dual-write mode (Phase 2).
 
 Tests that ACM can write to both files and SQL when dual_mode is enabled,
@@ -15,7 +15,7 @@ project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 def _require_storage_module():
@@ -25,25 +25,25 @@ def _require_storage_module():
 
         return importlib.import_module("core.storage")
     except Exception as exc:
-        Console.warn(f"[TEST] Storage module unavailable: {exc}")
+        Console.warn(f"Storage module unavailable: {exc}", component="TEST")
         pytest.skip(f"core.storage unavailable: {exc}")
 
 def test_sql_connection():
     """Test basic SQL connectivity."""
-    Console.info("[TEST] Testing SQL connection...")
+    Console.info("Testing SQL connection...", component="TEST")
     result = None
     try:
         sql_client = SQLClient.from_ini('acm')
         sql_client.connect()
     except Exception as exc:
-        Console.warn(f"[TEST] SQL connection unavailable: {exc}")
+        Console.warn(f"SQL connection unavailable: {exc}", component="TEST")
         pytest.skip(f"SQL connection unavailable: {exc}")
 
     try:
         with sql_client.cursor() as cur:
             cur.execute("SELECT 1 AS test")
             result = cur.fetchone()
-            Console.info(f"[TEST] SQL connection OK: {result}")
+            Console.info(f"SQL connection OK: {result}", component="TEST")
     finally:
         try:
             sql_client.close()
@@ -55,7 +55,7 @@ def test_sql_connection():
 
 def test_dual_mode_config():
     """Test that dual_mode config can be read from SQL."""
-    Console.info("[TEST] Testing dual_mode config read...")
+    Console.info("Testing dual_mode config read...", component="TEST")
     try:
         from utils.sql_config import get_equipment_config
 
@@ -65,33 +65,33 @@ def test_dual_mode_config():
             fallback_to_csv=True
         )
     except Exception as exc:
-        Console.warn(f"[TEST] Config read failed: {exc}")
+        Console.warn(f"Config read failed: {exc}", component="TEST")
         pytest.skip(f"SQL config unavailable: {exc}")
 
     dual_mode = cfg.get('output', {}).get('dual_mode', False)
-    Console.info(f"[TEST] dual_mode config: {dual_mode}")
+    Console.info(f"dual_mode config: {dual_mode}", component="TEST")
     assert isinstance(dual_mode, bool)
 
 def test_sql_health_check():
     """Test SQL health check with caching."""
-    Console.info("[TEST] Testing SQL health check...")
+    Console.info("Testing SQL health check...", component="TEST")
     storage = None
     try:
         storage = _require_storage_module()
         sql_client = SQLClient.from_ini('acm')
         sql_client.connect()
     except Exception as exc:
-        Console.warn(f"[TEST] Health check skipped: {exc}")
+        Console.warn(f"Health check skipped: {exc}", component="TEST")
         pytest.skip(f"SQL connection unavailable: {exc}")
 
     assert storage is not None
 
     try:
         result1 = storage._check_sql_health(sql_client)
-        Console.info(f"[TEST] First health check: {result1}")
+        Console.info(f"First health check: {result1}", component="TEST")
 
         result2 = storage._check_sql_health(sql_client)
-        Console.info(f"[TEST] Second health check (cached): {result2}")
+        Console.info(f"Second health check (cached): {result2}", component="TEST")
     finally:
         try:
             sql_client.close()
@@ -99,7 +99,7 @@ def test_sql_health_check():
             pass
 
     result3 = storage._check_sql_health(None)
-    Console.info(f"[TEST] Health check with None client: {result3}")
+    Console.info(f"Health check with None client: {result3}", component="TEST")
 
     assert result1
     assert result2
@@ -107,7 +107,7 @@ def test_sql_health_check():
 
 def test_storage_write_functions():
     """Test that storage write functions accept SQL parameters."""
-    Console.info("[TEST] Testing storage write function signatures...")
+    Console.info("Testing storage write function signatures...", component="TEST")
     storage = _require_storage_module()
     import pandas as pd
     import tempfile
@@ -126,7 +126,7 @@ def test_storage_write_functions():
             run_id='test-run-id',
             equip_id=123
         )
-        Console.info(f"[TEST] write_scores_csv result: {result}")
+        Console.info(f"write_scores_csv result: {result}", component="TEST")
 
         episodes_df = pd.DataFrame({
             'start_ts': ['2025-01-01 00:00:00'],
@@ -141,7 +141,7 @@ def test_storage_write_functions():
             run_id='test-run-id',
             equip_id=123
         )
-        Console.info(f"[TEST] write_episodes_csv result: {result2}")
+        Console.info(f"write_episodes_csv result: {result2}", component="TEST")
 
     assert result is not None
     assert result2 is not None
@@ -164,10 +164,10 @@ def main():
             result = test_func()
             results.append((test_name, result))
             status = "✓ PASS" if result else "✗ FAIL"
-            Console.info(f"[TEST] {test_name}: {status}")
+            Console.info(f"{test_name}: {status}", component="TEST")
         except Exception as e:
             results.append((test_name, False))
-            Console.error(f"[TEST] {test_name}: ✗ EXCEPTION - {e}")
+            Console.error(f"{test_name}: ✗ EXCEPTION - {e}", component="TEST")
     
     Console.info("\n=== Test Summary ===")
     passed = sum(1 for _, result in results if result)

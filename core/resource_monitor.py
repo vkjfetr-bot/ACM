@@ -1,5 +1,7 @@
-"""
+﻿"""
 Resource Monitor for ACM - Tracks CPU, memory, and timing metrics.
+
+Integrates with OTEL metrics for Prometheus export.
 
 Usage:
     from core.resource_monitor import ResourceMonitor, R
@@ -24,7 +26,7 @@ import time
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime
 
 try:
@@ -34,6 +36,31 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 import pandas as pd
+
+# OTEL metrics integration (lazy loaded)
+_otel_enabled = False
+_record_memory_fn: Optional[Callable] = None
+_record_cpu_fn: Optional[Callable] = None
+_equipment_context: str = ""
+
+
+def enable_resource_metrics(equipment: str = "") -> None:
+    """Enable OTEL metrics recording for ResourceMonitor."""
+    global _otel_enabled, _record_memory_fn, _record_cpu_fn, _equipment_context
+    try:
+        from core.observability import record_memory, record_cpu
+        _record_memory_fn = record_memory
+        _record_cpu_fn = record_cpu
+        _otel_enabled = True
+        _equipment_context = equipment
+    except ImportError:
+        _otel_enabled = False
+
+
+def set_resource_equipment(equipment: str) -> None:
+    """Set the equipment context for resource metrics."""
+    global _equipment_context
+    _equipment_context = equipment
 
 
 @dataclass
@@ -215,6 +242,25 @@ class ResourceMonitor:
                 metrics.mem_peak_rss = metrics.mem_end_rss
             metrics.finalize()
             
+            # Record to OTEL metrics if enabled
+            if _otel_enabled:
+                try:
+                    if _record_memory_fn:
+                        _record_memory_fn(
+                            current_mb=metrics.mem_end_rss / (1024*1024),
+                            peak_mb=metrics.mem_peak_rss / (1024*1024),
+                            equipment=_equipment_context,
+                            section=name
+                        )
+                    if _record_cpu_fn and metrics.cpu_percent_avg > 0:
+                        _record_cpu_fn(
+                            percent=metrics.cpu_percent_avg,
+                            equipment=_equipment_context,
+                            section=name
+                        )
+                except Exception:
+                    pass  # Don't let metrics errors break monitoring
+            
             self._active_stack.pop()
     
     def record(self, name: str, duration_s: float, mem_delta_mb: float = 0.0):
@@ -279,13 +325,13 @@ class ResourceMonitor:
     
     def print_summary(self, top_n: int = 20):
         """Print a summary of resource usage to console."""
-        from utils.logger import Console
+        from core.observability import Console, Heartbeat
         
         metrics = self.get_metrics()
         summary = self.get_summary()
         
-        Console.info("[RESOURCE] === Resource Usage Summary ===")
-        Console.info(f"[RESOURCE] Total duration: {summary.get('total_duration_s', 0):.2f}s")
+        Console.info("=== Resource Usage Summary ===", component="RESOURCE")
+        Console.info(f"Total duration: {summary.get('total_duration_s', 0):.2f}s", component="RESOURCE")
         Console.info(f"[RESOURCE] Memory: start={summary.get('mem_start_mb', 0):.0f}MB, "
                     f"peak={summary.get('mem_peak_mb', 0):.0f}MB, "
                     f"delta={summary.get('mem_delta_mb', 0):+.0f}MB")
@@ -293,7 +339,7 @@ class ResourceMonitor:
         # Sort by duration and show top N
         sorted_metrics = sorted(metrics, key=lambda x: x['duration_s'], reverse=True)[:top_n]
         
-        Console.info(f"[RESOURCE] Top {min(top_n, len(sorted_metrics))} sections by duration:")
+        Console.info(f"Top {min(top_n, len(sorted_metrics))} sections by duration:", component="RESOURCE")
         for m in sorted_metrics:
             indent = "  " * m['depth']
             Console.info(f"[RESOURCE] {indent}{m['section']}: {m['duration_s']:.3f}s, "
@@ -354,8 +400,8 @@ class ResourceMonitor:
             )
             return True
         except Exception as e:
-            from utils.logger import Console
-            Console.warn(f"[RESOURCE] Failed to write metrics to SQL: {e}")
+            from core.observability import Console, Heartbeat
+            Console.warn(f"Failed to write metrics to SQL: {e}", component="RESOURCE")
             return False
     
     def reset(self):

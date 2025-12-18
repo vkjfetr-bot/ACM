@@ -1,4 +1,4 @@
-# utils/config.py
+﻿# utils/config.py
 from __future__ import annotations
 
 import copy
@@ -6,7 +6,7 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict
 
-from utils.logger import Console
+from core.observability import Console
 from utils import validators
 
 

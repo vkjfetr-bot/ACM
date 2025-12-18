@@ -1,4 +1,4 @@
-"""
+﻿"""
 Populate ACM_Config table from config_table.csv
 
 This script loads the configuration from configs/config_table.csv
@@ -18,7 +18,7 @@ project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 from utils.config_dict import ConfigDict
 
 
@@ -100,14 +100,14 @@ def populate_config(csv_path: Path):
     Load config from CSV and populate ACM_Config table.
     CSV format: EquipID,Category,ParamPath,ParamValue,ValueType,LastUpdated,UpdatedBy,ChangeReason,UpdatedDateTime
     """
-    Console.info(f"[CFG-MIGRATE] Loading config from {csv_path}")
+    Console.info(f"Loading config from {csv_path}", component="CFG-MIGRATE")
     
     # Load CSV
     if not csv_path.exists():
         raise FileNotFoundError(f"Config file not found: {csv_path}")
     
     df = pd.read_csv(csv_path)
-    Console.info(f"[CFG-MIGRATE] Loaded {len(df)} rows from CSV")
+    Console.info(f"Loaded {len(df)} rows from CSV", component="CFG-MIGRATE")
     
     # Validate required columns
     required_cols = ['EquipID', 'Category', 'ParamPath', 'ParamValue', 'ValueType']
@@ -116,7 +116,7 @@ def populate_config(csv_path: Path):
         raise ValueError(f"Missing required columns: {missing_cols}")
     
     # Connect to SQL
-    Console.info("[CFG-MIGRATE] Connecting to ACM database...")
+    Console.info("Connecting to ACM database...", component="CFG-MIGRATE")
     client = SQLClient.from_ini('acm')
     client.connect()
     
@@ -135,7 +135,7 @@ def populate_config(csv_path: Path):
             value_type = str(row['ValueType']).strip() if pd.notna(row['ValueType']) else 'string'
             
             if not param_path:
-                Console.warn(f"[CFG-MIGRATE] Skipping empty ParamPath for EquipID={equip_id}")
+                Console.warn(f"Skipping empty ParamPath for EquipID={equip_id}", component="CFG-MIGRATE")
                 error_count += 1
                 continue
             
@@ -159,17 +159,17 @@ def populate_config(csv_path: Path):
                 insert_count += 1
                 
             except Exception as e:
-                Console.warn(f"[CFG-MIGRATE] Failed to insert {full_param_path} (EquipID={equip_id}): {e}")
+                Console.warn(f"Failed to insert {full_param_path} (EquipID={equip_id}): {e}", component="CFG-MIGRATE")
                 error_count += 1
         
         client.conn.commit()
-        Console.info(f"[CFG-MIGRATE] Committed {insert_count} config parameters")
+        Console.info(f"Committed {insert_count} config parameters", component="CFG-MIGRATE")
     finally:
         cursor.close()
     
     client.close()
     
-    Console.info(f"[CFG-MIGRATE] Migration complete: {insert_count} processed, {error_count} errors")
+    Console.info(f"Migration complete: {insert_count} processed, {error_count} errors", component="CFG-MIGRATE")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Lean SQL-Only Output Manager for ACM
 ====================================
 
@@ -17,7 +17,7 @@ from contextlib import contextmanager
 import pandas as pd
 import numpy as np
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 # SQL table whitelist
@@ -172,14 +172,14 @@ class SQLOutputManager:
         start = time.time()
         
         try:
-            Console.info("[SQL] Starting transaction")
+            Console.info("Starting transaction", component="SQL")
             yield
             self._commit()
             elapsed = time.time() - start
-            Console.info(f"[SQL] Transaction committed ({elapsed:.2f}s)")
+            Console.info(f"Transaction committed ({elapsed:.2f}s)", component="SQL")
         except Exception as e:
             self._rollback()
-            Console.error(f"[SQL] Transaction rolled back: {e}")
+            Console.error(f"Transaction rolled back: {e}", component="SQL")
             raise
         finally:
             self._in_transaction = False
@@ -193,7 +193,7 @@ class SQLOutputManager:
                 if not getattr(self.sql_client.conn, "autocommit", True):
                     self.sql_client.conn.commit()
         except Exception as e:
-            Console.error(f"[SQL] Commit failed: {e}")
+            Console.error(f"Commit failed: {e}", component="SQL")
             raise
     
     def _rollback(self):
@@ -225,7 +225,7 @@ class SQLOutputManager:
             raise ValueError(f"Table '{table_name}' not in whitelist")
         
         if df.empty:
-            Console.warn(f"[SQL] Empty DataFrame for {table_name}, skipping")
+            Console.warn(f"Empty DataFrame for {table_name}, skipping", component="SQL")
             return 0
         
         start = time.time()
@@ -243,12 +243,12 @@ class SQLOutputManager:
             self.stats.rows += rows_written
             self.stats.write_time += elapsed
             
-            Console.info(f"[SQL] Wrote {rows_written} rows to {table_name} ({elapsed:.2f}s)")
+            Console.info(f"Wrote {rows_written} rows to {table_name} ({elapsed:.2f}s)", component="SQL")
             return rows_written
             
         except Exception as e:
             self.stats.failures += 1
-            Console.error(f"[SQL] Failed to write {table_name}: {e}")
+            Console.error(f"Failed to write {table_name}: {e}", component="SQL")
             raise
     
     def _prepare_dataframe(self, 
@@ -387,7 +387,7 @@ class SQLOutputManager:
         try:
             return pd.read_sql_query(query, self.sql_client, params=params or None)
         except Exception as e:
-            Console.error(f"[SQL] Failed to read {table_name}: {e}")
+            Console.error(f"Failed to read {table_name}: {e}", component="SQL")
             raise
     
     def get_run_data(self, table_name: str) -> pd.DataFrame:
@@ -515,7 +515,7 @@ class SQLOutputManager:
                 results['ACM_EpisodeMetrics'] = self._write_episode_metrics(episodes_df)
         
         total_rows = sum(results.values())
-        Console.info(f"[SQL] Wrote {len(results)} tables, {total_rows} total rows")
+        Console.info(f"Wrote {len(results)} tables, {total_rows} total rows", component="SQL")
         return results
     
     # ==================== ANALYTICS TABLE GENERATORS ====================

@@ -1,4 +1,4 @@
-"""
+﻿"""
 ACM Run Metadata Writer
 
 Writes comprehensive run-level metadata to ACM_Runs table for:
@@ -13,7 +13,7 @@ Called at the end of every ACM run (success or failure).
 from datetime import datetime, timezone
 from typing import Optional
 import pandas as pd
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 def write_run_metadata(
@@ -64,7 +64,7 @@ def write_run_metadata(
     """
     
     if sql_client is None:
-        Console.warn("[RUN_META] No SQL client provided, skipping ACM_Runs write")
+        Console.warn("No SQL client provided, skipping ACM_Runs write", component="RUN_META")
         return False
     
     try:
@@ -123,11 +123,11 @@ def write_run_metadata(
         # Commit
         sql_client.conn.commit()
         
-        Console.info(f"[RUN_META] Wrote run metadata to ACM_Runs: {run_id}")
+        Console.info(f"Wrote run metadata to ACM_Runs: {run_id}", component="RUN_META")
         return True
         
     except Exception as e:
-        Console.error(f"[RUN_META] Failed to write ACM_Runs: {e}")
+        Console.error(f"Failed to write ACM_Runs: {e}", component="RUN_META")
         try:
             sql_client.conn.rollback()
         except:
@@ -210,7 +210,7 @@ def extract_run_metadata_from_scores(scores: pd.DataFrame, per_regime_enabled: b
         metadata["regime_count"] = regime_count
         
     except Exception as e:
-        Console.warn(f"[RUN_META] Failed to extract health metrics: {e}")
+        Console.warn(f"Failed to extract health metrics: {e}", component="RUN_META")
         metadata["avg_health_index"] = None
         metadata["min_health_index"] = None
         metadata["max_fused_z"] = None
@@ -263,13 +263,13 @@ def extract_data_quality_score(data_quality_path=None, sql_client=None, run_id=N
                     # Average null rate across train and score
                     avg_null_pct = (df["train_null_pct"].mean() + df["score_null_pct"].mean()) / 2.0
                     quality_score = 100.0 * (1.0 - avg_null_pct / 100.0)
-                    Console.debug(f"[RUN_META] Data quality from SQL: avg_null={avg_null_pct:.2f}%, score={quality_score:.1f}")
+                    Console.debug(f"Data quality from SQL: avg_null={avg_null_pct:.2f}%, score={quality_score:.1f}", component="RUN_META")
                     return float(quality_score)
                 else:
-                    Console.debug("[RUN_META] No data quality records found in SQL, defaulting to 100.0")
+                    Console.debug("No data quality records found in SQL, defaulting to 100.0", component="RUN_META")
                     return 100.0
             except Exception as e:
-                Console.warn(f"[RUN_META] Failed to query ACM_DataQuality: {e}, falling back to CSV")
+                Console.warn(f"Failed to query ACM_DataQuality: {e}, falling back to CSV", component="RUN_META")
         
         # File mode: read from CSV
         if data_quality_path and Path(data_quality_path).exists():
@@ -310,7 +310,7 @@ def extract_data_quality_score(data_quality_path=None, sql_client=None, run_id=N
                 return 100.0
         
     except Exception as e:
-        Console.warn(f"[RUN_META] Failed to extract data quality score: {e}")
+        Console.warn(f"Failed to extract data quality score: {e}", component="RUN_META")
         return 100.0
 
 
@@ -347,7 +347,7 @@ def write_retrain_metadata(
         bool: True if insert succeeded.
     """
     if sql_client is None:
-        Console.warn("[RUN_META] No SQL client; skipping ACM_RunMetadata write")
+        Console.warn("No SQL client; skipping ACM_RunMetadata write", component="RUN_META")
         return False
 
     try:
@@ -377,10 +377,10 @@ def write_retrain_metadata(
         with sql_client.cursor() as cur:
             cur.execute(insert_sql, record)
         sql_client.conn.commit()
-        Console.info(f"[RUN_META] Wrote retrain metadata RunID={run_id} StateV={forecast_state_version}")
+        Console.info(f"Wrote retrain metadata RunID={run_id} StateV={forecast_state_version}", component="RUN_META")
         return True
     except Exception as e:
-        Console.error(f"[RUN_META] Failed to write ACM_RunMetadata: {e}")
+        Console.error(f"Failed to write ACM_RunMetadata: {e}", component="RUN_META")
         try:
             sql_client.conn.rollback()
         except Exception:
@@ -459,9 +459,9 @@ def write_timer_stats(
             cur.executemany(insert_sql, rows)
             
         sql_client.conn.commit()
-        Console.debug(f"[PERF] Wrote {len(rows)} timer records to ACM_RunTimers")
+        Console.debug(f"Wrote {len(rows)} timer records to ACM_RunTimers", component="PERF")
         return True
         
     except Exception as e:
-        Console.warn(f"[PERF] Failed to write timer stats: {e}")
+        Console.warn(f"Failed to write timer stats: {e}", component="PERF")
         return False

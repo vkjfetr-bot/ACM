@@ -1,4 +1,4 @@
-"""
+﻿"""
 SQL-50 Validation Script: End-to-End Pure SQL Operation
 =======================================================
 
@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.sql_client import SQLClient
 from utils.config_dict import ConfigDict
-from utils.logger import Console
+from core.observability import Console
 import subprocess
 
 
@@ -105,7 +105,7 @@ def get_sql_table_counts(sql_client: SQLClient, run_id: str) -> dict:
 
 def run_pipeline(equip: str) -> tuple:
     """Run ACM pipeline and return (success, run_id, duration)."""
-    Console.info(f"[VALIDATE] Running pipeline for {equip} in SQL-only mode...")
+    Console.info(f"Running pipeline for {equip} in SQL-only mode...", component="VALIDATE")
     
     start_time = time.time()
     
@@ -133,8 +133,8 @@ def run_pipeline(equip: str) -> tuple:
     success = result.returncode == 0
     
     if not success:
-        Console.error(f"[VALIDATE] Pipeline failed with exit code {result.returncode}")
-        Console.error(f"[VALIDATE] STDERR: {result.stderr[-500:]}")  # Last 500 chars
+        Console.error(f"Pipeline failed with exit code {result.returncode}", component="VALIDATE")
+        Console.error(f"STDERR: {result.stderr[-500:]}", component="VALIDATE")  # Last 500 chars
     
     return success, run_id, duration
 
@@ -155,40 +155,40 @@ def main():
     # Verify SQL-only mode is enabled
     storage_backend = cfg.get("runtime", {}).get("storage_backend", "file")
     if storage_backend != "sql":
-        Console.error(f"[VALIDATE] ✗ storage_backend={storage_backend}, expected 'sql'")
-        Console.error(f"[VALIDATE] Please set storage_backend=sql in configs/config_table.csv")
+        Console.error(f"✗ storage_backend={storage_backend}, expected 'sql'", component="VALIDATE")
+        Console.error(f"Please set storage_backend=sql in configs/config_table.csv", component="VALIDATE")
         return 1
     
-    Console.info(f"[VALIDATE] ✓ storage_backend=sql (SQL-only mode enabled)")
+    Console.info(f"✓ storage_backend=sql (SQL-only mode enabled)", component="VALIDATE")
     Console.info("")
     
     # Get artifacts directory
     artifacts_dir = Path("artifacts") / args.equip
     
     # Count files BEFORE run
-    Console.info("[VALIDATE] Counting files before pipeline run...")
+    Console.info("Counting files before pipeline run...", component="VALIDATE")
     files_before = count_files_by_type(artifacts_dir)
-    Console.info(f"[VALIDATE] Files before: {files_before['total']} total")
-    Console.info(f"[VALIDATE]   - CSV: {files_before['csv']}, JOBLIB: {files_before['joblib']}, PNG: {files_before['png']}")
+    Console.info(f"Files before: {files_before['total']} total", component="VALIDATE")
+    Console.info(f"- CSV: {files_before['csv']}, JOBLIB: {files_before['joblib']}, PNG: {files_before['png']}", component="VALIDATE")
     Console.info("")
     
     # Run pipeline
     success, run_id, duration = run_pipeline(args.equip)
     
     if not success:
-        Console.error("[VALIDATE] ✗ Pipeline execution failed")
+        Console.error("✗ Pipeline execution failed", component="VALIDATE")
         return 1
     
-    Console.info(f"[VALIDATE] ✓ Pipeline completed successfully")
-    Console.info(f"[VALIDATE] Duration: {duration:.2f}s (target: <15s)")
-    Console.info(f"[VALIDATE] RunID: {run_id}")
+    Console.info(f"✓ Pipeline completed successfully", component="VALIDATE")
+    Console.info(f"Duration: {duration:.2f}s (target: <15s)", component="VALIDATE")
+    Console.info(f"RunID: {run_id}", component="VALIDATE")
     Console.info("")
     
     # Count files AFTER run
-    Console.info("[VALIDATE] Counting files after pipeline run...")
+    Console.info("Counting files after pipeline run...", component="VALIDATE")
     files_after = count_files_by_type(artifacts_dir)
-    Console.info(f"[VALIDATE] Files after: {files_after['total']} total")
-    Console.info(f"[VALIDATE]   - CSV: {files_after['csv']}, JOBLIB: {files_after['joblib']}, PNG: {files_after['png']}")
+    Console.info(f"Files after: {files_after['total']} total", component="VALIDATE")
+    Console.info(f"- CSV: {files_after['csv']}, JOBLIB: {files_after['joblib']}, PNG: {files_after['png']}", component="VALIDATE")
     Console.info("")
     
     # Calculate new files created
@@ -200,12 +200,12 @@ def main():
         'total': files_after['total'] - files_before['total']
     }
     
-    Console.info("[VALIDATE] New files created:")
-    Console.info(f"[VALIDATE]   - CSV: {new_files['csv']}")
-    Console.info(f"[VALIDATE]   - JOBLIB: {new_files['joblib']}")
-    Console.info(f"[VALIDATE]   - JSON: {new_files['json']}")
-    Console.info(f"[VALIDATE]   - PNG: {new_files['png']}")
-    Console.info(f"[VALIDATE]   - Total: {new_files['total']}")
+    Console.info("New files created:", component="VALIDATE")
+    Console.info(f"- CSV: {new_files['csv']}", component="VALIDATE")
+    Console.info(f"- JOBLIB: {new_files['joblib']}", component="VALIDATE")
+    Console.info(f"- JSON: {new_files['json']}", component="VALIDATE")
+    Console.info(f"- PNG: {new_files['png']}", component="VALIDATE")
+    Console.info(f"- Total: {new_files['total']}", component="VALIDATE")
     Console.info("")
     
     # Validation checks
@@ -213,35 +213,35 @@ def main():
     
     # Check 1: No CSV files created
     if new_files['csv'] > 0:
-        Console.error(f"[VALIDATE] ✗ Created {new_files['csv']} CSV files (expected 0)")
+        Console.error(f"✗ Created {new_files['csv']} CSV files (expected 0)", component="VALIDATE")
         validation_passed = False
     else:
-        Console.info("[VALIDATE] ✓ No CSV files created")
+        Console.info("✓ No CSV files created", component="VALIDATE")
     
     # Check 2: No JOBLIB files created
     if new_files['joblib'] > 0:
-        Console.error(f"[VALIDATE] ✗ Created {new_files['joblib']} JOBLIB files (expected 0)")
+        Console.error(f"✗ Created {new_files['joblib']} JOBLIB files (expected 0)", component="VALIDATE")
         validation_passed = False
     else:
-        Console.info("[VALIDATE] ✓ No JOBLIB files created")
+        Console.info("✓ No JOBLIB files created", component="VALIDATE")
     
     # Check 3: PNG files created (charts)
     if new_files['png'] > 0:
-        Console.info(f"[VALIDATE] ✓ Created {new_files['png']} PNG chart files (expected behavior)")
+        Console.info(f"✓ Created {new_files['png']} PNG chart files (expected behavior)", component="VALIDATE")
     else:
-        Console.warn("[VALIDATE] ⚠ No PNG charts created (chart generation may be disabled)")
+        Console.warn("⚠ No PNG charts created (chart generation may be disabled)", component="VALIDATE")
     
     # Check 4: Performance target (<15s)
     if duration < 15.0:
-        Console.info(f"[VALIDATE] ✓ Performance target met: {duration:.2f}s < 15s")
+        Console.info(f"✓ Performance target met: {duration:.2f}s < 15s", component="VALIDATE")
     else:
-        Console.warn(f"[VALIDATE] ⚠ Performance target missed: {duration:.2f}s > 15s")
+        Console.warn(f"⚠ Performance target missed: {duration:.2f}s > 15s", component="VALIDATE")
     
     Console.info("")
     
     # Check SQL tables
     if run_id:
-        Console.info("[VALIDATE] Checking SQL table population...")
+        Console.info("Checking SQL table population...", component="VALIDATE")
         sql_client = SQLClient(cfg, db_section="acm")
         sql_client.connect()
         
@@ -258,25 +258,25 @@ def main():
         for table in critical_tables:
             count = table_counts.get(table, 0)
             if isinstance(count, str):  # Error
-                Console.error(f"[VALIDATE] ✗ {table}: {count}")
+                Console.error(f"✗ {table}: {count}", component="VALIDATE")
                 validation_passed = False
             elif count > 0:
-                Console.info(f"[VALIDATE] ✓ {table}: {count} rows")
+                Console.info(f"✓ {table}: {count} rows", component="VALIDATE")
             else:
-                Console.error(f"[VALIDATE] ✗ {table}: 0 rows (expected >0)")
+                Console.error(f"✗ {table}: 0 rows (expected >0)", component="VALIDATE")
                 validation_passed = False
         
         Console.info("")
-        Console.info("[VALIDATE] All SQL tables:")
+        Console.info("All SQL tables:", component="VALIDATE")
         for table, count in sorted(table_counts.items()):
             if isinstance(count, str):
-                Console.info(f"[VALIDATE]   {table}: {count}")
+                Console.info(f"{table}: {count}", component="VALIDATE")
             else:
-                Console.info(f"[VALIDATE]   {table}: {count:,} rows")
+                Console.info(f"{table}: {count:,} rows", component="VALIDATE")
         
         sql_client.conn.close()
     else:
-        Console.error("[VALIDATE] ✗ Could not extract RunID from pipeline output")
+        Console.error("✗ Could not extract RunID from pipeline output", component="VALIDATE")
         validation_passed = False
     
     # Final verdict

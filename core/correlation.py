@@ -1,4 +1,4 @@
-# core/correlation.py
+﻿# core/correlation.py
 """
 Multivariate correlation-break detection module.
 
@@ -18,7 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
 try:
-    from utils.logger import Console
+    from core.observability import Console, Heartbeat
 except ImportError as e:
     # If logger import fails, something is seriously wrong - fail fast
     raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
@@ -122,7 +122,7 @@ class MahalanobisDetector:
         
         n_dropped = n_features_orig - df.shape[1]
         if n_dropped > 0:
-            Console.debug(f"[MHAL] Dropped {n_dropped} constant/all-NaN columns")
+            Console.debug(f"Dropped {n_dropped} constant/all-NaN columns", component="MHAL")
         
         # Fallback if everything got dropped
         if df.shape[1] == 0:
@@ -137,7 +137,7 @@ class MahalanobisDetector:
         
         # Guard: insufficient samples
         if n_samples < 2:
-            Console.warn(f"[MHAL] Insufficient samples (n={n_samples}). Falling back to identity scoring.")
+            Console.warn(f"Insufficient samples (n={n_samples}). Falling back to identity scoring.", component="MHAL")
             self.pca = None
             self.cond_num = 1.0
             return self
@@ -218,7 +218,7 @@ class MahalanobisDetector:
         # Final NaN check
         nan_count = int(np.sum(~np.isfinite(result)))
         if nan_count > 0:
-            Console.warn(f"[MHAL] Output NaN audit: {nan_count}/{len(result)} non-finite scores detected")
+            Console.warn(f"Output NaN audit: {nan_count}/{len(result)} non-finite scores detected", component="MHAL")
             result = np.nan_to_num(result, nan=0.0, posinf=1e6, neginf=0.0)
         
         return result
@@ -245,30 +245,30 @@ class PCASubspaceDetector:
 
     def fit(self, X: pd.DataFrame) -> "PCASubspaceDetector":
         """Fit scaler + PCA on TRAIN safely."""
-        from utils.logger import Console
-        Console.info(f"[PCA] fit() entry: input shape={X.shape}")
+        from core.observability import Console, Heartbeat
+        Console.info(f"fit() entry: input shape={X.shape}", component="PCA")
         df = X.copy()
-        Console.info(f"[PCA] After copy: shape={df.shape}")
+        Console.info(f"After copy: shape={df.shape}", component="PCA")
 
         # Drop fully non-finite columns, then near-constants
         df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
-        Console.info(f"[PCA] After drop non-finite: shape={df.shape}")
+        Console.info(f"After drop non-finite: shape={df.shape}", component="PCA")
         std = df.astype("float64").std(axis=0)
         df = df.loc[:, std > 1e-6]
-        Console.info(f"[PCA] After drop near-constants: shape={df.shape}")
+        Console.info(f"After drop near-constants: shape={df.shape}", component="PCA")
 
         # If everything got dropped, inject a safe dummy feature
         if df.shape[1] == 0:
             df = pd.DataFrame({"_dummy": np.zeros(len(df), dtype=np.float64)}, index=df.index)
 
         # Impute + clip (guard wild magnitudes)
-        Console.info("[PCA] Computing medians for imputation...")
+        Console.info("Computing medians for imputation...", component="PCA")
         self.col_medians = df.median()
-        Console.info(f"[PCA] Imputing and clipping {df.shape[1]} columns...")
+        Console.info(f"Imputing and clipping {df.shape[1]} columns...", component="PCA")
         df = df.fillna(self.col_medians).clip(lower=-1e6, upper=1e6)
 
         self.keep_cols = list(df.columns)
-        Console.info(f"[PCA] Prepared {len(self.keep_cols)} features for PCA")
+        Console.info(f"Prepared {len(self.keep_cols)} features for PCA", component="PCA")
         
         # COR-02: Guard against insufficient samples for PCA after feature filtering
         # PCA requires at least 2 samples to compute meaningful components
@@ -283,11 +283,11 @@ class PCASubspaceDetector:
             return self
 
         # Scale
-        Console.info(f"[PCA] Scaling data: converting to float64...")
+        Console.info(f"Scaling data: converting to float64...", component="PCA")
         data_float = df.values.astype(np.float64, copy=False)
-        Console.info(f"[PCA] Fitting scaler on {data_float.shape} array...")
+        Console.info(f"Fitting scaler on {data_float.shape} array...", component="PCA")
         Xs = self.scaler.fit_transform(data_float)
-        Console.info(f"[PCA] Scaling complete: output shape={Xs.shape}")
+        Console.info(f"Scaling complete: output shape={Xs.shape}", component="PCA")
 
         # Choose a safe n_components
         n_samples, n_features = Xs.shape
@@ -297,11 +297,11 @@ class PCASubspaceDetector:
         except Exception:
             user_nc = 5
         k = int(max(1, min(user_nc, n_features, max(1, n_samples - 1))))
-        Console.info(f"[PCA] Using {k} components (n_samples={n_samples}, n_features={n_features})")
+        Console.info(f"Using {k} components (n_samples={n_samples}, n_features={n_features})", component="PCA")
         
         # Incremental path (CPU only)
         if self.cfg.get("incremental", False):
-            Console.info("[PCA] Using IncrementalPCA mode")
+            Console.info("Using IncrementalPCA mode", component="PCA")
             from sklearn.decomposition import IncrementalPCA
             self.pca = IncrementalPCA(  # type: ignore[assignment]
                 n_components=k,
@@ -309,18 +309,18 @@ class PCASubspaceDetector:
             )
             # partial_fit in batches
             bs = self.pca.batch_size or 256  # type: ignore[attr-defined]
-            Console.info(f"[PCA] Partial fitting in batches of {bs}...")
+            Console.info(f"Partial fitting in batches of {bs}...", component="PCA")
             for i in range(0, n_samples, bs):
                 batch_end = min(i+bs, n_samples)
-                Console.info(f"[PCA] Batch {i}-{batch_end} of {n_samples}")
+                Console.info(f"Batch {i}-{batch_end} of {n_samples}", component="PCA")
                 self.pca.partial_fit(Xs[i:batch_end])  # type: ignore[attr-defined]
-            Console.info("[PCA] IncrementalPCA fitting complete")
+            Console.info("IncrementalPCA fitting complete", component="PCA")
         else:
             # Default batch path
-            Console.info(f"[PCA] Starting standard PCA.fit() with svd_solver='full' on ({n_samples} x {n_features})...")
+            Console.info(f"Starting standard PCA.fit() with svd_solver='full' on ({n_samples} x {n_features})...", component="PCA")
             self.pca = PCA(n_components=k, svd_solver="full", random_state=17)
             self.pca.fit(Xs)
-            Console.info("[PCA] Standard PCA.fit() complete")
+            Console.info("Standard PCA.fit() complete", component="PCA")
             
         return self
 

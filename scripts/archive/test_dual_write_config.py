@@ -1,4 +1,4 @@
-"""
+﻿"""
 Test config loading and SQL connection for dual-write mode
 """
 import sys
@@ -11,7 +11,7 @@ sys.path.insert(0, str(project_root))
 
 from utils.config_dict import ConfigDict
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 _LOG_PREFIX_HANDLERS = (

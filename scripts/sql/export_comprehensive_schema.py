@@ -1,4 +1,4 @@
-"""
+﻿"""
 Comprehensive ACM Database Schema Export
 
 Generates a detailed markdown document with:
@@ -27,7 +27,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 def _fetch_tables(cur) -> list[str]:

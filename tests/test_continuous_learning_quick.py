@@ -1,4 +1,4 @@
-"""
+﻿"""
 Quick validation tests for SQL Mode Continuous Learning Architecture
 Tests core functionality of all 10 implemented tasks
 """
@@ -10,7 +10,7 @@ import time
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.logger import Console
+from core.observability import Console
 
 
 class QuickValidationTests:

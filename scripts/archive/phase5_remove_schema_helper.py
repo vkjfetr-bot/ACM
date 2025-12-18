@@ -61,9 +61,9 @@ def remove_schema_descriptor():
                         with open(schema_path, 'w') as f:
                             import json
                             json.dump(schema_descriptor, f, indent=2)
-                        Console.info(f"[ANALYTICS] Generated schema descriptor: {schema_path}")
+                        Console.info(f"Generated schema descriptor: {schema_path}", component="ANALYTICS")
                     except Exception as e:
-                        Console.warn(f"[ANALYTICS] Failed to generate schema descriptor: {e}")
+                        Console.warn(f"Failed to generate schema descriptor: {e}", component="ANALYTICS")
                     """
     
     if old_block in content:

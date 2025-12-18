@@ -1,4 +1,4 @@
-"""
+﻿"""
 Degradation Models for Health Forecasting (v10.0.0)
 
 Implements trend-based degradation models with uncertainty quantification.
@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from scipy import optimize
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 @dataclass

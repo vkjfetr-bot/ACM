@@ -1,0 +1,31 @@
+# Pyroscope Configuration for Docker
+# ====================================
+
+target: all
+
+server:
+  http_listen_port: 4040
+  grpc_listen_port: 4041
+  log_level: info
+
+storage:
+  backend: filesystem
+  filesystem:
+    dir: /var/pyroscope/data
+
+memberlist:
+  join_members: []
+
+ingester:
+  lifecycler:
+    ring:
+      replication_factor: 1
+
+compactor:
+  compaction_interval: 30s
+
+limits:
+  max_query_length: 24h
+  max_query_lookback: 168h
+  ingestion_rate_mb: 4
+  ingestion_burst_size_mb: 2

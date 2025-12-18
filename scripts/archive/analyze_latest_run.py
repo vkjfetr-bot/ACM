@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 <<<<<<< HEAD
 from pathlib import Path
 
@@ -17,7 +17,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 >>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
-from utils.logger import Console
+from core.observability import Console
 
 run_dir = Path(r"artifacts/FD_FAN_COLDSTART").glob("run_*")
 run_dir = max(run_dir, key=lambda p: p.name)  # latest by name timestamp

@@ -1,4 +1,4 @@
-# core/multivariate_forecast.py
+﻿# core/multivariate_forecast.py
 """
 Multivariate Time Series Forecasting Module (v10.1.0)
 
@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 @dataclass

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Test script for SQL-44: Verify SQL historian data loading
 """
 import sys
@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 from core.sql_client import SQLClient
 from core.output_manager import OutputManager
-from utils.logger import Console
+from core.observability import Console
 
 
 _LOG_PREFIX_HANDLERS = (

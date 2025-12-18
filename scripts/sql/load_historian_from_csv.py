@@ -1,4 +1,4 @@
-"""
+﻿"""
 Load CSV data files into ACM_HistorianData table.
 This script populates the SQL historian table from the CSV files in data/ folder.
 """
@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 def load_csv_to_historian(equip_id: int, equip_code: str, csv_path: Path, sql_client: SQLClient):

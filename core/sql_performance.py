@@ -1,4 +1,4 @@
-"""
+﻿"""
 SQL Performance Optimization Module
 
 Provides:
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 import pandas as pd
 import numpy as np
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 
 
 class SQLPerformanceMonitor:
@@ -66,13 +66,13 @@ class SQLPerformanceMonitor:
         if report["total_operations"] == 0:
             return
         
-        Console.info(f"[SQL_PERF] Write performance summary:")
-        Console.info(f"[SQL_PERF]   Operations: {report['total_operations']}")
-        Console.info(f"[SQL_PERF]   Total rows: {report['total_rows']:,}")
-        Console.info(f"[SQL_PERF]   Total time: {report['total_time']:.2f}s")
-        Console.info(f"[SQL_PERF]   Avg throughput: {report['avg_throughput']:.0f} rows/s")
-        Console.info(f"[SQL_PERF]   Slowest: {report['slowest_table']} ({max([op['duration'] for op in self.operation_times]):.2f}s)")
-        Console.info(f"[SQL_PERF]   Fastest: {report['fastest_table']} ({min([op['duration'] for op in self.operation_times]):.2f}s)")
+        Console.info(f"Write performance summary:", component="SQL_PERF")
+        Console.info(f"Operations: {report['total_operations']}", component="SQL_PERF")
+        Console.info(f"Total rows: {report['total_rows']:,}", component="SQL_PERF")
+        Console.info(f"Total time: {report['total_time']:.2f}s", component="SQL_PERF")
+        Console.info(f"Avg throughput: {report['avg_throughput']:.0f} rows/s", component="SQL_PERF")
+        Console.info(f"Slowest: {report['slowest_table']} ({max([op['duration'] for op in self.operation_times]):.2f}s)", component="SQL_PERF")
+        Console.info(f"Fastest: {report['fastest_table']} ({min([op['duration'] for op in self.operation_times]):.2f}s)", component="SQL_PERF")
 
 
 class SQLBatchWriter:
@@ -108,7 +108,7 @@ class SQLBatchWriter:
                 self.sql_client.conn.commit()
             elif hasattr(self.sql_client, "commit"):
                 self.sql_client.commit()
-            Console.info("[SQL_PERF] Transaction committed successfully")
+            Console.info("Transaction committed successfully", component="SQL_PERF")
         except Exception as e:
             # Rollback on error
             try:
@@ -116,7 +116,7 @@ class SQLBatchWriter:
                     self.sql_client.conn.rollback()
                 elif hasattr(self.sql_client, "rollback"):
                     self.sql_client.rollback()
-                Console.error(f"[SQL_PERF] Transaction rolled back: {e}")
+                Console.error(f"Transaction rolled back: {e}", component="SQL_PERF")
             except:
                 pass
             raise
@@ -177,12 +177,12 @@ class SQLBatchWriter:
             
             duration = time.time() - start_time
             self.monitor.record_operation(table_name, inserted, duration)
-            Console.info(f"[SQL_PERF] {table_name}: {inserted} rows in {duration:.2f}s ({inserted/duration:.0f} rows/s)")
+            Console.info(f"{table_name}: {inserted} rows in {duration:.2f}s ({inserted/duration:.0f} rows/s)", component="SQL_PERF")
             
             return inserted
             
         except Exception as e:
-            Console.error(f"[SQL_PERF] Failed to write {table_name}: {e}")
+            Console.error(f"Failed to write {table_name}: {e}", component="SQL_PERF")
             raise
     
     def write_multiple_tables(self, tables: List[Tuple[str, pd.DataFrame]]) -> Dict[str, int]:
@@ -203,7 +203,7 @@ class SQLBatchWriter:
                     rows = self.write_table(table_name, df, delete_existing=True)
                     results[table_name] = rows
                 except Exception as e:
-                    Console.error(f"[SQL_PERF] Failed writing {table_name}, rolling back all: {e}")
+                    Console.error(f"Failed writing {table_name}, rolling back all: {e}", component="SQL_PERF")
                     raise
         
         return results

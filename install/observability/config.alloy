@@ -1,0 +1,117 @@
+// Grafana Alloy Configuration for ACM Observability Stack
+// =========================================================
+// 
+// Copy this file to: C:\Program Files\GrafanaLabs\Alloy\config.alloy
+// Then restart Alloy service: Restart-Service Alloy
+//
+// This config receives OTLP telemetry from ACM Python applications
+// and forwards to the Docker-based Grafana stack:
+//   - Traces  -> Tempo (localhost:4320)
+//   - Logs    -> Loki (localhost:3100)
+//   - Metrics -> Prometheus (localhost:9090)
+
+// ============================================================================
+// LOGGING CONFIG
+// ============================================================================
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ============================================================================
+// OTLP RECEIVER
+// Accepts traces, metrics, and logs from Python OpenTelemetry SDK
+// Python apps should set: OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+// ============================================================================
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces  = [otelcol.processor.batch.default.input]
+    metrics = [otelcol.processor.batch.metrics.input]
+    logs    = [otelcol.processor.batch.default.input]
+  }
+}
+
+// ============================================================================
+// BATCH PROCESSOR - Traces and Logs
+// ============================================================================
+otelcol.processor.batch "default" {
+  timeout = "5s"
+  send_batch_size = 1000
+  send_batch_max_size = 2000
+
+  output {
+    traces  = [otelcol.exporter.otlp.tempo.input]
+    logs    = [otelcol.exporter.loki.default.input]
+  }
+}
+
+// ============================================================================
+// BATCH PROCESSOR - Metrics (separate for different export)
+// ============================================================================
+otelcol.processor.batch "metrics" {
+  timeout = "10s"
+  send_batch_size = 500
+
+  output {
+    metrics = [otelcol.exporter.prometheus.default.input]
+  }
+}
+
+// ============================================================================
+// TEMPO EXPORTER
+// Sends traces to Grafana Tempo (Docker container)
+// Tempo OTLP is remapped to port 4320 to avoid conflict with Alloy's 4317
+// ============================================================================
+otelcol.exporter.otlp "tempo" {
+  client {
+    // Tempo Docker container exposed on host port 4320 (gRPC)
+    endpoint = "localhost:4320"
+    tls {
+      insecure = true
+      insecure_skip_verify = true
+    }
+  }
+}
+
+// ============================================================================
+// PROMETHEUS EXPORTER
+// Converts OTEL metrics to Prometheus format and remote-writes to Prometheus
+// ============================================================================
+otelcol.exporter.prometheus "default" {
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = "http://localhost:9090/api/v1/write"
+  }
+  external_labels = {
+    source = "alloy",
+    app    = "acm",
+  }
+}
+
+// ============================================================================
+// LOKI EXPORTER
+// Sends logs to Grafana Loki (Docker container)
+// ============================================================================
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://localhost:3100/loki/api/v1/push"
+  }
+  external_labels = {
+    source = "alloy",
+    app    = "acm",
+  }
+}

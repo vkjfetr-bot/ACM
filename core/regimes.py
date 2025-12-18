@@ -28,7 +28,7 @@ except Exception:
     OutputManager = None  # type: ignore
 import matplotlib.pyplot as plt
 
-from utils.logger import Console
+from core.observability import Console, Heartbeat
 import hashlib
 
 try:
@@ -347,14 +347,14 @@ def build_feature_basis(
                 available_operational.append(tag)
         
         if available_operational:
-            Console.info(f"[REGIME] v10.1.0: Using {len(available_operational)} raw operational sensors for regime clustering: {available_operational[:5]}{'...' if len(available_operational) > 5 else ''}")
+            Console.info(f"v10.1.0: Using {len(available_operational)} raw operational sensors for regime clustering: {available_operational[:5]}{'...' if len(available_operational) > 5 else ''}", component="REGIME")
             used_raw_tags = available_operational
             train_raw = raw_train.reindex(train_features.index)[available_operational].astype(float).ffill().bfill().fillna(0.0)
             score_raw = raw_score.reindex(score_features.index)[available_operational].astype(float).ffill().bfill().fillna(0.0)
             train_parts.append(train_raw)
             score_parts.append(score_raw)
         else:
-            Console.warn(f"[REGIME] v10.1.0: No operational columns found matching keywords {operational_keywords[:5]}. Falling back to PCA features.")
+            Console.warn(f"v10.1.0: No operational columns found matching keywords {operational_keywords[:5]}. Falling back to PCA features.", component="REGIME")
 
     # Only use PCA features if raw sensors not available or insufficient
     if not train_parts and pca_detector is not None and getattr(pca_detector, "pca", None) is not None:
@@ -376,11 +376,11 @@ def build_feature_basis(
                     
                     # FIX #5: Validate PCA variance for numerical stability
                     if not np.isfinite(pca_variance_ratio) or pca_variance_ratio < 0 or pca_variance_ratio > 1.0:
-                        Console.warn(f"[REGIME] PCA variance ratio out of bounds: {pca_variance_ratio}. Resetting to NaN.")
+                        Console.warn(f"PCA variance ratio out of bounds: {pca_variance_ratio}. Resetting to NaN.", component="REGIME")
                         pca_variance_ratio = float("nan")
                         pca_variance_vector = None
                     elif any(not np.isfinite(v) for v in pca_variance_vector):
-                        Console.warn("[REGIME] PCA variance vector contains non-finite values. Check numerical stability.")
+                        Console.warn("PCA variance vector contains non-finite values. Check numerical stability.", component="REGIME")
                         
                 cols = [f"PCA_{i+1}" for i in range(n_pca_used)]
                 train_parts.append(pd.DataFrame(train_scores[:, :n_pca_used], index=train_features.index, columns=cols))
@@ -487,7 +487,7 @@ def _fit_kmeans_scaled(
     if max_models > 0:
         allowed_max = k_min + max_models - 1
         if k_max > allowed_max:
-            Console.warn(f"[REGIME] Limiting auto-k sweep to {max_models} models (k_max {k_max}->{allowed_max}) for budget")
+            Console.warn(f"Limiting auto-k sweep to {max_models} models (k_max {k_max}->{allowed_max}) for budget", component="REGIME")
             k_max = allowed_max
 
     # FIX #7: Sample for evaluation using uniform random sampling instead of
@@ -592,10 +592,10 @@ def _fit_kmeans_scaled(
     )
     if silhouette_scores:
         formatted = ", ".join(f"k={k}: {score:.3f}" for k, score in sorted(silhouette_scores))
-        Console.info(f"[REGIME] Silhouette sweep: {formatted}")
+        Console.info(f"Silhouette sweep: {formatted}", component="REGIME")
     elif all_scores:
         formatted = ", ".join(f"k={k}: {score:.3f}" for k, score in sorted(all_scores))
-        Console.info(f"[REGIME] Score sweep: {formatted}")
+        Console.info(f"Score sweep: {formatted}", component="REGIME")
 
     return scaler, best_model, int(best_k), float(best_score), best_metric, all_scores, low_quality
 
@@ -609,10 +609,10 @@ def fit_regime_model(
     input_issues = _validate_regime_inputs(train_basis, "train_basis")
     config_issues = _validate_regime_config(cfg)
     for issue in input_issues:
-        Console.warn(f"[REGIME] Input validation: {issue}")
+        Console.warn(f"Input validation: {issue}", component="REGIME")
     # Config issues suppressed - defaults are applied automatically
     # for issue in config_issues:
-    #     Console.warn(f"[REGIME] Config validation: {issue}")
+    #     Console.warn(f"Config validation: {issue}", component="REGIME")
 
     (
         scaler,
@@ -874,7 +874,7 @@ def build_summary_dataframe(model: RegimeModel) -> pd.DataFrame:
         if not np.isfinite(total_duration) or total_duration <= 0:
             # Ultimate fallback: sample counts
             total_duration = float(sum(stat.get("count", 0) for stat in stats.values()))
-            Console.warn("[REGIME] build_summary_dataframe: using sample counts as duration proxy (legacy model)")
+            Console.warn("build_summary_dataframe: using sample counts as duration proxy (legacy model)", component="REGIME")
 
     rows: List[Dict[str, Any]] = []
     for label, stat in stats.items():
@@ -1188,16 +1188,16 @@ def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None,
                 return pd.DataFrame(columns=["start_ts", "end_ts"])
         except Exception as e:
             # SQL query failed, fall back to CSV
-            from utils.logger import Console
-            Console.warn(f"[REGIME] SQL episode read failed, falling back to CSV: {e}")
+            from core.observability import Console, Heartbeat
+            Console.warn(f"SQL episode read failed, falling back to CSV: {e}", component="REGIME")
     
     # REG-CSV-01: Fallback to CSV for file-mode/dev or if SQL unavailable
     safe_base = Path.cwd()
     try:
         resolved = p.resolve()
         if not resolved.is_relative_to(safe_base):
-            from utils.logger import Console
-            Console.warn(f"[REGIME] Episode path outside workspace: {resolved}")
+            from core.observability import Console, Heartbeat
+            Console.warn(f"Episode path outside workspace: {resolved}", component="REGIME")
             return pd.DataFrame(columns=["start_ts", "end_ts"])
     except Exception:
         pass
@@ -1214,7 +1214,7 @@ def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None,
     valid_mask = df["start_ts"].notna() & df["end_ts"].notna()
     nat_count = (~valid_mask).sum()
     if nat_count > 0:
-        Console.warn(f"[REGIME] Filtering {nat_count} episodes with invalid timestamps (NaT)")
+        Console.warn(f"Filtering {nat_count} episodes with invalid timestamps (NaT)", component="REGIME")
         df = df[valid_mask]
     
     # FIX #9: Validate end_ts > start_ts
@@ -1229,7 +1229,7 @@ def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None,
     
     final_count = len(df)
     if final_count < initial_count:
-        Console.info(f"[REGIME] Episodes after validation: {final_count}/{initial_count}")
+        Console.info(f"Episodes after validation: {final_count}/{initial_count}", component="REGIME")
     
     return df
 
@@ -1295,24 +1295,24 @@ def _read_scores_csv(p: Path, sql_client=None, equip_id: Optional[int] = None, r
                     df_clean = df[~df.index.isna()]
                     dropped = len(df) - len(df_clean)
                     if dropped > 0:
-                        Console.warn(f"[REGIME] Dropped {dropped} rows with invalid timestamps from SQL scores")
+                        Console.warn(f"Dropped {dropped} rows with invalid timestamps from SQL scores", component="REGIME")
                     return df_clean
                 else:
-                    Console.warn("[REGIME] SQL scores missing Timestamp column")
+                    Console.warn("SQL scores missing Timestamp column", component="REGIME")
                     return pd.DataFrame()
             else:
                 # No scores found in SQL, return empty
                 return pd.DataFrame()
         except Exception as e:
             # SQL query failed, fall back to CSV
-            Console.warn(f"[REGIME] SQL scores read failed, falling back to CSV: {e}")
+            Console.warn(f"SQL scores read failed, falling back to CSV: {e}", component="REGIME")
     
     # REG-CSV-01: Fallback to CSV for file-mode/dev or if SQL unavailable
     safe_base = Path.cwd()
     try:
         resolved = p.resolve()
         if not resolved.is_relative_to(safe_base):
-            Console.warn(f"[REGIME] Scores path outside workspace: {resolved}")
+            Console.warn(f"Scores path outside workspace: {resolved}", component="REGIME")
             return pd.DataFrame()
     except Exception:
         pass
@@ -1324,7 +1324,7 @@ def _read_scores_csv(p: Path, sql_client=None, equip_id: Optional[int] = None, r
     df_clean = df[~df.index.isna()]
     dropped = len(df) - len(df_clean)
     if dropped > 0:
-        Console.warn(f"[REGIME] Dropped {dropped} rows with invalid timestamps from scores.csv")
+        Console.warn(f"Dropped {dropped} rows with invalid timestamps from scores.csv", component="REGIME")
     return df_clean
 
 # -----------------------------------
@@ -1602,7 +1602,7 @@ def align_regime_labels(
     if new_centers.shape[0] != prev_centers.shape[0]:
         new_k = new_centers.shape[0]
         prev_k = prev_centers.shape[0]
-        Console.info(f"[REGIME_ALIGN] Cluster count changed: prev_k={prev_k}, new_k={new_k}")
+        Console.info(f"Cluster count changed: prev_k={prev_k}, new_k={new_k}", component="REGIME_ALIGN")
         
         # FIX #1: Actually apply the mapping when cluster counts differ
         # Use Hungarian algorithm for partial optimal matching
@@ -1658,7 +1658,7 @@ def align_regime_labels(
             new_model.kmeans.cluster_centers_ = reordered
             mapping = col_ind.tolist() if hasattr(col_ind, 'tolist') else list(col_ind)
         
-        Console.info(f"[REGIME_ALIGN] Applied cluster reordering for k change: {new_k} clusters aligned to {prev_k}")
+        Console.info(f"Applied cluster reordering for k change: {new_k} clusters aligned to {prev_k}", component="REGIME_ALIGN")
         new_model.meta["prev_cluster_mapping"] = mapping.tolist() if hasattr(mapping, 'tolist') else list(mapping)
         new_model.meta["alignment_k_change"] = {"from": prev_k, "to": new_k}
         return new_model
@@ -1673,7 +1673,7 @@ def align_regime_labels(
     unique_mapping = len(set(mapping)) == len(mapping)
     
     if not unique_mapping:
-        Console.warn(f"[REGIME_ALIGN] Non-unique mapping detected: {mapping}. Using optimal assignment.")
+        Console.warn(f"Non-unique mapping detected: {mapping}. Using optimal assignment.", component="REGIME_ALIGN")
         # Use Hungarian algorithm for optimal 1:1 assignment
         from scipy.optimize import linear_sum_assignment
         from scipy.spatial.distance import cdist
@@ -1689,7 +1689,7 @@ def align_regime_labels(
     # Store mapping in metadata
     new_model.meta["cluster_reorder_mapping"] = mapping.tolist()
     
-    Console.info(f"[REGIME_ALIGN] Aligned {len(mapping)} clusters to previous model")
+    Console.info(f"Aligned {len(mapping)} clusters to previous model", component="REGIME_ALIGN")
     
     return new_model
 
@@ -1778,7 +1778,7 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
         return out
 
     if bool(_cfg_get(cfg, "regimes.allow_legacy_label", False)):
-        Console.warn("[REGIME] Falling back to legacy labeling path (allow_legacy_label=True)")
+        Console.warn("Falling back to legacy labeling path (allow_legacy_label=True)", component="REGIME")
         return _legacy_label(score_df, ctx, out, cfg)
     raise RuntimeError("[REGIME] Regime model unavailable and legacy path disabled (regimes.allow_legacy_label=False)")
 
@@ -1934,7 +1934,7 @@ def run(ctx: Any) -> Dict[str, Any]:
         try:
             regime_model = load_regime_model(models_dir)
         except Exception as load_exc:
-            Console.warn(f"[REGIME] Failed to load regime model for reporting: {load_exc}")
+            Console.warn(f"Failed to load regime model for reporting: {load_exc}", component="REGIME")
 
     if regime_model is not None:
         summary_df = build_summary_dataframe(regime_model)
@@ -2152,9 +2152,9 @@ def save_regime_model(model: RegimeModel, models_dir: Path) -> None:
             'kmeans': model.kmeans,
             'train_hash': model.train_hash,
         }, joblib_path)
-        Console.info(f"[REGIME] Saved regime models (KMeans+Scaler) -> {joblib_path}")
+        Console.info(f"Saved regime models (KMeans+Scaler) -> {joblib_path}", component="REGIME")
     except Exception as e:
-        Console.warn(f"[REGIME] Failed to save regime joblib: {e}")
+        Console.warn(f"Failed to save regime joblib: {e}", component="REGIME")
         _persist_regime_error(e, models_dir)
         raise
     
@@ -2170,9 +2170,9 @@ def save_regime_model(model: RegimeModel, models_dir: Path) -> None:
         else:
             with json_path.open("w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
-        Console.info(f"[REGIME] Saved regime metadata -> {json_path}")
+        Console.info(f"Saved regime metadata -> {json_path}", component="REGIME")
     except Exception as e:
-        Console.warn(f"[REGIME] Failed to save regime metadata: {e}")
+        Console.warn(f"Failed to save regime metadata: {e}", component="REGIME")
         _persist_regime_error(e, models_dir)
         raise
 
@@ -2197,11 +2197,11 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
     
     # Check if both files exist
     if not joblib_path.exists():
-        Console.info(f"[REGIME] No cached regime model found at {joblib_path}")
+        Console.info(f"No cached regime model found at {joblib_path}", component="REGIME")
         return None
     
     if not json_path.exists():
-        Console.warn(f"[REGIME] Regime joblib exists but metadata missing: {json_path}")
+        Console.warn(f"Regime joblib exists but metadata missing: {json_path}", component="REGIME")
         return None
     
     try:
@@ -2242,7 +2242,7 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
             meta=meta,
         )
         
-        Console.info(f"[REGIME] Loaded cached regime model from {joblib_path}")
+        Console.info(f"Loaded cached regime model from {joblib_path}", component="REGIME")
         cluster_count = getattr(kmeans, "n_clusters", model.meta.get("best_k"))
         Console.info(
             f"[REGIME]   - K={cluster_count}, features={len(model.feature_columns)}, train_hash={train_hash}"
@@ -2250,7 +2250,7 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
         return model
         
     except Exception as e:
-        Console.warn(f"[REGIME] Failed to load regime model: {e}")
+        Console.warn(f"Failed to load regime model: {e}", component="REGIME")
         return None
 
 
@@ -2268,7 +2268,7 @@ def detect_transient_states(
     default_states = np.array(["steady"] * n_samples, dtype=object)
 
     if not enabled:
-        Console.info("[TRANSIENT] Detection disabled in config")
+        Console.info("Detection disabled in config", component="TRANSIENT")
         return default_states
 
     if n_samples == 0:
@@ -2283,7 +2283,7 @@ def detect_transient_states(
 
     numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
     if not numeric_cols:
-        Console.warn("[TRANSIENT] No numeric columns for ROC calculation")
+        Console.warn("No numeric columns for ROC calculation", component="TRANSIENT")
         return default_states
 
     # FIX #8: Validate sensor_weights_cfg keys match available columns
@@ -2298,7 +2298,7 @@ def detect_transient_states(
                 f"{unmatched_cols[:3]}{'...' if len(unmatched_cols) > 3 else ''}"
             )
         if matched_cols:
-            Console.info(f"[TRANSIENT] Using custom weights for {len(matched_cols)} sensors")
+            Console.info(f"Using custom weights for {len(matched_cols)} sensors", component="TRANSIENT")
     
     # FIX #8: Document why abs() is used and preserve relative importance
     # Absolute value is used because weights should be non-negative for ROC aggregation
@@ -2306,12 +2306,12 @@ def detect_transient_states(
     # Normalization happens AFTER abs() to maintain relative importance ratios
     raw_weights = np.array([float(sensor_weights_cfg.get(col, 1.0)) for col in numeric_cols], dtype=float)
     if np.any(raw_weights < 0):
-        Console.info("[TRANSIENT] Negative weights found; using absolute values for ROC aggregation")
+        Console.info("Negative weights found; using absolute values for ROC aggregation", component="TRANSIENT")
     weights = np.abs(raw_weights)
     
     if not np.isfinite(weights).all() or weights.sum() <= 0:
         weights = np.ones(len(numeric_cols), dtype=float)
-        Console.warn("[TRANSIENT] Invalid weights detected; falling back to uniform weights")
+        Console.warn("Invalid weights detected; falling back to uniform weights", component="TRANSIENT")
     weights /= weights.sum()
 
     data_numeric = data[numeric_cols].apply(pd.to_numeric, errors="coerce").ffill().bfill()
@@ -2365,7 +2365,7 @@ def detect_transient_states(
     states[trip_mask] = "trip"
 
     state_counts = pd.Series(states).value_counts().to_dict()
-    Console.info(f"[TRANSIENT] State distribution: {state_counts}")
+    Console.info(f"State distribution: {state_counts}", component="TRANSIENT")
 
     return states
 

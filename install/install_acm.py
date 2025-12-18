@@ -1,4 +1,4 @@
-"""
+﻿"""
 One-shot installer for ACM SQL schema.
 
 Runs the generated SQL scripts in install/sql in order:
@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 import pyodbc
 
 from core.sql_client import SQLClient
-from utils.logger import Console
+from core.observability import Console
 
 
 SQL_DIR = ROOT / "install" / "sql"
