@@ -131,7 +131,7 @@ def format_culprit_label(culprit_string: str, use_short: bool = False) -> str:
     
     Handles both simple detector codes and detector+sensor patterns:
     - 'ar1_z' -> 'Time-Series Anomaly (AR1)'
-    - 'pca_spe_z(DEMO.SIM.FSAB)' -> 'Correlation Break (PCA-SPE) → DEMO.SIM.FSAB'
+    - 'pca_spe_z(DEMO.SIM.FSAB)' -> 'Correlation Break (PCA-SPE) -> DEMO.SIM.FSAB'
     
     Args:
         culprit_string: Original culprit string from episodes
@@ -145,7 +145,7 @@ def format_culprit_label(culprit_string: str, use_short: bool = False) -> str:
         'Density Anomaly (GMM)'
         
         >>> format_culprit_label('pca_spe_z(Temperature_01)')
-        'Correlation Break (PCA-SPE) → Temperature_01'
+        'Correlation Break (PCA-SPE) -> Temperature_01'
         
         >>> format_culprit_label('ar1_z', use_short=True)
         'Time-Series (AR1)'
@@ -160,7 +160,7 @@ def format_culprit_label(culprit_string: str, use_short: bool = False) -> str:
         sensor = culprit_string[culprit_string.index('(')+1:culprit_string.index(')')]
         
         detector_label = get_detector_label(detector_code, use_short)
-        return f"{detector_label} → {sensor}"
+        return f"{detector_label} -> {sensor}"
     else:
         # Just detector code
         return get_detector_label(culprit_string, use_short)
@@ -182,7 +182,7 @@ def parse_and_label_culprits(culprit_string: str, use_short: bool = False) -> li
         ['Time-Series Anomaly (AR1)', 'Density Anomaly (GMM)']
         
         >>> parse_and_label_culprits('pca_spe_z(Sensor1),iforest_z')
-        ['Correlation Break (PCA-SPE) → Sensor1', 'Rare State (IsolationForest)']
+        ['Correlation Break (PCA-SPE) -> Sensor1', 'Rare State (IsolationForest)']
     """
     if not culprit_string:
         return []

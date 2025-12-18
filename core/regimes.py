@@ -347,14 +347,14 @@ def build_feature_basis(
                 available_operational.append(tag)
         
         if available_operational:
-            Console.info(f"v10.1.0: Using {len(available_operational)} raw operational sensors for regime clustering: {available_operational[:5]}{'...' if len(available_operational) > 5 else ''}", component="REGIME")
+            Console.info(f"Using {len(available_operational)} raw operational sensors for regime clustering: {available_operational[:5]}{'...' if len(available_operational) > 5 else ''}", component="REGIME")
             used_raw_tags = available_operational
             train_raw = raw_train.reindex(train_features.index)[available_operational].astype(float).ffill().bfill().fillna(0.0)
             score_raw = raw_score.reindex(score_features.index)[available_operational].astype(float).ffill().bfill().fillna(0.0)
             train_parts.append(train_raw)
             score_parts.append(score_raw)
         else:
-            Console.warn(f"v10.1.0: No operational columns found matching keywords {operational_keywords[:5]}. Falling back to PCA features.", component="REGIME")
+            Console.warn(f"No operational columns found matching keywords {operational_keywords[:5]}. Falling back to PCA features.", component="REGIME")
 
     # Only use PCA features if raw sensors not available or insufficient
     if not train_parts and pca_detector is not None and getattr(pca_detector, "pca", None) is not None:

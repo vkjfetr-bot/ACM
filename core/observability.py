@@ -180,6 +180,29 @@ _init_lock = threading.Lock()
 
 
 # =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def _check_endpoint_reachable(endpoint: str, timeout: float = 1.0) -> bool:
+    """Check if an HTTP endpoint is reachable (quick connectivity test)."""
+    import socket
+    from urllib.parse import urlparse
+    
+    try:
+        parsed = urlparse(endpoint)
+        host = parsed.hostname or "localhost"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+
+# =============================================================================
 # INITIALIZATION
 # =============================================================================
 
@@ -258,6 +281,13 @@ def init(
         
         # OpenTelemetry setup for tracing
         if not OTEL_AVAILABLE or not OTEL_EXPORTERS_AVAILABLE:
+            _initialized = True
+            return
+        
+        # Pre-check OTLP endpoint connectivity to avoid noisy export errors
+        otlp_reachable = _check_endpoint_reachable(otlp_endpoint)
+        if not otlp_reachable:
+            Console.warn(f"[OTEL] OTLP endpoint not reachable at {otlp_endpoint} - tracing/metrics disabled")
             _initialized = True
             return
         

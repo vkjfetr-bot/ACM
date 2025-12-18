@@ -157,6 +157,12 @@ except Exception:
             return _C()
         def log(self, *a, **k): pass
 
+# Version import (used for dynamic version in log messages)
+try:
+    from utils.version import __version__ as ACM_VERSION
+except ImportError:
+    ACM_VERSION = "unknown"
+
 
 # Console from observability (backwards compatible)
 # Console is now imported above from core.observability
@@ -4170,11 +4176,11 @@ def main() -> None:
                 # The legacy quick-forecast is replaced by the full enhanced forecasting
                 # module which runs after analytics generation and provides richer outputs.
 
-                # === RUL + FORECASTING (v10.0.0 Unified Engine) ===
+                # === RUL + FORECASTING (Unified Engine) ===
                 with T.section("outputs.forecasting"):
                     try:
-                        # v10.0.0: Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
-                        Console.info("Running unified forecasting engine (v10.0.0)", component="FORECAST")
+                        # Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
+                        Console.info(f"Running unified forecasting engine (v{ACM_VERSION})", component="FORECAST")
                         forecast_engine = ForecastEngine(
                             sql_client=getattr(output_manager, "sql_client", None),
                             output_manager=output_manager,
