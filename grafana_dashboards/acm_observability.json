@@ -611,7 +611,7 @@
       "type": "bargauge",
       "targets": [
         {
-          "expr": "topk(10, sum by (stage) (rate(acm_stage_duration_seconds_sum{equipment=~\"$equipment\"}[1h])) / sum by (stage) (rate(acm_stage_duration_seconds_count{equipment=~\"$equipment\"}[1h])))",
+          "expr": "topk(10, sum by (stage) (acm_stage_duration_seconds_sum{equipment=~\"$equipment\"}) / clamp_min(sum by (stage) (acm_stage_duration_seconds_count{equipment=~\"$equipment\"}), 1))",
           "legendFormat": "{{stage}}"
         }
       ]
