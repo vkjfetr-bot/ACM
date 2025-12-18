@@ -681,12 +681,9 @@
       "type": "traces",
       "targets": [
         {
-          "queryType": "traceqlSearch",
+          "queryType": "nativeSearch",
           "limit": 50,
-          "tableType": "traces",
-          "filters": [
-            { "id": "service", "operator": "=", "scope": "resource", "tag": "service.name", "value": ["acm-pipeline"] }
-          ]
+          "serviceName": "acm-pipeline"
         }
       ]
     },
@@ -722,12 +719,9 @@
       "type": "timeseries",
       "targets": [
         {
-          "queryType": "traceqlSearch",
+          "queryType": "nativeSearch",
           "limit": 100,
-          "tableType": "spans",
-          "filters": [
-            { "id": "service", "operator": "=", "scope": "resource", "tag": "service.name", "value": ["acm-pipeline"] }
-          ]
+          "serviceName": "acm-pipeline"
         }
       ]
     },
@@ -760,12 +754,9 @@
       "type": "bargauge",
       "targets": [
         {
-          "queryType": "traceqlSearch",
+          "queryType": "nativeSearch",
           "limit": 20,
-          "tableType": "spans",
-          "filters": [
-            { "id": "service", "operator": "=", "scope": "resource", "tag": "service.name", "value": ["acm-pipeline"] }
-          ]
+          "serviceName": "acm-pipeline"
         }
       ]
     },
