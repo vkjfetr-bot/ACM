@@ -2,9 +2,17 @@
 
 This handbook is a complete, implementation-level walkthrough of ACM V10 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
 
-**Current Version:** v10.2.0 - MHAL Deprecated, Simplified 6-Detector Architecture
+**Current Version:** v10.3.0 - Consolidated Observability Stack
 
 ### Recent Deltas (Dec 2025)
+- **v10.3.0**: Consolidated observability stack with unified `core/observability.py`:
+  - Removed legacy loggers: `utils/logger.py`, `utils/acm_logger.py`, `core/sql_logger.py`, `core/sql_logger_v2.py`
+  - Unified Console API: `Console.info/warn/error/ok/status/header` for all logging
+  - OpenTelemetry integration: Traces to Tempo, metrics to Prometheus, logs to Loki
+  - Grafana Pyroscope: Continuous profiling for performance analysis
+  - Timer metrics: `utils/timer.py` emits OTEL spans and Prometheus histograms
+  - New dashboards: `acm_observability.json`, `acm_performance_monitor.json`
+  - Install scripts: `install/observability/` with Docker Compose stack
 - **v10.2.0**: Mahalanobis detector deprecated - mathematically redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable in orthogonal space. Simplified to 6 active detectors.
 - Scripts cleanup: Single-purpose analysis/check/debug scripts archived to `scripts/archive/`. Schema updater remains: `scripts/sql/export_comprehensive_schema.py`.
 - Forecast/RUL refactor complete: `core/forecast_engine.py` is primary.
@@ -66,8 +74,15 @@ This handbook is a complete, implementation-level walkthrough of ACM V10 for new
   - `core/regimes.py`, `core/drift.py`, `core/fuse.py`, `core/fast_features.py`, `core/outliers.py`, `core/correlation.py`: Detector heads and feature plumbing used by `acm_main`.
   - `core/sql_client.py`: Thin pyodbc wrapper used by SQL mode (SP calls, retries).
   - `core/smart_coldstart.py`: Coldstart retry/orchestration when SQL historian is sparse.
-  - `core/observability.py`: Consolidated observability stack (OpenTelemetry traces/metrics, structlog logging, Pyroscope profiling). See `docs/OBSERVABILITY.md`.
-  - `utils/logger.py`, `utils/timer.py`: Base Console logging, SQL sink integration, heartbeat, timing helpers.
+  - `core/observability.py`: **Unified observability module** (v10.3.0) providing:
+    - `Console` class: Structured logging with `.info()/.warn()/.error()/.ok()/.status()/.header()`
+    - `Span` class: OpenTelemetry trace spans with automatic context propagation
+    - `Metrics` class: Prometheus counters, histograms, gauges
+    - `log_timer()`: Structured timer logs for Grafana visualization
+    - Automatic Loki integration via structlog + Grafana Alloy
+    - Pyroscope profiling hooks for performance analysis
+    - See `docs/OBSERVABILITY.md` for full API reference
+  - `utils/timer.py`: Scoped timing with OTEL span integration; uses `Console.section/status` for console-only output.
   - Feature builder implementation detail: `core/fast_features.py` prefers Polars over pandas by default. The threshold `fusion.features.polars_threshold` is set to 10 to aggressively route feature computations through Polars for performance.
 
 - **Persistence & SQL assets**

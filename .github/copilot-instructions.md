@@ -1,8 +1,8 @@
-# ACM - Automated Condition Monitoring (v10.2.0)
+# ACM - Automated Condition Monitoring (v10.3.0)
 
 ACM is a predictive maintenance and equipment health monitoring system. It ingests sensor data from industrial equipment (FD_FAN, GAS_TURBINE, etc.) via SQL Server, runs anomaly detection algorithms, calculates health scores, and forecasts Remaining Useful Life (RUL). Results are visualized through Grafana dashboards for operations teams.
 
-**Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence.
+**Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
 
 ---
 
@@ -23,6 +23,14 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 - **Grafana** - Dashboards in `grafana_dashboards/*.json`
 - **MS SQL datasource** - Direct SQL queries with `$__timeFrom()`, `$__timeTo()` macros
 
+### Observability Stack (v10.3.0)
+- **OpenTelemetry** - Distributed tracing (Tempo) and metrics (Prometheus)
+- **Loki** - Structured log aggregation via Grafana Alloy
+- **Pyroscope** - Continuous profiling for performance analysis
+- **Unified API** - `core/observability.py` provides Console, Span, Metrics classes
+- **Grafana Dashboards** - `acm_observability.json`, `acm_performance_monitor.json`
+- **Install scripts** - `install/observability/` for Docker Compose stack
+
 ### Configuration
 - **configs/config_table.csv** - Equipment-specific settings (cascading: `*` global, then equipment rows)
 - **configs/sql_connection.ini** - SQL Server credentials (gitignored, local-only)
@@ -39,8 +47,7 @@ ACM/
 |   +-- acm_main.py       # Pipeline orchestrator (entry point)
 |   +-- output_manager.py # All CSV/PNG/SQL writes (ALLOWED_TABLES)
 |   +-- sql_client.py     # SQL Server connectivity
-|   +-- observability.py  # Consolidated observability (OpenTelemetry + structlog + Pyroscope)
-|   +-- sql_logger_v2.py  # Batched SQL log sink
+|   +-- observability.py  # Unified observability (Console, Span, Metrics, log_timer)
 |   +-- omr.py            # Overall Model Residual detector
 |   +-- correlation.py    # Correlation-based detector
 |   +-- outliers.py       # Statistical outlier detection
@@ -48,8 +55,7 @@ ACM/
 |   +-- fuse.py           # Multi-detector fusion
 |   +-- regimes.py        # Operating regime detection
 |   +-- drift.py          # Concept drift monitoring
-|   +-- rul_engine.py     # RUL forecasting
-|   +-- forecasting.py    # Health/sensor forecasts
+|   +-- forecast_engine.py # RUL and health forecasting
 |   +-- model_persistence.py  # SQL-only model storage
 |   +-- episode_culprits_writer.py  # Episode diagnostics
 +-- scripts/              # Operational scripts
@@ -132,6 +138,20 @@ python -c "import sys; print(sys.version)"
 - Multi-line strings in `-c` fail due to PowerShell's line continuation rules
 - **Solution: Always create a .py file for anything beyond trivial one-liners**
 
+### Logging & Observability Rules (v10.3.0)
+- **ALWAYS use `Console` class** from `core.observability` for all logging
+- **NEVER use `print()` or legacy loggers** (`utils/logger.py`, `utils/acm_logger.py` are deleted)
+- Console methods:
+  - `Console.info(msg, **kwargs)` - General info (goes to Loki)
+  - `Console.warn(msg, **kwargs)` - Warnings (goes to Loki)
+  - `Console.error(msg, **kwargs)` - Errors (goes to Loki)
+  - `Console.ok(msg, **kwargs)` - Success messages (goes to Loki)
+  - `Console.status(msg)` - Console-only output (NO Loki)
+  - `Console.header(title, char="=")` - Section headers (NO Loki)
+  - `Console.section(title)` - Lighter separators (NO Loki)
+- **Separator lines MUST use `Console.status/header/section`** to avoid leaking to Loki
+- **Timer output** uses `Console.section/status` (console-only, not logged)
+
 ### Grafana Dashboard Rules
 - Time series: Return raw `DATETIME` columns (not `FORMAT()` strings)
 - Order: `ORDER BY time ASC` for time series
@@ -163,11 +183,26 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 python scripts/sql/populate_acm_config.py
 ```
 
+### Observability Stack
+```powershell
+# Start observability stack (Prometheus, Loki, Tempo, Pyroscope, Alloy)
+cd install/observability; docker compose up -d
+
+# Verify stack is running
+Invoke-RestMethod -Uri "http://localhost:3200/api/search?limit=1"  # Tempo
+Invoke-RestMethod -Uri "http://localhost:3100/ready"                # Loki
+Invoke-RestMethod -Uri "http://localhost:9090/-/healthy"            # Prometheus
+
+# View traces in Grafana
+# Open http://localhost:3000, go to Explore > Tempo > Search for service.name=acm-pipeline
+```
+
 ### Testing
 ```powershell
 pytest tests/test_fast_features.py
 pytest tests/test_dual_write.py
 pytest tests/test_progress_tracking.py
+pytest tests/test_observability.py
 ```
 
 ---
@@ -220,7 +255,7 @@ pytest tests/test_progress_tracking.py
 - Use `_to_naive*` helpers in output_manager.py and acm_main.py
 
 ### Version Management
-- Version stored in `utils/version.py` (currently v10.2.0)
+- Version stored in `utils/version.py` (currently v10.3.0)
 - Increment only when explicitly requested
 - Follow semantic versioning (MAJOR.MINOR.PATCH)
 
@@ -233,15 +268,17 @@ pytest tests/test_progress_tracking.py
 ## Key Knowledge Base Documents
 
 | Document | Purpose |
-|----------|---------|
+|----------|---------||
 | `README.md` | Product overview, setup, running ACM |
 | `docs/ACM_SYSTEM_OVERVIEW.md` | Architecture, module map, data flow |
+| `docs/OBSERVABILITY.md` | Observability stack (traces, metrics, logs, profiling) |
 | `docs/SOURCE_CONTROL_PRACTICES.md` | Git workflow, branching, releases |
 | `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` | Authoritative SQL table definitions |
 | `utils/version.py` | Current version and release notes |
 | `docs/OMR_DETECTOR.md` | Overall Model Residual detector |
 | `docs/COLDSTART_MODE.md` | Cold-start strategy for sparse data |
 | `docs/EQUIPMENT_IMPORT_PROCEDURE.md` | How to add new equipment |
+| `install/observability/README.md` | Observability stack installation |
 
 ---
 

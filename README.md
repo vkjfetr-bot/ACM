@@ -7,7 +7,15 @@ ACM V10 is a multi-detector pipeline for autonomous asset condition monitoring. 
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
 ### Recent Updates (Dec 2025)
-- **v10.3.0**: Consolidated observability stack with OpenTelemetry (traces/metrics), structlog (structured logging), and Grafana Pyroscope (profiling). See `docs/OBSERVABILITY.md`.
+- **v10.3.0**: Consolidated observability stack with unified `core/observability.py` module:
+  - **OpenTelemetry Traces**: Distributed tracing to Tempo via OTLP (localhost:4318)
+  - **OpenTelemetry Metrics**: Prometheus metrics (counters, histograms, gauges) scraped at localhost:8000
+  - **Structured Logging**: structlog-based logging to Loki via Alloy (localhost:3100)
+  - **Profiling**: Grafana Pyroscope continuous profiling (localhost:4040)
+  - **Grafana Dashboards**: `acm_observability.json` for traces/logs/metrics visualization
+  - **Console API**: Unified `Console.info/warn/error/ok/status/header` replacing legacy loggers
+  - **Timer Integration**: `utils/timer.py` emits spans + Prometheus histograms
+  - See `docs/OBSERVABILITY.md` and `install/observability/README.md` for setup
 - **v10.2.0**: Mahalanobis detector deprecated - was mathematically redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable. Simplified to 6 active detectors.
 - Forecast/RUL work is in `core/forecast_engine.py` and the new degradation/RUL stack.
 - SQL historian sample for FD_FAN is time-shifted (2023-10-15 → 2025-09-14). Set Grafana ranges accordingly.
