@@ -115,3 +115,49 @@ loki.write "default" {
     app    = "acm",
   }
 }
+
+// ============================================================================
+// WINDOWS PERFORMANCE COUNTERS
+// Collect CPU, Memory, Disk, and Process metrics from Windows
+// Required for profiling ACM performance on Windows hosts
+// ============================================================================
+
+// CPU Usage
+prometheus.scrape "windows_cpu" {
+  targets = prometheus.exporter.windows.default.targets
+  forward_to = [prometheus.remote_write.default.receiver]
+  scrape_interval = "15s"
+}
+
+prometheus.exporter.windows "default" {
+  enabled_collectors = [
+    "cpu",
+    "cs",
+    "logical_disk",
+    "memory",
+    "net",
+    "os",
+    "process",
+    "system",
+    "time",
+  ]
+  
+  // Process collector - monitor Python processes specifically
+  process {
+    include = "python.*|acm.*"
+    exclude = ""
+  }
+}
+
+// ============================================================================
+// PROCESS-SPECIFIC METRICS  
+// Monitor Python/ACM processes for memory, CPU, handles
+// ============================================================================
+prometheus.scrape "python_processes" {
+  targets = [
+    {"__address__" = "localhost:9182", "job" = "windows_exporter"},
+  ]
+  forward_to = [prometheus.remote_write.default.receiver]
+  scrape_interval = "15s"
+  metrics_path = "/metrics"
+}

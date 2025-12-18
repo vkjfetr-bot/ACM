@@ -40,7 +40,13 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from core.output_manager import ALLOWED_TABLES
-from core.observability import Console, init as init_observability, shutdown as shutdown_observability
+from core.observability import (
+    Console, 
+    init as init_observability, 
+    shutdown as shutdown_observability,
+    record_run,
+    record_error,
+)
 
 
 class SQLBatchRunner:
@@ -681,6 +687,9 @@ class SQLBatchRunner:
         if hasattr(self, '_current_total_batches'):
             env["ACM_BATCH_TOTAL"] = str(self._current_total_batches)
 
+        # Track batch start time for metrics
+        batch_start_time = time.time()
+
         # Stream child output live so devs can see progress (instead of buffering everything).
         process = subprocess.Popen(
             cmd,
@@ -722,6 +731,9 @@ class SQLBatchRunner:
         
         success = process.returncode == 0
 
+        # Calculate duration for metrics
+        batch_duration = time.time() - batch_start_time if 'batch_start_time' in locals() else 0.0
+
         # If the batch failed or outcome was not OK/NOOP, surface logs so the
         # caller can see exactly what went wrong inside acm_main.
         if not success or outcome == "FAIL":
@@ -731,6 +743,9 @@ class SQLBatchRunner:
                     f"[RUN-DEBUG] {equip_name}: --- acm_main stdout (captured) ---\n{stdout_text.rstrip()}",
                     equipment=equip_name,
                 )
+            # Record FAIL in Prometheus metrics (since acm_main didn't complete)
+            record_run(equip_name, "FAIL", batch_duration)
+            record_error(equip_name, f"Exit code {process.returncode}", "subprocess_failure")
 
         if success and outcome in ("OK", "NOOP"):
             # After a successful batch, inspect SQL outputs for this equipment
