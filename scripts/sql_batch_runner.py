@@ -1130,16 +1130,14 @@ def main() -> int:
     max_workers = max(1, args.max_workers)
     errors: List[str] = []
 
-    Console.info("\n" + "="*60)
-    Console.info("SQL BATCH RUNNER - Continuous ACM Processing")
-    Console.info("="*60)
+    Console.header("SQL BATCH RUNNER - Continuous ACM Processing")
     Console.info(f"Equipment: {', '.join(args.equip)}", equipment=args.equip)
     Console.info(f"SQL Server: {args.sql_server}/{args.sql_database}", server=args.sql_server, database=args.sql_database)
     Console.info(f"Tick Window: {args.tick_minutes} minutes", tick_minutes=args.tick_minutes)
     Console.info(f"Max Workers: {max_workers}", max_workers=max_workers)
     Console.info(f"Resume: {args.resume}", resume=args.resume)
     Console.info(f"Dry Run: {args.dry_run}", dry_run=args.dry_run)
-    Console.info("="*60)
+    Console.status("="*60)
 
     import time
     overall_start_time = time.time()
@@ -1186,9 +1184,9 @@ def main() -> int:
     overall_minutes = int(overall_elapsed / 60)
     overall_seconds = int(overall_elapsed % 60)
 
-    Console.info("\n" + "="*60)
+    Console.status("\n" + "="*60)
     Console.info(f"[TIMING] Overall execution time: {overall_minutes}m {overall_seconds}s", minutes=overall_minutes, seconds=overall_seconds)
-    Console.info("="*60)
+    Console.status("="*60)
     
     # Shutdown observability to flush any pending logs
     shutdown_observability()
@@ -1197,11 +1195,11 @@ def main() -> int:
         Console.error("BATCH RUNNER COMPLETED WITH ERRORS:")
         for line in errors:
             Console.error(f"  [FAIL] {line}")
-        Console.info("="*60)
+        Console.status("="*60)
         return 1
     else:
         Console.ok("BATCH RUNNER COMPLETED SUCCESSFULLY")
-        Console.info("="*60)
+        Console.status("="*60)
         return 0
 
 

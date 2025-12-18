@@ -502,9 +502,17 @@ class Console:
     
     @staticmethod
     def _send_to_loki(level: str, message: str, component: Optional[str] = None, **kwargs) -> None:
-        """Send structured log to Loki with proper labels."""
+        """Send structured log to Loki with proper labels.
+        
+        Automatically filters out formatting-only messages (separators, blank lines)
+        to prevent log pollution.
+        """
         if not _loki_pusher:
             return
+        # Filter out formatting-only lines (separators, banners)
+        stripped = message.strip()
+        if not stripped or all(c in '=-_*#~' for c in stripped):
+            return  # Skip pure separator/decoration lines
         _loki_pusher.log(level, message, component=component, **kwargs)
     
     @staticmethod

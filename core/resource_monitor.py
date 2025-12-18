@@ -330,7 +330,7 @@ class ResourceMonitor:
         metrics = self.get_metrics()
         summary = self.get_summary()
         
-        Console.info("=== Resource Usage Summary ===", component="RESOURCE")
+        Console.section("Resource Usage Summary")
         Console.info(f"Total duration: {summary.get('total_duration_s', 0):.2f}s", component="RESOURCE")
         Console.info(f"[RESOURCE] Memory: start={summary.get('mem_start_mb', 0):.0f}MB, "
                     f"peak={summary.get('mem_peak_mb', 0):.0f}MB, "
