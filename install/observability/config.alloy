@@ -161,3 +161,30 @@ prometheus.scrape "python_processes" {
   scrape_interval = "15s"
   metrics_path = "/metrics"
 }
+
+// ============================================================================
+// MSSQL EXPORTER - ACM Custom Metrics
+// Query ACM SQL tables for operational metrics
+// Uses Windows Authentication (winsspi) - no password needed
+// ============================================================================
+prometheus.exporter.mssql "acm" {
+  // Windows Authentication via winsspi
+  connection_string = "sqlserver://localhost:1433/B19CL3PCQLSERVER?database=ACM&authenticator=winsspi&TrustServerCertificate=true"
+  connection_name   = "acm_database"
+  timeout           = "30s"
+  
+  // Custom ACM metrics configuration
+  query_config = local.file.acm_sql_metrics.content
+}
+
+prometheus.scrape "acm_mssql" {
+  targets         = prometheus.exporter.mssql.acm.targets
+  forward_to      = [prometheus.remote_write.default.receiver]
+  scrape_interval = "60s"  // Query every minute
+  scrape_timeout  = "30s"
+}
+
+// Load custom SQL metrics definitions from file
+local.file "acm_sql_metrics" {
+  filename = "C:/Program Files/GrafanaLabs/Alloy/acm_sql_metrics.yaml"
+}

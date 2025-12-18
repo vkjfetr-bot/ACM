@@ -218,6 +218,65 @@ init_observability(
 2. Check Alloy is forwarding: Look at Alloy logs
 3. Verify structlog is configured with OTLP exporter
 
+## SQL Metrics via MSSQL Exporter
+
+Alloy scrapes ACM operational metrics directly from SQL Server tables. This provides database-level visibility that complements the Python app metrics.
+
+### Installation
+
+1. Copy the SQL metrics config:
+   ```powershell
+   Copy-Item "install\observability\acm_sql_metrics.yaml" "C:\Program Files\GrafanaLabs\Alloy\acm_sql_metrics.yaml"
+   ```
+
+2. Copy the updated Alloy config:
+   ```powershell
+   Copy-Item "install\observability\config.alloy" "C:\Program Files\GrafanaLabs\Alloy\config.alloy"
+   ```
+
+3. Restart Alloy:
+   ```powershell
+   Restart-Service Alloy
+   ```
+
+### Available SQL Metrics
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `acm_sql_runs_total` | equipment, outcome | Total runs by equipment/outcome |
+| `acm_sql_runs_last_24h` | equipment | Runs in last 24 hours |
+| `acm_sql_run_duration_seconds` | equipment | Average run duration |
+| `acm_sql_last_run_timestamp` | equipment | Unix timestamp of last run |
+| `acm_sql_scores_rows_total` | equipment | Rows in ACM_Scores_Wide |
+| `acm_sql_scores_latest_timestamp` | equipment | Most recent score timestamp |
+| `acm_sql_health_timeline_rows` | equipment | Rows in ACM_HealthTimeline |
+| `acm_sql_anomaly_events_total` | equipment, severity | Anomaly events by severity |
+| `acm_sql_active_defects` | equipment | Currently active defects |
+| `acm_sql_episodes_total` | equipment | Total diagnostic episodes |
+| `acm_sql_episode_duration_hours` | equipment | Total episode duration |
+| `acm_sql_rul_hours` | equipment, method | Latest RUL prediction |
+| `acm_sql_health_current` | equipment | Current health score (0-100) |
+| `acm_sql_models_count` | equipment, model_type | Models in registry |
+| `acm_sql_model_size_bytes` | equipment | Model blob sizes |
+| `acm_sql_logs_by_level` | equipment, log_level | Log entries by level |
+| `acm_sql_errors_last_24h` | equipment | Errors in last 24 hours |
+| `acm_sql_table_rows` | table_name | Row count per ACM table |
+| `acm_sql_table_size_mb` | table_name | Table size in MB |
+| `acm_sql_database_size_mb` | - | Total database size |
+| `acm_sql_active_connections` | - | Active DB connections |
+
+### Windows Performance Counters
+
+Alloy also collects Windows system metrics:
+
+| Metric Prefix | Description |
+|---------------|-------------|
+| `windows_cpu_*` | CPU usage per core |
+| `windows_memory_*` | Memory usage |
+| `windows_logical_disk_*` | Disk I/O |
+| `windows_process_*` | Per-process stats (python/acm) |
+| `windows_system_*` | System uptime, context switches |
+
 ## Port Summary
 
 | Port | Service | Protocol |
