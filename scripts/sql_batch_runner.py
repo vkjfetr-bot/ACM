@@ -749,9 +749,8 @@ class SQLBatchRunner:
         Returns:
             True if coldstart completed successfully
         """
-        Console.info(f"\n{'='*60}")
-        Console.info(f"[COLDSTART] Starting coldstart for {equip_name}", equipment=equip_name)
-        Console.info(f"{'='*60}")
+        # Use Console.header for visual separators (console-only, not logged to Loki)
+        Console.header(f"[COLDSTART] Starting coldstart for {equip_name}", char="=")
         
         # Get earliest data timestamp for historical replay
         min_ts, max_ts = self._get_data_range(equip_name)
@@ -769,7 +768,8 @@ class SQLBatchRunner:
         
         last_processed_end: Optional[datetime] = None
         for attempt in range(1, self.max_coldstart_attempts + 1):
-            Console.info(f"\n[COLDSTART] {equip_name}: Attempt {attempt}/{self.max_coldstart_attempts}", equipment=equip_name, attempt=attempt, max_attempts=self.max_coldstart_attempts)
+            # Use header for attempt separators (console-only)
+            Console.header(f"[COLDSTART] {equip_name}: Attempt {attempt}/{self.max_coldstart_attempts}", char="-", width=50)
             
             # Check current status
             is_complete, accum_rows, req_rows = self._check_coldstart_status(equip_name)
@@ -937,9 +937,8 @@ class SQLBatchRunner:
         import time
         start_time = time.time()
         
-        Console.info(f"\n{'#'*60}")
-        Console.info(f"# Processing Equipment: {equip_name}", equipment=equip_name)
-        Console.info(f"{'#'*60}")
+        # Use Console.header for visual separators (console-only, not logged to Loki)
+        Console.header(f"Processing Equipment: {equip_name}", char="#")
 
         # Fail fast if SQL is unreachable so we do not appear hung
         if not self._test_sql_connection():

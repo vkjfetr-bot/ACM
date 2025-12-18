@@ -18,18 +18,35 @@ import json
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
-# Import from unified observability module
+# Import from unified observability module (lazy to handle import order)
 _Span: Optional[type] = None
 _record_section_fn: Optional[Callable] = None
 _equipment_context: str = ""
 _Console: Optional[type] = None
 _log_timer_fn: Optional[Callable] = None
+_observability_initialized: bool = False
 
+def _ensure_observability() -> None:
+    """Lazily import observability module to handle import order issues."""
+    global _Span, _Console, _log_timer_fn, _observability_initialized
+    if _observability_initialized:
+        return
+    _observability_initialized = True
+    try:
+        from core.observability import Span as _OtelSpan, Console, log_timer as _otel_log_timer
+        _Span = _OtelSpan
+        _Console = Console
+        _log_timer_fn = _otel_log_timer
+    except ImportError:
+        pass
+
+# Try import at module load (works if observability loaded first)
 try:
     from core.observability import Span as _OtelSpan, Console, log_timer as _otel_log_timer
     _Span = _OtelSpan
     _Console = Console
     _log_timer_fn = _otel_log_timer
+    _observability_initialized = True
 except ImportError:
     pass
 
@@ -132,6 +149,9 @@ class Timer:
         
         Also pushes structured log to Loki with log_type='timer'.
         """
+        # Ensure observability is available (handles import order)
+        _ensure_observability()
+        
         # Extract parent from hierarchical name (e.g., "fit.pca" -> "fit")
         parts = name.split(".")
         parent = parts[0] if parts else name
@@ -171,6 +191,9 @@ class Timer:
         if not self.enable: 
             return
         
+        # Ensure observability is available (handles import order)
+        _ensure_observability()
+        
         if self._json_mode:
             data = {
                 "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -193,6 +216,9 @@ class Timer:
             return
         total = time.perf_counter() - self._t0
         
+        # Ensure observability is available (handles import order)
+        _ensure_observability()
+        
         if self._json_mode:
             sections = [
                 {"name": k, "duration_s": round(v, 3), "percent": round((v / total) * 100.0, 1)}
@@ -206,8 +232,8 @@ class Timer:
             }))
         elif _Console:
             if self.totals:
-                # Log summary header (not a timer, just informational)
-                _Console.info("-- Timer Summary ------------------------------")
+                # Console-only section header (not logged to Loki)
+                _Console.section("Timer Summary")
                 for k, v in sorted(self.totals.items(), key=lambda x: -x[1]):
                     pct = (v / total) * 100.0 if total > 0 else 0.0
                     parts = k.split(".")
@@ -215,12 +241,12 @@ class Timer:
                     # Push structured timer to Loki (skip console's Loki push to avoid duplicates)
                     if _log_timer_fn:
                         _log_timer_fn(section=k, duration_s=v, pct=pct, parent=parent, total_s=total)
-                    # Console output only (skip_loki=True since log_timer_fn handles Loki)
-                    _Console.info(f"{k:<30} {v:7.3f}s ({pct:5.1f}%)", skip_loki=True)
+                    # Console output only (status = no Loki)
+                    _Console.status(f"{k:<30} {v:7.3f}s ({pct:5.1f}%)")
             # Log total run as structured timer
             if _log_timer_fn:
                 _log_timer_fn(section="total_run", duration_s=total, parent="total_run", total_s=total)
-            _Console.info(f"total_run                      {total:7.3f}s", skip_loki=True)
+            _Console.status(f"total_run                      {total:7.3f}s")
         else:
             timestamp = self._get_timestamp()
             if self.totals:
