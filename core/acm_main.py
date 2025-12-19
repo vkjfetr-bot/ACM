@@ -846,10 +846,14 @@ def main() -> None:
 
     # Initialize observability (traces/metrics to OTLP collector, logs to Loki)
     # Uses localhost endpoints: OTLP on 4318, Loki on 3100
+    # Get equip_id early for observability tagging
+    equip_id_init = _get_equipment_id(args.equip) if args.equip else 0
+    
     if _OBSERVABILITY_AVAILABLE:
         try:
             init_observability(
                 equipment=args.equip,
+                equip_id=equip_id_init,
                 service_name="acm-pipeline",
                 otlp_endpoint="http://localhost:4318",
                 loki_endpoint="http://localhost:3100",
@@ -1024,6 +1028,9 @@ def main() -> None:
             Console.info(f"Using equipment from CLI argument: {equip_code}", component="RUN")
             run_id, win_start, win_end, equip_id = _sql_start_run(sql_client, cfg, equip_code)
             
+            # Update observability context with run_id for proper tagging of traces/metrics/logs
+            set_acm_context(run_id=run_id, equip_id=equip_id)
+            
             # Override window if CLI args provided (e.g. for batch backfill)
             if args.start_time:
                 try:
@@ -1053,6 +1060,8 @@ def main() -> None:
             # Set equip_id for dual mode
             equip_id = _get_equipment_id(equip)
             Console.info(f"Created SQL connection for dual-write mode, run_id={run_id}", component="DUAL")
+            # Update observability context with run_id for proper tagging
+            set_acm_context(run_id=run_id, equip_id=equip_id)
         except Exception as e:
             Console.warn(f"Failed to connect to SQL for dual-write, will use file-only mode: {e}", component="DUAL")
             sql_client = None

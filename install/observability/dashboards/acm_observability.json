@@ -1,588 +1,563 @@
 {
   "uid": "acm-observability",
   "title": "ACM Observability",
-  "description": "Monitor ACM pipeline performance, logs, traces, and system resources",
-  "tags": ["acm", "observability"],
+  "description": "Complete observability dashboard: pipeline status, resource utilization (CPU/RAM/Disk), per-equipment analysis, and performance profiling",
+  "tags": ["acm", "observability", "profiling", "resources"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 4,
-  "refresh": "10s",
+  "version": 11,
+  "refresh": "30s",
   "time": { "from": "now-1h", "to": "now" },
-  "panels": [
-    {
-      "id": 1,
-      "title": "Summary (selected time range)",
-      "type": "row",
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
-      "collapsed": false
-    },
-    {
-      "id": 2,
-      "title": "Runs",
-      "description": "Total ACM pipeline runs in selected time range",
-      "type": "stat",
-      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(count_over_time({app=\"acm\"} |= `Finalized RunID` [$__range]))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
-          "color": { "mode": "thresholds" },
-          "unit": "none",
-          "decimals": 0,
-          "noValue": "0"
-        }
-      },
-      "options": {
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 3,
-      "title": "OK",
-      "description": "Successful runs with data processed",
-      "type": "stat",
-      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(count_over_time({app=\"acm\"} |= `outcome=OK` [$__range]))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
-          "color": { "mode": "thresholds" },
-          "unit": "none",
-          "decimals": 0,
-          "noValue": "0"
-        }
-      },
-      "options": {
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 4,
-      "title": "NOOP",
-      "description": "Runs skipped (no new data)",
-      "type": "stat",
-      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(count_over_time({app=\"acm\"} |= `outcome=NOOP` [$__range]))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "yellow", "value": null }] },
-          "color": { "mode": "thresholds" },
-          "unit": "none",
-          "decimals": 0,
-          "noValue": "0"
-        }
-      },
-      "options": {
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 5,
-      "title": "Errors",
-      "description": "Error log entries",
-      "type": "stat",
-      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(count_over_time({app=\"acm\", level=\"error\"} [$__range]))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
-          "color": { "mode": "thresholds" },
-          "unit": "none",
-          "decimals": 0,
-          "noValue": "0"
-        }
-      },
-      "options": {
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
-        "textMode": "value",
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 6,
-      "title": "Warnings",
-      "description": "Warning log entries",
-      "type": "stat",
-      "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(count_over_time({app=\"acm\", level=\"warning\"} [$__range]))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 10 }] },
-          "color": { "mode": "thresholds" },
-          "unit": "none",
-          "decimals": 0,
-          "noValue": "0"
-        }
-      },
-      "options": {
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 7,
-      "title": "Equipment",
-      "description": "Unique equipment processed",
-      "type": "stat",
-      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "count(sum by (equipment) (count_over_time({app=\"acm\", equipment!=\"\"} [$__range])))"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] },
-          "color": { "mode": "thresholds" },
-          "unit": "none",
-          "decimals": 0,
-          "noValue": "0"
-        }
-      },
-      "options": {
-        "reduceOptions": { "calcs": ["last"], "fields": "", "values": false },
-        "textMode": "value",
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 10,
-      "title": "System Resources",
-      "type": "row",
-      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
-      "collapsed": false
-    },
-    {
-      "id": 11,
-      "title": "Memory Usage (MB)",
-      "description": "Process memory consumption over time",
-      "type": "timeseries",
-      "gridPos": { "x": 0, "y": 6, "w": 8, "h": 6 },
-      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(acm_memory_rss_mb)",
-          "legendFormat": "Current RSS"
-        },
-        {
-          "refId": "B",
-          "expr": "max(acm_memory_peak_mb)",
-          "legendFormat": "Peak"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": 300000 },
-          "unit": "decmbytes",
-          "min": 0
-        }
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
-      }
-    },
-    {
-      "id": 12,
-      "title": "CPU Usage (%)",
-      "description": "CPU utilization percentage",
-      "type": "timeseries",
-      "gridPos": { "x": 8, "y": 6, "w": 8, "h": 6 },
-      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "avg(acm_cpu_percent)",
-          "legendFormat": "Avg CPU %"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": { "fixedColor": "orange", "mode": "fixed" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "spanNulls": 300000 },
-          "unit": "percent",
-          "max": 100,
-          "min": 0
-        }
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
-      }
-    },
-    {
-      "id": 13,
-      "title": "Disk I/O (MB)",
-      "description": "Cumulative disk read/write per section",
-      "type": "timeseries",
-      "gridPos": { "x": 16, "y": 6, "w": 8, "h": 6 },
-      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(acm_disk_read_mb)",
-          "legendFormat": "Read MB"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(acm_disk_write_mb)",
-          "legendFormat": "Write MB"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": 300000 },
-          "unit": "decmbytes",
-          "min": 0
-        }
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
-      }
-    },
-    {
-      "id": 14,
-      "title": "Peak Memory",
-      "type": "stat",
-      "gridPos": { "x": 0, "y": 12, "w": 3, "h": 3 },
-      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "max(acm_memory_peak_mb)" }],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 1000 }] },
-          "unit": "decmbytes", "decimals": 0, "noValue": "0"
-        }
-      },
-      "options": { "reduceOptions": { "calcs": ["max"] }, "colorMode": "value", "graphMode": "none" }
-    },
-    {
-      "id": 15,
-      "title": "Avg CPU",
-      "type": "stat",
-      "gridPos": { "x": 3, "y": 12, "w": 3, "h": 3 },
-      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "avg(acm_cpu_percent)" }],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 80 }] },
-          "unit": "percent", "decimals": 1, "noValue": "0"
-        }
-      },
-      "options": { "reduceOptions": { "calcs": ["mean"] }, "colorMode": "value", "graphMode": "none" }
-    },
-    {
-      "id": 16,
-      "title": "Disk Read",
-      "type": "stat",
-      "gridPos": { "x": 6, "y": 12, "w": 3, "h": 3 },
-      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(acm_disk_read_mb)" }],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
-          "unit": "decmbytes", "decimals": 0, "noValue": "0"
-        }
-      },
-      "options": { "reduceOptions": { "calcs": ["last"] }, "colorMode": "value", "graphMode": "none" }
-    },
-    {
-      "id": 17,
-      "title": "Disk Write",
-      "type": "stat",
-      "gridPos": { "x": 9, "y": 12, "w": 3, "h": 3 },
-      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(acm_disk_write_mb)" }],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] },
-          "unit": "decmbytes", "decimals": 0, "noValue": "0"
-        }
-      },
-      "options": { "reduceOptions": { "calcs": ["last"] }, "colorMode": "value", "graphMode": "none" }
-    },
-    {
-      "id": 18,
-      "title": "Detailed Profiling",
-      "type": "text",
-      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 3 },
-      "options": {
-        "mode": "markdown",
-        "content": "### [→ Open ACM Profiling Dashboard](/d/acm-profiling)\n\nFor detailed per-section CPU/memory breakdown, equipment memory usage, timer logs, and disk I/O analysis."
-      }
-    },
-    {
-      "id": 20,
-      "title": "Pipeline Logs",
-      "type": "row",
-      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 1 },
-      "collapsed": false
-    },
-    {
-      "id": 21,
-      "title": "Live Logs",
-      "type": "logs",
-      "gridPos": { "x": 0, "y": 13, "w": 16, "h": 10 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{app=\"acm\"}",
-          "queryType": "range"
-        }
-      ],
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": true,
-        "enableLogDetails": true,
-        "dedupStrategy": "none",
-        "sortOrder": "Descending"
-      }
-    },
-    {
-      "id": 22,
-      "title": "Log Rate (per minute)",
-      "type": "timeseries",
-      "gridPos": { "x": 16, "y": 13, "w": 8, "h": 5 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (level) (count_over_time({app=\"acm\"} [1m]))",
-          "legendFormat": "{{level}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" }, "fillOpacity": 80 },
-          "color": { "mode": "palette-classic" }
-        },
-        "overrides": [
-          { "matcher": { "id": "byName", "options": "error" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "warning" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "info" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] }
-        ]
-      },
-      "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
-      }
-    },
-    {
-      "id": 23,
-      "title": "By Component",
-      "type": "piechart",
-      "gridPos": { "x": 16, "y": 18, "w": 8, "h": 5 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (component) (count_over_time({app=\"acm\"} [$__range]))",
-          "legendFormat": "{{component}}"
-        }
-      ],
-      "options": {
-        "legend": { "displayMode": "table", "placement": "right", "values": ["value"] },
-        "pieType": "donut",
-        "tooltip": { "mode": "single" }
-      },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "palette-classic" } }
-      }
-    },
-    {
-      "id": 50,
-      "title": "Distributed Tracing",
-      "type": "row",
-      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
-      "collapsed": false
-    },
-    {
-      "id": 51,
-      "title": "Recent Traces",
-      "description": "Tempo traces from ACM pipeline runs. Click a trace to see span details.",
-      "type": "table",
-      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
-      "datasource": { "uid": "tempo-ds", "type": "tempo" },
-      "targets": [
-        {
-          "refId": "A",
-          "queryType": "traceql",
-          "query": "{}"
-        }
-      ],
-      "transformations": [],
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "traceID" },
-            "properties": [
-              { "id": "links", "value": [{ "title": "View Trace", "url": "/explore?left={\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"tempo\",\"uid\":\"tempo-ds\"},\"queryType\":\"traceql\",\"query\":\"${__value.raw}\"}]}" }] }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm"
-      }
-    },
-    {
-      "id": 30,
-      "title": "Errors & Warnings Detail",
-      "type": "row",
-      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
-      "collapsed": true,
-      "panels": [
-        {
-          "id": 31,
-          "title": "Error Logs",
-          "type": "logs",
-          "gridPos": { "x": 0, "y": 33, "w": 12, "h": 8 },
-          "datasource": { "uid": "loki-ds", "type": "loki" },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "{app=\"acm\", level=\"error\"}",
-              "queryType": "range"
-            }
-          ],
-          "options": {
-            "showTime": true,
-            "showLabels": false,
-            "wrapLogMessage": true,
-            "prettifyLogMessage": true,
-            "enableLogDetails": true,
-            "sortOrder": "Descending"
-          }
-        },
-        {
-          "id": 32,
-          "title": "Warning Logs",
-          "type": "logs",
-          "gridPos": { "x": 12, "y": 33, "w": 12, "h": 8 },
-          "datasource": { "uid": "loki-ds", "type": "loki" },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "{app=\"acm\", level=\"warning\"}",
-              "queryType": "range"
-            }
-          ],
-          "options": {
-            "showTime": true,
-            "showLabels": false,
-            "wrapLogMessage": true,
-            "prettifyLogMessage": true,
-            "enableLogDetails": true,
-            "sortOrder": "Descending"
-          }
-        }
-      ]
-    },
-    {
-      "id": 40,
-      "title": "Timing Details",
-      "type": "row",
-      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 1 },
-      "collapsed": true,
-      "panels": [
-        {
-          "id": 41,
-          "title": "Timer Logs",
-          "type": "logs",
-          "gridPos": { "x": 0, "y": 42, "w": 24, "h": 6 },
-          "datasource": { "uid": "loki-ds", "type": "loki" },
-          "targets": [
-            {
-              "refId": "A",
-              "expr": "{app=\"acm\", log_type=\"timer\"}",
-              "queryType": "range"
-            }
-          ],
-          "options": {
-            "showTime": true,
-            "showLabels": false,
-            "wrapLogMessage": false,
-            "prettifyLogMessage": true,
-            "enableLogDetails": true,
-            "sortOrder": "Descending"
-          }
-        }
-      ]
-    }
-  ],
   "templating": {
     "list": [
       {
         "name": "equipment",
+        "label": "Equipment",
         "type": "query",
-        "datasource": { "uid": "loki-ds", "type": "loki" },
-        "query": "label_values({app=\"acm\"}, equipment)",
+        "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+        "query": "label_values(acm_memory_rss_mb, equipment)",
         "refresh": 2,
         "includeAll": true,
+        "allValue": ".*",
         "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "section",
+        "label": "Section/Module",
+        "type": "query",
+        "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+        "query": "label_values(acm_stage_duration_seconds_sum{equipment=~\"$equipment\"}, stage)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "run_id",
+        "label": "Run ID",
+        "type": "query",
+        "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+        "query": "label_values(acm_memory_delta_mb{equipment=~\"$equipment\"}, run_id)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
         "current": { "text": "All", "value": "$__all" }
       }
     ]
   },
+  "links": [
+    { "title": "ACM Behavior", "type": "link", "url": "/d/acm-behavior/acm-behavior", "icon": "dashboard", "tooltip": "Equipment health, anomalies, and RUL" },
+    { "title": "Pyroscope Profiles", "type": "link", "url": "http://localhost:4040", "icon": "external-link", "targetBlank": true, "tooltip": "Flame graphs and CPU profiling" },
+    { "title": "Tempo Traces", "type": "link", "url": "/explore?orgId=1&left=%7B%22datasource%22:%22tempo-ds%22%7D", "icon": "search", "tooltip": "Distributed traces" }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "📖 Dashboard Guide",
+      "type": "text",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 3 },
+      "options": {
+        "mode": "markdown",
+        "content": "## ACM Observability Dashboard\n\n**How to read this dashboard:**\n- **Top Row**: Executive summary - total runs, success/failure counts, peak resource usage\n- **System Resources**: Global CPU, RAM, Disk I/O across all equipment and runs\n- **Per-Module Breakdown**: Which ACM modules (startup, load_data, fit.pca, fusion, etc.) consume the most resources\n- **Per-Equipment Analysis**: Resource consumption breakdown by equipment - useful for identifying problematic equipment\n- **Per-Run Analysis**: Drill down into specific runs using the Run ID filter to see exactly what happened\n\n**Filters**: Use **Equipment** to focus on specific equipment, **Section/Module** for specific pipeline stages, **Run ID** for individual run analysis.\n\n**Color coding**: 🟢 Green = healthy, 🟡 Yellow = warning, 🟠 Orange = high, 🔴 Red = critical"
+      }
+    },
+    {
+      "id": 10,
+      "title": "🎯 Executive Summary",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 3, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "title": "Total Runs",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(acm_runs_total{equipment=~\"$equipment\"}) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }, "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 12,
+      "title": "OK Runs",
+      "type": "stat",
+      "gridPos": { "x": 3, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(acm_runs_total{equipment=~\"$equipment\", outcome=\"OK\"}) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 13,
+      "title": "NOOP Runs",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(acm_runs_total{equipment=~\"$equipment\", outcome=\"NOOP\"}) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "yellow", "value": null }] }, "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 14,
+      "title": "Error Runs",
+      "type": "stat",
+      "gridPos": { "x": 9, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(acm_runs_total{equipment=~\"$equipment\", outcome=~\"ERROR|FAIL\"}) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "id": 15,
+      "title": "Peak Memory",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max(acm_memory_rss_mb{equipment=~\"$equipment\"}) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 1000 }] }, "unit": "decmbytes", "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["max"] }, "textMode": "auto", "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 16,
+      "title": "Peak CPU",
+      "type": "stat",
+      "gridPos": { "x": 15, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max(acm_cpu_percent{equipment=~\"$equipment\"}) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 100 }, { "color": "red", "value": 200 }] }, "unit": "percent", "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["max"] }, "textMode": "auto", "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 17,
+      "title": "Total Disk Read",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(acm_disk_read_mb{equipment=~\"$equipment\"}) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }, "unit": "decmbytes", "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 18,
+      "title": "Equipment Count",
+      "type": "stat",
+      "gridPos": { "x": 21, "y": 4, "w": 3, "h": 4 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "count(count by (equipment) (acm_memory_rss_mb{equipment=~\"$equipment\"})) or vector(0)" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] }, "noValue": "0" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "value", "graphMode": "none" }
+    },
+
+    {
+      "id": 100,
+      "title": "📊 System Resource Overview (All Equipment)",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 101,
+      "title": "Memory (RSS) Over Time",
+      "description": "Process memory consumption - watch for steady growth indicating memory leaks",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 9, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "max by (equipment) (acm_memory_rss_mb{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "gradientMode": "hue", "spanNulls": 60000, "lineInterpolation": "smooth" },
+          "unit": "decmbytes",
+          "min": 0
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 102,
+      "title": "CPU Usage Over Time",
+      "description": "CPU % - values >100% indicate multi-core usage",
+      "type": "timeseries",
+      "gridPos": { "x": 6, "y": 9, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "max by (equipment) (acm_cpu_percent{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "gradientMode": "hue", "spanNulls": 60000, "lineInterpolation": "smooth" },
+          "unit": "percent",
+          "min": 0,
+          "max": 300
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 103,
+      "title": "Disk Read Over Time",
+      "description": "Cumulative disk read operations",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 9, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (equipment) (acm_disk_read_mb{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "gradientMode": "hue", "spanNulls": 60000, "lineInterpolation": "smooth" },
+          "unit": "decmbytes",
+          "min": 0
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 104,
+      "title": "Disk Write Over Time",
+      "description": "Cumulative disk write operations",
+      "type": "timeseries",
+      "gridPos": { "x": 18, "y": 9, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (equipment) (acm_disk_write_mb{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 15, "gradientMode": "hue", "spanNulls": 60000, "lineInterpolation": "smooth" },
+          "unit": "decmbytes",
+          "min": 0
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+
+    {
+      "id": 200,
+      "title": "🔬 Per-Module Resource Breakdown (Which code consumes what)",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 17, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 201,
+      "title": "Memory Delta by Module",
+      "description": "How much memory each module ADDS (positive) or FREES (negative)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "topk(12, acm_memory_delta_mb{equipment=~\"$equipment\", section=~\"$section\"})", "legendFormat": "{{section}} ({{equipment}})" }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "hue", "barAlignment": 0, "barWidthFactor": 0.6 },
+          "unit": "decmbytes",
+          "decimals": 1
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"], "sortBy": "Max", "sortDesc": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 202,
+      "title": "Top Memory Consumers",
+      "description": "Modules with highest memory allocations",
+      "type": "bargauge",
+      "gridPos": { "x": 12, "y": 18, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "topk(10, max by (section) (acm_memory_delta_mb{equipment=~\"$equipment\"}))", "legendFormat": "{{section}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 30 }, { "color": "orange", "value": 60 }, { "color": "red", "value": 100 }] },
+          "unit": "decmbytes",
+          "min": 0
+        }
+      },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["max"], "values": false }, "showUnfilled": true }
+    },
+    {
+      "id": 203,
+      "title": "Top CPU Consumers",
+      "description": "Modules with highest CPU usage",
+      "type": "bargauge",
+      "gridPos": { "x": 18, "y": 18, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "topk(10, max by (section) (acm_cpu_percent{equipment=~\"$equipment\"}))", "legendFormat": "{{section}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "orange", "value": 100 }, { "color": "red", "value": 150 }] },
+          "unit": "percent",
+          "min": 0
+        }
+      },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["max"], "values": false }, "showUnfilled": true }
+    },
+    {
+      "id": 204,
+      "title": "Stage Duration (ms)",
+      "description": "Time spent in each module - identify bottlenecks",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 26, "w": 12, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "topk(12, increase(acm_stage_duration_seconds_sum{equipment=~\"$equipment\", stage=~\"$section\"}[5m]) * 1000)", "legendFormat": "{{stage}} ({{equipment}})" }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "bars", "lineWidth": 1, "fillOpacity": 80, "gradientMode": "hue", "barWidthFactor": 0.6 },
+          "unit": "ms",
+          "min": 0,
+          "decimals": 0
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum", "max"], "sortBy": "Max", "sortDesc": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 205,
+      "title": "Slowest Modules",
+      "description": "Bottleneck identification",
+      "type": "bargauge",
+      "gridPos": { "x": 12, "y": 26, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "topk(10, max by (stage) (acm_stage_duration_seconds_sum{equipment=~\"$equipment\"}) * 1000)", "legendFormat": "{{stage}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "orange", "value": 2000 }, { "color": "red", "value": 10000 }] },
+          "unit": "ms",
+          "min": 0
+        }
+      },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["max"], "values": false }, "showUnfilled": true }
+    },
+    {
+      "id": 206,
+      "title": "Disk I/O by Module",
+      "description": "Which modules perform most disk operations",
+      "type": "bargauge",
+      "gridPos": { "x": 18, "y": 26, "w": 6, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "topk(10, max by (section) (acm_disk_read_mb{equipment=~\"$equipment\"}))", "legendFormat": "Read: {{section}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }, { "color": "purple", "value": 100 }, { "color": "red", "value": 500 }] },
+          "unit": "decmbytes",
+          "min": 0
+        }
+      },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["max"], "values": false }, "showUnfilled": true }
+    },
+
+    {
+      "id": 300,
+      "title": "🏭 Per-Equipment Analysis",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 301,
+      "title": "Memory Usage by Equipment",
+      "description": "Peak memory per equipment - identifies memory-hungry equipment",
+      "type": "bargauge",
+      "gridPos": { "x": 0, "y": 35, "w": 8, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sort_desc(max by (equipment) (acm_memory_rss_mb{equipment=~\"$equipment\"}))", "legendFormat": "{{equipment}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 400 }, { "color": "red", "value": 600 }] }, "unit": "decmbytes", "min": 0 } },
+      "transformations": [{ "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Value", "desc": true }] } }],
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["max"], "values": false }, "showUnfilled": true, "namePlacement": "auto" }
+    },
+    {
+      "id": 302,
+      "title": "CPU Usage by Equipment",
+      "description": "Peak CPU % - values >100% indicate multi-core usage (e.g., 738% = ~7.4 CPU cores utilized)",
+      "type": "bargauge",
+      "gridPos": { "x": 8, "y": 35, "w": 8, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sort_desc(max by (equipment) (acm_cpu_percent{equipment=~\"$equipment\"}))", "legendFormat": "{{equipment}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 100 }, { "color": "orange", "value": 200 }, { "color": "red", "value": 400 }] }, "unit": "percent", "min": 0 } },
+      "transformations": [{ "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Value", "desc": true }] } }],
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["max"], "values": false }, "showUnfilled": true, "namePlacement": "auto" }
+    },
+    {
+      "id": 303,
+      "title": "Runs by Equipment",
+      "description": "Number of runs per equipment",
+      "type": "bargauge",
+      "gridPos": { "x": 16, "y": 35, "w": 8, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sort_desc(sum by (equipment) (acm_runs_total{equipment=~\"$equipment\"}))", "legendFormat": "{{equipment}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }, "min": 0 } },
+      "transformations": [{ "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Value", "desc": true }] } }],
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "reduceOptions": { "calcs": ["max"], "values": false }, "showUnfilled": true, "namePlacement": "auto" }
+    },
+    {
+      "id": 304,
+      "title": "Equipment Resource Matrix",
+      "description": "Complete resource breakdown per equipment",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 43, "w": 24, "h": 8 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (equipment) (acm_runs_total{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}", "format": "table", "instant": true },
+        { "refId": "B", "expr": "max by (equipment) (acm_memory_rss_mb{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}", "format": "table", "instant": true },
+        { "refId": "C", "expr": "max by (equipment) (acm_cpu_percent{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}", "format": "table", "instant": true },
+        { "refId": "D", "expr": "sum by (equipment) (acm_disk_read_mb{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}", "format": "table", "instant": true },
+        { "refId": "E", "expr": "sum by (equipment) (acm_disk_write_mb{equipment=~\"$equipment\"})", "legendFormat": "{{equipment}}", "format": "table", "instant": true }
+      ],
+      "transformations": [
+        { "id": "merge" },
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true, "Time 5": true }, "renameByName": { "equipment": "Equipment", "Value #A": "Runs", "Value #B": "Peak Memory (MB)", "Value #C": "Peak CPU (%)", "Value #D": "Disk Read (MB)", "Value #E": "Disk Write (MB)" } } }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "cellOptions": { "type": "auto" } }, "noValue": "-" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Peak Memory (MB)" }, "properties": [{ "id": "unit", "value": "decmbytes" }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 400 }, { "color": "red", "value": 600 }] } }, { "id": "custom.cellOptions", "value": { "type": "color-background" } }] },
+          { "matcher": { "id": "byName", "options": "Peak CPU (%)" }, "properties": [{ "id": "unit", "value": "percent" }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 100 }, { "color": "red", "value": 200 }] } }, { "id": "custom.cellOptions", "value": { "type": "color-background" } }] },
+          { "matcher": { "id": "byName", "options": "Disk Read (MB)" }, "properties": [{ "id": "unit", "value": "decmbytes" }] },
+          { "matcher": { "id": "byName", "options": "Disk Write (MB)" }, "properties": [{ "id": "unit", "value": "decmbytes" }] }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": true, "reducer": ["sum"] }, "sortBy": [{ "displayName": "Runs", "desc": true }] }
+    },
+
+    {
+      "id": 400,
+      "title": "🔍 Per-Run Analysis (Select Run ID from filter)",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 51, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 401,
+          "title": "Run Resources Breakdown",
+          "description": "Resource usage for the selected run - use Run ID filter above",
+          "type": "table",
+          "gridPos": { "x": 0, "y": 52, "w": 24, "h": 10 },
+          "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+          "targets": [
+            { "refId": "A", "expr": "acm_memory_delta_mb{run_id=~\"$run_id\", equipment=~\"$equipment\"}", "legendFormat": "", "format": "table", "instant": true },
+            { "refId": "B", "expr": "acm_cpu_percent{run_id=~\"$run_id\", equipment=~\"$equipment\"}", "legendFormat": "", "format": "table", "instant": true },
+            { "refId": "C", "expr": "acm_disk_read_mb{run_id=~\"$run_id\", equipment=~\"$equipment\"}", "legendFormat": "", "format": "table", "instant": true }
+          ],
+          "transformations": [
+            { "id": "merge" },
+            { "id": "organize", "options": { "excludeByName": { "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "__name__": true, "app": true, "job": true, "source": true }, "renameByName": { "equipment": "Equipment", "section": "Section", "run_id": "Run ID", "Value #A": "Memory Delta (MB)", "Value #B": "CPU (%)", "Value #C": "Disk Read (MB)" } } }
+          ],
+          "fieldConfig": {
+            "defaults": { "custom": { "cellOptions": { "type": "auto" } } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "Memory Delta (MB)" }, "properties": [{ "id": "unit", "value": "decmbytes" }, { "id": "decimals", "value": 1 }] },
+              { "matcher": { "id": "byName", "options": "CPU (%)" }, "properties": [{ "id": "unit", "value": "percent" }] },
+              { "matcher": { "id": "byName", "options": "Disk Read (MB)" }, "properties": [{ "id": "unit", "value": "decmbytes" }] }
+            ]
+          },
+          "options": { "showHeader": true, "cellHeight": "sm", "sortBy": [{ "displayName": "Memory Delta (MB)", "desc": true }] }
+        },
+        {
+          "id": 402,
+          "title": "Run Timeline (Memory)",
+          "description": "Memory progression during the selected run",
+          "type": "timeseries",
+          "gridPos": { "x": 0, "y": 62, "w": 12, "h": 8 },
+          "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+          "targets": [{ "refId": "A", "expr": "acm_memory_delta_mb{run_id=~\"$run_id\", equipment=~\"$equipment\"}", "legendFormat": "{{section}}" }],
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 80 }, "unit": "decmbytes" } },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } }
+        },
+        {
+          "id": 403,
+          "title": "Run Timeline (CPU)",
+          "description": "CPU usage during the selected run",
+          "type": "timeseries",
+          "gridPos": { "x": 12, "y": 62, "w": 12, "h": 8 },
+          "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+          "targets": [{ "refId": "A", "expr": "acm_cpu_percent{run_id=~\"$run_id\", equipment=~\"$equipment\"}", "legendFormat": "{{section}}" }],
+          "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 80 }, "unit": "percent" } },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["max"] }, "tooltip": { "mode": "multi" } }
+        }
+      ]
+    },
+
+    {
+      "id": 500,
+      "title": "📜 Logs & Traces",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 70, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 501,
+          "title": "Recent Logs",
+          "description": "ACM pipeline logs - filter by equipment using the Equipment variable",
+          "type": "logs",
+          "gridPos": { "x": 0, "y": 71, "w": 24, "h": 12 },
+          "datasource": { "uid": "loki-ds", "type": "loki" },
+          "targets": [{ "refId": "A", "expr": "{app=\"acm\"} | equipment=~\"$equipment\"", "legendFormat": "" }],
+          "options": { "showTime": true, "showLabels": true, "showCommonLabels": false, "wrapLogMessage": true, "prettifyLogMessage": false, "enableLogDetails": true, "sortOrder": "Descending" }
+        },
+        {
+          "id": 502,
+          "title": "Error Logs",
+          "description": "Error-level logs only",
+          "type": "logs",
+          "gridPos": { "x": 0, "y": 83, "w": 24, "h": 8 },
+          "datasource": { "uid": "loki-ds", "type": "loki" },
+          "targets": [{ "refId": "A", "expr": "{app=\"acm\", level=\"error\"} | equipment=~\"$equipment\"", "legendFormat": "" }],
+          "options": { "showTime": true, "showLabels": true, "showCommonLabels": false, "wrapLogMessage": true, "prettifyLogMessage": false, "enableLogDetails": true, "sortOrder": "Descending" }
+        }
+      ]
+    },
+
+    {
+      "id": 600,
+      "title": "📋 Detailed Module Tables",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 91, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 601,
+          "title": "Complete Module Resource Matrix",
+          "description": "All modules with their resource consumption",
+          "type": "table",
+          "gridPos": { "x": 0, "y": 92, "w": 24, "h": 12 },
+          "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+          "targets": [
+            { "refId": "A", "expr": "max by (section, equipment) (acm_memory_delta_mb{equipment=~\"$equipment\", section=~\"$section\"})", "legendFormat": "", "format": "table", "instant": true },
+            { "refId": "B", "expr": "max by (section, equipment) (acm_cpu_percent{equipment=~\"$equipment\", section=~\"$section\"})", "legendFormat": "", "format": "table", "instant": true },
+            { "refId": "C", "expr": "max by (stage, equipment) (acm_stage_duration_seconds_sum{equipment=~\"$equipment\", stage=~\"$section\"}) * 1000", "legendFormat": "", "format": "table", "instant": true },
+            { "refId": "D", "expr": "max by (section, equipment) (acm_disk_read_mb{equipment=~\"$equipment\", section=~\"$section\"})", "legendFormat": "", "format": "table", "instant": true }
+          ],
+          "transformations": [
+            { "id": "merge" },
+            { "id": "organize", "options": { "excludeByName": { "Time": true, "Time 1": true, "Time 2": true, "Time 3": true, "Time 4": true, "__name__": true, "app": true, "job": true, "source": true, "parent": true, "run_id": true, "stage": true }, "renameByName": { "equipment": "Equipment", "section": "Module", "Value #A": "Memory Delta (MB)", "Value #B": "CPU (%)", "Value #C": "Duration (ms)", "Value #D": "Disk Read (MB)" } } }
+          ],
+          "fieldConfig": {
+            "defaults": { "custom": { "cellOptions": { "type": "auto" } } },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "Memory Delta (MB)" }, "properties": [{ "id": "unit", "value": "decmbytes" }, { "id": "decimals", "value": 1 }, { "id": "min", "value": 0 }, { "id": "max", "value": 150 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "#F2495C", "value": null }, { "color": "#FF5733", "value": 30 }, { "color": "#C70039", "value": 60 }, { "color": "#900C3F", "value": 100 }] } }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "lcd" } }] },
+              { "matcher": { "id": "byName", "options": "CPU (%)" }, "properties": [{ "id": "unit", "value": "percent" }, { "id": "min", "value": 0 }, { "id": "max", "value": 200 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "#F2495C", "value": null }, { "color": "#FF5733", "value": 50 }, { "color": "#C70039", "value": 100 }, { "color": "#900C3F", "value": 150 }] } }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "lcd" } }] },
+              { "matcher": { "id": "byName", "options": "Duration (ms)" }, "properties": [{ "id": "unit", "value": "ms" }, { "id": "decimals", "value": 0 }, { "id": "min", "value": 0 }, { "id": "max", "value": 100 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "#F2495C", "value": null }, { "color": "#FF5733", "value": 50 }, { "color": "#C70039", "value": 70 }, { "color": "#900C3F", "value": 90 }] } }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "lcd" } }] },
+              { "matcher": { "id": "byName", "options": "Disk Read (MB)" }, "properties": [{ "id": "unit", "value": "decmbytes" }, { "id": "decimals", "value": 1 }, { "id": "min", "value": 0 }, { "id": "max", "value": 500 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "#F2495C", "value": null }, { "color": "#FF5733", "value": 100 }, { "color": "#C70039", "value": 250 }, { "color": "#900C3F", "value": 400 }] } }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "lcd" } }] }
+            ]
+          },
+          "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": true, "reducer": ["sum"] }, "sortBy": [{ "displayName": "Memory Delta (MB)", "desc": true }] }
+        }
+      ]
+    }
+  ],
   "annotations": { "list": [] }
 }

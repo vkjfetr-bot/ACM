@@ -666,7 +666,9 @@ def set_context(
     batch_num: Optional[int] = None,
     batch_total: Optional[int] = None,
 ) -> None:
-    """Update context for all subsequent logs."""
+    """Update context for all subsequent logs, traces, and profiles."""
+    global _pyroscope_pusher
+    
     if equipment is not None:
         _config.equipment = equipment
     if equip_id is not None:
@@ -686,6 +688,15 @@ def set_context(
         batch_num=_config.batch_num,
         batch_total=_config.batch_total,
     )
+    
+    # Update Pyroscope pusher tags with new context
+    if _pyroscope_pusher is not None:
+        _pyroscope_pusher._tags = {
+            "equipment": _config.equipment or "unknown",
+            "equip_id": str(_config.equip_id),
+            "run_id": _config.run_id or "unknown",
+            "service": _config.service_name,
+        }
 
 
 # =============================================================================
@@ -894,12 +905,26 @@ _SPAN_KIND_MAP = {
 }
 
 
+# Try to import psutil for memory tracking in Span
+try:
+    import psutil
+    _PSUTIL_AVAILABLE = True
+    _PROCESS = psutil.Process()
+except ImportError:
+    _PSUTIL_AVAILABLE = False
+    _PROCESS = None
+
+
 class Span:
     """
-    Context manager for OpenTelemetry spans.
+    Context manager for OpenTelemetry spans with integrated resource tracking.
     
     Usage:
         with Span("fit.pca"):
+            model.fit(X)
+        
+        # With resource tracking (memory, CPU)
+        with Span("fit.pca", track_resources=True):
             model.fit(X)
     
     Spans are colored in Tempo based on span kind:
@@ -907,14 +932,42 @@ class Span:
     - INTERNAL (green): Internal processing
     - SERVER (purple): Entry points
     - PRODUCER (orange): Data generation
+    
+    Resource metrics recorded (when track_resources=True):
+    - acm_memory_rss_mb: Process memory at section end
+    - acm_memory_delta_mb: Memory change during section
+    - acm_cpu_percent: CPU usage during section
+    - All labeled with {equipment, section, run_id}
     """
     
-    def __init__(self, name: str, **attributes):
+    def __init__(self, name: str, track_resources: bool = True, **attributes):
         self.name = name
         self.attributes = attributes
+        self.track_resources = track_resources
         self._span: Optional[Any] = None
         self._context_token: Optional[Any] = None
         self._start_time = 0.0
+        self._mem_start: float = 0.0
+        self._cpu_start: Optional[float] = None
+    
+    def _get_memory_mb(self) -> float:
+        """Get current process memory in MB."""
+        if _PSUTIL_AVAILABLE and _PROCESS:
+            try:
+                return _PROCESS.memory_info().rss / (1024 * 1024)
+            except Exception:
+                return 0.0
+        return 0.0
+    
+    def _get_cpu_times(self) -> Optional[float]:
+        """Get CPU times for delta calculation."""
+        if _PSUTIL_AVAILABLE and _PROCESS:
+            try:
+                times = _PROCESS.cpu_times()
+                return times.user + times.system
+            except Exception:
+                return None
+        return None
     
     def _get_span_kind(self) -> Any:
         """Determine span kind based on span name prefix."""
@@ -927,6 +980,11 @@ class Span:
     
     def __enter__(self) -> "Span":
         self._start_time = time.perf_counter()
+        
+        # Capture starting resource metrics
+        if self.track_resources:
+            self._mem_start = self._get_memory_mb()
+            self._cpu_start = self._get_cpu_times()
         
         if _tracer is not None:
             span_kind = self._get_span_kind()
@@ -958,30 +1016,82 @@ class Span:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         elapsed = time.perf_counter() - self._start_time
         
-        # Record metric with full hierarchical stage name
-        if _meter and "stage_duration" in _metrics:
-            # Split into parent/child for filtering (e.g., "fit.pca" -> parent="fit", stage="fit.pca")
-            parts = self.name.split(".")
-            parent = parts[0] if parts else self.name
-            _metrics["stage_duration"].record(
-                elapsed,
-                {
-                    "stage": self.name,  # Full hierarchical name
-                    "parent": parent,     # Top-level category
-                    "equipment": _config.equipment or "unknown"
-                }
-            )
+        # Capture ending resource metrics
+        mem_end = 0.0
+        mem_delta = 0.0
+        cpu_pct = 0.0
+        if self.track_resources:
+            mem_end = self._get_memory_mb()
+            mem_delta = mem_end - self._mem_start
             
-            # Also push structured timer log to Loki
-            if _loki_pusher:
-                _loki_pusher.log(
-                    "info",
-                    f"{self.name} completed in {elapsed:.3f}s",
-                    log_type="timer",
-                    section=self.name,
-                    duration_s=round(elapsed, 6),
-                    parent=parent
-                )
+            # Calculate CPU usage
+            if self._cpu_start is not None:
+                cpu_end = self._get_cpu_times()
+                if cpu_end is not None and elapsed > 0:
+                    cpu_delta = cpu_end - self._cpu_start
+                    # Convert to percentage (cpu_delta is seconds of CPU time)
+                    cpu_pct = (cpu_delta / elapsed) * 100.0
+        
+        # Get context for metrics
+        equipment = _config.equipment or "unknown"
+        run_id = _config.run_id or ""
+        parts = self.name.split(".")
+        parent = parts[0] if parts else self.name
+        
+        # Record stage duration metric
+        if _meter and "stage_duration" in _metrics:
+            attrs = {
+                "stage": self.name,  # Full hierarchical name
+                "parent": parent,     # Top-level category
+                "equipment": equipment
+            }
+            if run_id:
+                attrs["run_id"] = run_id
+            _metrics["stage_duration"].record(elapsed, attrs)
+        
+        # Record resource metrics (memory per module per equipment per run)
+        if self.track_resources and _meter:
+            resource_attrs = {
+                "section": self.name,
+                "equipment": equipment
+            }
+            if run_id:
+                resource_attrs["run_id"] = run_id
+            
+            # Memory at end of section
+            if "memory_rss_mb" in _metrics:
+                _metrics["memory_rss_mb"].set(mem_end, resource_attrs)
+            
+            # Memory delta (how much this section added/freed)
+            if "memory_delta_mb" in _metrics:
+                _metrics["memory_delta_mb"].set(mem_delta, resource_attrs)
+            
+            # CPU usage
+            if "cpu_percent" in _metrics and cpu_pct > 0:
+                _metrics["cpu_percent"].set(cpu_pct, resource_attrs)
+            
+            # Add resource info to span
+            if self._span is not None:
+                self._span.set_attribute("acm.mem_mb", round(mem_end, 1))
+                self._span.set_attribute("acm.mem_delta_mb", round(mem_delta, 1))
+                self._span.set_attribute("acm.cpu_pct", round(cpu_pct, 1))
+                self._span.set_attribute("acm.duration_s", round(elapsed, 4))
+        
+        # Push structured timer log to Loki with resources
+        if _loki_pusher:
+            _loki_pusher.log(
+                "info",
+                f"{self.name} completed in {elapsed:.3f}s",
+                log_type="timer",
+                section=self.name,
+                duration_s=round(elapsed, 6),
+                parent=parent,
+                equipment=equipment,
+                run_id=run_id,
+                mem_mb=round(mem_end, 1),
+                mem_delta_mb=round(mem_delta, 1),
+                cpu_pct=round(cpu_pct, 1)
+            )
         
         # End span
         if self._span is not None:
@@ -1001,12 +1111,12 @@ class Span:
             self._span.set_attribute(key, value)
 
 
-def traced(name: str):
-    """Decorator to trace a function."""
+def traced(name: str, track_resources: bool = True):
+    """Decorator to trace a function with optional resource tracking."""
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            with Span(name):
+            with Span(name, track_resources=track_resources):
                 return func(*args, **kwargs)
         return wrapper
     return decorator
@@ -1180,7 +1290,7 @@ def record_model_refit(equipment: str, reason: str = "", detector: str = "") -> 
 # =============================================================================
 
 def record_memory(current_mb: float, peak_mb: float = 0.0, 
-                  equipment: str = "", section: str = "") -> None:
+                  equipment: str = "", section: str = "", run_id: str = "") -> None:
     """Record memory usage metrics.
     
     Args:
@@ -1188,15 +1298,25 @@ def record_memory(current_mb: float, peak_mb: float = 0.0,
         peak_mb: Peak memory during section in MB
         equipment: Equipment name
         section: Code section name (optional)
+        run_id: Run identifier for drill-down
     """
+    # Get run_id from context if not provided
+    if not run_id:
+        run_id = _config.run_id or ""
+    
     if _meter:
         if "memory_rss_mb" in _metrics:
             attrs = {"equipment": equipment}
             if section:
                 attrs["section"] = section
+            if run_id:
+                attrs["run_id"] = run_id
             _metrics["memory_rss_mb"].set(current_mb, attrs)
         if "memory_peak_mb" in _metrics and peak_mb > 0:
-            _metrics["memory_peak_mb"].set(peak_mb, {"equipment": equipment})
+            peak_attrs = {"equipment": equipment}
+            if run_id:
+                peak_attrs["run_id"] = run_id
+            _metrics["memory_peak_mb"].set(peak_mb, peak_attrs)
     
     # Log to Loki with structured data only (no console spam)
     # The memory values are used for metrics dashboards, not human reading
@@ -1209,7 +1329,8 @@ def record_memory(current_mb: float, peak_mb: float = 0.0,
             memory_mb=round(current_mb, 1),
             memory_peak_mb=round(peak_mb, 1),
             section=section or "global",
-            equipment=equipment
+            equipment=equipment,
+            run_id=run_id
         )
 
 
@@ -1242,7 +1363,8 @@ def record_cpu(percent: float, equipment: str = "", section: str = "") -> None:
 def record_section_resources(section: str, duration_s: float, 
                              mem_start_mb: float = 0, mem_end_mb: float = 0,
                              mem_peak_mb: float = 0, mem_delta_mb: float = 0,
-                             cpu_avg_pct: float = 0, equipment: str = "") -> None:
+                             cpu_avg_pct: float = 0, equipment: str = "",
+                             run_id: str = "") -> None:
     """Record comprehensive resource metrics for a code section.
     
     Args:
@@ -1254,9 +1376,16 @@ def record_section_resources(section: str, duration_s: float,
         mem_delta_mb: Memory change (end - start) in MB
         cpu_avg_pct: Average CPU percentage
         equipment: Equipment name
+        run_id: Run identifier for drill-down
     """
+    # Get run_id from context if not provided
+    if not run_id:
+        run_id = _config.run_id or ""
+    
     if _meter:
         attrs = {"equipment": equipment, "section": section}
+        if run_id:
+            attrs["run_id"] = run_id
         
         if "section_duration" in _metrics:
             _metrics["section_duration"].record(duration_s, attrs)
@@ -1265,7 +1394,10 @@ def record_section_resources(section: str, duration_s: float,
             _metrics["memory_delta_mb"].set(mem_delta_mb, attrs)
         
         if "memory_rss_mb" in _metrics:
-            _metrics["memory_rss_mb"].set(mem_end_mb, {"equipment": equipment, "section": section})
+            mem_attrs = {"equipment": equipment, "section": section}
+            if run_id:
+                mem_attrs["run_id"] = run_id
+            _metrics["memory_rss_mb"].set(mem_end_mb, mem_attrs)
         
         if "cpu_percent" in _metrics and cpu_avg_pct > 0:
             _metrics["cpu_percent"].set(cpu_avg_pct, attrs)
@@ -1283,7 +1415,8 @@ def record_section_resources(section: str, duration_s: float,
             mem_peak_mb=round(mem_peak_mb, 1),
             mem_delta_mb=round(mem_delta_mb, 1),
             cpu_avg_pct=round(cpu_avg_pct, 1),
-            equipment=equipment
+            equipment=equipment,
+            run_id=run_id
         )
 
 
@@ -1805,12 +1938,13 @@ class _PyroscopePusher:
                 if stat.ttot < 0.001:  # Skip if < 1ms
                     continue
             
-            # Stack format: module;function <microseconds>
-            # Use total time in microseconds (yappi reports seconds)
-            total_us = int(stat.ttot * 1_000_000)
-            if total_us > 1000:  # Only report functions taking > 1ms
+            # Stack format: module;function <sample_count>
+            # Use CALL COUNT (ncall) as sample count - this is what Pyroscope expects
+            # NOT time (ttot) which causes cumulative inflation
+            sample_count = stat.ncall
+            if sample_count > 0 and stat.ttot > 0.001:  # At least 1 call and > 1ms total time
                 stack = f"{module};{name}"
-                lines.append(f"{stack} {total_us}")
+                lines.append(f"{stack} {sample_count}")
         
         return lines
     
@@ -1835,6 +1969,11 @@ class _PyroscopePusher:
         profile_type = "cpu"  # We're doing CPU profiling with yappi
         app_with_labels = f"{self._app_name}.{profile_type}{{{labels_str}}}" if labels_str else f"{self._app_name}.{profile_type}"
         
+        # Duration in seconds for this profile window
+        duration_secs = until_ts - from_ts
+        if duration_secs <= 0:
+            duration_secs = 60  # Default 1 minute if invalid
+        
         params = {
             "name": app_with_labels,
             "from": str(from_ts),
@@ -1842,6 +1981,7 @@ class _PyroscopePusher:
             "format": "folded",
             "sampleRate": "100",
             "spyName": "pyspy",
+            # Use 'samples' for call counts - Pyroscope standard
             "units": "samples",
             "aggregationType": "sum",
         }
