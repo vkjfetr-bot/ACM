@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
-from core.observability import Console, Heartbeat
+from core.observability import Console, Heartbeat, Span
 from typing import Any, Dict, Optional, List
 
 
@@ -66,18 +66,19 @@ class IsolationForestDetector:
         Args:
             X (pd.DataFrame): The training feature matrix.
         """
-        if not X.empty:
-            Xc = _finite_impute(X)
-            self._columns_ = list(Xc.columns)
-            Xn = Xc.to_numpy(dtype=np.float32, copy=False)
-            self.model.fit(Xn)
-            self._fitted_ = True
-            # Optional: set threshold if contamination is numeric
-            cont = self.model.contamination
-            if isinstance(cont, (int, float)) and 0 < cont < 0.5:
-                train_scores = -self.model.score_samples(Xn)
-                self._threshold_ = float(np.quantile(train_scores, 1.0 - cont))
-        return self
+        with Span("fit.iforest", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            if not X.empty:
+                Xc = _finite_impute(X)
+                self._columns_ = list(Xc.columns)
+                Xn = Xc.to_numpy(dtype=np.float32, copy=False)
+                self.model.fit(Xn)
+                self._fitted_ = True
+                # Optional: set threshold if contamination is numeric
+                cont = self.model.contamination
+                if isinstance(cont, (int, float)) and 0 < cont < 0.5:
+                    train_scores = -self.model.score_samples(Xn)
+                    self._threshold_ = float(np.quantile(train_scores, 1.0 - cont))
+            return self
 
     def score(self, X: pd.DataFrame) -> np.ndarray:
         """
@@ -90,16 +91,17 @@ class IsolationForestDetector:
         Returns:
             np.ndarray: An array of anomaly scores.
         """
-        # Guard: do not score if model hasn't been fitted.
-        if not self._fitted_ or not hasattr(self.model, "estimators_"):
-            return np.zeros(len(X), dtype=np.float32)
-        Xc = _finite_impute(X)
-        if self._columns_ is not None:
-            Xc = Xc.reindex(self._columns_, axis=1)
-        Xn = Xc.to_numpy(dtype=np.float32, copy=False)
-        # score_samples returns the opposite of the anomaly score. We invert it.
-        scores = -self.model.score_samples(Xn)
-        return scores.astype(np.float32, copy=False)
+        with Span("score.iforest", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            # Guard: do not score if model hasn't been fitted.
+            if not self._fitted_ or not hasattr(self.model, "estimators_"):
+                return np.zeros(len(X), dtype=np.float32)
+            Xc = _finite_impute(X)
+            if self._columns_ is not None:
+                Xc = Xc.reindex(self._columns_, axis=1)
+            Xn = Xc.to_numpy(dtype=np.float32, copy=False)
+            # score_samples returns the opposite of the anomaly score. We invert it.
+            scores = -self.model.score_samples(Xn)
+            return scores.astype(np.float32, copy=False)
 
     def decision_function(self, X: pd.DataFrame) -> np.ndarray:
         # Same as score(), provided for API parity
@@ -147,100 +149,102 @@ class GMMDetector:
 
     def fit(self, X: pd.DataFrame) -> "GMMDetector":
         """Fits the GMM on the training data."""
-        if X.empty:
-            return self
-        Xc = _finite_impute(X)
-        self._columns_ = list(Xc.columns)
-        Xn = Xc.to_numpy(dtype=np.float64, copy=False)
+        with Span("fit.gmm", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            if X.empty:
+                return self
+            Xc = _finite_impute(X)
+            self._columns_ = list(Xc.columns)
+            Xn = Xc.to_numpy(dtype=np.float64, copy=False)
 
-        # Drop constant features
-        var = Xn.var(axis=0)
-        self._var_mask = (var > 0)
-        if not np.any(self._var_mask):
-            Console.warn("All features constant — disabling GMM.", component="GMM")
+            # Drop constant features
+            var = Xn.var(axis=0)
+            self._var_mask = (var > 0)
+            if not np.any(self._var_mask):
+                Console.warn("All features constant — disabling GMM.", component="GMM")
+                self._is_fitted = False
+                return self
+            Xn = Xn[:, self._var_mask]
+
+            n_samples, n_features = Xn.shape
+            if n_features < 1 or n_samples < 2:
+                Console.warn("Not enough data after preprocessing — disabling GMM.", component="GMM")
+                self._is_fitted = False
+                return self
+
+            Xs = self.scaler.fit_transform(Xn).astype(np.float64, copy=False)
+
+            # Components: cap by samples; keep a small heuristic limit
+            heuristic = int(max(2, np.sqrt(n_samples) / 2))
+            safe_k = max(2, min(self._user_k, heuristic, n_samples - 1, 32))
+
+            # Use config for trial parameters
+            cov_type = self.gmm_cfg.get("covariance_type", "diag")
+            reg_covar = float(self.gmm_cfg.get("reg_covar", 1e-3)) # Increased default for stability
+            
+            # If BIC search is enabled, find best k
+            if self.gmm_cfg.get("enable_bic_search", True) and safe_k > 2:
+                bics = []
+                k_range = range(max(2, self.gmm_cfg.get("k_min", 2)), min(safe_k, self.gmm_cfg.get("k_max", 5)) + 1)
+                for k_test in k_range:
+                    gm_test = GaussianMixture(n_components=k_test, covariance_type=cov_type, reg_covar=reg_covar, random_state=17)
+                    gm_test.fit(Xs)
+                    bics.append(gm_test.bic(Xs))
+                safe_k = k_range[np.argmin(bics)]
+                Console.info(f"BIC search selected k={safe_k}", component="GMM")
+
+            # Simplified trial with configured parameters
+            trials = [dict(covariance_type=cov_type, reg_covar=reg_covar)]
+
+            last_err = None
+            last_err = None
+            for params in trials:
+                k = safe_k
+                while k >= 2:
+                    try:
+                        gm = GaussianMixture(
+                            n_components=k,
+                            covariance_type=params["covariance_type"],
+                            reg_covar=params["reg_covar"], # Use the resolved reg_covar
+                            n_init=int(self.gmm_cfg.get("n_init", 3)), # Increased n_init for better convergence
+                            max_iter=int(self.gmm_cfg.get("max_iter", 100)),
+                            init_params=str(self.gmm_cfg.get("init_params", "kmeans")),
+                            random_state=int(self.gmm_cfg.get("random_state", 42)),
+                        )
+                        gm.fit(Xs)
+                        self.model = gm
+                        self._is_fitted = True
+                        self._fitted_params = dict(k=k, **params)
+                        Console.info(f"Fitted k={k}, cov={params['covariance_type']}, reg={params['reg_covar']}", component="GMM")
+                        # Calibrate scores on training set for z-score decision_function
+                        tr_scores = -gm.score_samples(Xs)
+                        self._score_mu_ = float(np.mean(tr_scores))
+                        self._score_sd_ = float(np.std(tr_scores) + 1e-9)
+                        return self
+                    except Exception as e:
+                        last_err = e
+                        k -= 1
+                        continue
+
+            Console.warn(f"Disabled after retries: {last_err}", component="GMM")
             self._is_fitted = False
             return self
-        Xn = Xn[:, self._var_mask]
-
-        n_samples, n_features = Xn.shape
-        if n_features < 1 or n_samples < 2:
-            Console.warn("Not enough data after preprocessing — disabling GMM.", component="GMM")
-            self._is_fitted = False
-            return self
-
-        Xs = self.scaler.fit_transform(Xn).astype(np.float64, copy=False)
-
-        # Components: cap by samples; keep a small heuristic limit
-        heuristic = int(max(2, np.sqrt(n_samples) / 2))
-        safe_k = max(2, min(self._user_k, heuristic, n_samples - 1, 32))
-
-        # Use config for trial parameters
-        cov_type = self.gmm_cfg.get("covariance_type", "diag")
-        reg_covar = float(self.gmm_cfg.get("reg_covar", 1e-3)) # Increased default for stability
-        
-        # If BIC search is enabled, find best k
-        if self.gmm_cfg.get("enable_bic_search", True) and safe_k > 2:
-            bics = []
-            k_range = range(max(2, self.gmm_cfg.get("k_min", 2)), min(safe_k, self.gmm_cfg.get("k_max", 5)) + 1)
-            for k_test in k_range:
-                gm_test = GaussianMixture(n_components=k_test, covariance_type=cov_type, reg_covar=reg_covar, random_state=17)
-                gm_test.fit(Xs)
-                bics.append(gm_test.bic(Xs))
-            safe_k = k_range[np.argmin(bics)]
-            Console.info(f"BIC search selected k={safe_k}", component="GMM")
-
-        # Simplified trial with configured parameters
-        trials = [dict(covariance_type=cov_type, reg_covar=reg_covar)]
-
-        last_err = None
-        last_err = None
-        for params in trials:
-            k = safe_k
-            while k >= 2:
-                try:
-                    gm = GaussianMixture(
-                        n_components=k,
-                        covariance_type=params["covariance_type"],
-                        reg_covar=params["reg_covar"], # Use the resolved reg_covar
-                        n_init=int(self.gmm_cfg.get("n_init", 3)), # Increased n_init for better convergence
-                        max_iter=int(self.gmm_cfg.get("max_iter", 100)),
-                        init_params=str(self.gmm_cfg.get("init_params", "kmeans")),
-                        random_state=int(self.gmm_cfg.get("random_state", 42)),
-                    )
-                    gm.fit(Xs)
-                    self.model = gm
-                    self._is_fitted = True
-                    self._fitted_params = dict(k=k, **params)
-                    Console.info(f"Fitted k={k}, cov={params['covariance_type']}, reg={params['reg_covar']}", component="GMM")
-                    # Calibrate scores on training set for z-score decision_function
-                    tr_scores = -gm.score_samples(Xs)
-                    self._score_mu_ = float(np.mean(tr_scores))
-                    self._score_sd_ = float(np.std(tr_scores) + 1e-9)
-                    return self
-                except Exception as e:
-                    last_err = e
-                    k -= 1
-                    continue
-
-        Console.warn(f"Disabled after retries: {last_err}", component="GMM")
-        self._is_fitted = False
-        return self
 
     def score(self, X: pd.DataFrame) -> np.ndarray:
         """
         Calculates the negative log-likelihood for each sample.
         Higher scores indicate a higher likelihood of being an anomaly.
         """
-        if not self._is_fitted or self.model is None or self._var_mask is None:
-            return np.zeros(len(X), dtype=np.float32)
-        Xc = _finite_impute(X)
-        if self._columns_ is not None:
-            Xc = Xc.reindex(self._columns_, axis=1)
-        Xn = Xc.to_numpy(dtype=np.float64, copy=False)
-        Xn = Xn[:, self._var_mask]
-        Xs = self.scaler.transform(Xn).astype(np.float64, copy=False)
-        scores = -self.model.score_samples(Xs)
-        return scores.astype(np.float32, copy=False)
+        with Span("score.gmm", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            if not self._is_fitted or self.model is None or self._var_mask is None:
+                return np.zeros(len(X), dtype=np.float32)
+            Xc = _finite_impute(X)
+            if self._columns_ is not None:
+                Xc = Xc.reindex(self._columns_, axis=1)
+            Xn = Xc.to_numpy(dtype=np.float64, copy=False)
+            Xn = Xn[:, self._var_mask]
+            Xs = self.scaler.transform(Xn).astype(np.float64, copy=False)
+            scores = -self.model.score_samples(Xs)
+            return scores.astype(np.float32, copy=False)
 
     def decision_function(self, X: pd.DataFrame) -> np.ndarray:
         raw = self.score(X).astype(np.float64, copy=False)

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple, Literal, Optional
 import numpy as np
 import pandas as pd
-from core.observability import Console, Heartbeat
+from core.observability import Console, Heartbeat, Span
 
 # Minimum samples required for AR(1) model coefficient estimation
 MIN_AR1_SAMPLES = 3
@@ -65,8 +65,9 @@ class AR1Detector:
         Returns:
             self for chaining
         """
-        self.phimap = {}
-        self.sdmap = {}
+        with Span("fit.ar1", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            self.phimap = {}
+            self.sdmap = {}
         
         if not isinstance(X, pd.DataFrame) or X.shape[0] == 0:
             self._is_fitted = True
@@ -140,8 +141,8 @@ class AR1Detector:
             n = len(insufficient_cols)
             Console.warn(f"{n} columns with <{MIN_FORECAST_SAMPLES} samples (unstable coefficients)", component="AR1")
         
-        self._is_fitted = True
-        return self
+            self._is_fitted = True
+            return self
     
     def score(self, X: pd.DataFrame, return_per_sensor: bool = False) -> np.ndarray | Tuple[np.ndarray, pd.DataFrame]:
         """
@@ -155,8 +156,9 @@ class AR1Detector:
             Fused absolute z-scores (len == len(X))
             Optionally: (fused_scores, per_sensor_df) when return_per_sensor=True
         """
-        if not self._is_fitted:
-            return np.zeros(len(X), dtype=np.float32)
+        with Span("score.ar1", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            if not self._is_fitted:
+                return np.zeros(len(X), dtype=np.float32)
         
         per_cols: Dict[str, np.ndarray] = {}
         n = len(X)
@@ -225,10 +227,10 @@ class AR1Detector:
             else:
                 fused = np.nanmean(matrix, axis=1).astype(np.float32)
         
-        if return_per_sensor:
-            Z = pd.DataFrame({name: matrix[:, i] for i, name in enumerate(col_names)}, index=X.index)
-            return fused, Z
-        return fused
+            if return_per_sensor:
+                Z = pd.DataFrame({name: matrix[:, i] for i, name in enumerate(col_names)}, index=X.index)
+                return fused, Z
+            return fused
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize detector state for persistence."""
