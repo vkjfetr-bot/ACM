@@ -1548,6 +1548,18 @@ class _LokiPusher:
             "equip_id": str(_config.equip_id) if _config.equip_id else "0",
         }
         
+        # Add trace_id from current span for trace-to-logs correlation
+        if OTEL_AVAILABLE and otel_trace is not None:
+            try:
+                current_span = otel_trace.get_current_span()
+                if current_span and current_span.is_recording():
+                    span_ctx = current_span.get_span_context()
+                    if span_ctx and span_ctx.trace_id:
+                        # Format as 32-char hex string (Tempo format)
+                        labels["trace_id"] = format(span_ctx.trace_id, '032x')
+            except Exception:
+                pass  # Best effort - don't break logging
+        
         # Add optional context as labels (must be strings)
         # Handle known label fields from context
         if context.get("tag"):
