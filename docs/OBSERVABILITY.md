@@ -1,150 +1,134 @@
 # ACM Observability Stack
 
-This document describes the consolidated observability architecture for ACM v10.2.x+.
+This document describes the consolidated observability architecture for ACM v10.3.x+.
 
 ## Overview
 
-ACM uses a modern observability stack built on open standards:
+ACM uses a modern observability stack built on open standards, deployed entirely in Docker:
 
-| Signal | Tool | Backend | Purpose |
-|--------|------|---------|---------|
-| **Traces** | OpenTelemetry SDK | Grafana Tempo | Distributed tracing, request flow |
-| **Metrics** | OpenTelemetry SDK | Grafana Mimir | Performance metrics, counters |
-| **Logs** | structlog | Grafana Loki + SQL | Structured JSON logs |
-| **Profiling** | Grafana Pyroscope | Pyroscope | Continuous CPU/memory flamegraphs |
+| Signal | Tool | Backend | Port | Purpose |
+|--------|------|---------|------|---------|
+| **Traces** | OpenTelemetry SDK | Grafana Tempo | 3200 | Distributed tracing, request flow |
+| **Metrics** | OpenTelemetry SDK | Prometheus | 9090 | Performance metrics, counters |
+| **Logs** | structlog | Grafana Loki | 3100 | Structured JSON logs |
+| **Profiling** | pyroscope-io | Grafana Pyroscope | 4040 | Continuous CPU/memory flamegraphs |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  ACM Python Application                                      │
-│  ┌─────────────────┐ ┌─────────────────┐ ┌────────────────┐ │
-│  │ OTel SDK        │ │ structlog       │ │ Pyroscope SDK  │ │
-│  │ (traces+metrics)│ │ (JSON logs)     │ │ (profiling)    │ │
-│  └────────┬────────┘ └────────┬────────┘ └───────┬────────┘ │
-└───────────┼───────────────────┼──────────────────┼──────────┘
-            │ OTLP              │ SQL + stdout     │ HTTP
+┌─────────────────────────────────────────────────────────────────┐
+│  ACM Python Application (Host)                                   │
+│  ┌─────────────────┐ ┌─────────────────┐ ┌────────────────────┐ │
+│  │ OTel SDK        │ │ structlog+Loki  │ │ pyroscope-io       │ │
+│  │ (traces+metrics)│ │ (JSON logs)     │ │ (profiling)        │ │
+│  └────────┬────────┘ └────────┬────────┘ └───────┬────────────┘ │
+└───────────┼───────────────────┼──────────────────┼──────────────┘
+            │ OTLP HTTP         │ HTTP             │ HTTP
+            │ :4318             │ :3100            │ :4040
             ▼                   ▼                  ▼
-┌───────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│  Grafana Alloy    │  │ ACM_RunLogs SQL │  │ Pyroscope       │
-│  (collector)      │  │ + Loki          │  │ Server          │
-└─────────┬─────────┘  └─────────────────┘  └─────────────────┘
-          │
-          ▼
-┌─────────────────┐
-│ Tempo (traces)  │
-│ Mimir (metrics) │
-└─────────────────┘
-          │
-          ▼
-┌─────────────────────┐
-│     Grafana         │
-│  (visualization)    │
-└─────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Docker: acm-observability network                               │
+│  ┌───────────────┐ ┌──────────────┐ ┌──────────────────────────┐│
+│  │ acm-alloy     │ │ acm-loki     │ │ acm-pyroscope            ││
+│  │ (collector)   │ │ (logs)       │ │ (profiles)               ││
+│  │ 4317,4318     │ │ 3100         │ │ 4040                     ││
+│  └───────┬───────┘ └──────────────┘ └──────────────────────────┘│
+│          │                                                       │
+│  ┌───────▼───────┐ ┌──────────────┐                             │
+│  │ acm-tempo     │ │ acm-         │                             │
+│  │ (traces)      │ │ prometheus   │                             │
+│  │ 3200          │ │ (metrics)    │                             │
+│  └───────────────┘ │ 9090         │                             │
+│                    └──────────────┘                             │
+│  ┌──────────────────────────────────────────────────────────────┤
+│  │ acm-grafana (dashboards)  http://localhost:3000              │
+│  │ admin/admin                                                   │
+│  └──────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Quick Start
+
+### 1. Start the Docker Stack
+```powershell
+cd install/observability
+docker compose up -d
+```
+
+### 2. Verify Services
+```powershell
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+```
+
+### 3. Access Grafana
+- URL: http://localhost:3000
+- Username: `admin`
+- Password: `admin`
+- Dashboards: ACM folder contains pre-provisioned dashboards
+
+### 4. Run ACM
+```powershell
+python scripts/sql_batch_runner.py --equip WFA_TURBINE_10 --tick-minutes 1440 --max-ticks 2
+```
+
+You should see:
+```
+[SUCCESS] [OTEL] Loki logs -> http://localhost:3100
+[SUCCESS] [OTEL] Traces -> http://localhost:4318/v1/traces
+[SUCCESS] [OTEL] Metrics -> http://localhost:4318/v1/metrics
+[SUCCESS] [OTEL] Profiling -> http://localhost:4040
 ```
 
 ## Installation
 
 ### Base (Required)
 ```bash
-pip install structlog>=24.0
+pip install structlog>=24.0 colorama
 ```
 
-### Full Telemetry (Optional)
+### Full Telemetry (Recommended)
 ```bash
 # OpenTelemetry for traces + metrics
 pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
-# Continuous profiling
+# Continuous profiling (requires Rust toolchain on some platforms)
 pip install pyroscope-io
 
 # Or install everything via extras
 pip install -e ".[observability]"
 ```
 
-### Development Profiling
-```bash
-pip install py-spy scalene memray
+## Docker Services
+
+| Container | Image | Ports | Purpose |
+|-----------|-------|-------|---------|
+| `acm-grafana` | grafana/grafana:latest | 3000 | Dashboard UI |
+| `acm-alloy` | grafana/alloy:latest | 4317, 4318, 12345 | OTLP collector |
+| `acm-tempo` | grafana/tempo:2.9.0 | 3200, 9095 | Trace storage |
+| `acm-loki` | grafana/loki:3.3.2 | 3100 | Log aggregation |
+| `acm-prometheus` | prom/prometheus:v2.54.1 | 9090 | Metrics storage |
+| `acm-pyroscope` | grafana/pyroscope:1.16.0 | 4040, 4041 | Profiling |
+
+## Configuration Files
+
 ```
-
-## Quick Start
-
-### Basic Usage (Logs Only)
-```python
-from core.observability import init_observability, get_logger, acm_log
-
-# Initialize at startup
-init_observability(service_name="acm-batch")
-
-# Get structured logger
-log = get_logger()
-log.info("batch_started", equipment="FD_FAN", rows=1500)
-
-# Or use category-aware logger (backwards compatible with ACMLog)
-acm_log.run("Pipeline started")
-acm_log.data("Loaded 1500 rows", row_count=1500)
-acm_log.perf("detector.fit", duration_ms=234.5)
+install/observability/
+├── docker-compose.yaml          # Main Docker Compose file
+├── config-docker.alloy          # Alloy collector config (Docker)
+├── config.alloy                  # Alloy config (Windows native, deprecated)
+├── tempo-docker.yaml            # Tempo configuration
+├── loki-docker.yaml             # Loki configuration
+├── prometheus.yaml              # Prometheus configuration
+├── pyroscope-docker.yaml        # Pyroscope configuration
+├── provisioning/
+│   ├── datasources/
+│   │   └── datasources.yaml     # Auto-provisioned datasources
+│   └── dashboards/
+│       └── dashboards.yaml      # Dashboard provisioning config
+└── dashboards/
+    ├── acm_observability.json   # Observability dashboard
+    └── acm_behavior.json        # Equipment behavior dashboard
 ```
-
-### Full Telemetry
-```python
-from core.observability import (
-    init_observability, 
-    get_tracer, 
-    get_meter, 
-    get_logger,
-    traced,
-    timed,
-    set_context,
-)
-
-# Initialize with OTLP endpoint
-init_observability(
-    service_name="acm-batch",
-    otlp_endpoint="http://localhost:4318",  # Grafana Alloy
-    pyroscope_endpoint="http://localhost:4040",  # Optional
-)
-
-# Set run context
-set_context(run_id="abc-123", equip_id=42, batch_num=0, batch_total=5)
-
-# Get instrumentation handles
-tracer = get_tracer()
-meter = get_meter()
-log = get_logger()
-
-# Create custom metrics
-batch_counter = meter.create_counter("acm.custom.counter")
-
-# Use decorator for tracing
-@traced("process_batch")
-@timed("batch.process")
-def process_batch(df):
-    log.info("processing", rows=len(df))
-    # ... work ...
-    batch_counter.add(1, {"status": "success"})
-```
-
-### Profiling with Pyroscope
-```python
-from core.observability import profile_section
-
-# Profile specific code sections
-with profile_section({"equipment": "FD_FAN", "detector": "omr"}):
-    run_detector()
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OTEL_SERVICE_NAME` | `acm` | Service name for traces/metrics |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | OTLP collector endpoint |
-| `OTEL_SDK_DISABLED` | `false` | Disable OpenTelemetry entirely |
-| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Trace sampling ratio (0.1 = 10%) |
-| `ACM_PYROSCOPE_ENDPOINT` | none | Pyroscope server endpoint |
-| `ACM_LOG_FORMAT` | `json` | Log format: `json` or `console` |
-| `ACM_LOG_LEVEL` | `INFO` | Minimum log level |
 
 ## Log Categories
 

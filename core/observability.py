@@ -145,6 +145,18 @@ except ImportError:
 
 
 # =============================================================================
+# PYROSCOPE (CONTINUOUS PROFILING)
+# =============================================================================
+
+try:
+    import pyroscope
+    PYROSCOPE_AVAILABLE = True
+except ImportError:
+    pyroscope = None
+    PYROSCOPE_AVAILABLE = False
+
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -154,6 +166,8 @@ DEFAULT_OTLP_ENDPOINT = "http://localhost:4318"
 DEFAULT_LOKI_ENDPOINT = "http://localhost:3100"
 # Prometheus remote-write endpoint  
 DEFAULT_PROMETHEUS_ENDPOINT = "http://localhost:9090"
+# Pyroscope profiling endpoint
+DEFAULT_PYROSCOPE_ENDPOINT = "http://localhost:4040"
 
 class _Config:
     """Runtime configuration."""
@@ -162,6 +176,7 @@ class _Config:
     otlp_endpoint: str = DEFAULT_OTLP_ENDPOINT
     loki_endpoint: str = DEFAULT_LOKI_ENDPOINT
     prometheus_endpoint: str = DEFAULT_PROMETHEUS_ENDPOINT
+    pyroscope_endpoint: str = DEFAULT_PYROSCOPE_ENDPOINT
     equipment: str = ""
     equip_id: int = 0
     run_id: str = ""
@@ -172,6 +187,7 @@ _config = _Config()
 _tracer: Optional[Any] = None
 _meter: Optional[Any] = None
 _loki_pusher: Optional["_LokiPusher"] = None
+_pyroscope_enabled: bool = False
 _initialized: bool = False
 _shutdown_called: bool = False
 _sql_sink: Optional["_SqlLogSink"] = None
@@ -214,11 +230,13 @@ def init(
     service_name: str = "acm-pipeline",
     otlp_endpoint: str = DEFAULT_OTLP_ENDPOINT,
     loki_endpoint: str = DEFAULT_LOKI_ENDPOINT,
+    pyroscope_endpoint: str = DEFAULT_PYROSCOPE_ENDPOINT,
     # Legacy param - maps to otlp_endpoint
     tempo_endpoint: Optional[str] = None,
     enable_tracing: bool = True,
     enable_metrics: bool = True,
     enable_loki: bool = True,
+    enable_profiling: bool = True,
 ) -> None:
     """Initialize observability stack.
     
@@ -230,8 +248,10 @@ def init(
         service_name: OpenTelemetry service name
         tempo_endpoint: Tempo OTLP endpoint (default: http://localhost:4321)
         loki_endpoint: Loki push endpoint (default: http://localhost:3100)
+        pyroscope_endpoint: Pyroscope endpoint (default: http://localhost:4040)
         enable_tracing: Enable trace export to Tempo
         enable_metrics: Enable metric export via OTEL
+        enable_profiling: Enable continuous profiling with Pyroscope
         enable_loki: Enable log push to Loki
     """
     global _initialized, _tracer, _meter, _sql_sink, _loki_pusher, _config, _metrics
@@ -278,6 +298,31 @@ def init(
                 Console.ok(f"[OTEL] Loki logs -> {loki_endpoint}")
             else:
                 Console.warn(f"[OTEL] Loki not connected at {loki_endpoint}")
+        
+        # Pyroscope continuous profiling
+        global _pyroscope_enabled
+        if enable_profiling and PYROSCOPE_AVAILABLE:
+            try:
+                pyroscope_reachable = _check_endpoint_reachable(pyroscope_endpoint)
+                if pyroscope_reachable:
+                    pyroscope.configure(
+                        application_name=service_name,
+                        server_address=pyroscope_endpoint,
+                        tags={
+                            "equipment": equipment or "unknown",
+                            "equip_id": str(equip_id),
+                            "run_id": run_id or "unknown",
+                        },
+                    )
+                    _pyroscope_enabled = True
+                    _config.pyroscope_endpoint = pyroscope_endpoint
+                    Console.ok(f"[OTEL] Profiling -> {pyroscope_endpoint}")
+                else:
+                    Console.warn(f"[OTEL] Pyroscope not reachable at {pyroscope_endpoint} - profiling disabled")
+            except Exception as e:
+                Console.warn(f"[OTEL] Pyroscope setup failed: {e}")
+        elif enable_profiling and not PYROSCOPE_AVAILABLE:
+            Console.warn("[OTEL] pyroscope-io not installed - profiling disabled (pip install pyroscope-io)")
         
         # OpenTelemetry setup for tracing
         if not OTEL_AVAILABLE or not OTEL_EXPORTERS_AVAILABLE:
@@ -420,12 +465,20 @@ def init(
 
 def shutdown() -> None:
     """Flush and shutdown all providers."""
-    global _sql_sink, _loki_pusher, _shutdown_called
+    global _sql_sink, _loki_pusher, _shutdown_called, _pyroscope_enabled
     
     # Prevent double shutdown (atexit may call again)
     if _shutdown_called:
         return
     _shutdown_called = True
+    
+    # Shutdown Pyroscope profiling
+    if _pyroscope_enabled and PYROSCOPE_AVAILABLE and pyroscope is not None:
+        try:
+            pyroscope.shutdown()
+        except Exception:
+            pass  # Best effort
+        _pyroscope_enabled = False
     
     # Flush and shutdown OTEL metric provider to ensure final metrics are exported
     if OTEL_AVAILABLE and otel_metrics is not None:

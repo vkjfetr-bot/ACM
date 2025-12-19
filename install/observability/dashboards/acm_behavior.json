@@ -1,0 +1,246 @@
+{
+  "uid": "acm-behavior",
+  "title": "ACM Behavior",
+  "description": "Monitor ACM equipment health, anomaly detection, and RUL predictions",
+  "tags": ["acm", "health", "anomaly", "rul"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "ACM Run Summary",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count_over_time({app=\"acm\"} |~ `\\[SUCCESS\\].*completed` [$__range])",
+          "legendFormat": "Successful Runs"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "unit": "none"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Rows Processed",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum_over_time({app=\"acm\"} |~ `Retrieved (\\d+) rows` | regexp `Retrieved (?P<rows>\\d+) rows` | unwrap rows [$__range])",
+          "legendFormat": "Total Rows"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Episodes Detected",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum_over_time({app=\"acm\"} |~ `episodes detected` | regexp `(?P<episodes>\\d+) episodes detected` | unwrap episodes [$__range])",
+          "legendFormat": "Episodes"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "yellow", "value": null },
+              { "color": "orange", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "unit": "none"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Errors",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count_over_time({app=\"acm\"} |~ `(?i)\\[ERROR\\]` [$__range])",
+          "legendFormat": "Errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "unit": "none"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 5,
+      "title": "Equipment Processing Timeline",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 8 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count_over_time({app=\"acm\"} |~ `\\[BATCH\\].*Batch \\d+` [$__interval])",
+          "legendFormat": "Batch Runs"
+        },
+        {
+          "refId": "B",
+          "expr": "count_over_time({app=\"acm\"} |~ `\\[SUCCESS\\]` [$__interval])",
+          "legendFormat": "Success Events"
+        },
+        {
+          "refId": "C",
+          "expr": "count_over_time({app=\"acm\"} |~ `\\[ERROR\\]` [$__interval])",
+          "legendFormat": "Errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "pointSize": 5,
+            "showPoints": "auto"
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Errors" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Recent ACM Activity",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{app=\"acm\"} |~ `\\[(BATCH|SUCCESS|RUN|DATA|EPISODE)\\]`",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      }
+    },
+    {
+      "id": 7,
+      "title": "Health & RUL Updates",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{app=\"acm\"} |~ `(?i)(health|rul|forecast|prediction)`",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

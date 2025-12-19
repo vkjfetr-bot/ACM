@@ -23,13 +23,15 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 - **Grafana** - Dashboards in `grafana_dashboards/*.json`
 - **MS SQL datasource** - Direct SQL queries with `$__timeFrom()`, `$__timeTo()` macros
 
-### Observability Stack (v10.3.0)
+### Observability Stack (v10.3.0 - Docker-based)
+- **Docker Compose** - Complete stack in `install/observability/docker-compose.yaml`
+- **Grafana** - Dashboard UI on port 3000 (admin/admin), auto-provisioned datasources
+- **Grafana Alloy** - OTLP collector on ports 4317 (gRPC), 4318 (HTTP)
 - **OpenTelemetry** - Distributed tracing (Tempo) and metrics (Prometheus)
-- **Loki** - Structured log aggregation via Grafana Alloy
-- **Pyroscope** - Continuous profiling for performance analysis
+- **Loki** - Structured log aggregation on port 3100
+- **Pyroscope** - Continuous profiling on port 4040 (requires `pip install pyroscope-io`)
 - **Unified API** - `core/observability.py` provides Console, Span, Metrics classes
-- **Grafana Dashboards** - `acm_observability.json`, `acm_performance_monitor.json`
-- **Install scripts** - `install/observability/` for Docker Compose stack
+- **Dashboards** - `install/observability/dashboards/` (auto-provisioned to Grafana)
 
 ### Configuration
 - **configs/config_table.csv** - Equipment-specific settings (cascading: `*` global, then equipment rows)
@@ -183,18 +185,40 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 python scripts/sql/populate_acm_config.py
 ```
 
-### Observability Stack
+### Observability Stack (Docker-based)
 ```powershell
-# Start observability stack (Prometheus, Loki, Tempo, Pyroscope, Alloy)
+# Start complete observability stack (Grafana, Alloy, Tempo, Loki, Prometheus, Pyroscope)
 cd install/observability; docker compose up -d
 
-# Verify stack is running
-Invoke-RestMethod -Uri "http://localhost:3200/api/search?limit=1"  # Tempo
-Invoke-RestMethod -Uri "http://localhost:3100/ready"                # Loki
-Invoke-RestMethod -Uri "http://localhost:9090/-/healthy"            # Prometheus
+# Verify all containers are healthy
+docker ps --format "table {{.Names}}\t{{.Status}}"
 
-# View traces in Grafana
-# Open http://localhost:3000, go to Explore > Tempo > Search for service.name=acm-pipeline
+# Expected containers:
+# acm-grafana      (port 3000) - Dashboard UI, admin/admin
+# acm-alloy        (port 4317, 4318) - OTLP collector
+# acm-tempo        (port 3200) - Traces
+# acm-loki         (port 3100) - Logs
+# acm-prometheus   (port 9090) - Metrics
+# acm-pyroscope    (port 4040) - Profiling
+
+# Access Grafana with auto-provisioned datasources and dashboards
+# Open http://localhost:3000 (admin/admin)
+# Dashboards in ACM folder: ACM Behavior, ACM Observability
+
+# Stop the stack
+docker compose down
+
+# Clean restart (removes all data)
+docker compose down -v; docker compose up -d
+```
+
+### Enable Profiling
+```powershell
+# Install pyroscope-io for continuous profiling
+pip install pyroscope-io
+
+# Verify in ACM output:
+# [SUCCESS] [OTEL] Profiling -> http://localhost:4040
 ```
 
 ### Testing

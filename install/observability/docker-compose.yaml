@@ -1,18 +1,78 @@
 # ACM Observability Stack - Docker Compose
 # =========================================
-# This runs Tempo, Pyroscope, and Loki in Docker containers.
-# Grafana is assumed to already be installed natively.
+# Complete observability stack with Alloy, Grafana, Tempo, Loki, Prometheus, Pyroscope
 #
 # Usage:
 #   docker-compose up -d
 #
 # Endpoints:
+#   Grafana:       http://localhost:3000  (admin/admin)
+#   Alloy OTLP:    localhost:4317 (gRPC), localhost:4318 (HTTP)
 #   Tempo API:     http://localhost:3200
-#   Tempo OTLP:    localhost:4317 (gRPC), localhost:4318 (HTTP)
 #   Pyroscope:     http://localhost:4040
 #   Loki:          http://localhost:3100
+#   Prometheus:    http://localhost:9090
 
 services:
+  # ============================================================================
+  # Grafana Alloy - OpenTelemetry Collector
+  # Receives OTLP from Python apps and routes to backends
+  # ============================================================================
+  alloy:
+    image: grafana/alloy:latest
+    container_name: acm-alloy
+    command:
+      - "run"
+      - "/etc/alloy/config.alloy"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--stability.level=generally-available"
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "12345:12345" # Alloy UI/metrics
+    volumes:
+      - ./config-docker.alloy:/etc/alloy/config.alloy:ro
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:12345/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================================
+  # Grafana - Dashboard and Visualization
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: acm-grafana
+    ports:
+      - "3000:3000"   # Grafana UI
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-pyroscope-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+      - pyroscope
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # ============================================================================
   # Grafana Tempo - Distributed Tracing
   # ============================================================================
@@ -22,8 +82,6 @@ services:
     command: ["-config.file=/etc/tempo.yaml"]
     ports:
       - "3200:3200"   # Tempo API
-      - "4320:4317"   # OTLP gRPC (remapped to 4320 to avoid Alloy conflict)
-      - "4321:4318"   # OTLP HTTP (remapped to 4321 to avoid Alloy conflict)
       - "9095:9095"   # Tempo gRPC
     volumes:
       - ./tempo-docker.yaml:/etc/tempo.yaml:ro
@@ -103,6 +161,7 @@ volumes:
   pyroscope-data:
   loki-data:
   prometheus-data:
+  grafana-data:
 
 networks:
   default:

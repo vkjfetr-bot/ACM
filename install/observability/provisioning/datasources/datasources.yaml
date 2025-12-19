@@ -1,0 +1,73 @@
+# Grafana Datasources for ACM Observability Stack (Docker)
+# ==========================================================
+# Auto-provisioned when Grafana starts
+# Uses Docker container names for internal networking
+
+apiVersion: 1
+
+datasources:
+  # Prometheus - Metrics (DEFAULT)
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    uid: prometheus-ds
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo-ds
+          urlDisplayLabel: View Trace
+
+  # Tempo - Distributed Tracing
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo-ds
+    isDefault: false
+    jsonData:
+      httpMethod: GET
+      serviceMap:
+        datasourceUid: prometheus-ds
+      search:
+        hide: false
+      nodeGraph:
+        enabled: true
+      tracesToLogsV2:
+        datasourceUid: loki-ds
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: false
+      tracesToProfiles:
+        datasourceUid: pyroscope-ds
+        profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
+        customQuery: true
+        query: 'service_name="${__span.serviceName}"'
+
+  # Loki - Log Aggregation
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    uid: loki-ds
+    isDefault: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - datasourceUid: tempo-ds
+          matcherRegex: '"trace_id":"([a-f0-9]+)"'
+          name: TraceID
+          url: '$${__value.raw}'
+
+  # Pyroscope - Continuous Profiling
+  - name: Pyroscope
+    type: grafana-pyroscope-datasource
+    access: proxy
+    url: http://pyroscope:4040
+    uid: pyroscope-ds
+    isDefault: false
+    jsonData: {}
