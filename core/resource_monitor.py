@@ -26,7 +26,7 @@ import time
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple
 from datetime import datetime
 
 try:
@@ -35,22 +35,38 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+# GPU monitoring (optional - requires pynvml/nvidia-ml-py)
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    GPU_AVAILABLE = True
+    GPU_COUNT = pynvml.nvmlDeviceGetCount()
+except Exception:
+    GPU_AVAILABLE = False
+    GPU_COUNT = 0
+
 import pandas as pd
 
 # OTEL metrics integration (lazy loaded)
 _otel_enabled = False
 _record_memory_fn: Optional[Callable] = None
 _record_cpu_fn: Optional[Callable] = None
+_record_gpu_fn: Optional[Callable] = None
+_record_capacity_fn: Optional[Callable] = None
+_record_disk_io_fn: Optional[Callable] = None
 _equipment_context: str = ""
 
 
 def enable_resource_metrics(equipment: str = "") -> None:
     """Enable OTEL metrics recording for ResourceMonitor."""
-    global _otel_enabled, _record_memory_fn, _record_cpu_fn, _equipment_context
+    global _otel_enabled, _record_memory_fn, _record_cpu_fn, _record_gpu_fn, _record_capacity_fn, _record_disk_io_fn, _equipment_context
     try:
-        from core.observability import record_memory, record_cpu
+        from core.observability import record_memory, record_cpu, record_gpu, record_capacity, record_disk_io
         _record_memory_fn = record_memory
         _record_cpu_fn = record_cpu
+        _record_gpu_fn = record_gpu
+        _record_capacity_fn = record_capacity
+        _record_disk_io_fn = record_disk_io
         _otel_enabled = True
         _equipment_context = equipment
     except ImportError:
@@ -61,6 +77,104 @@ def set_resource_equipment(equipment: str) -> None:
     """Set the equipment context for resource metrics."""
     global _equipment_context
     _equipment_context = equipment
+
+
+# =============================================================================
+# GPU Monitoring Utilities
+# =============================================================================
+
+def get_gpu_info() -> List[Dict[str, Any]]:
+    """Get GPU usage information for all available GPUs.
+    
+    Returns:
+        List of dicts with gpu_id, name, memory_used_mb, memory_total_mb, 
+        memory_percent, utilization_percent, temperature_c
+    """
+    if not GPU_AVAILABLE:
+        return []
+    
+    gpu_info = []
+    try:
+        for i in range(GPU_COUNT):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode('utf-8')
+            
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            
+            try:
+                temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            except Exception:
+                temp = 0
+            
+            gpu_info.append({
+                "gpu_id": i,
+                "name": name,
+                "memory_used_mb": mem_info.used / (1024 * 1024),
+                "memory_total_mb": mem_info.total / (1024 * 1024),
+                "memory_percent": (mem_info.used / mem_info.total) * 100 if mem_info.total > 0 else 0,
+                "utilization_percent": util.gpu,
+                "memory_utilization_percent": util.memory,
+                "temperature_c": temp
+            })
+    except Exception:
+        pass
+    
+    return gpu_info
+
+
+def get_cpu_per_core() -> List[float]:
+    """Get CPU usage percentage for each core."""
+    if not PSUTIL_AVAILABLE:
+        return []
+    try:
+        return psutil.cpu_percent(percpu=True, interval=0.0)
+    except Exception:
+        return []
+
+
+def get_system_info() -> Dict[str, Any]:
+    """Get system hardware info for capacity planning."""
+    info = {
+        "cpu_count_logical": 0,
+        "cpu_count_physical": 0,
+        "memory_total_gb": 0,
+        "gpu_count": GPU_COUNT,
+        "gpu_memory_total_gb": 0,
+    }
+    
+    if PSUTIL_AVAILABLE:
+        info["cpu_count_logical"] = psutil.cpu_count(logical=True) or 0
+        info["cpu_count_physical"] = psutil.cpu_count(logical=False) or 0
+        info["memory_total_gb"] = psutil.virtual_memory().total / (1024**3)
+    
+    if GPU_AVAILABLE:
+        total_gpu_mem = 0
+        for gpu in get_gpu_info():
+            total_gpu_mem += gpu.get("memory_total_mb", 0)
+        info["gpu_memory_total_gb"] = total_gpu_mem / 1024
+    
+    return info
+
+
+def get_disk_io() -> Dict[str, int]:
+    """Get current disk I/O counters."""
+    if not PSUTIL_AVAILABLE:
+        return {"read_bytes": 0, "write_bytes": 0, "read_count": 0, "write_count": 0}
+    try:
+        io = psutil.disk_io_counters()
+        if io:
+            return {
+                "read_bytes": io.read_bytes,
+                "write_bytes": io.write_bytes,
+                "read_count": io.read_count,
+                "write_count": io.write_count,
+            }
+    except Exception:
+        pass
+    return {"read_bytes": 0, "write_bytes": 0, "read_count": 0, "write_count": 0}
 
 
 @dataclass
@@ -84,6 +198,14 @@ class SectionMetrics:
     # Thread count
     thread_count: int = 0
     
+    # Disk I/O metrics (bytes)
+    disk_read_start: int = 0
+    disk_read_end: int = 0
+    disk_write_start: int = 0
+    disk_write_end: int = 0
+    disk_read_mb: float = 0.0
+    disk_write_mb: float = 0.0
+    
     # Nested depth (for hierarchy)
     depth: int = 0
     
@@ -91,6 +213,8 @@ class SectionMetrics:
         """Calculate derived metrics after section completes."""
         self.duration_s = self.end_time - self.start_time
         self.mem_delta_mb = (self.mem_end_rss - self.mem_start_rss) / (1024 * 1024)
+        self.disk_read_mb = (self.disk_read_end - self.disk_read_start) / (1024 * 1024)
+        self.disk_write_mb = (self.disk_write_end - self.disk_write_start) / (1024 * 1024)
         if self.cpu_samples:
             self.cpu_percent_avg = sum(self.cpu_samples) / len(self.cpu_samples)
 
@@ -223,6 +347,11 @@ class ResourceMonitor:
         metrics.mem_peak_rss = metrics.mem_start_rss
         metrics.thread_count = threading.active_count()
         
+        # Capture disk I/O start
+        disk_start = get_disk_io()
+        metrics.disk_read_start = disk_start["read_bytes"]
+        metrics.disk_write_start = disk_start["write_bytes"]
+        
         with self._lock:
             self._sections[name] = metrics
             if name not in self._section_order:
@@ -240,6 +369,12 @@ class ResourceMonitor:
             metrics.mem_end_rss = self._get_memory_rss()
             if metrics.mem_end_rss > metrics.mem_peak_rss:
                 metrics.mem_peak_rss = metrics.mem_end_rss
+            
+            # Capture disk I/O end
+            disk_end = get_disk_io()
+            metrics.disk_read_end = disk_end["read_bytes"]
+            metrics.disk_write_end = disk_end["write_bytes"]
+            
             metrics.finalize()
             
             # Record to OTEL metrics if enabled
@@ -255,6 +390,13 @@ class ResourceMonitor:
                     if _record_cpu_fn and metrics.cpu_percent_avg > 0:
                         _record_cpu_fn(
                             percent=metrics.cpu_percent_avg,
+                            equipment=_equipment_context,
+                            section=name
+                        )
+                    if _record_disk_io_fn and (metrics.disk_read_mb > 0 or metrics.disk_write_mb > 0):
+                        _record_disk_io_fn(
+                            read_mb=metrics.disk_read_mb,
+                            write_mb=metrics.disk_write_mb,
                             equipment=_equipment_context,
                             section=name
                         )
@@ -413,26 +555,108 @@ class ResourceMonitor:
         self._run_start_time = 0.0
         self._run_start_mem = 0
         self._peak_mem_rss = 0
+    
+    def record_gpu_metrics(self, equipment: str = "") -> List[Dict[str, Any]]:
+        """Record GPU metrics if available.
+        
+        Returns:
+            List of GPU info dicts
+        """
+        gpu_info = get_gpu_info()
+        if not gpu_info:
+            return []
+        
+        if _otel_enabled and _record_gpu_fn:
+            for gpu in gpu_info:
+                try:
+                    _record_gpu_fn(
+                        gpu_id=gpu["gpu_id"],
+                        utilization_pct=gpu["utilization_percent"],
+                        memory_used_mb=gpu["memory_used_mb"],
+                        memory_percent=gpu["memory_percent"],
+                        temperature_c=gpu["temperature_c"],
+                        gpu_name=gpu["name"],
+                        equipment=equipment or _equipment_context
+                    )
+                except Exception:
+                    pass
+        
+        return gpu_info
+    
+    def record_capacity_metrics(self, equipment: str = "", equipment_count: int = 0,
+                                 tag_count: int = 0, rows_processed: int = 0,
+                                 duration_s: float = 0, parallel_workers: int = 1) -> None:
+        """Record capacity planning metrics.
+        
+        Args:
+            equipment: Equipment name(s)
+            equipment_count: Number of equipment
+            tag_count: Number of sensor tags
+            rows_processed: Rows processed in batch
+            duration_s: Processing time
+            parallel_workers: Number of workers
+        """
+        if _otel_enabled and _record_capacity_fn:
+            try:
+                _record_capacity_fn(
+                    equipment=equipment or _equipment_context,
+                    equipment_count=equipment_count,
+                    tag_count=tag_count,
+                    rows_processed=rows_processed,
+                    duration_s=duration_s,
+                    parallel_workers=parallel_workers
+                )
+            except Exception:
+                pass
+    
+    def record_cpu_per_core(self, equipment: str = "") -> List[float]:
+        """Record per-core CPU usage.
+        
+        Returns:
+            List of CPU percentages per core
+        """
+        core_pcts = get_cpu_per_core()
+        if not core_pcts:
+            return []
+        
+        if _otel_enabled:
+            try:
+                from core.observability import record_cpu_per_core as _record_cores
+                _record_cores(core_pcts, equipment=equipment or _equipment_context)
+            except Exception:
+                pass
+        
+        return core_pcts
 
 
 # Global singleton instance
 R = ResourceMonitor()
 
 
-def get_system_info() -> Dict[str, Any]:
-    """Get static system information for context."""
+def get_full_system_info() -> Dict[str, Any]:
+    """Get comprehensive system information for capacity planning."""
     info = {
         "python_version": os.sys.version.split()[0],
         "platform": os.sys.platform,
-        "psutil_available": PSUTIL_AVAILABLE
+        "psutil_available": PSUTIL_AVAILABLE,
+        "gpu_available": GPU_AVAILABLE,
+        "gpu_count": GPU_COUNT,
     }
     
     if PSUTIL_AVAILABLE:
+        vm = psutil.virtual_memory()
         info.update({
             "cpu_count_logical": psutil.cpu_count(logical=True),
             "cpu_count_physical": psutil.cpu_count(logical=False),
-            "total_memory_gb": round(psutil.virtual_memory().total / (1024**3), 1),
-            "available_memory_gb": round(psutil.virtual_memory().available / (1024**3), 1)
+            "total_memory_gb": round(vm.total / (1024**3), 1),
+            "available_memory_gb": round(vm.available / (1024**3), 1),
+            "memory_percent_used": vm.percent,
         })
+    
+    if GPU_AVAILABLE:
+        gpu_info = get_gpu_info()
+        if gpu_info:
+            info["gpus"] = gpu_info
+            info["total_gpu_memory_gb"] = sum(g["memory_total_mb"] for g in gpu_info) / 1024
     
     return info

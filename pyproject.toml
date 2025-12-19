@@ -41,14 +41,19 @@ telemetry = [
   "opentelemetry-exporter-otlp-proto-http>=1.25",
   "opentelemetry-semantic-conventions>=0.46b0",
 ]
-# Continuous profiling with Grafana Pyroscope
+# Continuous profiling (pure Python, no Rust required)
 profiling = [
-  "pyroscope-io>=0.8",
+  "yappi>=1.6",
+]
+# GPU monitoring (requires NVIDIA GPU)
+gpu = [
+  "nvidia-ml-py>=12.0",
 ]
 # Full observability stack
 observability = [
   "acm-v4[telemetry]",
   "acm-v4[profiling]",
+  "acm-v4[gpu]",
 ]
 # For optional Rust bridge builds (if you decide to ship a wheel later)
 rust = ["maturin>=1.6"]

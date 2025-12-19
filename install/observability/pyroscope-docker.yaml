@@ -24,8 +24,10 @@ ingester:
 compactor:
   compaction_interval: 30s
 
+# Extended limits
 limits:
-  max_query_length: 24h
-  max_query_lookback: 168h
-  ingestion_rate_mb: 4
-  ingestion_burst_size_mb: 2
+  max_query_length: 720h
+  max_query_lookback: 720h
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 5
+  reject_older_than: 720h

@@ -4,10 +4,11 @@
 Provides section-based timing with:
 - OTEL trace spans (parent-child hierarchy in Tempo)
 - OTEL metrics (histograms in Prometheus)
+- Resource monitoring (memory/CPU via ResourceMonitor)
 - Console output (text or JSON format)
 - Summary at exit
 
-v2.0: Now uses core.observability.Span for proper trace integration.
+v2.1: Now integrates with ResourceMonitor for memory/CPU profiling.
 """
 from __future__ import annotations
 import atexit
@@ -26,6 +27,10 @@ _Console: Optional[type] = None
 _log_timer_fn: Optional[Callable] = None
 _observability_initialized: bool = False
 
+# ResourceMonitor integration (lazy loaded)
+_resource_monitor: Optional[Any] = None
+_resource_enabled: bool = False
+
 def _ensure_observability() -> None:
     """Lazily import observability module to handle import order issues."""
     global _Span, _Console, _log_timer_fn, _observability_initialized
@@ -39,6 +44,20 @@ def _ensure_observability() -> None:
         _log_timer_fn = _otel_log_timer
     except ImportError:
         pass
+
+
+def _ensure_resource_monitor() -> None:
+    """Lazily import ResourceMonitor."""
+    global _resource_monitor, _resource_enabled
+    if _resource_monitor is not None or _resource_enabled:
+        return
+    try:
+        from core.resource_monitor import R
+        _resource_monitor = R
+        _resource_enabled = True
+    except ImportError:
+        _resource_enabled = False
+
 
 # Try import at module load (works if observability loaded first)
 try:
@@ -55,6 +74,8 @@ def enable_timer_metrics(equipment: str = "") -> None:
     """Enable OTEL metrics recording for Timer sections."""
     global _equipment_context
     _equipment_context = equipment
+    # Also enable resource monitor
+    _ensure_resource_monitor()
 
 
 def set_timer_equipment(equipment: str) -> None:
@@ -81,34 +102,51 @@ class Timer:
         ACM_TIMINGS: Enable/disable timing output (default: 1)
         LOG_FORMAT: Output format (text|json)
     """
-    def __init__(self, enable: bool | None = None):
+    def __init__(self, enable: bool | None = None, profile_resources: bool = True):
         self.enable = bool(int(os.getenv("ACM_TIMINGS", "1"))) if enable is None else enable
+        self.profile_resources = profile_resources
         self.totals: Dict[str, float] = {}
-        self._active_spans: Dict[str, Any] = {}  # name -> (span, start_time)
+        self._active_spans: Dict[str, Any] = {}  # name -> (span, start_time, resource_ctx)
         self._t0 = time.perf_counter()
         self._json_mode = os.getenv("LOG_FORMAT", "text").lower() == "json"
         atexit.register(self._print_summary)
 
-    def section(self, name: str):
+    def section(self, name: str, profile: bool = True):
         """Start a timed section. Returns a context manager.
         
         Creates an OTEL span for proper trace hierarchy.
+        Also starts ResourceMonitor section for memory/CPU profiling.
+        
+        Args:
+            name: Section name (hierarchical with dots, e.g., "fit.pca")
+            profile: Whether to enable resource profiling (default True)
         """
         if not self.enable:
             return _NullContext()
-        return _TracedSection(self, name)
+        return _TracedSection(self, name, profile=profile and self.profile_resources)
 
-    def _start_section(self, name: str) -> Any:
+    def _start_section(self, name: str, profile: bool = True) -> Any:
         """Internal: start tracking a section."""
         start_time = time.perf_counter()
         span = None
+        resource_ctx = None
         
         # Create OTEL span if available
         if _Span:
             span = _Span(name)
             span.__enter__()
         
-        self._active_spans[name] = (span, start_time)
+        # Start resource monitoring if enabled and available
+        if profile and self.profile_resources:
+            _ensure_resource_monitor()
+            if _resource_monitor:
+                try:
+                    resource_ctx = _resource_monitor.section(name)
+                    resource_ctx.__enter__()
+                except Exception:
+                    resource_ctx = None
+        
+        self._active_spans[name] = (span, start_time, resource_ctx)
         return span
 
     def _end_section(self, name: str) -> float:
@@ -116,11 +154,18 @@ class Timer:
         if name not in self._active_spans:
             return 0.0
         
-        span, start_time = self._active_spans.pop(name)
+        span, start_time, resource_ctx = self._active_spans.pop(name)
         duration = time.perf_counter() - start_time
         
         # Accumulate for summary
         self.totals[name] = self.totals.get(name, 0.0) + duration
+        
+        # End resource monitoring first (while memory is still allocated)
+        if resource_ctx:
+            try:
+                resource_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
         
         # End OTEL span (this also records metrics via Span.__exit__)
         if span:
@@ -258,14 +303,15 @@ class Timer:
 
 
 class _TracedSection:
-    """Context manager for timed sections with OTEL span support."""
+    """Context manager for timed sections with OTEL span and resource profiling support."""
     
-    def __init__(self, timer: Timer, name: str):
+    def __init__(self, timer: Timer, name: str, profile: bool = True):
         self.timer = timer
         self.name = name
+        self.profile = profile
     
     def __enter__(self):
-        self.timer._start_section(self.name)
+        self.timer._start_section(self.name, profile=self.profile)
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):

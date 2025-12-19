@@ -1,90 +1,233 @@
 {
   "uid": "acm-observability",
   "title": "ACM Observability",
-  "description": "Monitor ACM pipeline performance, traces, logs, and metrics",
-  "tags": ["acm", "observability", "otel"],
+  "description": "Monitor ACM pipeline performance, logs, traces, and system resources",
+  "tags": ["acm", "observability"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
-  "refresh": "30s",
-  "time": {
-    "from": "now-1h",
-    "to": "now"
-  },
+  "version": 4,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
   "panels": [
     {
       "id": 1,
-      "title": "Pipeline Logs (Loki)",
-      "type": "logs",
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
-      "datasource": { "uid": "loki-ds", "type": "loki" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "{app=\"acm\"} |= ``",
-          "queryType": "range"
-        }
-      ],
-      "options": {
-        "showTime": true,
-        "showLabels": true,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "dedupStrategy": "none",
-        "sortOrder": "Descending"
-      }
+      "title": "Summary (selected time range)",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false
     },
     {
       "id": 2,
-      "title": "Log Level Distribution",
-      "type": "piechart",
-      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 8 },
+      "title": "Runs",
+      "description": "Total ACM pipeline runs in selected time range",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
       "datasource": { "uid": "loki-ds", "type": "loki" },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (level) (count_over_time({app=\"acm\"} [$__range]))",
-          "legendFormat": "{{level}}"
+          "expr": "sum(count_over_time({app=\"acm\"} |= `Finalized RunID` [$__range]))"
         }
       ],
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": ["value", "percent"]
-        },
-        "pieType": "pie",
-        "tooltip": { "mode": "single" }
-      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" }
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+          "color": { "mode": "thresholds" },
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0"
         }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
       }
     },
     {
       "id": 3,
-      "title": "Logs Over Time",
-      "type": "timeseries",
-      "gridPos": { "x": 8, "y": 8, "w": 16, "h": 8 },
+      "title": "OK",
+      "description": "Successful runs with data processed",
+      "type": "stat",
+      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
       "datasource": { "uid": "loki-ds", "type": "loki" },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (level) (count_over_time({app=\"acm\"} [$__interval]))",
-          "legendFormat": "{{level}}"
+          "expr": "sum(count_over_time({app=\"acm\"} |= `outcome=OK` [$__range]))"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "bars",
-            "stacking": { "mode": "normal" },
-            "fillOpacity": 80
-          },
-          "color": { "mode": "palette-classic" }
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "color": { "mode": "thresholds" },
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 4,
+      "title": "NOOP",
+      "description": "Runs skipped (no new data)",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(count_over_time({app=\"acm\"} |= `outcome=NOOP` [$__range]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "yellow", "value": null }] },
+          "color": { "mode": "thresholds" },
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 5,
+      "title": "Errors",
+      "description": "Error log entries",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(count_over_time({app=\"acm\", level=\"error\"} [$__range]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] },
+          "color": { "mode": "thresholds" },
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 6,
+      "title": "Warnings",
+      "description": "Warning log entries",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(count_over_time({app=\"acm\", level=\"warning\"} [$__range]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 10 }] },
+          "color": { "mode": "thresholds" },
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 7,
+      "title": "Equipment",
+      "description": "Unique equipment processed",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(sum by (equipment) (count_over_time({app=\"acm\", equipment!=\"\"} [$__range])))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] },
+          "color": { "mode": "thresholds" },
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["last"], "fields": "", "values": false },
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 10,
+      "title": "System Resources",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "title": "Memory Usage (MB)",
+      "description": "Process memory consumption over time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 6, "w": 8, "h": 6 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(acm_memory_rss_mb)",
+          "legendFormat": "Current RSS"
+        },
+        {
+          "refId": "B",
+          "expr": "max(acm_memory_peak_mb)",
+          "legendFormat": "Peak"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": 300000 },
+          "unit": "decmbytes",
+          "min": 0
         }
       },
       "options": {
@@ -93,60 +236,286 @@
       }
     },
     {
-      "id": 4,
-      "title": "Recent Traces (Tempo)",
-      "type": "table",
-      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
-      "datasource": { "uid": "tempo-ds", "type": "tempo" },
+      "id": 12,
+      "title": "CPU Usage (%)",
+      "description": "CPU utilization percentage",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 6, "w": 8, "h": 6 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
       "targets": [
         {
           "refId": "A",
-          "queryType": "traceqlSearch",
-          "limit": 20,
-          "filters": [
-            { "id": "service-name", "tag": "service.name", "operator": "=", "value": ["acm-pipeline"], "scope": "resource" }
-          ]
+          "expr": "avg(acm_cpu_percent)",
+          "legendFormat": "Avg CPU %"
         }
       ],
-      "options": {
-        "showHeader": true
-      },
       "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "defaults": {
+          "color": { "fixedColor": "orange", "mode": "fixed" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "spanNulls": 300000 },
+          "unit": "percent",
+          "max": 100,
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
       }
     },
     {
-      "id": 5,
-      "title": "Error Logs",
+      "id": 13,
+      "title": "Disk I/O (MB)",
+      "description": "Cumulative disk read/write per section",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 6, "w": 8, "h": 6 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(acm_disk_read_mb)",
+          "legendFormat": "Read MB"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(acm_disk_write_mb)",
+          "legendFormat": "Write MB"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": 300000 },
+          "unit": "decmbytes",
+          "min": 0
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 20,
+      "title": "Pipeline Logs",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "title": "Live Logs",
       "type": "logs",
-      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 6 },
+      "gridPos": { "x": 0, "y": 13, "w": 16, "h": 10 },
       "datasource": { "uid": "loki-ds", "type": "loki" },
       "targets": [
         {
           "refId": "A",
-          "expr": "{app=\"acm\"} |~ `(?i)(error|exception|failed|critical)`",
+          "expr": "{app=\"acm\"} | json",
           "queryType": "range"
         }
       ],
       "options": {
         "showTime": true,
-        "showLabels": true,
+        "showLabels": false,
+        "showCommonLabels": false,
         "wrapLogMessage": true,
+        "prettifyLogMessage": true,
         "enableLogDetails": true,
+        "dedupStrategy": "none",
         "sortOrder": "Descending"
-      },
+      }
+    },
+    {
+      "id": 22,
+      "title": "Log Rate (per minute)",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 13, "w": 8, "h": 5 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (level) (count_over_time({app=\"acm\"} [1m]))",
+          "legendFormat": "{{level}}"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
-          "color": { "fixedColor": "red", "mode": "fixed" }
-        }
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" }, "fillOpacity": 80 },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "error" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "warning" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "info" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
       }
+    },
+    {
+      "id": 23,
+      "title": "By Component",
+      "type": "piechart",
+      "gridPos": { "x": 16, "y": 18, "w": 8, "h": 5 },
+      "datasource": { "uid": "loki-ds", "type": "loki" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (component) (count_over_time({app=\"acm\"} [$__range]))",
+          "legendFormat": "{{component}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value"] },
+        "pieType": "donut",
+        "tooltip": { "mode": "single" }
+      },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } }
+      }
+    },
+    {
+      "id": 50,
+      "title": "Distributed Tracing",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 51,
+      "title": "Recent Traces",
+      "description": "Tempo traces from ACM pipeline runs. Click a trace to see span details.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 8 },
+      "datasource": { "uid": "tempo-ds", "type": "tempo" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "traceqlSearch",
+          "filters": [
+            { "id": "service-name", "tag": "service.name", "operator": "=", "scope": "resource", "value": ["acm-pipeline"] }
+          ],
+          "limit": 20
+        }
+      ],
+      "transformations": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "traceID" },
+            "properties": [
+              { "id": "links", "value": [{ "title": "View Trace", "url": "/explore?left={\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"tempo\",\"uid\":\"tempo-ds\"},\"queryType\":\"traceql\",\"query\":\"${__value.raw}\"}]}" }] }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 30,
+      "title": "Errors & Warnings Detail",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 31,
+          "title": "Error Logs",
+          "type": "logs",
+          "gridPos": { "x": 0, "y": 33, "w": 12, "h": 8 },
+          "datasource": { "uid": "loki-ds", "type": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "{app=\"acm\", level=\"error\"} | json",
+              "queryType": "range"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": false,
+            "wrapLogMessage": true,
+            "prettifyLogMessage": true,
+            "enableLogDetails": true,
+            "sortOrder": "Descending"
+          }
+        },
+        {
+          "id": 32,
+          "title": "Warning Logs",
+          "type": "logs",
+          "gridPos": { "x": 12, "y": 33, "w": 12, "h": 8 },
+          "datasource": { "uid": "loki-ds", "type": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "{app=\"acm\", level=\"warning\"} | json",
+              "queryType": "range"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": false,
+            "wrapLogMessage": true,
+            "prettifyLogMessage": true,
+            "enableLogDetails": true,
+            "sortOrder": "Descending"
+          }
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "title": "Timing Details",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 41, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 41,
+          "title": "Timer Logs",
+          "type": "logs",
+          "gridPos": { "x": 0, "y": 42, "w": 24, "h": 6 },
+          "datasource": { "uid": "loki-ds", "type": "loki" },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "{app=\"acm\", log_type=\"timer\"} | json",
+              "queryType": "range"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": false,
+            "wrapLogMessage": false,
+            "prettifyLogMessage": true,
+            "enableLogDetails": true,
+            "sortOrder": "Descending"
+          }
+        }
+      ]
     }
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "equipment",
+        "type": "query",
+        "datasource": { "uid": "loki-ds", "type": "loki" },
+        "query": "label_values({app=\"acm\"}, equipment)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
   },
-  "annotations": {
-    "list": []
-  }
+  "annotations": { "list": [] }
 }

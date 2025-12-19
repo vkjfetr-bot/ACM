@@ -52,7 +52,11 @@ acm-tempo        Up (healthy)     0.0.0.0:3200->3200/tcp
 
 Datasources and dashboards are auto-provisioned:
 - **Datasources**: Prometheus, Tempo, Loki, Pyroscope (pre-configured)
-- **Dashboards**: ACM folder contains ACM Behavior and ACM Observability dashboards
+- **Dashboards**: ACM folder contains:
+  - **ACM Behavior** - Equipment health, anomaly detection, RUL monitoring
+  - **ACM Observability** - Pipeline logs, traces, metrics overview
+  - **ACM Profiling & Resources** - CPU flamegraphs, memory usage, section profiling
+  - **ACM Capacity Planning** - Hardware sizing based on equipment/tag count, GPU/CPU usage
 
 ### Step 4: Test with ACM
 

@@ -49,7 +49,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Callable, Dict, Generator, Optional, TypeVar
+from typing import Any, Callable, Dict, Generator, List, Optional, TypeVar
 
 # =============================================================================
 # STRUCTLOG + COLORAMA SETUP (Rich doesn't work reliably when piped)
@@ -145,15 +145,19 @@ except ImportError:
 
 
 # =============================================================================
-# PYROSCOPE (CONTINUOUS PROFILING)
+# PYROSCOPE (CONTINUOUS PROFILING) - Using yappi + HTTP API
+# No native pyroscope-io required (avoids Rust compilation on Windows)
 # =============================================================================
 
 try:
-    import pyroscope
-    PYROSCOPE_AVAILABLE = True
+    import yappi
+    YAPPI_AVAILABLE = True
 except ImportError:
-    pyroscope = None
-    PYROSCOPE_AVAILABLE = False
+    yappi = None
+    YAPPI_AVAILABLE = False
+
+# Legacy flag for backwards compatibility
+PYROSCOPE_AVAILABLE = YAPPI_AVAILABLE
 
 
 # =============================================================================
@@ -188,6 +192,7 @@ _tracer: Optional[Any] = None
 _meter: Optional[Any] = None
 _loki_pusher: Optional["_LokiPusher"] = None
 _pyroscope_enabled: bool = False
+_pyroscope_pusher: Optional["_PyroscopePusher"] = None
 _initialized: bool = False
 _shutdown_called: bool = False
 _sql_sink: Optional["_SqlLogSink"] = None
@@ -299,19 +304,19 @@ def init(
             else:
                 Console.warn(f"[OTEL] Loki not connected at {loki_endpoint}")
         
-        # Pyroscope continuous profiling
-        global _pyroscope_enabled
-        if enable_profiling and PYROSCOPE_AVAILABLE:
+        # Pyroscope continuous profiling (via yappi + HTTP API - no Rust required)
+        global _pyroscope_enabled, _pyroscope_pusher
+        if enable_profiling and YAPPI_AVAILABLE:
             try:
                 pyroscope_reachable = _check_endpoint_reachable(pyroscope_endpoint)
                 if pyroscope_reachable:
-                    pyroscope.configure(
-                        application_name=service_name,
-                        server_address=pyroscope_endpoint,
+                    _pyroscope_pusher = _PyroscopePusher(
+                        endpoint=pyroscope_endpoint,
+                        app_name="acm",  # Simple app name, equipment goes in tags
                         tags={
                             "equipment": equipment or "unknown",
                             "equip_id": str(equip_id),
-                            "run_id": run_id or "unknown",
+                            "service": service_name,
                         },
                     )
                     _pyroscope_enabled = True
@@ -321,8 +326,8 @@ def init(
                     Console.warn(f"[OTEL] Pyroscope not reachable at {pyroscope_endpoint} - profiling disabled")
             except Exception as e:
                 Console.warn(f"[OTEL] Pyroscope setup failed: {e}")
-        elif enable_profiling and not PYROSCOPE_AVAILABLE:
-            Console.warn("[OTEL] pyroscope-io not installed - profiling disabled (pip install pyroscope-io)")
+        elif enable_profiling and not YAPPI_AVAILABLE:
+            Console.warn("[OTEL] yappi not installed - profiling disabled (pip install yappi)")
         
         # OpenTelemetry setup for tracing
         if not OTEL_AVAILABLE or not OTEL_EXPORTERS_AVAILABLE:
@@ -455,6 +460,92 @@ def init(
                     description="Data quality score (0-100)",
                 )
                 
+                # ===== RESOURCE METRICS =====
+                _metrics["memory_rss_mb"] = _meter.create_gauge(
+                    "acm_memory_rss_mb",
+                    description="Process RSS memory in MB",
+                )
+                _metrics["memory_peak_mb"] = _meter.create_gauge(
+                    "acm_memory_peak_mb",
+                    description="Peak process memory in MB",
+                )
+                _metrics["memory_delta_mb"] = _meter.create_gauge(
+                    "acm_memory_delta_mb",
+                    description="Memory change for section in MB",
+                )
+                _metrics["cpu_percent"] = _meter.create_gauge(
+                    "acm_cpu_percent",
+                    description="CPU utilization percentage",
+                )
+                _metrics["cpu_per_core"] = _meter.create_gauge(
+                    "acm_cpu_per_core_percent",
+                    description="CPU utilization per logical core",
+                )
+                _metrics["section_duration"] = _meter.create_histogram(
+                    "acm_section_duration_seconds",
+                    description="Duration of code sections with resource tracking",
+                    unit="s",
+                )
+                
+                # ===== GPU METRICS =====
+                _metrics["gpu_utilization"] = _meter.create_gauge(
+                    "acm_gpu_utilization_percent",
+                    description="GPU compute utilization percentage",
+                )
+                _metrics["gpu_memory_used"] = _meter.create_gauge(
+                    "acm_gpu_memory_used_mb",
+                    description="GPU memory used in MB",
+                )
+                _metrics["gpu_memory_percent"] = _meter.create_gauge(
+                    "acm_gpu_memory_percent",
+                    description="GPU memory utilization percentage",
+                )
+                _metrics["gpu_temperature"] = _meter.create_gauge(
+                    "acm_gpu_temperature_celsius",
+                    description="GPU temperature in Celsius",
+                )
+                
+                # ===== CAPACITY PLANNING METRICS =====
+                _metrics["parallel_workers"] = _meter.create_gauge(
+                    "acm_parallel_workers",
+                    description="Number of parallel workers currently active",
+                )
+                _metrics["equipment_count"] = _meter.create_gauge(
+                    "acm_equipment_count",
+                    description="Number of equipment being processed",
+                )
+                _metrics["tag_count"] = _meter.create_gauge(
+                    "acm_tag_count",
+                    description="Number of sensor tags being processed",
+                )
+                _metrics["rows_per_second"] = _meter.create_gauge(
+                    "acm_rows_per_second",
+                    description="Processing throughput in rows per second",
+                )
+                _metrics["batch_duration"] = _meter.create_histogram(
+                    "acm_batch_duration_seconds",
+                    description="Duration of batch processing",
+                    unit="s",
+                )
+                
+                # ===== DISK I/O METRICS =====
+                _metrics["disk_read_mb"] = _meter.create_gauge(
+                    "acm_disk_read_mb",
+                    description="Disk read in MB for section",
+                )
+                _metrics["disk_write_mb"] = _meter.create_gauge(
+                    "acm_disk_write_mb",
+                    description="Disk write in MB for section",
+                )
+                _metrics["disk_read_total_mb"] = _meter.create_counter(
+                    "acm_disk_read_total_mb",
+                    description="Total disk read in MB",
+                )
+                _metrics["disk_write_total_mb"] = _meter.create_counter(
+                    "acm_disk_write_total_mb",
+                    description="Total disk write in MB",
+                )
+                
                 Console.ok(f"Metrics -> {otlp_endpoint}/v1/metrics", component="OTEL")
             except Exception as e:
                 Console.warn(f"[OTEL] Metrics setup failed: {e}")
@@ -465,20 +556,21 @@ def init(
 
 def shutdown() -> None:
     """Flush and shutdown all providers."""
-    global _sql_sink, _loki_pusher, _shutdown_called, _pyroscope_enabled
+    global _sql_sink, _loki_pusher, _shutdown_called, _pyroscope_enabled, _pyroscope_pusher
     
     # Prevent double shutdown (atexit may call again)
     if _shutdown_called:
         return
     _shutdown_called = True
     
-    # Shutdown Pyroscope profiling
-    if _pyroscope_enabled and PYROSCOPE_AVAILABLE and pyroscope is not None:
+    # Shutdown Pyroscope profiling (yappi-based)
+    if _pyroscope_enabled and _pyroscope_pusher is not None:
         try:
-            pyroscope.shutdown()
+            _pyroscope_pusher.stop_and_push()
         except Exception:
             pass  # Best effort
         _pyroscope_enabled = False
+        _pyroscope_pusher = None
     
     # Flush and shutdown OTEL metric provider to ensure final metrics are exported
     if OTEL_AVAILABLE and otel_metrics is not None:
@@ -508,6 +600,63 @@ def shutdown() -> None:
     if _loki_pusher:
         _loki_pusher.close()
         _loki_pusher = None
+
+
+# =============================================================================
+# PROFILING HELPERS
+# =============================================================================
+
+def start_profiling() -> None:
+    """Start CPU profiling for the current process.
+    
+    Call this at the start of a batch/run to begin collecting profile data.
+    Profile data is automatically pushed to Pyroscope on shutdown or
+    when stop_profiling() is called.
+    """
+    global _pyroscope_pusher
+    if _pyroscope_pusher is not None:
+        _pyroscope_pusher.start()
+        Console.info("[PROFILE] Started CPU profiling")
+    else:
+        # Silently skip if not initialized
+        pass
+
+
+def stop_profiling() -> None:
+    """Stop CPU profiling and push results to Pyroscope.
+    
+    Call this at the end of a batch/run to push profile data.
+    """
+    global _pyroscope_pusher
+    if _pyroscope_pusher is not None:
+        Console.info("[PROFILE] Stopping and pushing profile data...")
+        _pyroscope_pusher.stop_and_push()
+        Console.ok("[PROFILE] Profile data pushed to Pyroscope")
+    else:
+        # Silently skip if not initialized
+        pass
+
+
+@contextmanager
+def profile_section(name: str) -> Generator[None, None, None]:
+    """Context manager to profile a specific section of code.
+    
+    Usage:
+        with profile_section("fit_models"):
+            model.fit(X)
+    
+    This starts profiling, runs the code, then stops and pushes
+    the profile for that section.
+    """
+    if _pyroscope_pusher is None:
+        yield
+        return
+    
+    _pyroscope_pusher.start()
+    try:
+        yield
+    finally:
+        _pyroscope_pusher.stop_and_push()
 
 
 def set_context(
@@ -1026,6 +1175,256 @@ def record_model_refit(equipment: str, reason: str = "", detector: str = "") -> 
                         equipment=equipment, component="model", reason=reason, detector=detector)
 
 
+# =============================================================================
+# RESOURCE METRICS (CPU, Memory, Section Profiling)
+# =============================================================================
+
+def record_memory(current_mb: float, peak_mb: float = 0.0, 
+                  equipment: str = "", section: str = "") -> None:
+    """Record memory usage metrics.
+    
+    Args:
+        current_mb: Current RSS memory in MB
+        peak_mb: Peak memory during section in MB
+        equipment: Equipment name
+        section: Code section name (optional)
+    """
+    if _meter:
+        if "memory_rss_mb" in _metrics:
+            attrs = {"equipment": equipment}
+            if section:
+                attrs["section"] = section
+            _metrics["memory_rss_mb"].set(current_mb, attrs)
+        if "memory_peak_mb" in _metrics and peak_mb > 0:
+            _metrics["memory_peak_mb"].set(peak_mb, {"equipment": equipment})
+    
+    # Log to Loki with structured data only (no console spam)
+    # The memory values are used for metrics dashboards, not human reading
+    if _loki_pusher:
+        _loki_pusher.log(
+            "debug", 
+            f"memory_sample",
+            component="resource",
+            log_type="memory",
+            memory_mb=round(current_mb, 1),
+            memory_peak_mb=round(peak_mb, 1),
+            section=section or "global",
+            equipment=equipment
+        )
+
+
+def record_cpu(percent: float, equipment: str = "", section: str = "") -> None:
+    """Record CPU usage metric.
+    
+    Args:
+        percent: CPU percentage (0-100 per core, can exceed 100 for multi-core)
+        equipment: Equipment name
+        section: Code section name (optional)
+    """
+    if _meter and "cpu_percent" in _metrics:
+        attrs = {"equipment": equipment}
+        if section:
+            attrs["section"] = section
+        _metrics["cpu_percent"].set(percent, attrs)
+    
+    if _loki_pusher:
+        _loki_pusher.log(
+            "debug",
+            f"CPU: {percent:.1f}%",
+            component="resource",
+            log_type="cpu",
+            cpu_percent=round(percent, 1),
+            section=section or "global",
+            equipment=equipment
+        )
+
+
+def record_section_resources(section: str, duration_s: float, 
+                             mem_start_mb: float = 0, mem_end_mb: float = 0,
+                             mem_peak_mb: float = 0, mem_delta_mb: float = 0,
+                             cpu_avg_pct: float = 0, equipment: str = "") -> None:
+    """Record comprehensive resource metrics for a code section.
+    
+    Args:
+        section: Section name (e.g., "detector.fit.pca")
+        duration_s: Duration in seconds
+        mem_start_mb: Memory at start in MB
+        mem_end_mb: Memory at end in MB
+        mem_peak_mb: Peak memory during section in MB
+        mem_delta_mb: Memory change (end - start) in MB
+        cpu_avg_pct: Average CPU percentage
+        equipment: Equipment name
+    """
+    if _meter:
+        attrs = {"equipment": equipment, "section": section}
+        
+        if "section_duration" in _metrics:
+            _metrics["section_duration"].record(duration_s, attrs)
+        
+        if "memory_delta_mb" in _metrics:
+            _metrics["memory_delta_mb"].set(mem_delta_mb, attrs)
+        
+        if "memory_rss_mb" in _metrics:
+            _metrics["memory_rss_mb"].set(mem_end_mb, {"equipment": equipment, "section": section})
+        
+        if "cpu_percent" in _metrics and cpu_avg_pct > 0:
+            _metrics["cpu_percent"].set(cpu_avg_pct, attrs)
+    
+    if _loki_pusher:
+        _loki_pusher.log(
+            "info",
+            f"Section {section}: {duration_s:.3f}s, mem={mem_delta_mb:+.1f}MB, cpu={cpu_avg_pct:.0f}%",
+            component="resource",
+            log_type="section_profile",
+            section=section,
+            duration_s=round(duration_s, 4),
+            mem_start_mb=round(mem_start_mb, 1),
+            mem_end_mb=round(mem_end_mb, 1),
+            mem_peak_mb=round(mem_peak_mb, 1),
+            mem_delta_mb=round(mem_delta_mb, 1),
+            cpu_avg_pct=round(cpu_avg_pct, 1),
+            equipment=equipment
+        )
+
+
+def record_cpu_per_core(core_percentages: list, equipment: str = "") -> None:
+    """Record CPU usage per logical core.
+    
+    Args:
+        core_percentages: List of CPU percentages for each core
+        equipment: Equipment name
+    """
+    if _meter and "cpu_per_core" in _metrics:
+        for core_id, pct in enumerate(core_percentages):
+            _metrics["cpu_per_core"].set(pct, {"equipment": equipment, "core": str(core_id)})
+
+
+def record_gpu(gpu_id: int = 0, utilization_pct: float = 0, memory_used_mb: float = 0,
+               memory_percent: float = 0, temperature_c: float = 0, 
+               gpu_name: str = "", equipment: str = "") -> None:
+    """Record GPU usage metrics.
+    
+    Args:
+        gpu_id: GPU index (0, 1, 2, ...)
+        utilization_pct: GPU compute utilization (0-100)
+        memory_used_mb: GPU memory used in MB
+        memory_percent: GPU memory utilization percentage
+        temperature_c: GPU temperature in Celsius
+        gpu_name: GPU model name
+        equipment: Equipment being processed
+    """
+    if _meter:
+        attrs = {"equipment": equipment, "gpu_id": str(gpu_id)}
+        
+        if "gpu_utilization" in _metrics:
+            _metrics["gpu_utilization"].set(utilization_pct, attrs)
+        if "gpu_memory_used" in _metrics:
+            _metrics["gpu_memory_used"].set(memory_used_mb, attrs)
+        if "gpu_memory_percent" in _metrics:
+            _metrics["gpu_memory_percent"].set(memory_percent, attrs)
+        if "gpu_temperature" in _metrics and temperature_c > 0:
+            _metrics["gpu_temperature"].set(temperature_c, attrs)
+    
+    if _loki_pusher:
+        _loki_pusher.log(
+            "debug",
+            f"GPU{gpu_id} ({gpu_name}): {utilization_pct:.0f}% util, {memory_used_mb:.0f}MB ({memory_percent:.0f}%), {temperature_c}°C",
+            component="resource",
+            log_type="gpu",
+            gpu_id=gpu_id,
+            gpu_name=gpu_name,
+            gpu_utilization_pct=round(utilization_pct, 1),
+            gpu_memory_mb=round(memory_used_mb, 0),
+            gpu_memory_pct=round(memory_percent, 1),
+            gpu_temp_c=temperature_c,
+            equipment=equipment
+        )
+
+
+def record_capacity(equipment: str = "", equipment_count: int = 0, tag_count: int = 0,
+                    rows_processed: int = 0, duration_s: float = 0, 
+                    parallel_workers: int = 1) -> None:
+    """Record capacity planning metrics for hardware sizing.
+    
+    Args:
+        equipment: Equipment name(s) being processed
+        equipment_count: Number of equipment being processed
+        tag_count: Number of sensor tags being processed
+        rows_processed: Number of data rows processed
+        duration_s: Processing duration in seconds
+        parallel_workers: Number of parallel workers active
+    """
+    if _meter:
+        attrs = {"equipment": equipment}
+        
+        if "equipment_count" in _metrics:
+            _metrics["equipment_count"].set(equipment_count, attrs)
+        if "tag_count" in _metrics:
+            _metrics["tag_count"].set(tag_count, attrs)
+        if "parallel_workers" in _metrics:
+            _metrics["parallel_workers"].set(parallel_workers, attrs)
+        
+        # Calculate throughput
+        if "rows_per_second" in _metrics and duration_s > 0:
+            rps = rows_processed / duration_s
+            _metrics["rows_per_second"].set(rps, attrs)
+        
+        if "batch_duration" in _metrics and duration_s > 0:
+            _metrics["batch_duration"].record(duration_s, attrs)
+    
+    if _loki_pusher:
+        rps = rows_processed / duration_s if duration_s > 0 else 0
+        _loki_pusher.log(
+            "info",
+            f"Capacity: {equipment_count} equip, {tag_count} tags, {rows_processed} rows in {duration_s:.1f}s ({rps:.0f} rows/s)",
+            component="capacity",
+            log_type="capacity",
+            equipment=equipment,
+            equipment_count=equipment_count,
+            tag_count=tag_count,
+            rows_processed=rows_processed,
+            duration_s=round(duration_s, 2),
+            rows_per_second=round(rps, 1),
+            parallel_workers=parallel_workers
+        )
+
+
+def record_disk_io(read_mb: float = 0, write_mb: float = 0, 
+                   equipment: str = "", section: str = "") -> None:
+    """Record disk I/O metrics for a section.
+    
+    Args:
+        read_mb: Bytes read in MB
+        write_mb: Bytes written in MB  
+        equipment: Equipment being processed
+        section: Code section name
+    """
+    if _meter:
+        attrs = {"equipment": equipment, "section": section}
+        
+        if "disk_read_mb" in _metrics:
+            _metrics["disk_read_mb"].set(read_mb, attrs)
+        if "disk_write_mb" in _metrics:
+            _metrics["disk_write_mb"].set(write_mb, attrs)
+        if "disk_read_total_mb" in _metrics and read_mb > 0:
+            _metrics["disk_read_total_mb"].add(read_mb, attrs)
+        if "disk_write_total_mb" in _metrics and write_mb > 0:
+            _metrics["disk_write_total_mb"].add(write_mb, attrs)
+    
+    # Only log significant I/O (>1MB)
+    if _loki_pusher and (read_mb > 1 or write_mb > 1):
+        _loki_pusher.log(
+            "debug",
+            f"Disk I/O [{section}]: read={read_mb:.1f}MB, write={write_mb:.1f}MB",
+            component="resource",
+            log_type="disk_io",
+            equipment=equipment,
+            section=section,
+            disk_read_mb=round(read_mb, 2),
+            disk_write_mb=round(write_mb, 2)
+        )
+
+
 def log_timer(section: str, duration_s: float, pct: float = 0.0, 
               parent: str = "", total_s: float = 0.0) -> None:
     """Log timer section with structured fields for Loki.
@@ -1253,6 +1652,220 @@ class _LokiPusher:
 
 
 # =============================================================================
+# PYROSCOPE PUSHER (yappi + HTTP API)
+# =============================================================================
+
+class _PyroscopePusher:
+    """Push profiling data to Pyroscope using yappi and the HTTP ingest API.
+    
+    This avoids requiring pyroscope-io (which needs Rust compilation on Windows).
+    Uses yappi (pure Python profiler) and Pyroscope's simple /ingest endpoint.
+    
+    Profile format (collapsed/folded):
+        function1;function2;function3 <count>
+        main;process_data;compute 150
+        main;load_data;read_sql 42
+    """
+    
+    def __init__(self, endpoint: str, app_name: str, tags: Dict[str, str]):
+        self._endpoint = endpoint
+        self._app_name = app_name
+        self._tags = tags
+        self._profiling_active = False
+        self._profile_start_time: Optional[float] = None
+        
+    def start(self) -> None:
+        """Start profiling the current process."""
+        if self._profiling_active:
+            return
+        if not YAPPI_AVAILABLE:
+            return
+        try:
+            yappi.clear_stats()
+            yappi.start(builtins=False)
+            self._profiling_active = True
+            self._profile_start_time = time.time()
+        except Exception as e:
+            Console.warn(f"[PROFILE] Failed to start: {e}")
+    
+    def stop_and_push(self) -> None:
+        """Stop profiling and push results to Pyroscope."""
+        if not self._profiling_active:
+            return
+        if not YAPPI_AVAILABLE:
+            return
+            
+        try:
+            yappi.stop()
+            self._profiling_active = False
+            
+            # Get function stats
+            stats = yappi.get_func_stats()
+            if not stats:
+                return
+            
+            # Log top CPU-consuming functions locally for visibility
+            self._log_top_functions(stats, top_n=10)
+            
+            # Convert to collapsed format
+            collapsed_lines = self._stats_to_collapsed(stats)
+            if not collapsed_lines:
+                return
+            
+            # Calculate time range
+            end_time = time.time()
+            start_time = self._profile_start_time or (end_time - 60)
+            
+            # Push to Pyroscope (may not work with grafana/pyroscope, see docs)
+            self._push_profile(collapsed_lines, int(start_time), int(end_time))
+            
+        except Exception as e:
+            Console.warn(f"[PROFILE] Failed to push: {e}")
+        finally:
+            try:
+                yappi.clear_stats()
+            except Exception:
+                pass
+    
+    def _log_top_functions(self, stats, top_n: int = 10) -> None:
+        """Log the top N CPU-consuming functions."""
+        # Sort by total time and get top N
+        sorted_stats = sorted(stats, key=lambda s: s.ttot, reverse=True)[:top_n]
+        
+        if sorted_stats:
+            Console.section("Top CPU Functions")
+            for i, stat in enumerate(sorted_stats, 1):
+                # Format time nicely
+                ttot_ms = stat.ttot * 1000
+                ncall = stat.ncall
+                module = stat.module or ""
+                name = stat.name or "unknown"
+                
+                # Clean up module path
+                if "/" in module or "\\" in module:
+                    import os
+                    module = os.path.basename(module).replace(".py", "")
+                
+                Console.status(f"  {i:2}. {module}.{name}: {ttot_ms:.1f}ms ({ncall} calls)")
+    
+    def _stats_to_collapsed(self, stats) -> List[str]:
+        """Convert yappi stats to collapsed stack format.
+        
+        Collapsed format: "func1;func2;func3 <total_time_in_microseconds>"
+        
+        Since yappi gives us flat function stats (not stack traces),
+        we create a meaningful stack from the full module path.
+        """
+        lines = []
+        for stat in stats:
+            # Build a descriptive stack from module.function
+            module = stat.module or "unknown"
+            name = stat.name or "unknown"
+            full_name = stat.full_name or f"{module}.{name}"
+            
+            # Extract meaningful path (keep package structure for ACM code)
+            if "core" in module or "acm" in module.lower():
+                # ACM code - keep the package structure
+                # e.g., "c:\path\to\ACM\core\fuse.py" -> "core.fuse"
+                import os
+                parts = module.replace("\\", "/").split("/")
+                # Find "core" or relevant package
+                try:
+                    if "core" in parts:
+                        idx = parts.index("core")
+                        module = ".".join(parts[idx:])
+                    elif "scripts" in parts:
+                        idx = parts.index("scripts")
+                        module = ".".join(parts[idx:])
+                    else:
+                        module = os.path.splitext(os.path.basename(module))[0]
+                except (ValueError, IndexError):
+                    module = os.path.splitext(os.path.basename(module))[0]
+                # Remove .py extension
+                module = module.replace(".py", "")
+            elif "/" in module or "\\" in module:
+                # External code - just use filename
+                import os
+                module = os.path.splitext(os.path.basename(module))[0]
+            
+            # Skip internal/builtin functions
+            if name.startswith("_") and not name.startswith("__init__"):
+                if stat.ttot < 0.001:  # Skip if < 1ms
+                    continue
+            
+            # Stack format: module;function <microseconds>
+            # Use total time in microseconds (yappi reports seconds)
+            total_us = int(stat.ttot * 1_000_000)
+            if total_us > 1000:  # Only report functions taking > 1ms
+                stack = f"{module};{name}"
+                lines.append(f"{stack} {total_us}")
+        
+        return lines
+    
+    def _push_profile(self, collapsed_lines: List[str], from_ts: int, until_ts: int) -> None:
+        """Push collapsed profile to Pyroscope /ingest endpoint.
+        
+        Query params:
+            - name: app name with profile type and optional labels {key=value}
+                   Format: app_name.profile_type{key=value,...}
+                   e.g., acm.cpu{equipment=FD_FAN}
+            - from: UNIX timestamp start
+            - until: UNIX timestamp end
+            - format: folded (collapsed)
+            - sampleRate: 100 (default)
+            - spyName: pyspy (Python profiler)
+            - units: samples
+        """
+        # Build label string from tags
+        labels_str = ",".join(f"{k}={v}" for k, v in self._tags.items())
+        # App name must include profile type: app_name.profile_type{labels}
+        # Pyroscope expects: acm.cpu{equipment=FD_FAN} NOT acm{equipment=FD_FAN}
+        profile_type = "cpu"  # We're doing CPU profiling with yappi
+        app_with_labels = f"{self._app_name}.{profile_type}{{{labels_str}}}" if labels_str else f"{self._app_name}.{profile_type}"
+        
+        params = {
+            "name": app_with_labels,
+            "from": str(from_ts),
+            "until": str(until_ts),
+            "format": "folded",
+            "sampleRate": "100",
+            "spyName": "pyspy",
+            "units": "samples",
+            "aggregationType": "sum",
+        }
+        
+        # Build URL with properly encoded query params
+        import urllib.parse
+        query_string = urllib.parse.urlencode(params)
+        url = f"{self._endpoint}/ingest?{query_string}"
+        
+        # Profile data as newline-separated collapsed stacks
+        data = "\n".join(collapsed_lines).encode("utf-8")
+        
+        Console.info(f"[PROFILE] Pushing {len(collapsed_lines)} stack samples to Pyroscope...")
+        
+        try:
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "text/plain"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    Console.ok(f"[PROFILE] Successfully pushed to Pyroscope")
+        except urllib.error.HTTPError as e:
+            if e.code != 200:
+                try:
+                    body = e.read().decode('utf-8', errors='ignore')
+                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code} - {body[:200]}")
+                except Exception:
+                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code}")
+        except Exception as e:
+            Console.warn(f"[PROFILE] Pyroscope push error: {e}")
+
+
+# =============================================================================
 # SQL LOG SINK
 # =============================================================================
 
@@ -1357,7 +1970,17 @@ __all__ = [
     "record_regime",
     "record_data_quality",
     "record_model_refit",
+    "record_memory",
+    "record_cpu",
+    "record_cpu_per_core",
+    "record_gpu",
+    "record_capacity",
+    "record_disk_io",
+    "record_section_resources",
     "log_timer",
+    "start_profiling",
+    "stop_profiling",
+    "profile_section",
     "get_tracer",
     "get_meter",
     "OTEL_AVAILABLE",

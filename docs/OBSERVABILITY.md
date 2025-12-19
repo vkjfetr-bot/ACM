@@ -11,7 +11,7 @@ ACM uses a modern observability stack built on open standards, deployed entirely
 | **Traces** | OpenTelemetry SDK | Grafana Tempo | 3200 | Distributed tracing, request flow |
 | **Metrics** | OpenTelemetry SDK | Prometheus | 9090 | Performance metrics, counters |
 | **Logs** | structlog | Grafana Loki | 3100 | Structured JSON logs |
-| **Profiling** | pyroscope-io | Grafana Pyroscope | 4040 | Continuous CPU/memory flamegraphs |
+| **Profiling** | yappi + HTTP API | Grafana Pyroscope | 4040 | CPU profiling flamegraphs |
 
 ## Architecture
 
@@ -19,7 +19,7 @@ ACM uses a modern observability stack built on open standards, deployed entirely
 ┌─────────────────────────────────────────────────────────────────┐
 │  ACM Python Application (Host)                                   │
 │  ┌─────────────────┐ ┌─────────────────┐ ┌────────────────────┐ │
-│  │ OTel SDK        │ │ structlog+Loki  │ │ pyroscope-io       │ │
+│  │ OTel SDK        │ │ structlog+Loki  │ │ yappi + HTTP       │ │
 │  │ (traces+metrics)│ │ (JSON logs)     │ │ (profiling)        │ │
 │  └────────┬────────┘ └────────┬────────┘ └───────┬────────────┘ │
 └───────────┼───────────────────┼──────────────────┼──────────────┘
@@ -91,8 +91,8 @@ pip install structlog>=24.0 colorama
 # OpenTelemetry for traces + metrics
 pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
-# Continuous profiling (requires Rust toolchain on some platforms)
-pip install pyroscope-io
+# CPU profiling (pure Python, no Rust required)
+pip install yappi
 
 # Or install everything via extras
 pip install -e ".[observability]"
@@ -634,6 +634,81 @@ count_over_time({app="acm"} |= "outcome=" | json [24h])
 
 ---
 
+## Profiling with yappi + Pyroscope
+
+ACM uses **yappi** (pure Python) for CPU profiling, pushing profiles to Pyroscope via HTTP API. This avoids the Rust compilation requirements of `pyroscope-io`.
+
+### How It Works
+
+1. **yappi** samples the Python call stack during execution
+2. On shutdown (or manually), samples are converted to "collapsed/folded" format
+3. Profiles are pushed to Pyroscope's HTTP `/ingest` endpoint
+4. View flamegraphs in Grafana (Pyroscope data source)
+
+### Automatic Profiling (Recommended)
+
+When `init_observability()` is called with a Pyroscope endpoint, profiling starts automatically:
+
+```python
+from core.observability import init_observability, shutdown
+
+# Profiling starts automatically if yappi is installed
+init_observability(equipment="FD_FAN", equip_id=1)
+
+# ... your code runs here ...
+
+# Profiling stops and pushes to Pyroscope on shutdown
+shutdown()
+```
+
+### Manual Profiling (Specific Sections)
+
+For profiling specific code sections:
+
+```python
+from core.observability import start_profiling, stop_profiling
+
+# Profile a specific section
+start_profiling(equipment="FD_FAN", equip_id=1)
+
+# ... code to profile ...
+
+# Stop and push to Pyroscope
+stop_profiling()
+```
+
+### Context Manager for Scoped Profiling
+
+```python
+from core.observability import profile_section
+
+with profile_section(equipment="FD_FAN", equip_id=1):
+    # This code block will be profiled
+    heavy_computation()
+```
+
+### Viewing Profiles in Grafana
+
+1. Open Grafana at http://localhost:3000
+2. Go to **Explore** → Select **Pyroscope** data source
+3. Select profile type: `process_cpu:cpu:nanoseconds:cpu:nanoseconds`
+4. Filter by labels:
+   - `service_name = acm`
+   - `equipment = FD_FAN`
+5. View flamegraph to identify CPU hotspots
+
+### Pyroscope Query Examples
+
+```promql
+# Find profiles for specific equipment
+{service_name="acm", equipment="FD_FAN"}
+
+# Find all ACM profiles
+{service_name="acm"}
+```
+
+---
+
 ## Troubleshooting
 
 ### OpenTelemetry not sending data
@@ -651,9 +726,41 @@ export OTEL_LOG_LEVEL=debug
 export ACM_LOG_FORMAT=json
 ```
 
-### Pyroscope not profiling
+### Profiling not working
+
+**Check yappi is installed:**
 ```python
-# Verify pyroscope is available
-import pyroscope
-print(pyroscope.__version__)
+import yappi
+print(f"yappi version: {yappi.__version__}")
+```
+
+**Verify Pyroscope endpoint:**
+```powershell
+# Check Pyroscope is running
+curl http://localhost:4040/ready
+
+# Expected: "ready"
+```
+
+**Check for profiling success in logs:**
+```
+[SUCCESS] [OTEL] Profiling -> http://localhost:4040
+```
+
+**Manual test:**
+```python
+from core.observability import start_profiling, stop_profiling
+
+start_profiling(equipment="TEST", equip_id=999)
+import time
+time.sleep(1)  # Some work
+stop_profiling()
+# Check Pyroscope UI for "acm" app with equipment=TEST label
+```
+
+**Time zone issues (Windows + Docker):**
+If profiles don't appear, check `pyroscope-docker.yaml` has extended limits:
+```yaml
+limits:
+  reject_older_than: 720h  # Handle time drift between host and Docker
 ```

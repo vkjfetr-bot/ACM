@@ -29,7 +29,7 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 - **Grafana Alloy** - OTLP collector on ports 4317 (gRPC), 4318 (HTTP)
 - **OpenTelemetry** - Distributed tracing (Tempo) and metrics (Prometheus)
 - **Loki** - Structured log aggregation on port 3100
-- **Pyroscope** - Continuous profiling on port 4040 (requires `pip install pyroscope-io`)
+- **Pyroscope** - Continuous profiling on port 4040 (requires `pip install yappi`)
 - **Unified API** - `core/observability.py` provides Console, Span, Metrics classes
 - **Dashboards** - `install/observability/dashboards/` (auto-provisioned to Grafana)
 
@@ -214,8 +214,8 @@ docker compose down -v; docker compose up -d
 
 ### Enable Profiling
 ```powershell
-# Install pyroscope-io for continuous profiling
-pip install pyroscope-io
+# Install yappi for CPU profiling (pure Python, no Rust required)
+pip install yappi
 
 # Verify in ACM output:
 # [SUCCESS] [OTEL] Profiling -> http://localhost:4040

@@ -47,6 +47,8 @@ from core.observability import (
     shutdown as shutdown_observability,
     record_run,
     record_error,
+    start_profiling,
+    stop_profiling,
 )
 
 
@@ -328,10 +330,10 @@ class SQLBatchRunner:
                             conn.commit()
                     except Exception as tbl_err:
                         Console.warn(f"Failed to truncate {table} for EquipID={equip_id}: {tbl_err}", table=table, error=str(tbl_err))
-                    # Progress indicator every 10 tables
+                    # Progress indicator every 10 tables (console only, not Loki)
                     if idx % 10 == 0:
-                        Console.info(f"[RESET] Truncated {idx}/{total_tables} tables...", progress=idx, total=total_tables)
-            Console.info(f"[RESET] Truncated {deleted_count} tables with data for EquipID={equip_id}", equip_id=equip_id, tables_truncated=deleted_count)
+                        Console.status(f"  Cold-start reset: {idx}/{total_tables} tables processed...")
+            Console.ok(f"Cold-start reset complete: cleared {deleted_count} ACM output tables for EquipID={equip_id}")
         except Exception as e:
             Console.warn(f"Failed to truncate outputs for EquipID={equip_id}: {e}", error=str(e))
 
@@ -351,7 +353,7 @@ class SQLBatchRunner:
                 )
                 deleted_count = cur.rowcount
                 conn.commit()
-            Console.info(f"[RESET] Deleted {deleted_count} models from SQL ModelRegistry for EquipID={equip_id}", equip_id=equip_id, deleted=deleted_count)
+            Console.ok(f"Cold-start reset: deleted {deleted_count} cached models for EquipID={equip_id}")
                 
         except Exception as e:
             Console.warn(f"Failed to delete models for EquipID={equip_id}: {e}", error=str(e))
@@ -1128,9 +1130,13 @@ def main() -> int:
         enable_loki=True,
         enable_tracing=True,
         enable_metrics=True,
+        enable_profiling=True,
         loki_endpoint=loki_url,
         otlp_endpoint=otlp_endpoint,
     )
+    
+    # Start profiling (collect CPU samples for Pyroscope)
+    start_profiling()
     
     # Create runner
     runner = SQLBatchRunner(
@@ -1202,6 +1208,9 @@ def main() -> int:
     Console.status("\n" + "="*60)
     Console.info(f"[TIMING] Overall execution time: {overall_minutes}m {overall_seconds}s", minutes=overall_minutes, seconds=overall_seconds)
     Console.status("="*60)
+    
+    # Stop profiling and push samples to Pyroscope
+    stop_profiling()
     
     # Shutdown observability to flush any pending logs
     shutdown_observability()

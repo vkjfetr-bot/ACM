@@ -72,6 +72,7 @@ from core.episode_culprits_writer import write_episode_culprits_enhanced
 try:
     from core.observability import (
         init as init_observability,
+        shutdown as shutdown_observability,
         log as obs_log,
         get_tracer, 
         get_meter,
@@ -96,6 +97,8 @@ try:
         record_data_quality,
         record_model_refit,
         log_timer,
+        start_profiling,
+        stop_profiling,
     )
     _OBSERVABILITY_AVAILABLE = True
 except ImportError:
@@ -137,6 +140,9 @@ except ImportError:
     def record_data_quality(*args, **kwargs): pass
     def record_model_refit(*args, **kwargs): pass
     def log_timer(*args, **kwargs): pass
+    def start_profiling(): pass
+    def stop_profiling(): pass
+    def shutdown_observability(): pass
 
 # SQL client (optional; only used in SQL mode)
 try:
@@ -850,7 +856,10 @@ def main() -> None:
                 enable_tracing=True,
                 enable_metrics=True,
                 enable_loki=True,
+                enable_profiling=True,
             )
+            # Start profiling (collect CPU samples for Pyroscope)
+            start_profiling()
         except Exception as e:
             Console.warn(f"Observability init failed (non-fatal): {e}", component="OTEL")
 
@@ -4649,6 +4658,14 @@ def main() -> None:
                     root_span.set_attribute("acm.rows_read", rows_read)
                     root_span.set_attribute("acm.rows_written", rows_written)
                 _span_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+        
+        # Stop profiling and flush all observability data
+        if _OBSERVABILITY_AVAILABLE:
+            try:
+                stop_profiling()
+                shutdown_observability()  # Flush traces, metrics, logs
             except Exception:
                 pass
 
