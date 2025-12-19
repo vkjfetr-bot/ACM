@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
-from core.observability import Console, Heartbeat
+from core.observability import Console, Heartbeat, Span
 from utils.detector_labels import format_culprit_label
 
 import numpy as np
@@ -51,11 +51,12 @@ def tune_detector_weights(
     Returns:
         Tuple of (tuned_weights, diagnostics)
     """
-    tune_cfg = (cfg or {}).get("fusion", {}).get("auto_tune", {}) if cfg else {}
-    enabled = tune_cfg.get("enabled", False)
-    
-    if not enabled:
-        return current_weights, {"enabled": False, "reason": "auto_tune.enabled=False in config"}
+    with Span("fusion.tune_weights", n_detectors=len(streams), n_samples=len(fused) if isinstance(fused, np.ndarray) else 0):
+        tune_cfg = (cfg or {}).get("fusion", {}).get("auto_tune", {}) if cfg else {}
+        enabled = tune_cfg.get("enabled", False)
+        
+        if not enabled:
+            return current_weights, {"enabled": False, "reason": "auto_tune.enabled=False in config"}
     
     # FUSE-09: Configurable parameters
     learning_rate = float(tune_cfg.get("learning_rate", 0.3))
@@ -810,12 +811,13 @@ def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict
     v10.1.0: Added regime_labels parameter for episode-regime correlation.
     Episodes now include regime context for filtering false positives during transitions.
     """
-    epcfg = (cfg or {}).get("episodes", {})
-    cpd = epcfg.get("cpd", {}) if isinstance(epcfg, dict) else {}
-    
-    # FUSE-06: Auto-tune k_sigma and h_sigma based on training data statistics
-    auto_tune_cfg = cpd.get("auto_tune", {})
-    auto_tune_enabled = auto_tune_cfg.get("enabled", False)
+    with Span("fusion.combine", n_detectors=len(streams), n_samples=len(original_features)):
+        epcfg = (cfg or {}).get("episodes", {})
+        cpd = epcfg.get("cpd", {}) if isinstance(epcfg, dict) else {}
+        
+        # FUSE-06: Auto-tune k_sigma and h_sigma based on training data statistics
+        auto_tune_cfg = cpd.get("auto_tune", {})
+        auto_tune_enabled = auto_tune_cfg.get("enabled", False)
     
     base_k_sigma = float(cpd.get("k_sigma", 0.5))
     base_h_sigma = float(cpd.get("h_sigma", 5.0))
