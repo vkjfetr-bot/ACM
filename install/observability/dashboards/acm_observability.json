@@ -296,6 +296,76 @@
       }
     },
     {
+      "id": 14,
+      "title": "Peak Memory",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 12, "w": 3, "h": 3 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "max(acm_memory_peak_mb)" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 1000 }] },
+          "unit": "decmbytes", "decimals": 0, "noValue": "0"
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["max"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 15,
+      "title": "Avg CPU",
+      "type": "stat",
+      "gridPos": { "x": 3, "y": 12, "w": 3, "h": 3 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "avg(acm_cpu_percent)" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 80 }] },
+          "unit": "percent", "decimals": 1, "noValue": "0"
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["mean"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 16,
+      "title": "Disk Read",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 12, "w": 3, "h": 3 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(acm_disk_read_mb)" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+          "unit": "decmbytes", "decimals": 0, "noValue": "0"
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["last"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 17,
+      "title": "Disk Write",
+      "type": "stat",
+      "gridPos": { "x": 9, "y": 12, "w": 3, "h": 3 },
+      "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
+      "targets": [{ "refId": "A", "expr": "sum(acm_disk_write_mb)" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] },
+          "unit": "decmbytes", "decimals": 0, "noValue": "0"
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["last"] }, "colorMode": "value", "graphMode": "none" }
+    },
+    {
+      "id": 18,
+      "title": "Detailed Profiling",
+      "type": "text",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 3 },
+      "options": {
+        "mode": "markdown",
+        "content": "### [→ Open ACM Profiling Dashboard](/d/acm-profiling)\n\nFor detailed per-section CPU/memory breakdown, equipment memory usage, timer logs, and disk I/O analysis."
+      }
+    },
+    {
       "id": 20,
       "title": "Pipeline Logs",
       "type": "row",
