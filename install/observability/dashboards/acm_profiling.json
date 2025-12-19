@@ -171,7 +171,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{app=\"acm\", log_type=\"timer\"} | json",
+          "expr": "{app=\"acm\", log_type=\"timer\"}",
           "queryType": "range"
         }
       ],
@@ -262,11 +262,8 @@
       "targets": [
         {
           "refId": "A",
-          "queryType": "traceqlSearch",
-          "filters": [
-            { "id": "service-name", "tag": "service.name", "operator": "=", "scope": "resource", "value": ["acm-pipeline"] }
-          ],
-          "limit": 20
+          "queryType": "traceql",
+          "query": "{}"
         }
       ],
       "fieldConfig": {
