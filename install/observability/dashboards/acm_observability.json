@@ -311,7 +311,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{app=\"acm\"} | json",
+          "expr": "{app=\"acm\"}",
           "queryType": "range"
         }
       ],
