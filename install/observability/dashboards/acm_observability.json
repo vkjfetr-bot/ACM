@@ -394,11 +394,8 @@
       "targets": [
         {
           "refId": "A",
-          "queryType": "traceqlSearch",
-          "filters": [
-            { "id": "service-name", "tag": "service.name", "operator": "=", "scope": "resource", "value": ["acm-pipeline"] }
-          ],
-          "limit": 20
+          "queryType": "traceql",
+          "query": "{}"
         }
       ],
       "transformations": [],
@@ -434,7 +431,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "{app=\"acm\", level=\"error\"} | json",
+              "expr": "{app=\"acm\", level=\"error\"}",
               "queryType": "range"
             }
           ],
@@ -456,7 +453,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "{app=\"acm\", level=\"warning\"} | json",
+              "expr": "{app=\"acm\", level=\"warning\"}",
               "queryType": "range"
             }
           ],
@@ -487,7 +484,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "{app=\"acm\", log_type=\"timer\"} | json",
+              "expr": "{app=\"acm\", log_type=\"timer\"}",
               "queryType": "range"
             }
           ],
