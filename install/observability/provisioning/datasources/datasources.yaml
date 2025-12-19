@@ -35,14 +35,33 @@ datasources:
         hide: false
       nodeGraph:
         enabled: true
+      lokiSearch:
+        datasourceUid: loki-ds
       tracesToLogsV2:
         datasourceUid: loki-ds
-        spanStartTimeShift: '-1h'
-        spanEndTimeShift: '1h'
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
         filterByTraceID: true
         filterBySpanID: false
         customQuery: true
-        query: '{app="acm", trace_id="${__trace.traceId}"}'
+        query: '{app="acm"} | trace_id=`${__trace.traceId}`'
+        tags:
+          - key: equipment
+            value: ''
+          - key: run_id
+            value: ''
+      tracesToMetrics:
+        datasourceUid: prometheus-ds
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        tags:
+          - key: equipment
+            value: ''
+        queries:
+          - name: Stage Duration
+            query: 'acm_stage_duration_seconds_sum{equipment="${__span.tags.equipment}"}'
+          - name: Memory Usage
+            query: 'acm_memory_rss_mb{equipment="${__span.tags.equipment}"}'
       tracesToProfiles:
         datasourceUid: pyroscope-ds
         profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
@@ -58,11 +77,14 @@ datasources:
     isDefault: false
     jsonData:
       maxLines: 1000
+      # Derived fields: extract trace_id from label to link to Tempo traces
       derivedFields:
         - datasourceUid: tempo-ds
-          matcherRegex: '"trace_id":"([a-f0-9]+)"'
+          matcherType: label
+          matcherRegex: trace_id
           name: TraceID
           url: '$${__value.raw}'
+          urlDisplayLabel: View Trace
 
   # Pyroscope - Continuous Profiling
   - name: Pyroscope
