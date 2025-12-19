@@ -25,17 +25,42 @@
   "panels": [
     {
       "id": 1,
-      "title": "CPU Profiling",
+      "title": "Flame Graph (Pyroscope)",
       "type": "row",
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
       "collapsed": false
     },
     {
+      "id": 100,
+      "title": "CPU Flame Graph",
+      "description": "CPU profiling flame graph from Pyroscope - shows where CPU time is spent",
+      "type": "flamegraph",
+      "gridPos": { "x": 0, "y": 1, "w": 24, "h": 12 },
+      "datasource": { "uid": "pyroscope-ds", "type": "grafana-pyroscope-datasource" },
+      "targets": [
+        {
+          "refId": "A",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "labelSelector": "{}",
+          "queryType": "profile",
+          "groupBy": []
+        }
+      ],
+      "options": {}
+    },
+    {
       "id": 2,
+      "title": "CPU Metrics",
+      "type": "row",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+    {
+      "id": 3,
       "title": "CPU Usage Over Time",
       "description": "CPU percentage by section",
       "type": "timeseries",
-      "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
       "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
       "targets": [
         {
@@ -59,11 +84,11 @@
       }
     },
     {
-      "id": 3,
+      "id": 4,
       "title": "Section Duration (seconds)",
       "description": "Time spent in each pipeline section",
       "type": "timeseries",
-      "gridPos": { "x": 12, "y": 1, "w": 12, "h": 8 },
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
       "datasource": { "uid": "prometheus-ds", "type": "prometheus" },
       "targets": [
         {
@@ -89,7 +114,7 @@
       "id": 10,
       "title": "Memory Profiling",
       "type": "row",
-      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 1 },
       "collapsed": false
     },
     {
