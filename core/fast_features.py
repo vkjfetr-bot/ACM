@@ -14,6 +14,7 @@ import inspect
 import numpy as np
 import pandas as pd
 from utils.timer import Timer
+from core.observability import Span
 
 # Try polars
 try:
@@ -939,64 +940,65 @@ def compute_basic_features(pdf: pd.DataFrame, window: int = 3, cols: Optional[Li
     >>> # Show robust z-scores for spiky series
     >>> features['spiky_rz']  # Should highlight outliers
     """
-    # =================================================================================
-    # OPTIMIZATION: Delegate to the much faster Polars-native implementation if possible.
-    # The `compute_basic_features_pl` function is designed for this. By checking for
-    # Polars and a Polars DataFrame input, we can short-circuit the slow pandas path.
-    # =================================================================================
-    if HAS_POLARS and isinstance(pdf, pl.DataFrame):
-        features_pl = compute_basic_features_pl(pdf, window=window, cols=cols)
-        # The original function is expected to return a pandas DataFrame, so we convert back.
-        return features_pl.to_pandas()
+    with Span("features.compute", n_samples=len(pdf), n_features=pdf.shape[1] if len(pdf) > 0 else 0, window=window):
+        # =================================================================================
+        # OPTIMIZATION: Delegate to the much faster Polars-native implementation if possible.
+        # The `compute_basic_features_pl` function is designed for this. By checking for
+        # Polars and a Polars DataFrame input, we can short-circuit the slow pandas path.
+        # =================================================================================
+        if HAS_POLARS and isinstance(pdf, pl.DataFrame):
+            features_pl = compute_basic_features_pl(pdf, window=window, cols=cols)
+            # The original function is expected to return a pandas DataFrame, so we convert back.
+            return features_pl.to_pandas()
 
-    # --- Fallback to original pandas implementation if not using Polars ---
-    pdf = _to_pandas(pdf)
-    if cols is None:
-        cols = list(pdf.columns)
-    
-    _timer.log("feature_params", window=window, n_cols=len(cols), n_rows=len(pdf))
-    
-    # default fill policy: median-based imputation for small windows
-    # Use provided fill_values if available (prevents data leakage for score data)
-    with _timer.section("fill_missing"):
-        pdf_filled = _apply_fill(pdf, method="median", fill_values=fill_values)
+        # --- Fallback to original pandas implementation if not using Polars ---
+        pdf = _to_pandas(pdf)
+        if cols is None:
+            cols = list(pdf.columns)
+        
+        _timer.log("feature_params", window=window, n_cols=len(cols), n_rows=len(pdf))
+        
+        # default fill policy: median-based imputation for small windows
+        # Use provided fill_values if available (prevents data leakage for score data)
+        with _timer.section("fill_missing"):
+            pdf_filled = _apply_fill(pdf, method="median", fill_values=fill_values)
 
-    # --- Refactored Logic: Delegate to individual feature functions ---
-    # This simplifies the orchestrator and removes redundant logic.
-    med = rolling_median(pdf_filled, window, cols, min_periods=1, return_type="pandas")
-    mad = rolling_mad(pdf_filled, window, cols, min_periods=1, return_type="pandas")
-    ms = rolling_mean_std(pdf_filled, window, cols, min_periods=1, return_type="pandas")
-    slopes = rolling_ols_slope(pdf_filled, window, cols, min_periods=1, return_type="pandas")
-    sk = rolling_skew_kurt(pdf_filled, window, cols, min_periods=1, return_type="pandas")
-    se = rolling_spectral_energy(pdf_filled, window, cols, min_periods=1, return_type="pandas")
+        # --- Refactored Logic: Delegate to individual feature functions ---
+        # This simplifies the orchestrator and removes redundant logic.
+        med = rolling_median(pdf_filled, window, cols, min_periods=1, return_type="pandas")
+        mad = rolling_mad(pdf_filled, window, cols, min_periods=1, return_type="pandas")
+        ms = rolling_mean_std(pdf_filled, window, cols, min_periods=1, return_type="pandas")
+        slopes = rolling_ols_slope(pdf_filled, window, cols, min_periods=1, return_type="pandas")
+        sk = rolling_skew_kurt(pdf_filled, window, cols, min_periods=1, return_type="pandas")
+        se = rolling_spectral_energy(pdf_filled, window, cols, min_periods=1, return_type="pandas")
 
-    # robust z: (x - rolling_median) / (rolling_mad + eps)
-    eps = 1e-9
+        # robust z: (x - rolling_median) / (rolling_mad + eps)
+        eps = 1e-9
 
-    rz_df = pd.DataFrame(index=pdf_filled.index)
+        rz_df = pd.DataFrame(index=pdf_filled.index)
 
-    for c in cols:
-        m = med[f"{c}_med"] if f"{c}_med" in med.columns else 0.0
-        md = mad[f"{c}_mad"] if f"{c}_mad" in mad.columns else pd.Series(np.full(len(pdf_filled), eps), index=pdf_filled.index)
-        # clamp mad to avoid division by zero
-        md_clamped = md.copy()
-        md_clamped = md_clamped.where(md_clamped.abs() > eps, other=eps)
-        # scale MAD to approximate std
-        md_scaled = md_clamped * 1.4826
-        # compute robust z and clamp
-        rz = (pdf_filled[c] - m) / (md_scaled + eps)
-        rz = rz.clip(lower=-1e2, upper=1e2)
-        # replace infs/nans
-        rz = rz.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        rz_df[c + "_rz"] = rz
+        for c in cols:
+            m = med[f"{c}_med"] if f"{c}_med" in med.columns else 0.0
+            md = mad[f"{c}_mad"] if f"{c}_mad" in mad.columns else pd.Series(np.full(len(pdf_filled), eps), index=pdf_filled.index)
+            # clamp mad to avoid division by zero
+            md_clamped = md.copy()
+            md_clamped = md_clamped.where(md_clamped.abs() > eps, other=eps)
+            # scale MAD to approximate std
+            md_scaled = md_clamped * 1.4826
+            # compute robust z and clamp
+            rz = (pdf_filled[c] - m) / (md_scaled + eps)
+            rz = rz.clip(lower=-1e2, upper=1e2)
+            # replace infs/nans
+            rz = rz.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            rz_df[c + "_rz"] = rz
 
-    # Concatenate all feature parts
-    parts = [p for p in [med, mad, ms, slopes, sk, se, rz_df] if p is not None and not p.empty]
-    if not parts:
-        return pd.DataFrame(index=pdf.index)
+        # Concatenate all feature parts
+        parts = [p for p in [med, mad, ms, slopes, sk, se, rz_df] if p is not None and not p.empty]
+        if not parts:
+            return pd.DataFrame(index=pdf.index)
 
-    out = pd.concat(parts, axis=1)
-    # ensure no infs/nans in final feature table
-    out = out.replace([np.inf, -np.inf], np.nan)
-    out = out.fillna(0.0)
-    return out
+        out = pd.concat(parts, axis=1)
+        # ensure no infs/nans in final feature table
+            out = out.replace([np.inf, -np.inf], np.nan)
+        out = out.fillna(0.0)
+        return out
