@@ -141,8 +141,8 @@ class AR1Detector:
             n = len(insufficient_cols)
             Console.warn(f"{n} columns with <{MIN_FORECAST_SAMPLES} samples (unstable coefficients)", component="AR1")
         
-            self._is_fitted = True
-            return self
+        self._is_fitted = True
+        return self
     
     def score(self, X: pd.DataFrame, return_per_sensor: bool = False) -> np.ndarray | Tuple[np.ndarray, pd.DataFrame]:
         """
