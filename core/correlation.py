@@ -18,7 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
 try:
-    from core.observability import Console, Heartbeat
+    from core.observability import Console, Heartbeat, Span
 except ImportError as e:
     # If logger import fails, something is seriously wrong - fail fast
     raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
@@ -245,119 +245,104 @@ class PCASubspaceDetector:
 
     def fit(self, X: pd.DataFrame) -> "PCASubspaceDetector":
         """Fit scaler + PCA on TRAIN safely."""
-        from core.observability import Console, Heartbeat
-        Console.info(f"fit() entry: input shape={X.shape}", component="PCA")
-        df = X.copy()
-        Console.info(f"After copy: shape={df.shape}", component="PCA")
-
-        # Drop fully non-finite columns, then near-constants
-        df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
-        Console.info(f"After drop non-finite: shape={df.shape}", component="PCA")
-        std = df.astype("float64").std(axis=0)
-        df = df.loc[:, std > 1e-6]
-        Console.info(f"After drop near-constants: shape={df.shape}", component="PCA")
-
-        # If everything got dropped, inject a safe dummy feature
-        if df.shape[1] == 0:
-            df = pd.DataFrame({"_dummy": np.zeros(len(df), dtype=np.float64)}, index=df.index)
-
-        # Impute + clip (guard wild magnitudes)
-        Console.info("Computing medians for imputation...", component="PCA")
-        self.col_medians = df.median()
-        Console.info(f"Imputing and clipping {df.shape[1]} columns...", component="PCA")
-        df = df.fillna(self.col_medians).clip(lower=-1e6, upper=1e6)
-
-        self.keep_cols = list(df.columns)
-        Console.info(f"Prepared {len(self.keep_cols)} features for PCA", component="PCA")
-        
-        # COR-02: Guard against insufficient samples for PCA after feature filtering
-        # PCA requires at least 2 samples to compute meaningful components
-        if df.shape[0] < 2:
-            Console.warn(
-                f"[PCA] Insufficient samples after feature filtering (n={df.shape[0]}). "
-                f"Skipping PCA fit - score() will return zeros."
-            )
-            # Set PCA to None to signal fallback mode
-            self.pca = None
-            self.keep_cols = []
-            return self
-
-        # Scale
-        Console.info(f"Scaling data: converting to float64...", component="PCA")
-        data_float = df.values.astype(np.float64, copy=False)
-        Console.info(f"Fitting scaler on {data_float.shape} array...", component="PCA")
-        Xs = self.scaler.fit_transform(data_float)
-        Console.info(f"Scaling complete: output shape={Xs.shape}", component="PCA")
-
-        # Choose a safe n_components
-        n_samples, n_features = Xs.shape
-        user_nc = self.cfg.get("n_components", 5)
-        try:
-            user_nc = int(user_nc)
-        except Exception:
-            user_nc = 5
-        k = int(max(1, min(user_nc, n_features, max(1, n_samples - 1))))
-        Console.info(f"Using {k} components (n_samples={n_samples}, n_features={n_features})", component="PCA")
-        
-        # Incremental path (CPU only)
-        if self.cfg.get("incremental", False):
-            Console.info("Using IncrementalPCA mode", component="PCA")
-            from sklearn.decomposition import IncrementalPCA
-            self.pca = IncrementalPCA(  # type: ignore[assignment]
-                n_components=k,
-                batch_size=max(256, int(self.cfg.get("batch_size", 4096))),
-            )
-            # partial_fit in batches
-            bs = self.pca.batch_size or 256  # type: ignore[attr-defined]
-            Console.info(f"Partial fitting in batches of {bs}...", component="PCA")
-            for i in range(0, n_samples, bs):
-                batch_end = min(i+bs, n_samples)
-                Console.info(f"Batch {i}-{batch_end} of {n_samples}", component="PCA")
-                self.pca.partial_fit(Xs[i:batch_end])  # type: ignore[attr-defined]
-            Console.info("IncrementalPCA fitting complete", component="PCA")
-        else:
-            # Default batch path
-            Console.info(f"Starting standard PCA.fit() with svd_solver='full' on ({n_samples} x {n_features})...", component="PCA")
-            self.pca = PCA(n_components=k, svd_solver="full", random_state=17)
-            self.pca.fit(Xs)
-            Console.info("Standard PCA.fit() complete", component="PCA")
+        with Span("fit.pca", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            from core.observability import Console, Heartbeat
+            Console.info(f"Fit start: train shape={X.shape}", component="PCA")
+            df = X.copy()
             
-        return self
+            # Drop fully non-finite columns, then near-constants
+            df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
+            std = df.astype("float64").std(axis=0)
+            df = df.loc[:, std > 1e-6]
+            # If everything got dropped, inject a safe dummy feature
+            if df.shape[1] == 0:
+                df = pd.DataFrame({"_dummy": np.zeros(len(df), dtype=np.float64)}, index=df.index)
+
+            # Impute + clip (guard wild magnitudes)
+            self.col_medians = df.median()
+            df = df.fillna(self.col_medians).clip(lower=-1e6, upper=1e6)
+
+            self.keep_cols = list(df.columns)
+            
+            # COR-02: Guard against insufficient samples for PCA after feature filtering
+            # PCA requires at least 2 samples to compute meaningful components
+            if df.shape[0] < 2:
+                Console.warn(
+                    f"Insufficient samples after feature filtering (n={df.shape[0]}). "
+                    f"Skipping PCA fit - score() will return zeros.", component="PCA"
+                )
+                # Set PCA to None to signal fallback mode
+                self.pca = None
+                self.keep_cols = []
+                return self
+
+            # Scale
+            data_float = df.values.astype(np.float64, copy=False)
+            Xs = self.scaler.fit_transform(data_float)
+
+            # Choose a safe n_components
+            n_samples, n_features = Xs.shape
+            user_nc = self.cfg.get("n_components", 5)
+            try:
+                user_nc = int(user_nc)
+            except Exception:
+                user_nc = 5
+            k = int(max(1, min(user_nc, n_features, max(1, n_samples - 1))))
+            
+            # Incremental path (CPU only)
+            if self.cfg.get("incremental", False):
+                from sklearn.decomposition import IncrementalPCA
+                self.pca = IncrementalPCA(  # type: ignore[assignment]
+                    n_components=k,
+                    batch_size=max(256, int(self.cfg.get("batch_size", 4096))),
+                )
+                # partial_fit in batches
+                bs = self.pca.batch_size or 256  # type: ignore[attr-defined]
+                for i in range(0, n_samples, bs):
+                    batch_end = min(i+bs, n_samples)
+                    self.pca.partial_fit(Xs[i:batch_end])  # type: ignore[attr-defined]
+            else:
+                # Default batch path
+                self.pca = PCA(n_components=k, svd_solver="full", random_state=17)
+                self.pca.fit(Xs)
+                
+            Console.info(f"Fit complete in {Span.__name__}: {k} components, {n_samples} samples, {n_features} features", component="PCA" if "skip_loki" not in locals() else None, skip_loki=True)
+            return self
 
     def score(self, X: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Return (SPE, T²) as float32 arrays."""
-        if self.pca is None or self.col_medians is None:
-            n = len(X)
-            return np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
+        with Span("score.pca", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            if self.pca is None or self.col_medians is None:
+                n = len(X)
+                return np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
+            # Align columns, impute with TRAIN medians
+            df = X.copy().reindex(columns=self.keep_cols)
+            df = df.replace([np.inf, -np.inf], np.nan).fillna(self.col_medians)
+            Xs = self.scaler.transform(df.values.astype(np.float64, copy=False))
 
-        # Align columns, impute with TRAIN medians
-        df = X.copy().reindex(columns=self.keep_cols)
-        df = df.replace([np.inf, -np.inf], np.nan).fillna(self.col_medians)
-        Xs = self.scaler.transform(df.values.astype(np.float64, copy=False))
+            # Project → reconstruct → SPE
+            Z = self.pca.transform(Xs)
+            X_hat = self.pca.inverse_transform(Z)
+            spe = np.sum((Xs - X_hat) ** 2, axis=1)
+            # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
+            spe = np.clip(spe, 0.0, 1e6)
 
-        # Project → reconstruct → SPE
-        Z = self.pca.transform(Xs)
-        X_hat = self.pca.inverse_transform(Z)
-        spe = np.sum((Xs - X_hat) ** 2, axis=1)
-        # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
-        spe = np.clip(spe, 0.0, 1e6)
+            # Hotelling T² (guard tiny eigenvalues)
+            ev = getattr(self.pca, "explained_variance_", None)
+            if ev is None:
+                t2 = np.sum(Z ** 2, axis=1)
+            else:
+                ev = np.maximum(np.asarray(ev, dtype=np.float64), 1e-12)
+                # Compute per-component then clamp to avoid huge-but-finite spikes
+                t2_comp = (Z ** 2) / ev
+                # CAL-FIX-01: Reduced clip from 1e9 to 1e6
+                t2_comp = np.clip(t2_comp, 0.0, 1e6)
+                t2 = np.sum(t2_comp, axis=1)
 
-        # Hotelling T² (guard tiny eigenvalues)
-        ev = getattr(self.pca, "explained_variance_", None)
-        if ev is None:
-            t2 = np.sum(Z ** 2, axis=1)
-        else:
-            ev = np.maximum(np.asarray(ev, dtype=np.float64), 1e-12)
-            # Compute per-component then clamp to avoid huge-but-finite spikes
-            t2_comp = (Z ** 2) / ev
-            # CAL-FIX-01: Reduced clip from 1e9 to 1e6
-            t2_comp = np.clip(t2_comp, 0.0, 1e6)
-            t2 = np.sum(t2_comp, axis=1)
+            # Final sanitization and clamp before float32 cast
+            # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
+            spe = np.nan_to_num(spe, nan=0.0, posinf=1e6, neginf=0.0)
+            t2  = np.nan_to_num(t2,  nan=0.0, posinf=1e6, neginf=0.0)
+            t2  = np.clip(t2, 0.0, 1e6)
 
-        # Final sanitization and clamp before float32 cast
-        # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
-        spe = np.nan_to_num(spe, nan=0.0, posinf=1e6, neginf=0.0)
-        t2  = np.nan_to_num(t2,  nan=0.0, posinf=1e6, neginf=0.0)
-        t2  = np.clip(t2, 0.0, 1e6)
-
-        return spe.astype(np.float32, copy=False), t2.astype(np.float32, copy=False)
+            return spe.astype(np.float32, copy=False), t2.astype(np.float32, copy=False)

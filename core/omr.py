@@ -305,13 +305,14 @@ class OMRDetector:
         Returns:
             self (fitted)
         """
-        from core.observability import Console, Heartbeat
+        from core.observability import Console, Heartbeat, Span
         
-        # Validate input
-        is_valid, error_msg = self._validate_input(X)
-        if not is_valid:
-            Console.info(f"Skipping fit: {error_msg}", component="OMR")
-            return self
+        with Span("fit.omr", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            # Validate input
+            is_valid, error_msg = self._validate_input(X)
+            if not is_valid:
+                Console.info(f"Skipping fit: {error_msg}", component="OMR")
+                return self
         
         # Filter to healthy regime if labels provided
         if regime_labels is not None and len(regime_labels) == len(X):
@@ -404,15 +405,15 @@ class OMRDetector:
             self._is_fitted = True
             
             Console.info(
-                f"[OMR] Fitted {selected_model.upper()} model: "
+                f"Fitted {selected_model.upper()} model: "
                 f"{n_samples} samples, {n_features} features, "
-                f"{n_components} components, std={train_residual_std:.3f}"
+                f"{n_components} components, std={train_residual_std:.3f}", component="OMR"
             )
             
         except Exception as e:
             Console.error(f"Model fitting failed: {e}", component="OMR")
             import traceback
-            Console.error(traceback.format_exc())
+            Console.error(traceback.format_exc(), component="OMR")
             return self
         
         return self
@@ -468,99 +469,101 @@ class OMRDetector:
             omr_z: OMR z-scores (n_samples,)
             contributions: Optional DataFrame of per-sensor squared residuals (n_samples, n_features)
         """
-        if not self._is_fitted or self.model is None:
-            zeros = np.zeros(len(X), dtype=np.float32)
-            if return_contributions:
-                empty_contrib = pd.DataFrame(
-                    np.zeros((len(X), len(X.columns))),
-                    index=X.index,
-                    columns=X.columns
-                )
-                return zeros, empty_contrib
-            return zeros
+        from core.observability import Console, Heartbeat, Span
         
-        # Validate and prepare data
-        is_valid, _ = self._validate_input(X)
-        if not is_valid:
-            zeros = np.zeros(len(X), dtype=np.float32)
-            if return_contributions:
-                empty_contrib = pd.DataFrame(
-                    np.zeros((len(X), len(X.columns))),
-                    index=X.index,
-                    columns=X.columns
-                )
-                return zeros, empty_contrib
-            return zeros
-        
-        # Align columns to training feature order and mask
-        if self.model.feature_names:
-            X = X.reindex(self.model.feature_names, axis=1)
-        X_clean, _ = self._prepare_data(
-            X,
-            medians=pd.Series(self.model.train_medians, index=self.model.feature_names) if self.model.train_medians is not None else None,
-            var_mask=self.model.var_mask
-        )
+        with Span("score.omr", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            if not self._is_fitted or self.model is None:
+                zeros = np.zeros(len(X), dtype=np.float32)
+                if return_contributions:
+                    empty_contrib = pd.DataFrame(
+                        np.zeros((len(X), len(X.columns))),
+                        index=X.index,
+                        columns=X.columns
+                    )
+                    return zeros, empty_contrib
+                return zeros
             
-        # Scale
-        X_scaled = self.model.scaler.transform(X_clean)
-        
-        # Reconstruct
-        try:
-            X_recon = self._reconstruct_data(X_scaled)
-                
-        except Exception as e:
-            from core.observability import Console, Heartbeat
-            Console.error(f"Reconstruction failed: {e}", component="OMR")
-            zeros = np.zeros(len(X), dtype=np.float32)
-            if return_contributions:
-                empty_contrib = pd.DataFrame(
-                    np.zeros((len(X), len(X.columns))),
-                    index=X.index,
-                    columns=X.columns
-                )
-                return zeros, empty_contrib
-            return zeros
-        
-        # Compute residuals
-        residuals = X_scaled - X_recon
-        
-        # Per-sensor squared contributions (for root cause analysis)
-        squared_residuals = residuals ** 2
-        
-        # v10.1.0: Normalize contributions by feature variance for fair comparison
-        # AND downweight kurtosis/skewness features which naturally dominate
-        if return_contributions:
-            # Compute variance of each feature's squared residuals for normalization
-            feature_variances = np.var(squared_residuals, axis=0) + 1e-9
-            normalized_contributions = squared_residuals / feature_variances
+            # Validate and prepare data
+            is_valid, _ = self._validate_input(X)
+            if not is_valid:
+                zeros = np.zeros(len(X), dtype=np.float32)
+                if return_contributions:
+                    empty_contrib = pd.DataFrame(
+                        np.zeros((len(X), len(X.columns))),
+                        index=X.index,
+                        columns=X.columns
+                    )
+                    return zeros, empty_contrib
+                return zeros
             
-            # Apply weight reduction for hyper-sensitive statistical features
-            # Kurtosis (4th moment) and skewness (3rd moment) are overly reactive to outliers
-            kurt_skew_weight = 0.25  # Reduce _kurt and _skew contributions to 25%
-            for i, feature_name in enumerate(self.model.feature_names):
-                if feature_name.endswith('_kurt') or feature_name.endswith('_skew'):
-                    normalized_contributions[:, i] *= kurt_skew_weight
-        
-        # Overall residual norm (L2)
-        residual_norm = np.linalg.norm(residuals, axis=1)
-        
-        # Normalize by training std to get z-score
-        omr_z = residual_norm / self.model.train_residual_std
-        
-        # Clip z-scores to prevent extreme values
-        omr_z = np.clip(omr_z, -self.max_z_score, self.max_z_score)
-        omr_z = omr_z.astype(np.float32)
-        
-        if return_contributions:
-            # Return normalized per-sensor contributions
-            contrib_df = pd.DataFrame(
-                normalized_contributions,
-                index=X.index,
-                columns=self.model.feature_names
+            # Align columns to training feature order and mask
+            if self.model.feature_names:
+                X = X.reindex(self.model.feature_names, axis=1)
+            X_clean, _ = self._prepare_data(
+                X,
+                medians=pd.Series(self.model.train_medians, index=self.model.feature_names) if self.model.train_medians is not None else None,
+                var_mask=self.model.var_mask
             )
-            return omr_z, contrib_df
-        
-        return omr_z
+                
+            # Scale
+            X_scaled = self.model.scaler.transform(X_clean)
+            
+            # Reconstruct
+            try:
+                X_recon = self._reconstruct_data(X_scaled)
+                    
+            except Exception as e:
+                Console.error(f"Reconstruction failed: {e}", component="OMR")
+                zeros = np.zeros(len(X), dtype=np.float32)
+                if return_contributions:
+                    empty_contrib = pd.DataFrame(
+                        np.zeros((len(X), len(X.columns))),
+                        index=X.index,
+                        columns=X.columns
+                    )
+                    return zeros, empty_contrib
+                return zeros
+            
+            # Compute residuals
+            residuals = X_scaled - X_recon
+            
+            # Per-sensor squared contributions (for root cause analysis)
+            squared_residuals = residuals ** 2
+            
+            # v10.1.0: Normalize contributions by feature variance for fair comparison
+            # AND downweight kurtosis/skewness features which naturally dominate
+            if return_contributions:
+                # Compute variance of each feature's squared residuals for normalization
+                feature_variances = np.var(squared_residuals, axis=0) + 1e-9
+                normalized_contributions = squared_residuals / feature_variances
+                
+                # Apply weight reduction for hyper-sensitive statistical features
+                # Kurtosis (4th moment) and skewness (3rd moment) are overly reactive to outliers
+                kurt_skew_weight = 0.25  # Reduce _kurt and _skew contributions to 25%
+                for i, feature_name in enumerate(self.model.feature_names):
+                    if feature_name.endswith('_kurt') or feature_name.endswith('_skew'):
+                        normalized_contributions[:, i] *= kurt_skew_weight
+            
+            # Overall residual norm (L2)
+            residual_norm = np.linalg.norm(residuals, axis=1)
+            
+            # Normalize by training std to get z-score
+            omr_z = residual_norm / self.model.train_residual_std
+            
+            # Clip z-scores to prevent extreme values
+            omr_z = np.clip(omr_z, -self.max_z_score, self.max_z_score)
+            omr_z = omr_z.astype(np.float32)
+            
+            if return_contributions:
+                # Return normalized per-sensor contributions
+                contrib_df = pd.DataFrame(
+                    normalized_contributions,
+                    index=X.index,
+                    columns=self.model.feature_names
+                )
+                return omr_z, contrib_df
+            
+            return omr_z
     
     def get_top_contributors(
         self,
