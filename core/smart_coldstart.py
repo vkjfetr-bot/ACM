@@ -81,7 +81,7 @@ class SmartColdstart:
                     Console.info(f"Auto-detected tick_minutes from data cadence: {tick_minutes} minutes", component="COLDSTART")
                 else:
                     tick_minutes = 30  # Default fallback
-                    Console.warn(f"Could not detect cadence, using default tick_minutes: {tick_minutes}", component="COLDSTART")
+                    Console.warn(f"Could not detect cadence, using default tick_minutes: {tick_minutes}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, default_tick_minutes=tick_minutes)
             
             cur = self.sql_client.cursor()
             
@@ -112,7 +112,7 @@ class SmartColdstart:
             return self.state
             
         except Exception as e:
-            Console.error(f"Failed to check status: {e}", component="COLDSTART")
+            Console.error(f"Failed to check status: {e}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, stage=self.stage, error_type=type(e).__name__, error=str(e)[:200])
             # Default to needing coldstart on error
             self.state = ColdstartState(self.equip_id, self.stage)
             self.state.required_rows = required_rows
@@ -148,7 +148,7 @@ class SmartColdstart:
             rows = cur.fetchall()
             
             if len(rows) < 10:
-                Console.warn(f"Insufficient data for cadence detection: {len(rows)} rows", component="COLDSTART")
+                Console.warn(f"Insufficient data for cadence detection: {len(rows)} rows", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, table=table_name, rows_found=len(rows), min_required=10)
                 return None
             
             # Calculate intervals between consecutive timestamps
@@ -172,7 +172,7 @@ class SmartColdstart:
             return int(most_common_interval)
             
         except Exception as e:
-            Console.error(f"Failed to detect cadence: {e}", component="COLDSTART")
+            Console.error(f"Failed to detect cadence: {e}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, table=table_name, sample_hours=sample_hours, error_type=type(e).__name__, error=str(e)[:200])
             return None
         finally:
             try:
@@ -204,7 +204,7 @@ class SmartColdstart:
             if data_cadence_seconds is None:
                 # Fallback: assume 1 minute cadence
                 data_cadence_seconds = 60
-                Console.warn(f"Could not detect cadence, assuming {data_cadence_seconds}s", component="COLDSTART")
+                Console.warn(f"Could not detect cadence, assuming {data_cadence_seconds}s", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, table=table_name, default_cadence_s=data_cadence_seconds)
         
         # Calculate how many minutes needed to get required_rows
         cadence_minutes = data_cadence_seconds / 60
@@ -235,13 +235,13 @@ class SmartColdstart:
                 return start_time, end_time
             else:
                 # Fallback: use lookback from current time if no data found
-                Console.warn(f"No data found in {table_name}, using lookback from current batch", component="COLDSTART")
+                Console.warn(f"No data found in {table_name}, using lookback from current batch", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, table=table_name, required_rows=required_rows, lookback_minutes=required_minutes)
                 end_time = current_window_end
                 start_time = end_time - timedelta(minutes=required_minutes)
                 return start_time, end_time
                 
         except Exception as e:
-            Console.error(f"Error querying earliest timestamp: {e}", component="COLDSTART")
+            Console.error(f"Error querying earliest timestamp: {e}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, table=table_name, required_rows=required_rows, error_type=type(e).__name__, error=str(e)[:200])
             # Fallback: lookback from current time
             end_time = current_window_end
             start_time = end_time - timedelta(minutes=required_minutes)
@@ -296,13 +296,13 @@ class SmartColdstart:
                 if train is None and score is None:
                     # Insufficient data in this window - not an error, just skip this batch
                     window_hours = (initial_end - initial_start).total_seconds() / 3600
-                    Console.warn(f"Insufficient data in {window_hours:.1f}h window - batch will NOOP (models exist but no new data)", component="COLDSTART")
+                    Console.warn(f"Insufficient data in {window_hours:.1f}h window - batch will NOOP (models exist but no new data)", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, window_hours=round(window_hours, 1), start_time=str(initial_start), end_time=str(initial_end))
                     return None, None, None, False
                 return train, score, meta, complete
             except ValueError as e:
                 # Data insufficient - expected when batch windows are smaller than min samples
                 window_hours = (initial_end - initial_start).total_seconds() / 3600
-                Console.warn(f"Insufficient data in {window_hours:.1f}h window: {e}", component="COLDSTART")
+                Console.warn(f"Insufficient data in {window_hours:.1f}h window: {e}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, window_hours=round(window_hours, 1), error=str(e)[:200])
                 Console.info(f"Batch will NOOP (models exist but no new data to score)", component="COLDSTART")
                 return None, None, None, False
         
@@ -349,7 +349,7 @@ class SmartColdstart:
                     return train, score, meta, True
                 
                 else:
-                    Console.warn(f"Insufficient data: {rows_loaded} rows (required: {min_rows})", component="COLDSTART")
+                    Console.warn(f"Insufficient data: {rows_loaded} rows (required: {min_rows})", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, rows_loaded=rows_loaded, min_required=min_rows, attempt=attempt, max_attempts=max_attempts)
                     
                     # Expand window for next attempt
                     if attempt < max_attempts:
@@ -367,7 +367,7 @@ class SmartColdstart:
             except ValueError as e:
                 # Data insufficient error - expected during coldstart
                 error_msg = str(e)
-                Console.warn(f"Attempt {attempt} failed: {error_msg}", component="COLDSTART")
+                Console.warn(f"Attempt {attempt} failed: {error_msg}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, attempt=attempt, max_attempts=max_attempts, error_type="ValueError", error=error_msg[:200])
                 
                 self._update_progress(
                     rows_received=0,
@@ -389,7 +389,7 @@ class SmartColdstart:
                 
             except Exception as e:
                 # Unexpected error
-                Console.error(f"Unexpected error on attempt {attempt}: {e}", component="COLDSTART")
+                Console.error(f"Unexpected error on attempt {attempt}: {e}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, attempt=attempt, max_attempts=max_attempts, error_type=type(e).__name__, error=str(e)[:200])
                 self._update_progress(
                     rows_received=0,
                     data_start=attempt_start,
@@ -410,7 +410,7 @@ class SmartColdstart:
             train, score, meta = output_manager._load_data_from_sql(cfg, self.equip_name, start, end, is_coldstart=is_coldstart)
             return train, score, meta, coldstart_complete
         except Exception as e:
-            Console.error(f"Failed to load data window: {e}", component="COLDSTART")
+            Console.error(f"Failed to load data window: {e}", component="COLDSTART", equip_id=self.equip_id, equip_name=self.equip_name, start_time=str(start), end_time=str(end), is_coldstart=is_coldstart, error_type=type(e).__name__, error=str(e)[:200])
             return None, None, None, False
     
     def _update_progress(self, 
@@ -429,7 +429,7 @@ class SmartColdstart:
             )
             self.sql_client.conn.commit()
         except Exception as e:
-            Console.error(f"Failed to update progress: {e}", component="COLDSTART")
+            Console.error(f"Failed to update progress: {e}", component="COLDSTART", equip_id=self.equip_id, stage=self.stage, rows_received=rows_received, error_type=type(e).__name__, error=str(e)[:200])
         finally:
             try:
                 cur.close()
