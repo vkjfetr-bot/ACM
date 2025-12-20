@@ -196,7 +196,8 @@ class ForecastEngine:
             health_df, data_quality, data_summary = self._load_health_timeline()
             
             if health_df is None:
-                Console.warn(f"[ForecastEngine] No health data available; skipping forecast")
+                Console.warn("No health data available; skipping forecast",
+                             component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
                 return {
                     'success': False,
                     'error': 'No health data available',
@@ -213,7 +214,9 @@ class ForecastEngine:
                     HealthQuality.NOISY: "Health data has excessive noise - consider smoothing or filtering"
                 }
                 friendly_msg = quality_messages.get(data_quality, f"Data quality issue: {data_quality.value}")
-                Console.warn(f"[ForecastEngine] {friendly_msg}; skipping forecast (not fatal)")
+                Console.warn(f"{friendly_msg}; skipping forecast (not fatal)",
+                             component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                             quality=data_quality.value)
                 return {
                     'success': False,
                     'error': friendly_msg,
@@ -221,7 +224,8 @@ class ForecastEngine:
                 }
             
             if data_quality == HealthQuality.GAPPY:
-                Console.warn(f"[ForecastEngine] GAPPY data detected - proceeding with available data (historical replay mode)")
+                Console.warn("GAPPY data detected - proceeding with available data (historical replay mode)",
+                             component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
             
             # Step 2: Load persistent state
             state = self.state_mgr.load_state(self.equip_id)
@@ -241,7 +245,8 @@ class ForecastEngine:
             should_tune = self.config_mgr.should_tune(self.equip_id, state.data_volume_analyzed)
             
             if should_tune:
-                Console.info(f"[ForecastEngine] Auto-tuning triggered at DataVolume={state.data_volume_analyzed}")
+                Console.info(f"Auto-tuning triggered at DataVolume={state.data_volume_analyzed}",
+                             component="FORECAST", equip_id=self.equip_id, data_volume=state.data_volume_analyzed)
                 # TODO: Implement grid search tuning in future PR
                 # For now, use configured values
             
@@ -287,7 +292,8 @@ class ForecastEngine:
                     tables_written.extend(regime_tables)
                 except Exception as e:
                     # Non-fatal: regime forecasting is optional enhancement
-                    Console.warn(f"[ForecastEngine] Regime-conditioned forecasting skipped: {e}")
+                    Console.warn(f"Regime-conditioned forecasting skipped: {e}",
+                                 component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
             
             # Step 10: Update state with diagnostics (M9)
             state.model_coefficients_json = degradation_model.get_parameters()
@@ -315,7 +321,9 @@ class ForecastEngine:
             }
             
         except Exception as e:
-            Console.error(f"[ForecastEngine] Forecast failed: {e}")
+            Console.error(f"Forecast failed: {e}",
+                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                          error_type=type(e).__name__, error_msg=str(e)[:500])
             return {
                 'success': False,
                 'error': str(e),
@@ -354,13 +362,16 @@ class ForecastEngine:
         
         if quality != HealthQuality.OK and data_summary:
             Console.warn(
-                f"[ForecastEngine] Data quality issue: {data_summary.quality_reason}"
+                f"Data quality issue: {data_summary.quality_reason}",
+                component="FORECAST", equip_id=self.equip_id, quality=quality.value
             )
         
         if data_summary:
             Console.info(
-                f"[ForecastEngine] Data summary: n_samples={data_summary.n_samples}, "
-                f"dt_hours={data_summary.dt_hours:.2f}, window={data_summary.window_hours:.0f}h"
+                f"Data summary: n_samples={data_summary.n_samples}, "
+                f"dt_hours={data_summary.dt_hours:.2f}, window={data_summary.window_hours:.0f}h",
+                component="FORECAST", equip_id=self.equip_id, n_samples=data_summary.n_samples,
+                dt_hours=data_summary.dt_hours, window_hours=data_summary.window_hours
             )
         
         return health_df, quality, data_summary
@@ -385,10 +396,11 @@ class ForecastEngine:
         config['max_forecast_hours'] = config.get('max_forecast_hours', config['forecast_horizon_hours'])
         
         Console.info(
-            f"[ForecastEngine] Loaded config: alpha={config.get('alpha', 0.3):.2f}, "
+            f"Loaded forecast config: alpha={config.get('alpha', 0.3):.2f}, "
             f"beta={config.get('beta', 0.1):.2f}, "
             f"failure_threshold={config.get('failure_threshold', 70.0):.1f}, "
-            f"horizon={config.get('forecast_horizon_hours', 168.0):.0f}h"
+            f"horizon={config.get('forecast_horizon_hours', 168.0):.0f}h",
+            component="FORECAST", equip_id=self.equip_id
         )
         
         return config
@@ -412,9 +424,11 @@ class ForecastEngine:
         if state.model_coefficients_json:
             try:
                 model.set_parameters(state.model_coefficients_json)
-                Console.info("[ForecastEngine] Warm-started model from previous state")
+                Console.info("Warm-started degradation model from previous state",
+                             component="FORECAST", equip_id=self.equip_id)
             except Exception as e:
-                Console.warn(f"[ForecastEngine] Failed to warm-start model: {e}")
+                Console.warn(f"Failed to warm-start model: {e}",
+                             component="FORECAST", equip_id=self.equip_id, error=str(e))
         
         # Prepare health series
         health_series = pd.Series(
@@ -570,7 +584,8 @@ class ForecastEngine:
             if prev_ts is not None:
                 delta = ts - prev_ts
                 if delta.total_seconds() <= 0:
-                    Console.warn(f"[ForecastEngine] Non-increasing timestamp detected: {prev_ts} -> {ts}")
+                    Console.warn(f"Non-increasing timestamp detected: {prev_ts} -> {ts}",
+                                 component="FORECAST", equip_id=self.equip_id)
                     continue  # Skip non-increasing timestamps
                 
                 # Track expected delta for consistency check
@@ -578,8 +593,8 @@ class ForecastEngine:
                     expected_delta = delta
                 elif abs((delta - expected_delta).total_seconds()) > 60:  # Allow 1 min tolerance
                     Console.warn(
-                        f"[ForecastEngine] Inconsistent timestamp spacing: "
-                        f"expected {expected_delta}, got {delta}"
+                        f"Inconsistent timestamp spacing: expected {expected_delta}, got {delta}",
+                        component="FORECAST", equip_id=self.equip_id
                     )
             
             validated.append(ts)
@@ -604,8 +619,9 @@ class ForecastEngine:
             
             if len(validated_timestamps) < len(raw_timestamps):
                 Console.warn(
-                    f"[ForecastEngine] Filtered {len(raw_timestamps) - len(validated_timestamps)} "
-                    f"invalid timestamps"
+                    f"Filtered {len(raw_timestamps) - len(validated_timestamps)} invalid timestamps",
+                    component="FORECAST", equip_id=self.equip_id,
+                    raw_count=len(raw_timestamps), valid_count=len(validated_timestamps)
                 )
             
             # Use validated timestamps for all forecast DataFrames
@@ -756,7 +772,9 @@ class ForecastEngine:
             )
             tables_written.append('ACM_RUL')
             
-            Console.info(f"[ForecastEngine] Wrote {len(tables_written)} forecast tables to SQL")
+            Console.info(f"Wrote {len(tables_written)} forecast tables to SQL",
+                         component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                         tables=tables_written)
             
             # NEW: ACM_SensorForecast - Physical sensor forecasts
             sensor_forecast_df = self._generate_sensor_forecasts(sensor_attributions, forecast_results)
@@ -770,7 +788,8 @@ class ForecastEngine:
                     add_created_at=False
                 )
                 tables_written.append('ACM_SensorForecast')
-                Console.info(f"[ForecastEngine] Wrote sensor forecasts for {len(sensor_attributions)} sensors")
+                Console.info(f"Wrote sensor forecasts for {len(sensor_attributions)} sensors",
+                             component="FORECAST", equip_id=self.equip_id, sensors=len(sensor_attributions))
             
             # v10.1.0: Multivariate forecasting with VAR model
             # Only run if sensor data exists (same table as _generate_sensor_forecasts)
@@ -810,16 +829,21 @@ class ForecastEngine:
                         )
                         tables_written.append('ACM_MultivariateForecast')
                         Console.info(
-                            f"[ForecastEngine] Multivariate (VAR) forecast complete: "
-                            f"{len(sensor_names)} sensors, method={mvar_result.method}"
+                            f"Multivariate (VAR) forecast complete: {len(sensor_names)} sensors, method={mvar_result.method}",
+                            component="FORECAST", equip_id=self.equip_id, sensors=len(sensor_names),
+                            method=mvar_result.method
                         )
                 except ImportError as ie:
-                    Console.warn(f"[ForecastEngine] Multivariate forecasting module not available: {ie}")
+                    Console.warn(f"Multivariate forecasting module not available: {ie}",
+                                 component="FORECAST", equip_id=self.equip_id)
                 except Exception as e:
-                    Console.warn(f"[ForecastEngine] Multivariate forecasting failed (non-fatal): {e}")
+                    Console.warn(f"Multivariate forecasting failed (non-fatal): {e}",
+                                 component="FORECAST", equip_id=self.equip_id, error=str(e))
             
         except Exception as e:
-            Console.error(f"[ForecastEngine] Failed to write outputs: {e}")
+            Console.error(f"Failed to write forecast outputs: {e}",
+                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                          error_type=type(e).__name__, error_msg=str(e)[:500])
         
         return tables_written
     
@@ -878,8 +902,10 @@ class ForecastEngine:
             # Load context (OMR, drift, regime state)
             context = conditioned.load_forecast_context()
             Console.info(
-                f"[ForecastEngine] Regime context: regime={context.current_regime}, "
-                f"omr_z={context.current_omr_z}, drift_trend={context.drift_trend}"
+                f"Regime context: regime={context.current_regime}, "
+                f"omr_z={context.current_omr_z}, drift_trend={context.drift_trend}",
+                component="FORECAST", equip_id=self.equip_id, regime=context.current_regime,
+                omr_z=context.current_omr_z, drift_trend=context.drift_trend
             )
             
             # Compute per-regime stats
@@ -901,8 +927,9 @@ class ForecastEngine:
             conditioned_rul = rul_results.get('rul_conditioned')
             if conditioned_rul:
                 Console.info(
-                    f"[ForecastEngine] Regime-conditioned RUL: "
-                    f"P50={conditioned_rul.p50_median:.1f}h (regime={context.current_regime})"
+                    f"Regime-conditioned RUL: P50={conditioned_rul.p50_median:.1f}h (regime={context.current_regime})",
+                    component="FORECAST", equip_id=self.equip_id, rul_p50=conditioned_rul.p50_median,
+                    regime=context.current_regime
                 )
             
             # Write outputs to SQL
@@ -912,7 +939,9 @@ class ForecastEngine:
             )
             
         except Exception as e:
-            Console.error(f"[ForecastEngine] Regime-conditioned forecasting failed: {e}")
+            Console.error(f"Regime-conditioned forecasting failed: {e}",
+                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                          error_type=type(e).__name__, error_msg=str(e)[:500])
         
         return tables_written
     
@@ -962,7 +991,8 @@ class ForecastEngine:
                 from statsmodels.tsa.holtwinters import ExponentialSmoothing
                 USE_EXPONENTIAL_SMOOTHING = True
             except ImportError:
-                Console.warn("[ForecastEngine] statsmodels not available, using simple trend forecasting")
+                Console.warn("statsmodels not available, using simple trend forecasting",
+                             component="FORECAST", equip_id=self.equip_id)
                 USE_EXPONENTIAL_SMOOTHING = False
             
             from scipy import stats
@@ -972,7 +1002,8 @@ class ForecastEngine:
             top_sensors = sensor_attributions[:max_sensors]
             
             if not top_sensors:
-                Console.warn("[ForecastEngine] No sensor attributions available for forecasting")
+                Console.warn("No sensor attributions available for forecasting",
+                             component="FORECAST", equip_id=self.equip_id)
                 return None
             
             # Load recent sensor data from ACM_SensorNormalized_TS (contains SensorName, NormValue, ZScore)
@@ -1018,7 +1049,9 @@ class ForecastEngine:
                 sensor_data = sensor_history[sensor_history['SensorName'] == sensor_name].copy()
                 
                 if len(sensor_data) < 24:  # Need at least 24 hours
-                    Console.warn(f"[ForecastEngine] Insufficient data for sensor: {sensor_name} ({len(sensor_data)} points)")
+                    Console.warn(f"Insufficient data for sensor: {sensor_name} ({len(sensor_data)} points)",
+                                 component="FORECAST", equip_id=self.equip_id, sensor=sensor_name,
+                                 points=len(sensor_data))
                     continue
                 
                 # Prepare time series
@@ -1111,22 +1144,28 @@ class ForecastEngine:
                         })
                     
                 except Exception as e:
-                    Console.warn(f"[ForecastEngine] Failed to forecast sensor {sensor_name}: {e}")
+                    Console.warn(f"Failed to forecast sensor {sensor_name}: {e}",
+                                 component="FORECAST", equip_id=self.equip_id, sensor=sensor_name,
+                                 error=str(e))
                     continue
             
             if not forecast_records:
-                Console.warn("[ForecastEngine] No sensor forecasts generated")
+                Console.warn("No sensor forecasts generated",
+                             component="FORECAST", equip_id=self.equip_id)
                 return None
             
             df = pd.DataFrame(forecast_records)
             Console.info(
-                f"[ForecastEngine] Generated {len(df)} sensor forecast points "
-                f"for {df['SensorName'].nunique()} sensors over {forecast_horizon_hours:.0f}h"
+                f"Generated {len(df)} sensor forecast points for {df['SensorName'].nunique()} sensors over {forecast_horizon_hours:.0f}h",
+                component="FORECAST", equip_id=self.equip_id, points=len(df),
+                sensors=df['SensorName'].nunique(), horizon_hours=forecast_horizon_hours
             )
             return df
             
         except Exception as e:
-            Console.error(f"[ForecastEngine] Sensor forecasting failed: {e}")
+            Console.error(f"Sensor forecasting failed: {e}",
+                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                          error_type=type(e).__name__, error_msg=str(e)[:500])
             return None
 
 
@@ -1378,11 +1417,14 @@ class RegimeConditionedForecaster:
                     sample_count=len(regime_df)
                 )
             
-            Console.info(f"[RegimeConditioned] Computed stats for {len(self._regime_stats)} regimes")
+            Console.info(f"Computed stats for {len(self._regime_stats)} regimes",
+                         component="FORECAST", equip_id=self.equip_id, regimes=len(self._regime_stats))
             return self._regime_stats
             
         except Exception as e:
-            Console.error(f"[RegimeConditioned] Failed to compute regime stats: {e}")
+            Console.error(f"Failed to compute regime stats: {e}",
+                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                          error_type=type(e).__name__, error_msg=str(e)[:500])
             self._regime_stats = {}
             return self._regime_stats
     
@@ -1573,10 +1615,13 @@ class RegimeConditionedForecaster:
             )
             tables_written.append('ACM_ForecastContext')
             
-            Console.info(f"[RegimeConditioned] Wrote {len(tables_written)} tables")
-            
+            Console.info(f"Wrote {len(tables_written)} regime-conditioned tables",
+                         component="FORECAST", equip_id=self.equip_id, tables=tables_written)
+        
         except Exception as e:
-            Console.error(f"[RegimeConditioned] Failed to write outputs: {e}")
+            Console.error(f"Failed to write regime outputs: {e}",
+                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                          error_type=type(e).__name__, error_msg=str(e)[:500])
         
         return tables_written
     
