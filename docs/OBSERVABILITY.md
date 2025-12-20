@@ -11,7 +11,8 @@ ACM uses a modern observability stack built on open standards, deployed entirely
 | **Traces** | OpenTelemetry SDK | Grafana Tempo | 3200 | Distributed tracing, request flow |
 | **Metrics** | OpenTelemetry SDK | Prometheus | 9090 | Performance metrics, counters |
 | **Logs** | structlog | Grafana Loki | 3100 | Structured JSON logs |
-| **Profiling** | yappi + HTTP API | Grafana Pyroscope | 4040 | CPU profiling flamegraphs |
+| **CPU Profiling** | yappi + HTTP API | Grafana Pyroscope | 4040 | CPU flamegraphs |
+| **Memory Profiling** | tracemalloc + HTTP API | Grafana Pyroscope | 4040 | Memory allocation flamegraphs |
 
 ## Architecture
 
@@ -634,26 +635,49 @@ count_over_time({app="acm"} |= "outcome=" | json [24h])
 
 ---
 
-## Profiling with yappi + Pyroscope
+## Profiling with yappi + tracemalloc + Pyroscope
 
-ACM uses **yappi** (pure Python) for CPU profiling, pushing profiles to Pyroscope via HTTP API. This avoids the Rust compilation requirements of `pyroscope-io`.
+ACM uses **yappi** (pure Python) for CPU profiling and **tracemalloc** (Python stdlib) for memory profiling, pushing profiles to Pyroscope via HTTP API. This avoids the Rust compilation requirements of `pyroscope-io`.
+
+### Profile Types
+
+| Type | Tool | Description | Pyroscope Label |
+|------|------|-------------|-----------------|
+| **CPU** | yappi | CPU time spent in functions | `acm.cpu` |
+| **Memory Alloc (objects)** | tracemalloc | Number of allocations | `acm.alloc_objects` |
+| **Memory Alloc (bytes)** | tracemalloc | Bytes allocated | `acm.alloc_space` |
+
+### Profile Labels (for Correlation)
+
+Profiles are tagged with consistent labels for correlation with traces, logs, and metrics:
+
+| Label | Description | Example |
+|-------|-------------|---------|
+| `service_name` | Standard Grafana service name | `acm-pipeline` |
+| `equipment` | Equipment being processed | `FD_FAN` |
+| `equip_id` | Equipment database ID | `1` |
+| `run_id` | Current run identifier | `abc-123` |
+| `trace_id` | Active trace ID (when in span) | `1234...` |
+| `span_id` | Active span ID (when in span) | `5678...` |
 
 ### How It Works
 
-1. **yappi** samples the Python call stack during execution
-2. On shutdown (or manually), samples are converted to "collapsed/folded" format
-3. Profiles are pushed to Pyroscope's HTTP `/ingest` endpoint
-4. View flamegraphs in Grafana (Pyroscope data source)
+1. **yappi** samples the Python call stack for CPU time
+2. **tracemalloc** tracks memory allocations (when available)
+3. Profiles are labeled with trace context for correlation
+4. On shutdown, samples are converted to "collapsed/folded" format
+5. Profiles are pushed to Pyroscope's HTTP `/ingest` endpoint
+6. View flamegraphs in Grafana (Pyroscope data source)
 
 ### Automatic Profiling (Recommended)
 
-When `init_observability()` is called with a Pyroscope endpoint, profiling starts automatically:
+When `init()` is called with a reachable Pyroscope endpoint, profiling starts automatically:
 
 ```python
-from core.observability import init_observability, shutdown
+from core.observability import init, shutdown
 
 # Profiling starts automatically if yappi is installed
-init_observability(equipment="FD_FAN", equip_id=1)
+init(equipment="FD_FAN", equip_id=1)
 
 # ... your code runs here ...
 
@@ -669,7 +693,7 @@ For profiling specific code sections:
 from core.observability import start_profiling, stop_profiling
 
 # Profile a specific section
-start_profiling(equipment="FD_FAN", equip_id=1)
+start_profiling()
 
 # ... code to profile ...
 
@@ -682,29 +706,51 @@ stop_profiling()
 ```python
 from core.observability import profile_section
 
-with profile_section(equipment="FD_FAN", equip_id=1):
+with profile_section("heavy_computation"):
     # This code block will be profiled
     heavy_computation()
 ```
+
+### Trace-to-Profile Correlation
+
+Profiles taken during an active span are automatically labeled with the trace context:
+
+```python
+from core.observability import Span
+
+with Span("fit.models"):  # trace_id and span_id are captured
+    # CPU and memory profiles during this span will have
+    # trace_id and span_id labels for correlation
+    train_models()
+```
+
+In Grafana Tempo, clicking on a span provides a "Profiles" link to view the
+CPU/memory profile for that exact time range.
 
 ### Viewing Profiles in Grafana
 
 1. Open Grafana at http://localhost:3000
 2. Go to **Explore** → Select **Pyroscope** data source
-3. Select profile type: `process_cpu:cpu:nanoseconds:cpu:nanoseconds`
+3. Select profile type:
+   - CPU: `process_cpu:cpu:nanoseconds:cpu:nanoseconds`
+   - Memory (objects): `memory:alloc_objects:count:space:bytes`
+   - Memory (bytes): `memory:alloc_space:bytes:space:bytes`
 4. Filter by labels:
-   - `service_name = acm`
+   - `service_name = acm-pipeline`
    - `equipment = FD_FAN`
-5. View flamegraph to identify CPU hotspots
+5. View flamegraph to identify CPU/memory hotspots
 
 ### Pyroscope Query Examples
 
 ```promql
-# Find profiles for specific equipment
-{service_name="acm", equipment="FD_FAN"}
+# CPU profile for specific equipment
+{service_name="acm-pipeline", equipment="FD_FAN"}
 
-# Find all ACM profiles
-{service_name="acm"}
+# Memory profile for all equipment
+{service_name="acm-pipeline"}
+
+# Profile correlated with a specific trace
+{service_name="acm-pipeline", trace_id="abc123..."}
 ```
 
 ---

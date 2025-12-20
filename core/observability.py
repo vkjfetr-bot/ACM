@@ -304,24 +304,33 @@ def init(
             else:
                 Console.warn(f"[OTEL] Loki not connected at {loki_endpoint}", component="OTEL", endpoint=loki_endpoint, service="loki")
         
-        # Pyroscope continuous profiling (via yappi + HTTP API - no Rust required)
+        # Pyroscope continuous profiling (via yappi + tracemalloc + HTTP API - no Rust required)
         global _pyroscope_enabled, _pyroscope_pusher
         if enable_profiling and YAPPI_AVAILABLE:
             try:
                 pyroscope_reachable = _check_endpoint_reachable(pyroscope_endpoint)
                 if pyroscope_reachable:
+                    # Use consistent label names for Grafana correlation:
+                    # - service_name: Standard Grafana label (matches tracesToProfiles)
+                    # - equipment: Equipment name for filtering
+                    # - equip_id: Equipment database ID
+                    # - run_id: Run identifier for log/trace correlation
                     _pyroscope_pusher = _PyroscopePusher(
                         endpoint=pyroscope_endpoint,
-                        app_name="acm",  # Simple app name, equipment goes in tags
+                        app_name="acm",  # Simple app name, labels provide context
                         tags={
+                            "service_name": service_name,  # Standard Grafana label
                             "equipment": equipment or "unknown",
                             "equip_id": str(equip_id),
-                            "service": service_name,
+                            "run_id": run_id or "unknown",
                         },
                     )
                     _pyroscope_enabled = True
                     _config.pyroscope_endpoint = pyroscope_endpoint
-                    Console.ok(f"[OTEL] Profiling -> {pyroscope_endpoint}")
+                    profile_types = ["cpu (yappi)"]
+                    if TRACEMALLOC_AVAILABLE:
+                        profile_types.append("memory (tracemalloc)")
+                    Console.ok(f"[OTEL] Profiling -> {pyroscope_endpoint} [{', '.join(profile_types)}]")
                 else:
                     Console.warn(f"[OTEL] Pyroscope not reachable at {pyroscope_endpoint} - profiling disabled", component="OTEL", endpoint=pyroscope_endpoint, service="pyroscope")
             except Exception as e:
@@ -690,12 +699,17 @@ def set_context(
     )
     
     # Update Pyroscope pusher tags with new context
+    # Use consistent label names for Grafana correlation:
+    # - service_name: Standard Grafana label (matches tracesToProfiles)
+    # - equipment: Equipment name
+    # - equip_id: Equipment database ID
+    # - run_id: Run identifier for log/trace correlation
     if _pyroscope_pusher is not None:
         _pyroscope_pusher._tags = {
+            "service_name": _config.service_name,  # Standard Grafana label
             "equipment": _config.equipment or "unknown",
             "equip_id": str(_config.equip_id),
             "run_id": _config.run_id or "unknown",
-            "service": _config.service_name,
         }
 
 
@@ -1010,11 +1024,23 @@ class Span:
             # Add custom attributes
             for key, value in self.attributes.items():
                 self._span.set_attribute(f"acm.{key}", value)
+            
+            # Set trace context in Pyroscope for profile-to-trace correlation
+            if _pyroscope_pusher is not None:
+                span_context = self._span.get_span_context()
+                if span_context.is_valid:
+                    trace_id = format(span_context.trace_id, '032x')
+                    span_id = format(span_context.span_id, '016x')
+                    _pyroscope_pusher.set_trace_context(trace_id, span_id)
         
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         elapsed = time.perf_counter() - self._start_time
+        
+        # Clear trace context from Pyroscope when span ends
+        if _pyroscope_pusher is not None:
+            _pyroscope_pusher.clear_trace_context()
         
         # Capture ending resource metrics
         mem_end = 0.0
@@ -1628,15 +1654,22 @@ class _LokiPusher:
         - equip_id: equipment ID as string (per-log)
         - run_id: run identifier (per-log, if set)
         - tag: optional extra tag like "success" (per-log)
+    
+    Rate Limiting:
+        - Batches up to 100 logs per push
+        - Flushes every 5 seconds
+        - On 429 (rate limit), backs off with exponential delay
     """
     
-    def __init__(self, endpoint: str, labels: Dict[str, str], batch_size: int = 20):
+    def __init__(self, endpoint: str, labels: Dict[str, str], batch_size: int = 100):
         self._endpoint = endpoint
         self._base_labels = labels  # Static labels: app, service, equipment
         self._batch_size = batch_size
         self._queue: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._connected = False
+        self._backoff_until = 0.0  # Timestamp until which we should back off
+        self._consecutive_failures = 0
         
         # Test connection
         try:
@@ -1713,10 +1746,17 @@ class _LokiPusher:
         self._queue.put((ts_ns, labels, message))
     
     def _flush_loop(self) -> None:
-        """Background thread that flushes logs to Loki."""
+        """Background thread that flushes logs to Loki with rate limiting."""
         while not self._stop.is_set():
+            # Check if we're in backoff mode
+            now = time.time()
+            if now < self._backoff_until:
+                # Still in backoff - wait
+                time.sleep(min(1.0, self._backoff_until - now))
+                continue
+            
             self._flush_batch()
-            time.sleep(2.0)
+            time.sleep(5.0)  # Flush every 5 seconds (not 2)
         self._flush_batch()  # Final flush
     
     def _flush_batch(self) -> None:
@@ -1771,10 +1811,20 @@ class _LokiPusher:
                 method="POST"
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
-                pass  # 204 No Content on success
+                # Success - reset backoff
+                self._consecutive_failures = 0
+                self._backoff_until = 0.0
         except urllib.error.HTTPError as e:
-            # Log HTTP errors once (don't spam)
-            if not hasattr(self, '_http_error_logged'):
+            if e.code == 429:
+                # Rate limited - exponential backoff
+                self._consecutive_failures += 1
+                backoff_secs = min(60.0, 2.0 ** self._consecutive_failures)
+                self._backoff_until = time.time() + backoff_secs
+                # Only log first occurrence
+                if self._consecutive_failures == 1:
+                    print(f"[LOKI] Rate limited (429), backing off {backoff_secs:.0f}s")
+            elif not hasattr(self, '_http_error_logged'):
+                # Log other HTTP errors once (don't spam)
                 print(f"[LOKI] Push failed: {e.code} {e.reason}")
                 self._http_error_logged = True
         except Exception:
@@ -1800,80 +1850,206 @@ class _LokiPusher:
 
 
 # =============================================================================
-# PYROSCOPE PUSHER (yappi + HTTP API)
+# PYROSCOPE PUSHER (yappi + HTTP API + tracemalloc for memory)
 # =============================================================================
 
+# Try to import tracemalloc for memory profiling
+try:
+    import tracemalloc
+    TRACEMALLOC_AVAILABLE = True
+except ImportError:
+    tracemalloc = None
+    TRACEMALLOC_AVAILABLE = False
+
+
 class _PyroscopePusher:
-    """Push profiling data to Pyroscope using yappi and the HTTP ingest API.
+    """Push profiling data to Pyroscope using yappi (CPU) and tracemalloc (memory).
     
     This avoids requiring pyroscope-io (which needs Rust compilation on Windows).
     Uses yappi (pure Python profiler) and Pyroscope's simple /ingest endpoint.
+    
+    Profile types pushed:
+        - process_cpu:cpu:nanoseconds:cpu:nanoseconds (CPU time via yappi)
+        - memory:alloc_objects:count:space:bytes (Memory allocations via tracemalloc)
     
     Profile format (collapsed/folded):
         function1;function2;function3 <count>
         main;process_data;compute 150
         main;load_data;read_sql 42
+    
+    Labels (for correlation with traces/logs):
+        - service_name: "acm-pipeline" (standard Grafana label)
+        - equipment: Equipment name (e.g., "FD_FAN")
+        - equip_id: Equipment database ID  
+        - run_id: Current run identifier (for log/trace correlation)
     """
     
     def __init__(self, endpoint: str, app_name: str, tags: Dict[str, str]):
         self._endpoint = endpoint
         self._app_name = app_name
-        self._tags = tags
+        # Standardize tags for Grafana correlation
+        # Always include service_name for Grafana's tracesToProfiles
+        self._tags = {
+            "service_name": tags.get("service", "acm-pipeline"),
+            **{k: v for k, v in tags.items() if k != "service"}
+        }
         self._profiling_active = False
+        self._memory_profiling_active = False
         self._profile_start_time: Optional[float] = None
+        self._current_trace_id: Optional[str] = None
+        self._current_span_id: Optional[str] = None
+    
+    def set_trace_context(self, trace_id: Optional[str], span_id: Optional[str]) -> None:
+        """Set current trace/span context for profile correlation.
+        
+        Called by Span.__enter__ to link profiles to the active trace.
+        """
+        self._current_trace_id = trace_id
+        self._current_span_id = span_id
+    
+    def clear_trace_context(self) -> None:
+        """Clear trace context when span ends."""
+        self._current_trace_id = None
+        self._current_span_id = None
         
     def start(self) -> None:
-        """Start profiling the current process."""
+        """Start CPU and memory profiling for the current process."""
         if self._profiling_active:
             return
-        if not YAPPI_AVAILABLE:
-            return
-        try:
-            yappi.clear_stats()
-            yappi.start(builtins=False)
-            self._profiling_active = True
-            self._profile_start_time = time.time()
-        except Exception as e:
-            Console.warn(f"[PROFILE] Failed to start: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
-    
-    def stop_and_push(self) -> None:
-        """Stop profiling and push results to Pyroscope."""
-        if not self._profiling_active:
-            return
-        if not YAPPI_AVAILABLE:
-            return
-            
-        try:
-            yappi.stop()
-            self._profiling_active = False
-            
-            # Get function stats
-            stats = yappi.get_func_stats()
-            if not stats:
-                return
-            
-            # Log top CPU-consuming functions locally for visibility
-            self._log_top_functions(stats, top_n=10)
-            
-            # Convert to collapsed format
-            collapsed_lines = self._stats_to_collapsed(stats)
-            if not collapsed_lines:
-                return
-            
-            # Calculate time range
-            end_time = time.time()
-            start_time = self._profile_start_time or (end_time - 60)
-            
-            # Push to Pyroscope (may not work with grafana/pyroscope, see docs)
-            self._push_profile(collapsed_lines, int(start_time), int(end_time))
-            
-        except Exception as e:
-            Console.warn(f"[PROFILE] Failed to push: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
-        finally:
+        
+        # Start CPU profiling with yappi
+        if YAPPI_AVAILABLE:
             try:
                 yappi.clear_stats()
-            except Exception:
-                pass
+                yappi.start(builtins=False)
+                self._profiling_active = True
+                self._profile_start_time = time.time()
+            except Exception as e:
+                Console.warn(f"[PROFILE] Failed to start CPU profiling: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
+        
+        # Start memory profiling with tracemalloc
+        if TRACEMALLOC_AVAILABLE and not self._memory_profiling_active:
+            try:
+                tracemalloc.start(25)  # Track 25 frames for detailed stacks
+                self._memory_profiling_active = True
+            except Exception as e:
+                Console.warn(f"[PROFILE] Failed to start memory profiling: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
+    
+    def stop_and_push(self) -> None:
+        """Stop CPU and memory profiling and push results to Pyroscope."""
+        # Calculate time range first (needed for both profile types)
+        end_time = time.time()
+        start_time = self._profile_start_time or (end_time - 60)
+        
+        # Push CPU profile (yappi)
+        if self._profiling_active and YAPPI_AVAILABLE:
+            try:
+                yappi.stop()
+                self._profiling_active = False
+                
+                # Get function stats
+                stats = yappi.get_func_stats()
+                if stats:
+                    # Log top CPU-consuming functions locally for visibility
+                    self._log_top_functions(stats, top_n=10)
+                    
+                    # Convert to collapsed format and push
+                    collapsed_lines = self._stats_to_collapsed(stats)
+                    if collapsed_lines:
+                        self._push_profile(
+                            collapsed_lines, 
+                            int(start_time), 
+                            int(end_time),
+                            profile_type="cpu",
+                            units="samples",
+                        )
+            except Exception as e:
+                Console.warn(f"[PROFILE] Failed to push CPU profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
+            finally:
+                try:
+                    yappi.clear_stats()
+                except Exception:
+                    pass
+        
+        # Push memory profile (tracemalloc)
+        if self._memory_profiling_active and TRACEMALLOC_AVAILABLE:
+            try:
+                snapshot = tracemalloc.take_snapshot()
+                tracemalloc.stop()
+                self._memory_profiling_active = False
+                
+                # Convert memory snapshot to collapsed format
+                memory_lines = self._memory_snapshot_to_collapsed(snapshot)
+                if memory_lines:
+                    self._push_profile(
+                        memory_lines,
+                        int(start_time),
+                        int(end_time),
+                        profile_type="alloc_objects",
+                        units="objects",
+                    )
+                    # Also push bytes allocated
+                    memory_bytes_lines = self._memory_snapshot_to_collapsed(snapshot, use_bytes=True)
+                    if memory_bytes_lines:
+                        self._push_profile(
+                            memory_bytes_lines,
+                            int(start_time),
+                            int(end_time),
+                            profile_type="alloc_space",
+                            units="bytes",
+                        )
+            except Exception as e:
+                Console.warn(f"[PROFILE] Failed to push memory profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
+    
+    def _memory_snapshot_to_collapsed(self, snapshot, use_bytes: bool = False, top_n: int = 500) -> List[str]:
+        """Convert tracemalloc snapshot to collapsed stack format.
+        
+        Args:
+            snapshot: tracemalloc snapshot
+            use_bytes: If True, use bytes as sample value; otherwise use count
+            top_n: Limit to top N allocations
+        
+        Returns:
+            List of collapsed stack lines
+        """
+        lines = []
+        try:
+            # Group by traceback and sum allocations
+            stats = snapshot.statistics('traceback')[:top_n]
+            
+            for stat in stats:
+                # Build stack from traceback (reversed for Pyroscope - oldest first)
+                stack_parts = []
+                for frame in reversed(stat.traceback):
+                    filename = frame.filename
+                    lineno = frame.lineno
+                    
+                    # Clean up filename
+                    if "/" in filename or "\\" in filename:
+                        import os
+                        parts = filename.replace("\\", "/").split("/")
+                        # Keep ACM package structure
+                        if "core" in parts:
+                            idx = parts.index("core")
+                            filename = ".".join(parts[idx:])
+                        elif "scripts" in parts:
+                            idx = parts.index("scripts")
+                            filename = ".".join(parts[idx:])
+                        else:
+                            filename = os.path.basename(filename)
+                        filename = filename.replace(".py", "")
+                    
+                    stack_parts.append(f"{filename}:{lineno}")
+                
+                if stack_parts:
+                    stack = ";".join(stack_parts)
+                    value = stat.size if use_bytes else stat.count
+                    if value > 0:
+                        lines.append(f"{stack} {value}")
+        except Exception:
+            pass
+        
+        return lines
     
     def _log_top_functions(self, stats, top_n: int = 10) -> None:
         """Log the top N CPU-consuming functions."""
@@ -1951,25 +2127,46 @@ class _PyroscopePusher:
         
         return lines
     
-    def _push_profile(self, collapsed_lines: List[str], from_ts: int, until_ts: int) -> None:
+    def _push_profile(
+        self, 
+        collapsed_lines: List[str], 
+        from_ts: int, 
+        until_ts: int,
+        profile_type: str = "cpu",
+        units: str = "samples",
+    ) -> None:
         """Push collapsed profile to Pyroscope /ingest endpoint.
+        
+        Args:
+            collapsed_lines: Profile data in collapsed/folded format
+            from_ts: Start timestamp (UNIX seconds)
+            until_ts: End timestamp (UNIX seconds)
+            profile_type: Profile type (cpu, alloc_objects, alloc_space)
+            units: Unit type (samples, objects, bytes)
         
         Query params:
             - name: app name with profile type and optional labels {key=value}
                    Format: app_name.profile_type{key=value,...}
-                   e.g., acm.cpu{equipment=FD_FAN}
+                   e.g., acm.cpu{service_name=acm-pipeline,equipment=FD_FAN}
             - from: UNIX timestamp start
             - until: UNIX timestamp end
             - format: folded (collapsed)
             - sampleRate: 100 (default)
-            - spyName: pyspy (Python profiler)
-            - units: samples
+            - spyName: yappi (our Python profiler - NOT pyspy)
+            - units: samples/objects/bytes
         """
-        # Build label string from tags
-        labels_str = ",".join(f"{k}={v}" for k, v in self._tags.items())
+        # Build labels dict (include trace context if available)
+        labels = dict(self._tags)
+        if self._current_trace_id:
+            labels["trace_id"] = self._current_trace_id
+        if self._current_span_id:
+            labels["span_id"] = self._current_span_id
+        
+        # Build label string
+        labels_str = ",".join(f"{k}={v}" for k, v in labels.items())
+        
         # App name must include profile type: app_name.profile_type{labels}
-        # Pyroscope expects: acm.cpu{equipment=FD_FAN} NOT acm{equipment=FD_FAN}
-        profile_type = "cpu"  # We're doing CPU profiling with yappi
+        # Pyroscope expects: acm.cpu{service_name=acm-pipeline,equipment=FD_FAN}
         app_with_labels = f"{self._app_name}.{profile_type}{{{labels_str}}}" if labels_str else f"{self._app_name}.{profile_type}"
         
         # Duration in seconds for this profile window
@@ -1983,9 +2180,10 @@ class _PyroscopePusher:
             "until": str(until_ts),
             "format": "folded",
             "sampleRate": "100",
-            "spyName": "pyspy",
-            # Use 'samples' for call counts - Pyroscope standard
-            "units": "samples",
+            # Use 'yappi' as spy name - this is what we're actually using
+            # NOT 'pyspy' which is a different profiler (py-spy)
+            "spyName": "yappi",
+            "units": units,
             "aggregationType": "sum",
         }
         
@@ -1997,7 +2195,8 @@ class _PyroscopePusher:
         # Profile data as newline-separated collapsed stacks
         data = "\n".join(collapsed_lines).encode("utf-8")
         
-        Console.info(f"[PROFILE] Pushing {len(collapsed_lines)} stack samples to Pyroscope...")
+        profile_desc = f"{profile_type} ({len(collapsed_lines)} stacks)"
+        Console.info(f"[PROFILE] Pushing {profile_desc} to Pyroscope...")
         
         try:
             req = urllib.request.Request(
@@ -2008,16 +2207,16 @@ class _PyroscopePusher:
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
-                    Console.ok(f"[PROFILE] Successfully pushed to Pyroscope")
+                    Console.ok(f"[PROFILE] {profile_type} profile pushed successfully")
         except urllib.error.HTTPError as e:
             if e.code != 200:
                 try:
                     body = e.read().decode('utf-8', errors='ignore')
-                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code} - {body[:200]}", component="PROFILE", endpoint=self._endpoint, http_status=e.code, response=body[:100])
+                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code} - {body[:200]}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, http_status=e.code, response=body[:100])
                 except Exception:
-                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code}", component="PROFILE", endpoint=self._endpoint, http_status=e.code)
+                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, http_status=e.code)
         except Exception as e:
-            Console.warn(f"[PROFILE] Pyroscope push error: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
+            Console.warn(f"[PROFILE] Pyroscope push error: {e}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
 
 
 # =============================================================================

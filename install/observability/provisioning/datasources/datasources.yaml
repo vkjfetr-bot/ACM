@@ -62,11 +62,23 @@ datasources:
             query: 'acm_stage_duration_seconds_sum{equipment="${__span.tags.equipment}"}'
           - name: Memory Usage
             query: 'acm_memory_rss_mb{equipment="${__span.tags.equipment}"}'
+      # Trace-to-Profile correlation
+      # Links from Tempo traces to Pyroscope profiles using service_name label
       tracesToProfiles:
         datasourceUid: pyroscope-ds
+        # CPU profile type (primary)
         profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
         customQuery: true
-        query: 'service_name="${__span.serviceName}"'
+        # Match using service_name label (standard Grafana label set by ACM)
+        # Also include equipment for filtering
+        query: '{service_name="${__span.serviceName}",equipment="${__span.tags["acm.equipment"]}"}'
+        tags:
+          - key: service_name
+            value: ''
+          - key: equipment
+            value: ''
+          - key: run_id
+            value: ''
 
   # Loki - Log Aggregation
   - name: Loki
@@ -87,13 +99,20 @@ datasources:
           urlDisplayLabel: View Trace
 
   # Pyroscope - Continuous Profiling
+  # Provides CPU and memory profiling with trace correlation
   - name: Pyroscope
     type: grafana-pyroscope-datasource
     access: proxy
     url: http://pyroscope:4040
     uid: pyroscope-ds
     isDefault: false
-    jsonData: {}
+    jsonData:
+      # Enable trace correlation via tracesToLogs-style linking
+      tracesToLogsV2:
+        datasourceUid: tempo-ds
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        filterByTraceID: true
 
   # Microsoft SQL Server - ACM Business Data
   # Note: Uses host.docker.internal to connect from Docker container to host SQL Server
