@@ -56,3 +56,19 @@ datasources:
           matcherRegex: '"trace_id":"([a-f0-9]+)"'
           name: TraceID
           url: '$${__value.raw}'
+
+  # Microsoft SQL Server - ACM Business Data
+  # For standalone (non-Docker) Grafana installations
+  - name: MSSQL
+    type: mssql
+    access: proxy
+    uid: mssql-ds
+    isDefault: false
+    jsonData:
+      server: localhost\B19CL3PCQLSERVER
+      database: ACM
+      encrypt: "disable"
+      authenticationType: windows
+      connectionTimeout: 30
+    secureJsonData: {}
+    editable: true

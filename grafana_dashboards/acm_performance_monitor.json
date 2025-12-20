@@ -291,7 +291,7 @@
     {
       "datasource": {
         "type": "tempo",
-        "uid": "tempo-local"
+        "uid": "tempo-ds"
       },
       "fieldConfig": {
         "defaults": {
@@ -336,7 +336,7 @@
         {
           "datasource": {
             "type": "tempo",
-            "uid": "tempo-local"
+            "uid": "tempo-ds"
           },
           "query": "{resource.service.name=\"acm-pipeline\"}",
           "queryType": "traceql",
@@ -349,7 +349,7 @@
     {
       "datasource": {
         "type": "loki",
-        "uid": "loki-local"
+        "uid": "loki-ds"
       },
       "fieldConfig": {
         "defaults": {
@@ -394,7 +394,7 @@
         {
           "datasource": {
             "type": "loki",
-            "uid": "loki-local"
+            "uid": "loki-ds"
           },
           "expr": "{app=\"acm\"}",
           "refId": "A"
@@ -685,7 +685,7 @@
     {
       "datasource": {
         "type": "tempo",
-        "uid": "tempo-local"
+        "uid": "tempo-ds"
       },
       "gridPos": {
         "h": 8,
@@ -700,7 +700,7 @@
         {
           "datasource": {
             "type": "tempo",
-            "uid": "tempo-local"
+            "uid": "tempo-ds"
           },
           "limit": 20,
           "query": "{resource.service.name=\"acm-pipeline\"}",
@@ -727,7 +727,7 @@
     {
       "datasource": {
         "type": "loki",
-        "uid": "loki-local"
+        "uid": "loki-ds"
       },
       "gridPos": {
         "h": 10,
@@ -751,7 +751,7 @@
         {
           "datasource": {
             "type": "loki",
-            "uid": "loki-local"
+            "uid": "loki-ds"
           },
           "expr": "{app=\"acm\"} |= ``",
           "refId": "A"

@@ -51,14 +51,47 @@ acm-tempo        Up (healthy)     0.0.0.0:3200->3200/tcp
 - **Password**: `admin`
 
 Datasources and dashboards are auto-provisioned:
-- **Datasources**: Prometheus, Tempo, Loki, Pyroscope (pre-configured)
+- **Datasources**: Prometheus, Tempo, Loki, Pyroscope, MSSQL (pre-configured)
 - **Dashboards**: ACM folder contains:
   - **ACM Behavior** - Equipment health, anomaly detection, RUL monitoring
   - **ACM Observability** - Pipeline logs, traces, metrics overview
   - **ACM Profiling & Resources** - CPU flamegraphs, memory usage, section profiling
   - **ACM Capacity Planning** - Hardware sizing based on equipment/tag count, GPU/CPU usage
 
-### Step 4: Test with ACM
+### Step 4: Configure SQL Server Connection
+
+ACM dashboards (except Observability) require SQL Server connectivity for business data.
+
+**Option A: Create SQL Login (Recommended)**
+
+Run in SQL Server Management Studio (SSMS):
+```sql
+USE master;
+CREATE LOGIN grafana_reader WITH PASSWORD = 'YourSecurePassword123!';
+USE ACM;
+CREATE USER grafana_reader FOR LOGIN grafana_reader;
+ALTER ROLE db_datareader ADD MEMBER grafana_reader;
+```
+
+Then configure in Grafana:
+```powershell
+# From ACM project root
+.\scripts\configure_grafana_mssql.ps1 -User "grafana_reader" -Password "YourSecurePassword123!"
+```
+
+**Option B: Configure Manually via Grafana UI**
+
+1. Open http://localhost:3000/connections/datasources/mssql-ds
+2. Update connection settings:
+   - **Host**: `host.docker.internal:1433`
+   - **Database**: `ACM`
+   - **Authentication**: `SQL Server Authentication`
+   - **User**: `grafana_reader`
+   - **Password**: (your password)
+   - **Encrypt**: `disable` (for local development)
+3. Click **Save & Test**
+
+### Step 5: Test with ACM
 
 ```powershell
 python scripts/sql_batch_runner.py --equip WFA_TURBINE_10 --tick-minutes 1440 --max-ticks 2
