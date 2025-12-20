@@ -306,7 +306,9 @@ class SmartColdstart:
                 Console.info(f"Batch will NOOP (models exist but no new data to score)", component="COLDSTART")
                 return None, None, None, False
         
-        Console.info(f"Status: {state}", component="COLDSTART")
+        Console.info(f"Coldstart state: ready={state.is_ready()}, attempts={state.attempt_count}, rows={state.accumulated_rows}/{state.required_rows}", 
+                     component="COLDSTART", equip_id=self.equip_id, ready=state.is_ready(), 
+                     attempts=state.attempt_count, accumulated=state.accumulated_rows, required=state.required_rows)
         
         # Always calculate optimal window to ensure we load enough data
         # The optimal window calculates from EARLIEST available data forward

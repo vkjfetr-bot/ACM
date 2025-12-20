@@ -2194,7 +2194,7 @@ def main() -> None:
                     with T.section("fit.ar1"):
                         ar1_cfg = cfg.get("models", {}).get("ar1", {}) or {}
                         ar1_detector = AR1Detector(ar1_cfg=ar1_cfg).fit(train)
-                        Console.info("Detector fitted", component="AR1")
+                        Console.info(f"AR1 detector fitted (samples={len(train)})", component="AR1", samples=len(train))
                 
                 # PCA Subspace Detector
                 if pca_enabled and not pca_detector:
@@ -2224,7 +2224,7 @@ def main() -> None:
                     with T.section("fit.iforest"):
                         if_cfg = cfg.get("models", {}).get("iforest", {}) or {}
                         iforest_detector = outliers.IsolationForestDetector(if_cfg=if_cfg).fit(train)
-                        Console.info("Detector fitted", component="IFOREST")
+                        Console.info(f"IForest detector fitted (samples={len(train)}, estimators={if_cfg.get('n_estimators', 100)})", component="IFOREST", samples=len(train))
                 
                 # GMM Detector
                 if gmm_enabled and not gmm_detector:
@@ -2236,7 +2236,7 @@ def main() -> None:
                         gmm_cfg.setdefault("n_init", 3)
                         gmm_cfg.setdefault("random_state", 42)
                         gmm_detector = outliers.GMMDetector(gmm_cfg=gmm_cfg).fit(train)
-                        Console.info("Detector fitted", component="GMM")
+                        Console.info(f"GMM detector fitted (samples={len(train)}, components={gmm_cfg.get('n_components', 1)})", component="GMM", samples=len(train))
                 
                 # OMR Detector
                 if omr_enabled and not omr_detector:
@@ -2270,7 +2270,7 @@ def main() -> None:
                             except Exception as e:
                                 Console.warn(f"Failed to write diagnostics: {e}", component="OMR",
                                              equip=equip, error=str(e)[:200])
-                        Console.info("Detector fitted", component="OMR")
+                        Console.info(f"OMR detector fitted (samples={len(train)}, features={train.shape[1]})", component="OMR", samples=len(train), features=train.shape[1])
 
                 Console.info(f"All detectors fitted in {time.perf_counter()-fit_start_time:.2f}s", component="MODEL")
 
@@ -2443,7 +2443,7 @@ def main() -> None:
                 with T.section("score.ar1"):
                     res = ar1_detector.score(score)
                     frame["ar1_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                    Console.info("Detector scored", component="AR1")
+                    Console.info(f"AR1 detector scored (samples={len(score)})", component="AR1", samples=len(score))
             
             # PCA Subspace Detector
             if pca_enabled and pca_detector:
@@ -2451,7 +2451,7 @@ def main() -> None:
                     pca_spe, pca_t2 = pca_detector.score(score)
                     frame["pca_spe"] = pd.Series(pca_spe, index=frame.index).fillna(0)
                     frame["pca_t2"] = pd.Series(pca_t2, index=frame.index).fillna(0)
-                    Console.info("Detector scored", component="PCA")
+                    Console.info(f"PCA detector scored (samples={len(score)})", component="PCA", samples=len(score))
             
             # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
             
@@ -2460,14 +2460,14 @@ def main() -> None:
                 with T.section("score.iforest"):
                     res = iforest_detector.score(score)
                     frame["iforest_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                    Console.info("Detector scored", component="IFOREST")
+                    Console.info(f"IForest detector scored (samples={len(score)})", component="IFOREST", samples=len(score))
             
             # GMM Detector
             if gmm_enabled and gmm_detector:
                 with T.section("score.gmm"):
                     res = gmm_detector.score(score)
                     frame["gmm_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                    Console.info("Detector scored", component="GMM")
+                    Console.info(f"GMM detector scored (samples={len(score)})", component="GMM", samples=len(score))
             
             # OMR Detector (store contributions outside frame - pandas doesn't support custom attributes)
             if omr_enabled and omr_detector:
@@ -2475,7 +2475,7 @@ def main() -> None:
                     omr_z, omr_contributions = omr_detector.score(score, return_contributions=True)
                     frame["omr_raw"] = pd.Series(omr_z, index=frame.index).fillna(0)
                     omr_contributions_data = omr_contributions
-                    Console.info("Detector scored", component="OMR")
+                    Console.info(f"OMR detector scored (samples={len(score)})", component="OMR", samples=len(score))
         
         Console.info(f"All detectors scored in {time.perf_counter()-score_start_time:.2f}s", component="MODEL")
         
@@ -4075,7 +4075,7 @@ def main() -> None:
                             if not SQL_MODE:
                                 with schema_path.open("w", encoding="utf-8") as sf:
                                     json.dump(schema_dict, sf, indent=2, ensure_ascii=False)
-                                Console.info(f"{schema_path}", component="ART")
+                                Console.info(f"Schema written to {schema_path}", component="ART", columns=len(schema_dict.get('columns', [])))
                         except Exception as se:
                             Console.warn(f"Failed to write schema.json: {se}", component="IO",
                                          equip=equip, error=str(se)[:200])
@@ -4161,7 +4161,7 @@ def main() -> None:
                                 }
                                 cj.write(json.dumps(rec, ensure_ascii=False) + "\n")
                         if not SQL_MODE:
-                            Console.info(f"{culprits_path}", component="ART")
+                            Console.info(f"Culprits written to {culprits_path}", component="ART", episodes=len(culprits_df))
                     except Exception as ce:
                         Console.warn(f"Failed to write culprits.jsonl: {ce}", component="IO",
                                      equip=equip, error=str(ce)[:200])
@@ -4320,7 +4320,7 @@ def main() -> None:
                             table_count += 1
 
                 Console.info(f"Generated {table_count} analytics tables via OutputManager", component="OUTPUTS")
-                Console.info(f"Tables: {tables_dir}", component="OUTPUTS")
+                Console.info(f"Analytics tables written to SQL (mode=sql, dir={tables_dir})", component="OUTPUTS", table_count=table_count)
                 
                 # === FORECAST GENERATION ===
                 # FOR-CSV-01: Retired forecast_deprecated.run() in favor of comprehensive
