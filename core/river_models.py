@@ -75,7 +75,7 @@ class RiverTAD:
         if self.pipeline is None:
             numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
             if not numeric_cols:
-                Console.warn("No numeric columns available for streaming detector.", component="RIVER")
+                Console.warn("No numeric columns available for streaming detector", component="RIVER", n_columns=len(X.columns), dtypes=list(X.dtypes.unique())[:5])
                 return np.zeros(len(X), dtype=np.float32)
             self._init_pipeline(numeric_cols)
 

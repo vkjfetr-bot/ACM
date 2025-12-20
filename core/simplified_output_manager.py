@@ -179,7 +179,7 @@ class SQLOutputManager:
             Console.info(f"Transaction committed ({elapsed:.2f}s)", component="SQL")
         except Exception as e:
             self._rollback()
-            Console.error(f"Transaction rolled back: {e}", component="SQL")
+            Console.error(f"Transaction rolled back: {e}", component="SQL", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
             raise
         finally:
             self._in_transaction = False
@@ -193,7 +193,7 @@ class SQLOutputManager:
                 if not getattr(self.sql_client.conn, "autocommit", True):
                     self.sql_client.conn.commit()
         except Exception as e:
-            Console.error(f"Commit failed: {e}", component="SQL")
+            Console.error(f"Commit failed: {e}", component="SQL", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
             raise
     
     def _rollback(self):
@@ -225,7 +225,7 @@ class SQLOutputManager:
             raise ValueError(f"Table '{table_name}' not in whitelist")
         
         if df.empty:
-            Console.warn(f"Empty DataFrame for {table_name}, skipping", component="SQL")
+            Console.warn(f"Empty DataFrame for {table_name}, skipping", component="SQL", table=table_name, equip_id=self.equip_id, run_id=self.run_id)
             return 0
         
         start = time.time()
@@ -248,7 +248,7 @@ class SQLOutputManager:
             
         except Exception as e:
             self.stats.failures += 1
-            Console.error(f"Failed to write {table_name}: {e}", component="SQL")
+            Console.error(f"Failed to write {table_name}: {e}", component="SQL", table=table_name, equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
             raise
     
     def _prepare_dataframe(self, 
@@ -311,8 +311,8 @@ class SQLOutputManager:
                 if attempt == self.max_retries - 1:
                     raise
                 wait = 2 ** attempt
-                Console.warn(f"[SQL] Insert failed (attempt {attempt + 1}/{self.max_retries}), "
-                           f"retrying in {wait}s: {e}")
+                Console.warn(f"Insert failed (attempt {attempt + 1}/{self.max_retries}), "
+                           f"retrying in {wait}s: {e}", component="SQL", table=table_name, attempt=attempt + 1, max_retries=self.max_retries, wait_sec=wait, error_type=type(e).__name__)
                 time.sleep(wait)
         return 0
     
@@ -387,7 +387,7 @@ class SQLOutputManager:
         try:
             return pd.read_sql_query(query, self.sql_client, params=params or None)
         except Exception as e:
-            Console.error(f"Failed to read {table_name}: {e}", component="SQL")
+            Console.error(f"Failed to read {table_name}: {e}", component="SQL", table=table_name, equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
             raise
     
     def get_run_data(self, table_name: str) -> pd.DataFrame:

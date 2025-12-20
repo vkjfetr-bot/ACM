@@ -543,7 +543,7 @@ class ResourceMonitor:
             return True
         except Exception as e:
             from core.observability import Console, Heartbeat
-            Console.warn(f"Failed to write metrics to SQL: {e}", component="RESOURCE")
+            Console.warn(f"Failed to write metrics to SQL: {e}", component="RESOURCE", equip_id=equip_id, run_id=run_id, error_type=type(e).__name__, error=str(e)[:200])
             return False
     
     def reset(self):

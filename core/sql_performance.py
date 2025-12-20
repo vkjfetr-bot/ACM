@@ -116,7 +116,7 @@ class SQLBatchWriter:
                     self.sql_client.conn.rollback()
                 elif hasattr(self.sql_client, "rollback"):
                     self.sql_client.rollback()
-                Console.error(f"Transaction rolled back: {e}", component="SQL_PERF")
+                Console.error(f"Transaction rolled back: {e}", component="SQL_PERF", error_type=type(e).__name__, error=str(e)[:200])
             except:
                 pass
             raise
@@ -182,7 +182,7 @@ class SQLBatchWriter:
             return inserted
             
         except Exception as e:
-            Console.error(f"Failed to write {table_name}: {e}", component="SQL_PERF")
+            Console.error(f"Failed to write {table_name}: {e}", component="SQL_PERF", table=table_name, rows=len(df), error_type=type(e).__name__, error=str(e)[:200])
             raise
     
     def write_multiple_tables(self, tables: List[Tuple[str, pd.DataFrame]]) -> Dict[str, int]:
@@ -203,7 +203,7 @@ class SQLBatchWriter:
                     rows = self.write_table(table_name, df, delete_existing=True)
                     results[table_name] = rows
                 except Exception as e:
-                    Console.error(f"Failed writing {table_name}, rolling back all: {e}", component="SQL_PERF")
+                    Console.error(f"Failed writing {table_name}, rolling back all: {e}", component="SQL_PERF", table=table_name, error_type=type(e).__name__, error=str(e)[:200])
                     raise
         
         return results

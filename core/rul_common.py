@@ -84,8 +84,8 @@ def apply_health_timeline_row_limit(df: pd.DataFrame, config: Optional[Any] = No
     
     # Downsample: resample to frequency with mean aggregation
     Console.warn(
-        f"[RUL] Health timeline has {len(df)} rows (max={max_rows}). "
-        f"Downsampling to {downsample_freq} frequency."
+        "Health timeline requires downsampling",
+        component="RUL", n_rows=len(df), max_rows=max_rows, downsample_freq=downsample_freq
     )
     
     # Ensure Timestamp is index for resample
@@ -181,15 +181,16 @@ def load_health_timeline(
                 return df
             else:
                 Console.warn(
-                    f"[RUL] No rows in ACM_HealthTimeline for EquipID={equip_id}, RunID={run_id}"
+                    "No rows in ACM_HealthTimeline",
+                    component="RUL", equip_id=equip_id, run_id=run_id
                 )
         except Exception as e:
-            Console.warn(f"Failed to load health timeline from SQL: {e}", component="RUL")
+            Console.warn(f"Failed to load health timeline from SQL: {e}", component="RUL", equip_id=equip_id, run_id=run_id, error_type=type(e).__name__, error=str(e)[:200])
 
     # Priority 3: Fallback to legacy CSV path (file mode for dev/testing)
     p = tables_dir / "health_timeline.csv"
     if not p.exists():
-        Console.warn(f"health_timeline.csv not found in {tables_dir} (no cache, no SQL, no file)", component="RUL")
+        Console.warn("health_timeline.csv not found (no cache, no SQL, no file)", component="RUL", path=str(tables_dir))
         return None
     df = pd.read_csv(p)
     Console.info(f"Loaded health_timeline.csv from file ({len(df)} rows)", component="RUL")

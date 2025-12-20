@@ -101,14 +101,14 @@ class SensorAttributor:
             List of SensorAttribution objects, sorted by failure contribution (descending)
         """
         if self.sql_client is None:
-            Console.warn("[SensorAttributor] No SQL client provided; cannot load attributions")
+            Console.warn("No SQL client provided; cannot load attributions", component="SENSOR_ATTR", equip_id=equip_id, run_id=run_id)
             return []
         
         try:
             df = self._load_hotspots_dataframe(equip_id, run_id)
             
             if df.empty:
-                Console.warn(f"[SensorAttributor] No sensor hotspots found for EquipID={equip_id}, RunID={run_id}")
+                Console.warn("No sensor hotspots found", component="SENSOR_ATTR", equip_id=equip_id, run_id=run_id)
                 return []
             
             # Convert DataFrame to SensorAttribution objects
@@ -126,7 +126,7 @@ class SensorAttributor:
             return attributions
             
         except Exception as e:
-            Console.warn(f"[SensorAttributor] Failed to load sensor attributions: {e}")
+            Console.warn(f"Failed to load sensor attributions: {e}", component="SENSOR_ATTR", equip_id=equip_id, run_id=run_id, error_type=type(e).__name__, error=str(e)[:200])
             return []
     
     def _load_hotspots_dataframe(self, equip_id: int, run_id: str) -> pd.DataFrame:
@@ -186,13 +186,13 @@ class SensorAttributor:
             df = _run_query(base_query)
         except Exception as primary_err:
             Console.warn(
-                f"[SensorAttributor] SensorHotspots schema missing attribution columns; "
-                f"deriving contributions instead ({primary_err})"
+                "SensorHotspots schema missing attribution columns; deriving contributions instead",
+                component="SENSOR_ATTR", equip_id=equip_id, run_id=run_id, error_type=type(primary_err).__name__, error=str(primary_err)[:200]
             )
             try:
                 df = _run_query(fallback_query)
             except Exception as fallback_err:
-                Console.warn(f"[SensorAttributor] Failed to load sensor hotspots: {fallback_err}")
+                Console.warn(f"Failed to load sensor hotspots: {fallback_err}", component="SENSOR_ATTR", equip_id=equip_id, run_id=run_id, error_type=type(fallback_err).__name__, error=str(fallback_err)[:200])
                 return pd.DataFrame()
         
         if df.empty:
@@ -313,7 +313,7 @@ class SensorAttributor:
             return []
         
         if contribution_column not in sensor_data.columns:
-            Console.warn(f"[SensorAttributor] Column {contribution_column} not found in sensor data")
+            Console.warn("Contribution column not found in sensor data", component="SENSOR_ATTR", column=contribution_column, available_columns=list(sensor_data.columns)[:10])
             return []
         
         # Extract scores
@@ -321,7 +321,7 @@ class SensorAttributor:
         total = scores.sum()
         
         if total == 0:
-            Console.warn("[SensorAttributor] All contribution scores are zero")
+            Console.warn("All contribution scores are zero", component="SENSOR_ATTR", column=contribution_column, n_sensors=len(sensor_data))
             return []
         
         # Normalize to proportions
