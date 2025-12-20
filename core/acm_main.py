@@ -740,6 +740,24 @@ def _calculate_adaptive_thresholds(
         Console.warn("Falling back to static config values", component="THRESHOLD")
         return {}
 
+
+def _execute_with_deadlock_retry(cur, sql: str, params: tuple = (), max_retries: int = 3, delay: float = 0.5) -> None:
+    """Execute SQL with automatic retry on deadlock (error 1205)."""
+    import time
+    for attempt in range(max_retries):
+        try:
+            cur.execute(sql, params)
+            return
+        except Exception as e:
+            err_str = str(e)
+            # SQL Server deadlock error code 1205
+            if "1205" in err_str or "deadlock" in err_str.lower():
+                if attempt < max_retries - 1:
+                    time.sleep(delay * (attempt + 1))  # Exponential backoff
+                    continue
+            raise
+
+
 def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str, pd.Timestamp, pd.Timestamp, int]:
     """
     Start a run by inserting into ACM_Runs table.
@@ -765,13 +783,15 @@ def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str,
         
         # For idempotent re-runs, delete any prior run with same RunID
         # This handles both forecast tables and ACM_Runs cleanup (v10 consolidated tables)
-        cur.execute("DELETE FROM dbo.ACM_HealthForecast WHERE RunID = ?", (run_id,))
-        cur.execute("DELETE FROM dbo.ACM_FailureForecast WHERE RunID = ?", (run_id,))
-        cur.execute("DELETE FROM dbo.ACM_RUL WHERE RunID = ?", (run_id,))
-        cur.execute("DELETE FROM dbo.ACM_Runs WHERE RunID = ?", (run_id,))
+        # Use retry wrapper to handle SQL deadlocks during parallel batch runs
+        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_HealthForecast WHERE RunID = ?", (run_id,))
+        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_FailureForecast WHERE RunID = ?", (run_id,))
+        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_RUL WHERE RunID = ?", (run_id,))
+        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_Runs WHERE RunID = ?", (run_id,))
         
         # Direct INSERT into ACM_Runs instead of stored procedure
-        cur.execute(
+        _execute_with_deadlock_retry(
+            cur,
             """
             SET QUOTED_IDENTIFIER ON;
             INSERT INTO dbo.ACM_Runs (RunID, EquipID, StartedAt, ConfigSignature)
