@@ -91,33 +91,33 @@ class SQLBatchRunner:
                 cur.execute(f"SELECT MIN(EntryDateTime), MAX(EntryDateTime), COUNT(*) FROM {table_name}")
                 row = cur.fetchone()
                 if not row:
-                    Console.warn(f"[PRECHECK] {equip_name}: Historian table query returned no result", equipment=equip_name)
+                    Console.warn(f"[PRECHECK] {equip_name}: Historian table query returned no result", component="PRECHECK", equipment=equip_name)
                     return False
                 min_ts, max_ts, total_rows = row[0], row[1], int(row[2]) if row[2] is not None else 0
                 if not min_ts or not max_ts:
-                    Console.warn(f"[PRECHECK] {equip_name}: Historian table has no min/max timestamps", equipment=equip_name)
+                    Console.warn(f"[PRECHECK] {equip_name}: Historian table has no min/max timestamps", component="PRECHECK", equipment=equip_name)
                     return False
                 if total_rows <= 0:
                     Console.warn(
                         f"[PRECHECK] {equip_name}: Historian table has 0 rows; skipping processing",
-                        equipment=equip_name,
+                        component="PRECHECK", equipment=equip_name,
                     )
                     Console.info(
                         f"[PRECHECK] {equip_name}: Ensure raw table {table_name} is populated for the expected window",
-                        equipment=equip_name,
+                        component="PRECHECK", equipment=equip_name,
                         table=table_name,
                     )
                     return False
                 Console.info(
                     f"[PRECHECK] {equip_name}: Historian coverage OK — range=[{min_ts},{max_ts}], rows={total_rows}",
-                    equipment=equip_name,
+                    component="PRECHECK", equipment=equip_name,
                     min_timestamp=min_ts,
                     max_timestamp=max_ts,
                     total_rows=total_rows,
                 )
                 return True
         except Exception as e:
-            Console.warn(f"[PRECHECK] {equip_name}: Historian overview failed: {e}", equipment=equip_name, error=str(e))
+            Console.warn(f"[PRECHECK] {equip_name}: Historian overview failed: {e}", component="PRECHECK", equipment=equip_name, error=str(e))
             return False
     
     def _get_sql_connection(self) -> pyodbc.Connection:
@@ -141,7 +141,7 @@ class SQLBatchRunner:
             Console.info("Connection test OK", component="SQL")
             return True
         except Exception as exc:
-            Console.error(f"SQL connection test failed: {exc}", error=str(exc))
+            Console.error(f"SQL connection test failed: {exc}", component="SQL", error=str(exc), error_type=type(exc).__name__)
             return False
 
     # ------------------------
@@ -167,7 +167,7 @@ class SQLBatchRunner:
                     row = cur.fetchone()
                     if row and row[0] is not None:
                         eid = int(row[0])
-                        Console.info(f"[ID] Registered/Resolved EquipID={eid} for {equip_name}", equipment=equip_name, equip_id=eid)
+                        Console.info(f"[ID] Registered/Resolved EquipID={eid} for {equip_name}", component="ID", equipment=equip_name, equip_id=eid)
                         return eid
                 except Exception:
                     # Fall back to direct lookup when SP missing or errors
@@ -181,7 +181,7 @@ class SQLBatchRunner:
                 except Exception:
                     return None
         except Exception as e:
-            Console.warn(f"Could not resolve EquipID for {equip_name}: {e}", error=str(e))
+            Console.warn(f"Could not resolve EquipID for {equip_name}: {e}", component="ID", equipment=equip_name, error=str(e), error_type=type(e).__name__)
             return None
 
     def _get_config_int(self, equip_id: int, param_path: str, default_value: int) -> int:
@@ -200,7 +200,7 @@ class SQLBatchRunner:
                     except ValueError:
                         return default_value
         except Exception as e:
-            Console.warn(f"Could not read config {param_path} for EquipID={equip_id}: {e}", error=str(e))
+            Console.warn(f"Could not read config {param_path} for EquipID={equip_id}: {e}", component="CONFIG", equip_id=equip_id, param_path=param_path, error=str(e))
         return default_value
 
     def _set_tick_minutes(self, equip_id: int, minutes: int) -> None:
@@ -222,9 +222,9 @@ class SQLBatchRunner:
                         (equip_id, str(minutes))
                     )
                 conn.commit()
-                Console.info(f"[CFG] Set runtime.tick_minutes={minutes} for EquipID={equip_id}", tick_minutes=minutes, equip_id=equip_id)
+                Console.info(f"[CFG] Set runtime.tick_minutes={minutes} for EquipID={equip_id}", component="CFG", tick_minutes=minutes, equip_id=equip_id)
         except Exception as e:
-            Console.warn(f"Could not set runtime.tick_minutes for EquipID={equip_id}: {e}", error=str(e))
+            Console.warn(f"Could not set runtime.tick_minutes for EquipID={equip_id}: {e}", component="CFG", equip_id=equip_id, error=str(e), error_type=type(e).__name__)
 
     def _infer_tick_minutes_from_raw(self, equip_name: str, target_rows_per_batch: int = 5000) -> int:
         """Infer a reasonable tick size (minutes) from historian stats."""
@@ -258,13 +258,13 @@ class SQLBatchRunner:
             Console.info(
                 f"[CONFIG] Inferred tick_minutes={inferred} for {equip_name} "
                 f"(rows={total_rows}, minutes={total_minutes:.1f}, cadence={cadence_minutes:.2f}m)",
-                tick_minutes=inferred, equipment=equip_name, total_rows=total_rows
+                component="CONFIG", tick_minutes=inferred, equipment=equip_name, total_rows=total_rows
             )
             if inferred == max_tick:
-                Console.warn("[CONFIG] Clamped by ACM_SQL_MAX_TICK_MINUTES; override env var to expand further", max_tick=max_tick)
+                Console.warn("[CONFIG] Clamped by ACM_SQL_MAX_TICK_MINUTES; override env var to expand further", component="CONFIG", max_tick=max_tick)
             return inferred
         except Exception as e:
-            Console.warn(f"Could not infer tick_minutes from raw table for {equip_name}: {e}", error=str(e))
+            Console.warn(f"Could not infer tick_minutes from raw table for {equip_name}: {e}", component="CONFIG", equipment=equip_name, error=str(e), error_type=type(e).__name__)
             return self.tick_minutes
 
     def _truncate_outputs_for_equip(self, equip_id: int) -> None:
@@ -277,7 +277,7 @@ class SQLBatchRunner:
         try:
             tables_list = sorted(ALLOWED_TABLES)
             total_tables = len(tables_list)
-            Console.info(f"[RESET] Truncating {total_tables} ACM output tables for EquipID={equip_id}...", equip_id=equip_id, total_tables=total_tables)
+            Console.info(f"[RESET] Truncating {total_tables} ACM output tables for EquipID={equip_id}...", component="RESET", equip_id=equip_id, total_tables=total_tables)
             
             # Large tables that need batched deletion (can have millions of rows)
             large_tables = {
@@ -317,7 +317,7 @@ class SQLBatchRunner:
                                     break
                             if total_deleted > 0:
                                 deleted_count += 1
-                                Console.info(f"[RESET] Deleted {total_deleted:,} rows from {table}", table=table, rows=total_deleted)
+                                Console.info(f"[RESET] Deleted {total_deleted:,} rows from {table}", component="RESET", table=table, rows=total_deleted)
                         else:
                             # Small tables - single delete
                             cur.execute(
@@ -329,13 +329,13 @@ class SQLBatchRunner:
                                 deleted_count += 1
                             conn.commit()
                     except Exception as tbl_err:
-                        Console.warn(f"Failed to truncate {table} for EquipID={equip_id}: {tbl_err}", table=table, error=str(tbl_err))
+                        Console.warn(f"Failed to truncate {table} for EquipID={equip_id}: {tbl_err}", component="RESET", table=table, equip_id=equip_id, error=str(tbl_err), error_type=type(tbl_err).__name__)
                     # Progress indicator every 10 tables (console only, not Loki)
                     if idx % 10 == 0:
                         Console.status(f"  Cold-start reset: {idx}/{total_tables} tables processed...")
-            Console.ok(f"Cold-start reset complete: cleared {deleted_count} ACM output tables for EquipID={equip_id}")
+            Console.ok(f"Cold-start reset complete: cleared {deleted_count} ACM output tables for EquipID={equip_id}", component="RESET", equip_id=equip_id, deleted_count=deleted_count)
         except Exception as e:
-            Console.warn(f"Failed to truncate outputs for EquipID={equip_id}: {e}", error=str(e))
+            Console.warn(f"Failed to truncate outputs for EquipID={equip_id}: {e}", component="RESET", equip_id=equip_id, error=str(e), error_type=type(e).__name__)
 
     def _delete_models_for_equip(self, equip_id: int) -> None:
         """
@@ -353,10 +353,10 @@ class SQLBatchRunner:
                 )
                 deleted_count = cur.rowcount
                 conn.commit()
-            Console.ok(f"Cold-start reset: deleted {deleted_count} cached models for EquipID={equip_id}")
+            Console.ok(f"Cold-start reset: deleted {deleted_count} cached models for EquipID={equip_id}", component="RESET", equip_id=equip_id, deleted_count=deleted_count)
                 
         except Exception as e:
-            Console.warn(f"Failed to delete models for EquipID={equip_id}: {e}", error=str(e))
+            Console.warn(f"Failed to delete models for EquipID={equip_id}: {e}", component="RESET", equip_id=equip_id, error=str(e), error_type=type(e).__name__)
 
     def _inspect_last_run_outputs(self, equip_name: str) -> None:
         """
@@ -366,7 +366,7 @@ class SQLBatchRunner:
         try:
             equip_id = self._get_equip_id(equip_name)
             if not equip_id:
-                Console.warn(f"[QA] EquipID not found for {equip_name}, skipping output inspection", equipment=equip_name)
+                Console.warn(f"[QA] EquipID not found for {equip_name}, skipping output inspection", component="QA", equipment=equip_name)
                 return
             with self._get_sql_connection() as conn:
                 cur = conn.cursor()
@@ -437,7 +437,7 @@ class SQLBatchRunner:
                     )
                     row = cur.fetchone()
                     if not row:
-                        Console.warn(f"[QA] No ACM_Runs entry found for EquipID={equip_id}, skipping inspection", equip_id=equip_id)
+                        Console.warn(f"[QA] No ACM_Runs entry found for EquipID={equip_id}, skipping inspection", component="QA", equip_id=equip_id)
                         return
                     run_id, started_at, completed_at = row[0], row[1], row[2]
                     run_source = "ACM_Runs"
@@ -458,7 +458,7 @@ class SQLBatchRunner:
                 Console.info(
                     f"[QA] Inspecting outputs for EquipID={equip_id}, RunID={run_id} (from {run_source}), "
                     f"window=[{started_at},{completed_at})",
-                    equip_id=equip_id, run_id=str(run_id)
+                    component="QA", equip_id=equip_id, run_id=str(run_id)
                 )
                 tables_to_check: List[Tuple[str, bool]] = [
                     ("ACM_HealthTimeline", True),
@@ -490,12 +490,12 @@ class SQLBatchRunner:
                         Console.info(
                             f"[QA] {table_name}: {count_val} row(s) for EquipID={equip_id} "
                             f"{'(RunID scoped)' if has_run else ''}",
-                            table=table_name, count=count_val
+                            component="QA", table=table_name, count=count_val, equip_id=equip_id
                         )
                     except Exception as tbl_err:
-                        Console.warn(f"[QA] Skipped {table_name}: {tbl_err}", table=table_name, error=str(tbl_err))
+                        Console.warn(f"[QA] Skipped {table_name}: {tbl_err}", component="QA", table=table_name, error=str(tbl_err), error_type=type(tbl_err).__name__)
         except Exception as e:
-            Console.error(f"[QA] Output inspection failed for {equip_name}: {e}", equipment=equip_name, error=str(e))
+            Console.error(f"[QA] Output inspection failed for {equip_name}: {e}", component="QA", equipment=equip_name, error=str(e), error_type=type(e).__name__)
 
     def _reset_progress_to_beginning(self, equip_id: int) -> None:
         """Optional: Clear Runs and Coldstart state to force start from earliest EntryDateTime."""
@@ -507,9 +507,9 @@ class SQLBatchRunner:
                 cur.execute("DELETE FROM dbo.ACM_ColdstartState WHERE EquipID = ?", (equip_id,))
                 cur.execute("DELETE FROM dbo.ACM_Runs WHERE EquipID = ?", (equip_id,))
                 conn.commit()
-                Console.info(f"[RESET] Cleared ACM_Runs and Coldstart for EquipID={equip_id}", equip_id=equip_id)
+                Console.info(f"[RESET] Cleared ACM_Runs and Coldstart for EquipID={equip_id}", component="RESET", equip_id=equip_id)
         except Exception as e:
-            Console.warn(f"Could not reset progress for EquipID={equip_id}: {e}", error=str(e))
+            Console.warn(f"Could not reset progress for EquipID={equip_id}: {e}", component="RESET", equip_id=equip_id, error=str(e), error_type=type(e).__name__)
     
     def _load_progress(self) -> Dict[str, Dict]:
         """Load progress tracking state.
@@ -531,7 +531,7 @@ class SQLBatchRunner:
                 data = json.load(f)
                 return data
         except (json.JSONDecodeError, OSError) as exc:
-            Console.warn(f"Could not load progress file: {exc}", error=str(exc))
+            Console.warn(f"Could not load progress file: {exc}", component="PROGRESS", error=str(exc), error_type=type(exc).__name__)
             return {}
     
     def _save_progress(self, progress: Dict[str, Dict]) -> None:
@@ -541,7 +541,7 @@ class SQLBatchRunner:
             with open(self.progress_file, "w") as f:
                 json.dump(progress, f, indent=2, default=str)
         except OSError as exc:
-            Console.warn(f"Could not save progress file: {exc}", error=str(exc))
+            Console.warn(f"Could not save progress file: {exc}", component="PROGRESS", error=str(exc), error_type=type(exc).__name__)
     
     def _get_data_range(self, equip_name: str) -> tuple[Optional[datetime], Optional[datetime]]:
         """Get the available data range from SQL historian.
@@ -569,7 +569,7 @@ class SQLBatchRunner:
             return None, None
             
         except Exception as e:
-            Console.error(f"Failed to get data range for {equip_name}: {e}", equipment=equip_name, error=str(e))
+            Console.error(f"Failed to get data range for {equip_name}: {e}", component="DATA", equipment=equip_name, error=str(e), error_type=type(e).__name__)
             return None, None
     
     def _check_coldstart_status(self, equip_name: str) -> tuple[bool, int, int]:
@@ -581,7 +581,7 @@ class SQLBatchRunner:
         Returns:
             Tuple of (is_complete, accumulated_rows, required_rows)
         """
-        Console.info(f"[COLDSTART] {equip_name}: Checking coldstart status in SQL (ModelRegistry/ACM_ColdstartState)...", equipment=equip_name)
+        Console.info(f"[COLDSTART] {equip_name}: Checking coldstart status in SQL (ModelRegistry/ACM_ColdstartState)...", component="COLDSTART", equipment=equip_name)
         try:
             conn = self._get_sql_connection()
             cur = conn.cursor()
@@ -593,7 +593,7 @@ class SQLBatchRunner:
                 cur.close()
                 conn.close()
                 # When equip not found, use default min rows 50
-                Console.warn(f"[COLDSTART] {equip_name}: Equipment not found in Equipment table; using default minimum rows=50", equipment=equip_name)
+                Console.warn(f"[COLDSTART] {equip_name}: Equipment not found in Equipment table; using default minimum rows=50", component="COLDSTART", equipment=equip_name)
                 return False, 0, 50
             
             equip_id = row[0]
@@ -619,7 +619,7 @@ class SQLBatchRunner:
             
             # Coldstart complete if models exist
             if model_count >= 3:
-                Console.info(f"[COLDSTART] {equip_name}: Detected existing models in ModelRegistry (count={model_count})", equipment=equip_name, model_count=model_count)
+                Console.info(f"[COLDSTART] {equip_name}: Detected existing models in ModelRegistry (count={model_count})", component="COLDSTART", equipment=equip_name, model_count=model_count)
                 return True, 0, 0
             
             # Determine required rows: prefer ColdstartState.RequiredRows, else config runtime.coldstart_min_rows (default 50)
@@ -631,14 +631,14 @@ class SQLBatchRunner:
                 Console.info(
                     f"[COLDSTART] {equip_name}: Status={status}, "
                     f"AccumulatedRows={accum_rows or 0}, RequiredRows={required}",
-                    equipment=equip_name, status=status, accumulated=accum_rows or 0, required=required
+                    component="COLDSTART", equipment=equip_name, status=status, accumulated=accum_rows or 0, required=required
                 )
                 return is_complete, accum_rows or 0, required
-            Console.info(f"[COLDSTART] {equip_name}: No ACM_ColdstartState row; using default minimum rows={min_required}", equipment=equip_name, min_required=min_required)
+            Console.info(f"[COLDSTART] {equip_name}: No ACM_ColdstartState row; using default minimum rows={min_required}", component="COLDSTART", equipment=equip_name, min_required=min_required)
             return False, 0, min_required
             
         except Exception as e:
-            Console.warn(f"Could not check coldstart status: {e}", error=str(e))
+            Console.warn(f"Could not check coldstart status: {e}", component="COLDSTART", equipment=equip_name, error=str(e), error_type=type(e).__name__)
             return False, 0, 50
     
     def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False, batch_num: int = 0) -> tuple[bool, str]:
@@ -669,7 +669,7 @@ class SQLBatchRunner:
             Console.info(f"{printable}", mode="dry-run", component="DRY")
             return True, "OK"
         
-        Console.info(f"[RUN] {printable}", command=printable)
+        Console.info(f"[RUN] {printable}", component="RUN", command=printable)
         # Force SQL mode in acm_main so that SQL historian + stored procedures
         # are used instead of legacy CSV/file mode, regardless of older config.
         # Also set ACM_BATCH_MODE to enable continuous learning mode detection
@@ -682,9 +682,9 @@ class SQLBatchRunner:
         display_batch = batch_num + 1
         if self.start_from_beginning and batch_num == 0:
             env["ACM_FORECAST_FULL_HISTORY_MODE"] = "1"
-            Console.info(f"[BATCH] {equip_name}: First batch (start-from-beginning) - will perform coldstart split and train fresh models", equipment=equip_name, batch_num=display_batch)
+            Console.info(f"[BATCH] {equip_name}: First batch (start-from-beginning) - will perform coldstart split and train fresh models", component="BATCH", equipment=equip_name, batch_num=display_batch)
         else:
-            Console.info(f"[BATCH] {equip_name}: Batch {display_batch} - will load existing models and evolve incrementally", equipment=equip_name, batch_num=display_batch)
+            Console.info(f"[BATCH] {equip_name}: Batch {display_batch} - will load existing models and evolve incrementally", component="BATCH", equipment=equip_name, batch_num=display_batch)
         env["ACM_BATCH_NUM"] = str(batch_num)
         # Pass total batches info (if known) so acm_main can display "batch X/Y"
         if hasattr(self, '_current_total_batches'):
@@ -740,11 +740,11 @@ class SQLBatchRunner:
         # If the batch failed or outcome was not OK/NOOP, surface logs so the
         # caller can see exactly what went wrong inside acm_main.
         if not success or outcome == "FAIL":
-            Console.error(f"[RUN-DEBUG] {equip_name}: acm_main exited with code {process.returncode}", equipment=equip_name, return_code=process.returncode)
+            Console.error(f"[RUN-DEBUG] {equip_name}: acm_main exited with code {process.returncode}", component="RUN", equipment=equip_name, return_code=process.returncode)
             if stdout_text:
                 Console.error(
                     f"[RUN-DEBUG] {equip_name}: --- acm_main stdout (captured) ---\n{stdout_text.rstrip()}",
-                    equipment=equip_name,
+                    component="RUN", equipment=equip_name,
                 )
             # Record FAIL in Prometheus metrics (since acm_main didn't complete)
             record_run(equip_name, "FAIL", batch_duration)
@@ -773,10 +773,10 @@ class SQLBatchRunner:
         # Get earliest data timestamp for historical replay
         min_ts, max_ts = self._get_data_range(equip_name)
         if not min_ts or not max_ts:
-            Console.error(f"[COLDSTART] {equip_name}: No data available in historian", equipment=equip_name)
+            Console.error(f"[COLDSTART] {equip_name}: No data available in historian", component="COLDSTART", equipment=equip_name)
             return False, None
         
-        Console.info(f"[COLDSTART] {equip_name}: Historical data range: {min_ts} to {max_ts}", equipment=equip_name, min_ts=min_ts, max_ts=max_ts)
+        Console.info(f"[COLDSTART] {equip_name}: Historical data range: {min_ts} to {max_ts}", component="COLDSTART", equipment=equip_name, min_ts=min_ts, max_ts=max_ts)
         
         # Start coldstart from earliest timestamp
         coldstart_start = min_ts
@@ -792,13 +792,13 @@ class SQLBatchRunner:
             # Check current status
             is_complete, accum_rows, req_rows = self._check_coldstart_status(equip_name)
             if is_complete:
-                Console.ok(f"[COLDSTART] {equip_name}: Coldstart COMPLETE!", equipment=equip_name)
+                Console.ok(f"[COLDSTART] {equip_name}: Coldstart COMPLETE!", component="COLDSTART", equipment=equip_name)
                 # If models already existed before any processing this run, we may not
                 # have a concrete window end; return whatever we last computed (likely None)
                 return True, last_processed_end
             
-            Console.info(f"[COLDSTART] {equip_name}: Status - {accum_rows}/{req_rows} rows accumulated", equipment=equip_name, accumulated=accum_rows, required=req_rows)
-            Console.info(f"[COLDSTART] {equip_name}: Processing window [{coldstart_start} to {coldstart_end})", equipment=equip_name, start=coldstart_start, end=coldstart_end)
+            Console.info(f"[COLDSTART] {equip_name}: Status - {accum_rows}/{req_rows} rows accumulated", component="COLDSTART", equipment=equip_name, accumulated=accum_rows, required=req_rows)
+            Console.info(f"[COLDSTART] {equip_name}: Processing window [{coldstart_start} to {coldstart_end})", component="COLDSTART", equipment=equip_name, start=coldstart_start, end=coldstart_end)
             
             # Run ACM batch with historical time window
             success, outcome = self._run_acm_batch(equip_name, start_time=coldstart_start, end_time=coldstart_end, dry_run=dry_run)
@@ -806,21 +806,21 @@ class SQLBatchRunner:
             last_processed_end = coldstart_end
             
             if not success and outcome == "FAIL":
-                Console.error(f"[COLDSTART] {equip_name}: Attempt {attempt} FAILED (error)", equipment=equip_name, attempt=attempt)
+                Console.error(f"[COLDSTART] {equip_name}: Attempt {attempt} FAILED (error)", component="COLDSTART", equipment=equip_name, attempt=attempt)
                 continue
             
             if outcome == "NOOP":
-                Console.warn(f"[COLDSTART] {equip_name}: Deferred (insufficient data), will retry...", equipment=equip_name)
+                Console.warn(f"[COLDSTART] {equip_name}: Deferred (insufficient data), will retry...", component="COLDSTART", equipment=equip_name)
                 continue
             
             if outcome == "OK":
                 # Check if coldstart completed
                 is_complete, _, _ = self._check_coldstart_status(equip_name)
                 if is_complete:
-                    Console.ok(f"[COLDSTART] {equip_name}: Coldstart COMPLETE!", equipment=equip_name)
+                    Console.ok(f"[COLDSTART] {equip_name}: Coldstart COMPLETE!", component="COLDSTART", equipment=equip_name)
                     return True, last_processed_end
                 else:
-                    Console.info(f"[COLDSTART] {equip_name}: Making progress, continuing...", equipment=equip_name)
+                    Console.info(f"[COLDSTART] {equip_name}: Making progress, continuing...", component="COLDSTART", equipment=equip_name)
                     # Advance window for next coldstart attempt
                     # Add 1 second back to move to start of next day, then subtract 1 second for the end bound
                     coldstart_start = coldstart_end + timedelta(seconds=1)
@@ -828,7 +828,7 @@ class SQLBatchRunner:
                     if coldstart_end > max_ts:
                         coldstart_end = max_ts
         
-        Console.warn(f"[COLDSTART] {equip_name}: Max attempts ({self.max_coldstart_attempts}) reached without completion", equipment=equip_name, max_attempts=self.max_coldstart_attempts)
+        Console.warn(f"[COLDSTART] {equip_name}: Max attempts ({self.max_coldstart_attempts}) reached without completion", component="COLDSTART", equipment=equip_name, max_attempts=self.max_coldstart_attempts)
         return False, last_processed_end
     
     def _process_batches(self, equip_name: str, start_from: Optional[datetime] = None, 
@@ -844,17 +844,17 @@ class SQLBatchRunner:
         Returns:
             Number of batches successfully processed
         """
-        Console.info(f"\n{'='*60}")
-        Console.info(f"[BATCH] Starting batch processing for {equip_name}", equipment=equip_name)
-        Console.info(f"{'='*60}")
+        Console.info(f"\n{'='*60}", component="BATCH")
+        Console.info(f"[BATCH] Starting batch processing for {equip_name}", component="BATCH", equipment=equip_name)
+        Console.info(f"{'='*60}", component="BATCH")
         
         # Get data range
         min_ts, max_ts = self._get_data_range(equip_name)
         if not min_ts or not max_ts:
-            Console.warn(f"[BATCH] {equip_name}: No data available in historian", equipment=equip_name)
+            Console.warn(f"[BATCH] {equip_name}: No data available in historian", component="BATCH", equipment=equip_name)
             return 0
         
-        Console.info(f"[BATCH] {equip_name}: Data available from {min_ts} to {max_ts}", equipment=equip_name, min_timestamp=min_ts, max_timestamp=max_ts)
+        Console.info(f"[BATCH] {equip_name}: Data available from {min_ts} to {max_ts}", component="BATCH", equipment=equip_name, min_timestamp=min_ts, max_timestamp=max_ts)
         
         # Load progress
         progress = self._load_progress()
@@ -864,7 +864,7 @@ class SQLBatchRunner:
         if resume and 'last_batch_end' in equip_progress:
             current_ts = datetime.fromisoformat(equip_progress['last_batch_end'])
             batches_completed = equip_progress.get('batches_completed', 0)
-            Console.info(f"[BATCH] {equip_name}: Resuming from {current_ts} ({batches_completed} batches already completed)", equipment=equip_name, resume_from=current_ts, batches_completed=batches_completed)
+            Console.info(f"[BATCH] {equip_name}: Resuming from {current_ts} ({batches_completed} batches already completed)", component="BATCH", equipment=equip_name, resume_from=current_ts, batches_completed=batches_completed)
         elif start_from:
             current_ts = start_from
             batches_completed = 0
@@ -885,12 +885,12 @@ class SQLBatchRunner:
                 Console.info(
                     f"[BATCH] {equip_name}: Adjusting tick_minutes from {self.tick_minutes} "
                     f"to {new_tick} to honor max-batches={self.max_batches}",
-                    equipment=equip_name, old_tick=self.tick_minutes, new_tick=new_tick, max_batches=self.max_batches
+                    component="BATCH", equipment=equip_name, old_tick=self.tick_minutes, new_tick=new_tick, max_batches=self.max_batches
                 )
                 self.tick_minutes = new_tick
                 total_batches = int(total_minutes / self.tick_minutes) if self.tick_minutes > 0 else 0
         
-        Console.info(f"[BATCH] {equip_name}: Processing {total_batches} batch(es) ({self.tick_minutes}-minute windows)", equipment=equip_name, total_batches=total_batches, tick_minutes=self.tick_minutes)
+        Console.info(f"[BATCH] {equip_name}: Processing {total_batches} batch(es) ({self.tick_minutes}-minute windows)", component="BATCH", equipment=equip_name, total_batches=total_batches, tick_minutes=self.tick_minutes)
         
         # Store total for passing to child processes
         self._current_total_batches = total_batches
@@ -906,14 +906,14 @@ class SQLBatchRunner:
             if next_ts > max_ts:
                 next_ts = max_ts
             
-            Console.info(f"\n[BATCH] {equip_name}: Batch {batch_num}/{total_batches} - [{current_ts} to {next_ts}]", equipment=equip_name, batch=batch_num, total=total_batches)
+            Console.info(f"\n[BATCH] {equip_name}: Batch {batch_num}/{total_batches} - [{current_ts} to {next_ts}]", component="BATCH", equipment=equip_name, batch=batch_num, total=total_batches)
             
             # Run ACM (it will automatically use the current batch window from SQL)
             # Pass batches_completed (total count including previous runs) for frequency control
             success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run, batch_num=batches_completed)
             
             if not success:
-                Console.error(f"[BATCH] {equip_name}: Batch {batch_num} FAILED", equipment=equip_name, batch=batch_num)
+                Console.error(f"[BATCH] {equip_name}: Batch {batch_num} FAILED", component="BATCH", equipment=equip_name, batch=batch_num)
                 break
             
             batches_completed += 1
@@ -927,17 +927,17 @@ class SQLBatchRunner:
             if not dry_run:
                 self._save_progress(progress)
             
-            Console.ok(f"[BATCH] {equip_name}: Batch {batch_num} completed (outcome={outcome})", equipment=equip_name, batch=batch_num, outcome=outcome)
+            Console.ok(f"[BATCH] {equip_name}: Batch {batch_num} completed (outcome={outcome})", component="BATCH", equipment=equip_name, batch=batch_num, outcome=outcome)
             
             # Respect demo cap if provided
             if self.max_batches is not None and batch_num >= self.max_batches:
-                Console.info(f"[BATCH] Reached max-batches cap ({self.max_batches}); stopping early", max_batches=self.max_batches)
+                Console.info(f"[BATCH] Reached max-batches cap ({self.max_batches}); stopping early", component="BATCH", max_batches=self.max_batches)
                 break
 
             # Move to next window (add 1 second to move past the end of the current window)
             current_ts = next_ts + timedelta(seconds=1)
         
-        Console.info(f"\n[BATCH] {equip_name}: Processed {batches_completed} batch(es)", equipment=equip_name, batches_completed=batches_completed)
+        Console.info(f"\n[BATCH] {equip_name}: Processed {batches_completed} batch(es)", component="BATCH", equipment=equip_name, batches_completed=batches_completed)
         return batches_completed
     
     def process_equipment(self, equip_name: str, *, dry_run: bool = False, 
@@ -960,7 +960,7 @@ class SQLBatchRunner:
 
         # Fail fast if SQL is unreachable so we do not appear hung
         if not self._test_sql_connection():
-            Console.error(f"{equip_name}: Skipping processing due to SQL connection failure", equipment=equip_name)
+            Console.error(f"{equip_name}: Skipping processing due to SQL connection failure", component="PRECHECK", equipment=equip_name)
             return False
         
         # Load progress
@@ -970,10 +970,10 @@ class SQLBatchRunner:
         # Apply per-run configuration overrides
         equip_id = self._get_equip_id(equip_name)
         if equip_id:
-            Console.info(f"[PRECHECK] {equip_name}: Resolved EquipID={equip_id}", equipment=equip_name, equip_id=equip_id)
+            Console.info(f"[PRECHECK] {equip_name}: Resolved EquipID={equip_id}", component="PRECHECK", equipment=equip_name, equip_id=equip_id)
             # In dev mode, optionally infer tick size from raw data
             if self.start_from_beginning and not resume:
-                Console.info(f"[RESET] Starting from beginning for {equip_name} - performing full reset", equipment=equip_name)
+                Console.info(f"[RESET] Starting from beginning for {equip_name} - performing full reset", component="RESET", equipment=equip_name)
                 inferred = self._infer_tick_minutes_from_raw(equip_name)
                 self.tick_minutes = inferred
                 self._set_tick_minutes(equip_id, inferred)
@@ -981,7 +981,7 @@ class SQLBatchRunner:
                 # CRITICAL: Delete ALL existing models (SQL + filesystem) so first batch
                 # starts with fresh coldstart training. This ensures batch 0 trains new models,
                 # and subsequent batches evolve those models incrementally.
-                Console.info(f"[RESET] Deleting all existing models (SQL + filesystem) for {equip_name}", equipment=equip_name)
+                Console.info(f"[RESET] Deleting all existing models (SQL + filesystem) for {equip_name}", component="RESET", equipment=equip_name)
                 self._delete_models_for_equip(equip_id)
                 self._reset_progress_to_beginning(equip_id)
             else:
@@ -1000,29 +1000,29 @@ class SQLBatchRunner:
                             Console.info(
                                 f"[CONFIG] {equip_name}: Adjusting tick_minutes from {self.tick_minutes} "
                                 f"to {new_tick} to honor max-batches={self.max_batches} (applies to coldstart AND batches)",
-                                equipment=equip_name, old_tick=self.tick_minutes, new_tick=new_tick, max_batches=self.max_batches
+                                component="CONFIG", equipment=equip_name, old_tick=self.tick_minutes, new_tick=new_tick, max_batches=self.max_batches
                             )
                             self.tick_minutes = new_tick
                             self._set_tick_minutes(equip_id, new_tick)
         else:
-            Console.warn(f"[PRECHECK] {equip_name}: EquipID not found in dbo.Equipment; downstream writes will fail", equipment=equip_name)
+            Console.warn(f"[PRECHECK] {equip_name}: EquipID not found in dbo.Equipment; downstream writes will fail", component="PRECHECK", equipment=equip_name)
 
         # Historian preflight: if no data rows, stop early with a clear message
         if not self._log_historian_overview(equip_name):
-            Console.error(f"{equip_name}: Historian has no data — aborting this equipment run", equipment=equip_name)
+            Console.error(f"{equip_name}: Historian has no data — aborting this equipment run", component="PRECHECK", equipment=equip_name)
             return False
         
         # Check if coldstart already complete
         coldstart_complete = equip_progress.get('coldstart_complete', False)
         
         if resume and coldstart_complete:
-            Console.info(f"{equip_name}: Coldstart already complete, skipping to batch processing", equipment=equip_name)
+            Console.info(f"{equip_name}: Coldstart already complete, skipping to batch processing", component="COLDSTART", equipment=equip_name)
             coldstart_last_end: Optional[datetime] = None
         else:
             # Phase 1: Coldstart
             cs_ok, coldstart_last_end = self._process_coldstart(equip_name, dry_run=dry_run)
             if not cs_ok:
-                Console.error(f"{equip_name}: Coldstart failed", equipment=equip_name)
+                Console.error(f"{equip_name}: Coldstart failed", component="COLDSTART", equipment=equip_name)
                 return False
             
             # Update progress
@@ -1049,12 +1049,12 @@ class SQLBatchRunner:
         elapsed_seconds = int(elapsed_time % 60)
         
         if batches > 0:
-            Console.ok(f"{equip_name}: Completed - {batches} batch(es) processed", equipment=equip_name, batches=batches)
-            Console.info(f"[TIMING] {equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
+            Console.ok(f"{equip_name}: Completed - {batches} batch(es) processed", component="BATCH", equipment=equip_name, batches=batches)
+            Console.info(f"[TIMING] {equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", component="TIMING", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
             return True
         else:
-            Console.warn(f"{equip_name}: No batches processed", equipment=equip_name)
-            Console.info(f"[TIMING] {equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
+            Console.warn(f"{equip_name}: No batches processed", component="BATCH", equipment=equip_name)
+            Console.info(f"[TIMING] {equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", component="TIMING", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
             return False
 
 
@@ -1152,12 +1152,12 @@ def main() -> int:
     errors: List[str] = []
 
     Console.header("SQL BATCH RUNNER - Continuous ACM Processing")
-    Console.info(f"Equipment: {', '.join(args.equip)}", equipment=args.equip)
-    Console.info(f"SQL Server: {args.sql_server}/{args.sql_database}", server=args.sql_server, database=args.sql_database)
-    Console.info(f"Tick Window: {args.tick_minutes} minutes", tick_minutes=args.tick_minutes)
-    Console.info(f"Max Workers: {max_workers}", max_workers=max_workers)
-    Console.info(f"Resume: {args.resume}", resume=args.resume)
-    Console.info(f"Dry Run: {args.dry_run}", dry_run=args.dry_run)
+    Console.info(f"Equipment: {', '.join(args.equip)}", component="MAIN", equipment=args.equip)
+    Console.info(f"SQL Server: {args.sql_server}/{args.sql_database}", component="MAIN", server=args.sql_server, database=args.sql_database)
+    Console.info(f"Tick Window: {args.tick_minutes} minutes", component="MAIN", tick_minutes=args.tick_minutes)
+    Console.info(f"Max Workers: {max_workers}", component="MAIN", max_workers=max_workers)
+    Console.info(f"Resume: {args.resume}", component="MAIN", resume=args.resume)
+    Console.info(f"Dry Run: {args.dry_run}", component="MAIN", dry_run=args.dry_run)
     Console.status("="*60)
 
     import time
@@ -1173,7 +1173,7 @@ def main() -> int:
                     errors.append(f"{equip}: Processing incomplete")
             except Exception as exc:
                 errors.append(f"{equip}: {exc}")
-                Console.error(f"{equip}: {exc}", equipment=equip, error=str(exc))
+                Console.error(f"{equip}: {exc}", component="MAIN", equipment=equip, error=str(exc))
     else:
         # Parallel processing
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1199,14 +1199,14 @@ def main() -> int:
                     except Exception:
                         exc_text = exc_text.encode("ascii", "ignore").decode()
                     errors.append(f"{equip}: {exc_text}")
-                    Console.error(f"{equip}: {exc_text}", equipment=equip, error=exc_text)
+                    Console.error(f"{equip}: {exc_text}", component="MAIN", equipment=equip, error=exc_text)
 
     overall_elapsed = time.time() - overall_start_time
     overall_minutes = int(overall_elapsed / 60)
     overall_seconds = int(overall_elapsed % 60)
 
     Console.status("\n" + "="*60)
-    Console.info(f"[TIMING] Overall execution time: {overall_minutes}m {overall_seconds}s", minutes=overall_minutes, seconds=overall_seconds)
+    Console.info(f"[TIMING] Overall execution time: {overall_minutes}m {overall_seconds}s", component="TIMING", minutes=overall_minutes, seconds=overall_seconds)
     Console.status("="*60)
     
     # Stop profiling and push samples to Pyroscope
@@ -1216,13 +1216,13 @@ def main() -> int:
     shutdown_observability()
     
     if errors:
-        Console.error("BATCH RUNNER COMPLETED WITH ERRORS:")
+        Console.error("BATCH RUNNER COMPLETED WITH ERRORS:", component="MAIN")
         for line in errors:
-            Console.error(f"  [FAIL] {line}")
+            Console.error(f"  [FAIL] {line}", component="MAIN")
         Console.status("="*60)
         return 1
     else:
-        Console.ok("BATCH RUNNER COMPLETED SUCCESSFULLY")
+        Console.ok("BATCH RUNNER COMPLETED SUCCESSFULLY", component="MAIN")
         Console.status("="*60)
         return 0
 

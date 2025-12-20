@@ -50,13 +50,70 @@ acm-tempo        Up (healthy)     0.0.0.0:3200->3200/tcp
 - **Username**: `admin`
 - **Password**: `admin`
 
-Datasources and dashboards are auto-provisioned:
-- **Datasources**: Prometheus, Tempo, Loki, Pyroscope, MSSQL (pre-configured)
-- **Dashboards**: ACM folder contains:
-  - **ACM Behavior** - Equipment health, anomaly detection, RUL monitoring
-  - **ACM Observability** - Pipeline logs, traces, metrics overview
-  - **ACM Profiling & Resources** - CPU flamegraphs, memory usage, section profiling
-  - **ACM Capacity Planning** - Hardware sizing based on equipment/tag count, GPU/CPU usage
+Datasources are auto-provisioned via `provisioning/datasources/datasources.yaml`:
+- **Prometheus** (prometheus-ds) - Metrics storage
+- **Tempo** (tempo-ds) - Distributed tracing
+- **Loki** (loki-ds) - Log aggregation
+- **Pyroscope** (pyroscope-ds) - Continuous profiling
+- **MSSQL** (mssql-ds) - SQL Server for ACM business data
+
+## Dashboard Folder Structure & Tagging Philosophy
+
+### Folder Organization
+
+| Folder | UID | Purpose |
+|--------|-----|---------|
+| **ACM Observability** | `acm-observability-folder` | System monitoring: traces, logs, metrics, profiling |
+| **ACM Business** | `acm-business-folder` | Equipment health, anomalies, RUL (SQL data) |
+
+### Tagging Convention
+
+Tags help categorize dashboards for filtering and discovery:
+
+| Tag | Meaning |
+|-----|---------|
+| `acm` | All ACM-related dashboards |
+| `observability` | System/pipeline monitoring |
+| `business` | Equipment health & analytics |
+| `prometheus` | Uses Prometheus metrics |
+| `loki` | Uses Loki logs |
+| `tempo` | Uses Tempo traces |
+| `pyroscope` | Uses profiling data |
+| `mssql` | Uses SQL Server data |
+
+### Current Dashboards
+
+| Dashboard | Folder | Tags | Purpose |
+|-----------|--------|------|---------|
+| ACM Observability | ACM Observability | acm, observability, prometheus, loki, tempo, pyroscope | Pipeline execution monitoring, resource usage, logs, traces |
+
+### Importing Additional Dashboards
+
+To import a dashboard from `grafana_dashboards/`:
+
+```powershell
+# Read dashboard JSON and prepare for import
+$dashboard = Get-Content -Raw "grafana_dashboards/my_dashboard.json" | ConvertFrom-Json
+$dashboard.id = $null  # Clear ID for new import
+$dashboard.uid = "my-dashboard"  # Set unique UID
+$dashboard.tags = @("acm", "business", "mssql")  # Set tags
+
+# Create import payload
+$payload = @{
+    dashboard = $dashboard
+    folderUid = "acm-business-folder"  # Target folder
+    overwrite = $true
+    message = "Imported from grafana_dashboards"
+} | ConvertTo-Json -Depth 50
+
+# Write without BOM (critical for curl)
+[System.IO.File]::WriteAllText("import.json", $payload, [System.Text.UTF8Encoding]::new($false))
+
+# Import via API
+docker cp import.json acm-grafana:/tmp/import.json
+docker exec acm-grafana curl -s -X POST -H 'Content-Type: application/json' \
+  -u admin:admin -d @/tmp/import.json http://localhost:3000/api/dashboards/db
+```
 
 ### Step 4: Configure SQL Server Connection
 
@@ -136,14 +193,19 @@ install/observability/
 ├── prometheus.yaml              # Prometheus configuration
 ├── pyroscope-docker.yaml        # Pyroscope configuration
 ├── provisioning/
-│   ├── datasources/
-│   │   └── datasources.yaml     # Auto-provisioned Grafana datasources
-│   └── dashboards/
-│       └── dashboards.yaml      # Dashboard provisioning config
-└── dashboards/
-    ├── acm_observability.json   # Logs, traces, errors dashboard
-    └── acm_behavior.json        # Equipment runs, episodes dashboard
+│   └── datasources/
+│       └── datasources.yaml     # Auto-provisioned Grafana datasources
+└── README.md                    # This file
+
+# Dashboards are stored in project root, NOT auto-provisioned:
+grafana_dashboards/
+├── acm_observability.json       # Pipeline monitoring (observability stack)
+├── acm_behavior.json            # Equipment health (SQL data)
+└── ...                          # Other business dashboards
 ```
+
+> **Note**: Dashboards are NOT auto-provisioned. Import them manually via Grafana UI
+> or API to maintain full control over dashboard versions.
 
 ## Volumes (Persistent Data)
 

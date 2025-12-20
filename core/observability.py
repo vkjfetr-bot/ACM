@@ -2013,11 +2013,11 @@ class _PyroscopePusher:
             if e.code != 200:
                 try:
                     body = e.read().decode('utf-8', errors='ignore')
-                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code} - {body[:200]}")
+                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code} - {body[:200]}", component="PROFILE", endpoint=self._endpoint, http_status=e.code, response=body[:100])
                 except Exception:
-                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code}")
+                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code}", component="PROFILE", endpoint=self._endpoint, http_status=e.code)
         except Exception as e:
-            Console.warn(f"[PROFILE] Pyroscope push error: {e}")
+            Console.warn(f"[PROFILE] Pyroscope push error: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
 
 
 # =============================================================================
