@@ -999,6 +999,6 @@ def compute_basic_features(pdf: pd.DataFrame, window: int = 3, cols: Optional[Li
 
         out = pd.concat(parts, axis=1)
         # ensure no infs/nans in final feature table
-            out = out.replace([np.inf, -np.inf], np.nan)
+        out = out.replace([np.inf, -np.inf], np.nan)
         out = out.fillna(0.0)
         return out
