@@ -825,11 +825,11 @@ Console.info("Process completed in {t:.2f}s",
 **Timeline**: 1-2 weeks
 
 **Action items**:
-- [ ] acm_main.py: Add kwargs to 132 error/warn calls
+- [x] ~~acm_main.py: Add kwargs to 132 error/warn calls~~ ✅ DONE (Dec 2025) - commit `e290c48`
 - [ ] output_manager.py: Add kwargs to 77 error/warn calls
 - [ ] model_persistence.py: Add kwargs to 38 error/warn calls
 - [ ] regimes.py: Add kwargs to 32 error/warn calls
-- [ ] forecast_engine.py: Add kwargs to 22 error/warn calls
+- [x] ~~forecast_engine.py: Add kwargs to 22 error/warn calls~~ ✅ DONE (Dec 2025)
 
 **Template**:
 ```python
@@ -856,8 +856,8 @@ Console.error("Description of failure",
 **Timeline**: 2-3 days
 
 **Priority modules**:
-- [ ] forecast_engine.py: Add `component="FORECAST"` to all 34 calls
-- [ ] sql_batch_runner.py: Add `component="BATCH"` to 103 calls
+- [x] ~~forecast_engine.py: Add `component="FORECAST"` to all 34 calls~~ ✅ DONE (Dec 2025)
+- [x] ~~sql_batch_runner.py: Add `component="BATCH"` to 103 calls~~ ✅ Already has excellent inline tags [BATCH], [COLDSTART] etc. and 75% context kwargs - best in codebase
 - [ ] observability.py: Add appropriate components to 15 calls
 
 **Quick fix script**:
@@ -983,7 +983,7 @@ The main gap is contextual data in log messages, particularly for errors and war
 1. ✓ Logging infrastructure is solid (Console, Loki, component tags)
 2. ✓ Message distribution and levels are appropriate
 3. ⚠ Need systematic addition of context data (kwargs)
-4. ⚠ forecast_engine.py and sql_batch_runner.py need component tags
+4. ✅ ~~forecast_engine.py and sql_batch_runner.py need component tags~~ DONE - forecast_engine.py fixed, sql_batch_runner.py already good
 5. ✓ Documentation (LOGGING_GUIDE.md, OBSERVABILITY.md) is accurate
 
 **This audit provides a clear roadmap for achieving excellent observability across the entire ACM platform.**
