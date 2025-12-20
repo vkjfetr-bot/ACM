@@ -60,7 +60,6 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./provisioning:/etc/grafana/provisioning:ro
-      - ../../grafana_dashboards:/var/lib/grafana/dashboards/acm:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
