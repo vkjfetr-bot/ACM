@@ -308,22 +308,21 @@ class SmartColdstart:
         
         Console.info(f"Status: {state}", component="COLDSTART")
         
-        # On first attempt, calculate optimal window based on detected cadence
+        # Always calculate optimal window to ensure we load enough data
+        # The optimal window calculates from EARLIEST available data forward
         if state.attempt_count == 0:
             Console.info(f"First coldstart attempt - calculating optimal window", component="COLDSTART")
-            # Use the batch end time and look back from there
-            optimal_start, optimal_end = self.calculate_optimal_window(
-                current_window_end=initial_end,
-                required_rows=min_rows,
-                data_cadence_seconds=data_cadence_seconds
-            )
-            attempt_start = optimal_start
-            attempt_end = optimal_end
         else:
-            # Resume from previous attempt with expanded window
             Console.info(f"Resuming coldstart (previous attempts: {state.attempt_count})", component="COLDSTART")
-            attempt_start = initial_start
-            attempt_end = initial_end
+        
+        # Calculate optimal window that should contain enough data
+        optimal_start, optimal_end = self.calculate_optimal_window(
+            current_window_end=initial_end,
+            required_rows=min_rows,
+            data_cadence_seconds=data_cadence_seconds
+        )
+        attempt_start = optimal_start
+        attempt_end = optimal_end
         
         for attempt in range(1, max_attempts + 1):
             try:
