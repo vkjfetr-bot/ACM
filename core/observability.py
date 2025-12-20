@@ -302,7 +302,7 @@ def init(
             if _loki_pusher._connected:
                 Console.ok(f"[OTEL] Loki logs -> {loki_endpoint}")
             else:
-                Console.warn(f"[OTEL] Loki not connected at {loki_endpoint}")
+                Console.warn(f"[OTEL] Loki not connected at {loki_endpoint}", component="OTEL", endpoint=loki_endpoint, service="loki")
         
         # Pyroscope continuous profiling (via yappi + HTTP API - no Rust required)
         global _pyroscope_enabled, _pyroscope_pusher
@@ -323,11 +323,11 @@ def init(
                     _config.pyroscope_endpoint = pyroscope_endpoint
                     Console.ok(f"[OTEL] Profiling -> {pyroscope_endpoint}")
                 else:
-                    Console.warn(f"[OTEL] Pyroscope not reachable at {pyroscope_endpoint} - profiling disabled")
+                    Console.warn(f"[OTEL] Pyroscope not reachable at {pyroscope_endpoint} - profiling disabled", component="OTEL", endpoint=pyroscope_endpoint, service="pyroscope")
             except Exception as e:
-                Console.warn(f"[OTEL] Pyroscope setup failed: {e}")
+                Console.warn(f"[OTEL] Pyroscope setup failed: {e}", component="OTEL", endpoint=pyroscope_endpoint, service="pyroscope", error_type=type(e).__name__, error=str(e)[:200])
         elif enable_profiling and not YAPPI_AVAILABLE:
-            Console.warn("[OTEL] yappi not installed - profiling disabled (pip install yappi)")
+            Console.warn("[OTEL] yappi not installed - profiling disabled (pip install yappi)", component="OTEL", service="pyroscope", reason="yappi_not_installed")
         
         # OpenTelemetry setup for tracing
         if not OTEL_AVAILABLE or not OTEL_EXPORTERS_AVAILABLE:
@@ -337,7 +337,7 @@ def init(
         # Pre-check OTLP endpoint connectivity to avoid noisy export errors
         otlp_reachable = _check_endpoint_reachable(otlp_endpoint)
         if not otlp_reachable:
-            Console.warn(f"[OTEL] OTLP endpoint not reachable at {otlp_endpoint} - tracing/metrics disabled")
+            Console.warn(f"[OTEL] OTLP endpoint not reachable at {otlp_endpoint} - tracing/metrics disabled", component="OTEL", endpoint=otlp_endpoint, service="otlp")
             _initialized = True
             return
         
@@ -548,7 +548,7 @@ def init(
                 
                 Console.ok(f"Metrics -> {otlp_endpoint}/v1/metrics", component="OTEL")
             except Exception as e:
-                Console.warn(f"[OTEL] Metrics setup failed: {e}")
+                Console.warn(f"[OTEL] Metrics setup failed: {e}", component="OTEL", endpoint=otlp_endpoint, service="metrics", error_type=type(e).__name__, error=str(e)[:200])
         
         _initialized = True
         atexit.register(shutdown)
@@ -1834,7 +1834,7 @@ class _PyroscopePusher:
             self._profiling_active = True
             self._profile_start_time = time.time()
         except Exception as e:
-            Console.warn(f"[PROFILE] Failed to start: {e}")
+            Console.warn(f"[PROFILE] Failed to start: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
     
     def stop_and_push(self) -> None:
         """Stop profiling and push results to Pyroscope."""
@@ -1868,7 +1868,7 @@ class _PyroscopePusher:
             self._push_profile(collapsed_lines, int(start_time), int(end_time))
             
         except Exception as e:
-            Console.warn(f"[PROFILE] Failed to push: {e}")
+            Console.warn(f"[PROFILE] Failed to push: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
         finally:
             try:
                 yappi.clear_stats()
