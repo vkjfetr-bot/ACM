@@ -64,7 +64,7 @@ def write_run_metadata(
     """
     
     if sql_client is None:
-        Console.warn("No SQL client provided, skipping ACM_Runs write", component="RUN_META")
+        Console.warn("No SQL client provided, skipping ACM_Runs write", component="RUN_META", run_id=run_id, equip_id=equip_id)
         return False
     
     try:
@@ -127,7 +127,7 @@ def write_run_metadata(
         return True
         
     except Exception as e:
-        Console.error(f"Failed to write ACM_Runs: {e}", component="RUN_META")
+        Console.error(f"Failed to write ACM_Runs: {e}", component="RUN_META", run_id=run_id, equip_id=equip_id, equip_name=equip_name, error_type=type(e).__name__, error=str(e)[:200])
         try:
             sql_client.conn.rollback()
         except:
@@ -210,7 +210,7 @@ def extract_run_metadata_from_scores(scores: pd.DataFrame, per_regime_enabled: b
         metadata["regime_count"] = regime_count
         
     except Exception as e:
-        Console.warn(f"Failed to extract health metrics: {e}", component="RUN_META")
+        Console.warn(f"Failed to extract health metrics: {e}", component="RUN_META", error_type=type(e).__name__, error=str(e)[:200])
         metadata["avg_health_index"] = None
         metadata["min_health_index"] = None
         metadata["max_fused_z"] = None
@@ -269,7 +269,7 @@ def extract_data_quality_score(data_quality_path=None, sql_client=None, run_id=N
                     Console.debug("No data quality records found in SQL, defaulting to 100.0", component="RUN_META")
                     return 100.0
             except Exception as e:
-                Console.warn(f"Failed to query ACM_DataQuality: {e}, falling back to CSV", component="RUN_META")
+                Console.warn(f"Failed to query ACM_DataQuality: {e}, falling back to CSV", component="RUN_META", run_id=run_id, equip_id=equip_id, error_type=type(e).__name__)
         
         # File mode: read from CSV
         if data_quality_path and Path(data_quality_path).exists():
@@ -310,7 +310,7 @@ def extract_data_quality_score(data_quality_path=None, sql_client=None, run_id=N
                 return 100.0
         
     except Exception as e:
-        Console.warn(f"Failed to extract data quality score: {e}", component="RUN_META")
+        Console.warn(f"Failed to extract data quality score: {e}", component="RUN_META", error_type=type(e).__name__, error=str(e)[:200])
         return 100.0
 
 
@@ -347,7 +347,7 @@ def write_retrain_metadata(
         bool: True if insert succeeded.
     """
     if sql_client is None:
-        Console.warn("No SQL client; skipping ACM_RunMetadata write", component="RUN_META")
+        Console.warn("No SQL client; skipping ACM_RunMetadata write", component="RUN_META", run_id=run_id, equip_id=equip_id)
         return False
 
     try:
@@ -380,7 +380,7 @@ def write_retrain_metadata(
         Console.info(f"Wrote retrain metadata RunID={run_id} StateV={forecast_state_version}", component="RUN_META")
         return True
     except Exception as e:
-        Console.error(f"Failed to write ACM_RunMetadata: {e}", component="RUN_META")
+        Console.error(f"Failed to write ACM_RunMetadata: {e}", component="RUN_META", run_id=run_id, equip_id=equip_id, equip_name=equip_name, error_type=type(e).__name__, error=str(e)[:200])
         try:
             sql_client.conn.rollback()
         except Exception:
@@ -463,5 +463,5 @@ def write_timer_stats(
         return True
         
     except Exception as e:
-        Console.warn(f"Failed to write timer stats: {e}", component="PERF")
+        Console.warn(f"Failed to write timer stats: {e}", component="PERF", run_id=run_id, equip_id=equip_id, batch_num=batch_num, timer_count=len(timings), error_type=type(e).__name__, error=str(e)[:200])
         return False
