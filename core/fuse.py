@@ -70,7 +70,7 @@ def tune_detector_weights(
     valid_methods = {"episode_separability", "correlation"}
     method_fallback_reason: Optional[str] = None
     if requested_method not in valid_methods:
-        Console.warn(f"Unknown tuning method '{requested_method_raw}', defaulting to episode_separability", component="TUNE")
+        Console.warn(f"Unknown tuning method '{requested_method_raw}', defaulting to episode_separability", component="TUNE", requested_method=requested_method_raw, valid_methods=list(valid_methods))
         tuning_method = "episode_separability"
         method_fallback_reason = "unknown_method"
     else:
@@ -106,7 +106,7 @@ def tune_detector_weights(
     labels: Optional[np.ndarray] = None
     if episodes_df is not None and not episodes_df.empty:
         if fused_index is None or len(fused_index) != n_total:
-            Console.warn("Episodes provided but fused_index missing or misaligned; skipping PR-AUC labeling", component="TUNE")
+            Console.warn("Episodes provided but fused_index missing or misaligned; skipping PR-AUC labeling", component="TUNE", episodes_count=len(episodes_df), fused_index_len=len(fused_index) if fused_index is not None else 0, n_total=n_total)
         else:
             try:
                 fused_dt_index = pd.DatetimeIndex(fused_index)
@@ -174,7 +174,7 @@ def tune_detector_weights(
                 det_diag["n_samples"] = n_valid
 
                 if n_valid < min_samples_required:
-                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required}) - using prior", component="TUNE")
+                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required}) - using prior", component="TUNE", detector=detector_name, n_valid=n_valid, min_required=min_samples_required, method=tuning_method)
                     prior = float(detector_priors.get(detector_name, 1.0 / max(len(streams), 1)))
                     fallback_score = prior
                     quality_scores[detector_name] = fallback_score
@@ -192,7 +192,7 @@ def tune_detector_weights(
 
                 # Degenerate signal guards
                 if np.allclose(det_clean, 0.0, atol=1e-6):
-                    Console.warn(f"{detector_name}: all zeros - limited separability", component="TUNE")
+                    Console.warn(f"{detector_name}: all zeros - limited separability", component="TUNE", detector=detector_name, n_samples=len(det_clean), method=tuning_method)
                     prior = float(detector_priors.get(detector_name, 1.0))
                     fallback_score = prior * 0.01
                     quality_scores[detector_name] = fallback_score
@@ -208,7 +208,7 @@ def tune_detector_weights(
 
                 finite_signal = det_clean[np.abs(det_clean) > 1e-6]
                 if finite_signal.size > 0 and np.unique(np.sign(finite_signal)).size == 1:
-                    Console.warn(f"{detector_name}: all same sign - limited separability", component="TUNE")
+                    Console.warn(f"{detector_name}: all same sign - limited separability", component="TUNE", detector=detector_name, n_samples=len(finite_signal), method=tuning_method)
                     prior = float(detector_priors.get(detector_name, 1.0))
                     fallback_score = prior * 0.1
                     quality_scores[detector_name] = fallback_score
@@ -284,7 +284,7 @@ def tune_detector_weights(
                 diagnostics["detector_metrics"][detector_name] = det_diag
 
             except Exception as e:
-                Console.warn(f"{detector_name}: metric calculation failed - {e}", component="TUNE")
+                Console.warn(f"{detector_name}: metric calculation failed - {e}", component="TUNE", detector=detector_name, method=tuning_method, error_type=type(e).__name__, error=str(e)[:200])
                 prior = float(detector_priors.get(detector_name, 0.1))
                 fallback_score = prior
                 quality_scores[detector_name] = fallback_score
@@ -314,7 +314,7 @@ def tune_detector_weights(
     else:
         diagnostics["primary_metric"] = "abs_correlation"
         # Fallback: correlation-based tuning (LEGACY - circular but retained for compatibility)
-        Console.warn("Using legacy correlation-based tuning (circular dependency)", component="TUNE")
+        Console.warn("Using legacy correlation-based tuning (circular dependency)", component="TUNE", method="correlation", n_detectors=len(streams), n_total=n_total)
         correlations = {}
         
         for detector_name, detector_signal in streams.items():
@@ -323,7 +323,7 @@ def tune_detector_weights(
                 n_valid = int(np.sum(mask))
                 
                 if n_valid < min_samples_required:
-                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required})", component="TUNE")
+                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required})", component="TUNE", detector=detector_name, n_valid=n_valid, min_required=min_samples_required, method="correlation")
                     correlations[detector_name] = 0.0
                     diagnostics["detector_metrics"][detector_name] = {
                         "n_samples": n_valid,
@@ -351,7 +351,7 @@ def tune_detector_weights(
                     "metric_value": float(abs(corr_f))
                 }
             except Exception as e:
-                Console.warn(f"{detector_name}: correlation failed - {e}", component="TUNE")
+                Console.warn(f"{detector_name}: correlation failed - {e}", component="TUNE", detector=detector_name, method="correlation", error_type=type(e).__name__, error=str(e)[:200])
                 correlations[detector_name] = 0.0
                 diagnostics["detector_metrics"][detector_name] = {
                     "status": "error",
@@ -436,12 +436,12 @@ class ScoreCalibrator:
     def fit(self, x: np.ndarray, regime_labels: Optional[np.ndarray] = None) -> "ScoreCalibrator":
         x_finite = x[np.isfinite(x)]
         if x_finite.size == 0:
-            Console.warn("No finite values in calibration data - using defaults", component="CAL")
+            Console.warn("No finite values in calibration data - using defaults", component="CAL", calibrator=self.name, input_size=len(x))
             return self
 
         # FUSE-FIX-03: Validate input data has reasonable variation
         if x_finite.size < 10:
-            Console.warn(f"Insufficient samples ({x_finite.size}) for reliable calibration - using defaults", component="CAL")
+            Console.warn(f"Insufficient samples ({x_finite.size}) for reliable calibration - using defaults", component="CAL", calibrator=self.name, n_samples=x_finite.size, min_required=10)
             return self
 
         self.med = float(np.median(x_finite))
@@ -483,7 +483,7 @@ class ScoreCalibrator:
         max_thresh = float(self.self_tune_cfg.get("max_threshold", 1000.0))
         
         if not np.isfinite(self.q_thresh):
-            Console.warn(f"[CAL:{self.name}] Non-finite threshold computed ({self.q_thresh}) - using fallback 3.0")
+            Console.warn(f"[CAL:{self.name}] Non-finite threshold computed ({self.q_thresh}) - using fallback 3.0", component="CAL", calibrator=self.name, computed_threshold=self.q_thresh, fallback=3.0)
             self.q_thresh = 3.0
         elif self.q_thresh <= 0:
             Console.debug(f"[CAL:{self.name}] Non-positive threshold ({self.q_thresh:.6f}) - clamping to {min_thresh}")
@@ -889,9 +889,9 @@ def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict
                 Console.info(f"  k_sigma: {base_k_sigma:.3f} -> {k_sigma:.3f} (std={std:.3f})")
                 Console.info(f"  h_sigma: {base_h_sigma:.3f} -> {h_sigma:.3f} (p50={p50:.3f}, p95={p95:.3f})")
             else:
-                Console.warn("Auto-tune skipped: insufficient data for statistics", component="FUSE")
+                Console.warn("Auto-tune skipped: insufficient data for statistics", component="FUSE", stats_source=stats_source if 'stats_source' in dir() else "unknown", n_samples=n_total if 'n_total' in dir() else 0)
         except Exception as tune_e:
-            Console.warn(f"Auto-tune failed: {tune_e}", component="FUSE")
+            Console.warn(f"Auto-tune failed: {tune_e}", component="FUSE", error_type=type(tune_e).__name__, error=str(tune_e)[:200])
     
     params = EpisodeParams(
         k_sigma=k_sigma,
