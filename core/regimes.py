@@ -28,7 +28,7 @@ except Exception:
     OutputManager = None  # type: ignore
 import matplotlib.pyplot as plt
 
-from core.observability import Console, Heartbeat
+from core.observability import Console, Heartbeat, Span
 import hashlib
 
 try:
