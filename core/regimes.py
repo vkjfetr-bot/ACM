@@ -648,51 +648,51 @@ def fit_regime_model(
     if low_quality:
         quality_notes.append("silhouette_below_threshold")
     quality_notes.extend(input_issues)
-        quality_notes.extend(config_issues)
-        if np.isnan(best_score):
-            quality_notes.append("auto_k_unscored")
-        meta = {
-            "best_k": int(best_k),
-            "fit_score": float(best_score),
-            "fit_metric": best_metric,
-            "quality_ok": bool(quality_ok),
-            "quality_notes": quality_notes,
-            "quality_sweep": sorted(quality_sweep, key=lambda item: item[0]),
-            "model_version": REGIME_MODEL_VERSION,
-            "sklearn_version": sklearn.__version__,
-        }
-        if "kmeans_inertia" in basis_meta:
-            meta["kmeans_inertia"] = basis_meta["kmeans_inertia"]
-        if "kmeans_n_iter" in basis_meta:
-            meta["kmeans_n_iter"] = basis_meta["kmeans_n_iter"]
-        meta.update({k: v for k, v in basis_meta.items() if k not in meta})
-        # Aggregate quality score (0-100) for observability
-        quality_score = 0.0
-        if np.isfinite(best_score):
-            if best_metric == "silhouette":
-                quality_score = float(np.clip(best_score, 0.0, 1.0) * 100.0)
-            elif best_metric == "calinski_harabasz":
-                cal_ref = max(calinski_min, 1.0)
-                quality_score = float(np.clip(best_score / (2 * cal_ref), 0.0, 1.0) * 100.0)
-        if not quality_ok:
-            quality_score = min(quality_score, 50.0)
-        meta["regime_quality_score"] = quality_score
-        if train_hash is None:
-            try:
-                meta_hash = _stable_int_hash(train_basis.to_numpy(dtype=float, copy=False))
-                train_hash = meta_hash
-            except Exception:
-                pass
-        model = RegimeModel(
-            scaler=scaler,
-            kmeans=kmeans,
-            feature_columns=list(train_basis.columns),
-            raw_tags=basis_meta.get("raw_tags", []),
-            n_pca_components=int(basis_meta.get("n_pca", 0)),
-            train_hash=train_hash,
-            meta=meta,
-        )
-        return model
+    quality_notes.extend(config_issues)
+    if np.isnan(best_score):
+        quality_notes.append("auto_k_unscored")
+    meta = {
+        "best_k": int(best_k),
+        "fit_score": float(best_score),
+        "fit_metric": best_metric,
+        "quality_ok": bool(quality_ok),
+        "quality_notes": quality_notes,
+        "quality_sweep": sorted(quality_sweep, key=lambda item: item[0]),
+        "model_version": REGIME_MODEL_VERSION,
+        "sklearn_version": sklearn.__version__,
+    }
+    if "kmeans_inertia" in basis_meta:
+        meta["kmeans_inertia"] = basis_meta["kmeans_inertia"]
+    if "kmeans_n_iter" in basis_meta:
+        meta["kmeans_n_iter"] = basis_meta["kmeans_n_iter"]
+    meta.update({k: v for k, v in basis_meta.items() if k not in meta})
+    # Aggregate quality score (0-100) for observability
+    quality_score = 0.0
+    if np.isfinite(best_score):
+        if best_metric == "silhouette":
+            quality_score = float(np.clip(best_score, 0.0, 1.0) * 100.0)
+        elif best_metric == "calinski_harabasz":
+            cal_ref = max(calinski_min, 1.0)
+            quality_score = float(np.clip(best_score / (2 * cal_ref), 0.0, 1.0) * 100.0)
+    if not quality_ok:
+        quality_score = min(quality_score, 50.0)
+    meta["regime_quality_score"] = quality_score
+    if train_hash is None:
+        try:
+            meta_hash = _stable_int_hash(train_basis.to_numpy(dtype=float, copy=False))
+            train_hash = meta_hash
+        except Exception:
+            pass
+    model = RegimeModel(
+        scaler=scaler,
+        kmeans=kmeans,
+        feature_columns=list(train_basis.columns),
+        raw_tags=basis_meta.get("raw_tags", []),
+        n_pca_components=int(basis_meta.get("n_pca", 0)),
+        train_hash=train_hash,
+        meta=meta,
+    )
+    return model
 
 
 def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
