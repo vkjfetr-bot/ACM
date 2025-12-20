@@ -643,165 +643,166 @@ class Fuser:
         - spans_transition: True if episode crosses regime boundary
         - regime_context: Regime context flag for filtering false positives
         """
-        if len(series) == 0:
-            return pd.DataFrame()
+        with Span("episodes.detect", n_samples=len(series), n_detectors=len(streams)):
+            if len(series) == 0:
+                return pd.DataFrame()
 
-        x = np.asarray(series, dtype=float)
-        finite_mask = np.isfinite(x)
-        if not finite_mask.any():
-            return pd.DataFrame()
+            x = np.asarray(series, dtype=float)
+            finite_mask = np.isfinite(x)
+            if not finite_mask.any():
+                return pd.DataFrame()
 
-        mu = float(np.nanmean(x))
-        if not np.isfinite(mu):
-            mu = 0.0
-        sd = float(np.nanstd(x))
-        if not np.isfinite(sd) or sd <= 1e-9:
-            sd = 1.0
-        k = self.ep.k_sigma * sd
-        h = self.ep.h_sigma * sd
+            mu = float(np.nanmean(x))
+            if not np.isfinite(mu):
+                mu = 0.0
+            sd = float(np.nanstd(x))
+            if not np.isfinite(sd) or sd <= 1e-9:
+                sd = 1.0
+            k = self.ep.k_sigma * sd
+            h = self.ep.h_sigma * sd
 
-        s_pos = 0.0
-        active = False
-        start: Optional[int] = None
-        episodes = []
-        for i, xi in enumerate(x):
-            s_pos = max(0.0, s_pos + (xi - mu - k))
-            if active and s_pos <= 0.0:
-                active = False
-                start = None
-                continue
-            if (not active) and s_pos > 0:
-                active = True
-                start = i
-            if active and s_pos > h:
-                # close episode
-                end = i
-                if start is None:
-                    start = i
-                length = end - start + 1
-                if length >= self.ep.min_len:
-                    episodes.append((start, end))
-                s_pos = 0.0
-                active = False
-                start = None
-        # merge gaps
-        merged = []
-        for s, e in episodes:
-            if not merged:
-                merged.append([s, e])
-                continue
-            ps, pe = merged[-1]
-            if s - pe - 1 <= self.ep.gap_merge:
-                merged[-1][1] = e
-            else:
-                merged.append([s, e])
-
-        raw_idx = series.index
-        has_dt_index = isinstance(raw_idx, pd.DatetimeIndex)
-        idx = raw_idx
-        if not has_dt_index:
-            try:
-                inferred_type = getattr(raw_idx, "inferred_type", "") or ""
-                if "date" in inferred_type:
-                    dt_idx = pd.to_datetime(raw_idx, errors="coerce")
-                    if isinstance(dt_idx, pd.DatetimeIndex) and not dt_idx.isna().all():
-                        idx = dt_idx
-                        has_dt_index = True
-            except Exception:
-                pass
-
-        rows = []
-        for i, (s, e) in enumerate(merged):
-            start_ts = idx[max(0, s)]
-            end_ts = idx[min(len(idx) - 1, e)]
-            if has_dt_index and pd.notna(start_ts) and pd.notna(end_ts):
-                duration_s = (end_ts - start_ts).total_seconds()
-            else:
-                duration_s = float(e - s + 1)
-            
-            # Filter out short-duration episodes (only when real timestamps are available)
-            if has_dt_index and duration_s < self.ep.min_duration_s:
-                continue
-            
-            # --- Culprit Attribution Logic ---
-            episode_streams = {k: v[s:e+1] for k, v in streams.items()}
-            
-            # Find the detector with the highest mean score during the episode
-            max_mean_score = -np.inf
-            primary_detector = "unknown"
-            for name, scores in episode_streams.items():
-                mean_score = np.nanmean(scores)
-                if not np.isfinite(mean_score):
+            s_pos = 0.0
+            active = False
+            start: Optional[int] = None
+            episodes = []
+            for i, xi in enumerate(x):
+                s_pos = max(0.0, s_pos + (xi - mu - k))
+                if active and s_pos <= 0.0:
+                    active = False
+                    start = None
                     continue
-                if mean_score > max_mean_score:
-                    max_mean_score = mean_score
-                    primary_detector = name
-
-            # For multivariate models, find the top contributing sensor
-            culprits_raw = primary_detector
-            if 'pca' in primary_detector or 'mhal' in primary_detector:
-                # Simple attribution: find sensor with max mean value in the episode window
-                episode_features = original_features.iloc[s:e+1]
-                top_feature: Optional[str] = None
-                if not episode_features.empty:
-                    feature_means = episode_features.select_dtypes(include=[np.number]).mean()
-                    feature_means = feature_means.dropna()
-                    if not feature_means.empty:
-                        top_feature = str(feature_means.idxmax())
-                if top_feature:
-                    culprit_sensor = Fuser._get_base_sensor(top_feature)
-                    culprits_raw = f"{primary_detector}({culprit_sensor})"
-
-            # Format culprit with human-readable label
-            culprits = format_culprit_label(culprits_raw, use_short=False)
-            
-            # Calculate fused score statistics for the episode
-            episode_fused = x[s:e+1]
-            peak_fused_z = float(np.nanmax(episode_fused)) if len(episode_fused) > 0 else 0.0
-            avg_fused_z = float(np.nanmean(episode_fused)) if len(episode_fused) > 0 else 0.0
-            
-            # v10.1.0: Episode-Regime Correlation
-            # Extract regime context for this episode
-            start_regime = -1
-            end_regime = -1
-            spans_transition = False
-            regime_context = "unknown"
-            
-            if regime_labels is not None and len(regime_labels) > e:
-                episode_regimes = regime_labels[s:e+1]
-                
-                # Get dominant regime at start and end
-                start_regime = int(episode_regimes[0]) if len(episode_regimes) > 0 else -1
-                end_regime = int(episode_regimes[-1]) if len(episode_regimes) > 0 else -1
-                
-                # Check if episode spans multiple regimes
-                unique_regimes = np.unique(episode_regimes)
-                spans_transition = len(unique_regimes) > 1
-                
-                # Determine regime context for filtering
-                if spans_transition:
-                    # Episode spans regime transition - may be false positive
-                    regime_context = "transition"
-                elif len(unique_regimes) == 1:
-                    # Single regime - genuine anomaly within stable operating mode
-                    regime_context = "stable"
+                if (not active) and s_pos > 0:
+                    active = True
+                    start = i
+                if active and s_pos > h:
+                    # close episode
+                    end = i
+                    if start is None:
+                        start = i
+                    length = end - start + 1
+                    if length >= self.ep.min_len:
+                        episodes.append((start, end))
+                    s_pos = 0.0
+                    active = False
+                    start = None
+            # merge gaps
+            merged = []
+            for s, e in episodes:
+                if not merged:
+                    merged.append([s, e])
+                    continue
+                ps, pe = merged[-1]
+                if s - pe - 1 <= self.ep.gap_merge:
+                    merged[-1][1] = e
                 else:
-                    regime_context = "unknown"
-            
-            rows.append({
-                "start_ts": start_ts, 
-                "end_ts": end_ts, 
-                "duration_s": duration_s, 
-                "len": int(e - s + 1), 
-                "culprits": culprits,
-                "peak_fused_z": peak_fused_z,
-                "avg_fused_z": avg_fused_z,
-                "start_regime": start_regime,
-                "end_regime": end_regime,
-                "spans_transition": spans_transition,
-                "regime_context": regime_context
-            })
-        return pd.DataFrame(rows)
+                    merged.append([s, e])
+
+            raw_idx = series.index
+            has_dt_index = isinstance(raw_idx, pd.DatetimeIndex)
+            idx = raw_idx
+            if not has_dt_index:
+                try:
+                    inferred_type = getattr(raw_idx, "inferred_type", "") or ""
+                    if "date" in inferred_type:
+                        dt_idx = pd.to_datetime(raw_idx, errors="coerce")
+                        if isinstance(dt_idx, pd.DatetimeIndex) and not dt_idx.isna().all():
+                            idx = dt_idx
+                            has_dt_index = True
+                except Exception:
+                    pass
+
+            rows = []
+            for i, (s, e) in enumerate(merged):
+                start_ts = idx[max(0, s)]
+                end_ts = idx[min(len(idx) - 1, e)]
+                if has_dt_index and pd.notna(start_ts) and pd.notna(end_ts):
+                    duration_s = (end_ts - start_ts).total_seconds()
+                else:
+                    duration_s = float(e - s + 1)
+                
+                # Filter out short-duration episodes (only when real timestamps are available)
+                if has_dt_index and duration_s < self.ep.min_duration_s:
+                    continue
+                
+                # --- Culprit Attribution Logic ---
+                episode_streams = {k: v[s:e+1] for k, v in streams.items()}
+                
+                # Find the detector with the highest mean score during the episode
+                max_mean_score = -np.inf
+                primary_detector = "unknown"
+                for name, scores in episode_streams.items():
+                    mean_score = np.nanmean(scores)
+                    if not np.isfinite(mean_score):
+                        continue
+                    if mean_score > max_mean_score:
+                        max_mean_score = mean_score
+                        primary_detector = name
+
+                # For multivariate models, find the top contributing sensor
+                culprits_raw = primary_detector
+                if 'pca' in primary_detector or 'mhal' in primary_detector:
+                    # Simple attribution: find sensor with max mean value in the episode window
+                    episode_features = original_features.iloc[s:e+1]
+                    top_feature: Optional[str] = None
+                    if not episode_features.empty:
+                        feature_means = episode_features.select_dtypes(include=[np.number]).mean()
+                        feature_means = feature_means.dropna()
+                        if not feature_means.empty:
+                            top_feature = str(feature_means.idxmax())
+                    if top_feature:
+                        culprit_sensor = Fuser._get_base_sensor(top_feature)
+                        culprits_raw = f"{primary_detector}({culprit_sensor})"
+
+                # Format culprit with human-readable label
+                culprits = format_culprit_label(culprits_raw, use_short=False)
+                
+                # Calculate fused score statistics for the episode
+                episode_fused = x[s:e+1]
+                peak_fused_z = float(np.nanmax(episode_fused)) if len(episode_fused) > 0 else 0.0
+                avg_fused_z = float(np.nanmean(episode_fused)) if len(episode_fused) > 0 else 0.0
+                
+                # v10.1.0: Episode-Regime Correlation
+                # Extract regime context for this episode
+                start_regime = -1
+                end_regime = -1
+                spans_transition = False
+                regime_context = "unknown"
+                
+                if regime_labels is not None and len(regime_labels) > e:
+                    episode_regimes = regime_labels[s:e+1]
+                    
+                    # Get dominant regime at start and end
+                    start_regime = int(episode_regimes[0]) if len(episode_regimes) > 0 else -1
+                    end_regime = int(episode_regimes[-1]) if len(episode_regimes) > 0 else -1
+                    
+                    # Check if episode spans multiple regimes
+                    unique_regimes = np.unique(episode_regimes)
+                    spans_transition = len(unique_regimes) > 1
+                    
+                    # Determine regime context for filtering
+                    if spans_transition:
+                        # Episode spans regime transition - may be false positive
+                        regime_context = "transition"
+                    elif len(unique_regimes) == 1:
+                        # Single regime - genuine anomaly within stable operating mode
+                        regime_context = "stable"
+                    else:
+                        regime_context = "unknown"
+                
+                rows.append({
+                    "start_ts": start_ts, 
+                    "end_ts": end_ts, 
+                    "duration_s": duration_s, 
+                    "len": int(e - s + 1), 
+                    "culprits": culprits,
+                    "peak_fused_z": peak_fused_z,
+                    "avg_fused_z": avg_fused_z,
+                    "start_regime": start_regime,
+                    "end_regime": end_regime,
+                    "spans_transition": spans_transition,
+                    "regime_context": regime_context
+                })
+            return pd.DataFrame(rows)
 
 
 def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict[str, Any], original_features: pd.DataFrame, regime_labels: Optional[np.ndarray] = None) -> Tuple[pd.Series, pd.DataFrame]:
