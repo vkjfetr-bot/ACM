@@ -2,6 +2,22 @@
 # ==========================================================
 # Auto-provisioned when Grafana starts
 # Uses Docker container names for internal networking
+#
+# CRITICAL: Tag Mapping Rules for tracesToMetrics/tracesToLogs/tracesToProfiles
+# ==============================================================================
+# ACM span attributes use "acm." prefix (e.g., acm.equipment, acm.run_id)
+# Prometheus/Loki labels do NOT have prefix (e.g., equipment, run_id)
+#
+# The tags config maps:
+#   key: <span attribute name>  ->  value: <query variable name>
+#
+# Example:
+#   tags:
+#     - key: acm.equipment      # Span attribute to extract FROM
+#       value: equipment        # Query variable to use AS ${__span.tags.equipment}
+#
+# NEVER use ${__span.tags["acm.equipment"]} - use the 'value' name instead!
+# ==============================================================================
 
 apiVersion: 1
 

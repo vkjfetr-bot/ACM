@@ -496,6 +496,32 @@ FROM ACM_EpisodeMetrics WHERE EquipID = 1
 ### Default Time Range
 ACM dashboards should default to 5 years: `"from": "now-5y"`
 
+### Grafana Datasource tracesToMetrics/tracesToLogs/tracesToProfiles Tag Mapping
+**CRITICAL: Understand how Grafana maps span attributes to query variables**
+
+ACM span attributes use `acm.` prefix (e.g., `acm.equipment`, `acm.run_id`)
+Prometheus/Loki labels do NOT have prefix (e.g., `equipment`, `run_id`)
+
+The `tags` config in datasources.yaml maps:
+- `key`: Span attribute name to extract FROM
+- `value`: Query variable name to use AS
+
+```yaml
+# CORRECT:
+tags:
+  - key: acm.equipment      # Span attribute
+    value: equipment        # Query variable name
+queries:
+  - query: 'metric{equipment="${__span.tags.equipment}"}'  # Use 'value' name
+
+# WRONG - NEVER DO THIS:
+tags:
+  - key: acm.equipment
+    value: ''               # Empty value breaks it!
+queries:
+  - query: 'metric{equipment="${__span.tags["acm.equipment"]}"}'  # WRONG syntax
+```
+
 ---
 
 ## Common Mistakes to AVOID
@@ -517,6 +543,8 @@ ACM dashboards should default to 5 years: `"from": "now-5y"`
 | Python inline | F-strings with `{}` or quotes | **ALWAYS create script file** |
 | Grafana | `"spanNulls": true` | `"spanNulls": 3600000` |
 | RUL queries | `ORDER BY RUL_Hours ASC` | `ORDER BY CreatedAt DESC` |
+| Grafana tags | `value: ''` with `${__span.tags["key"]}` | `value: alias` with `${__span.tags.alias}` |
+| Grafana tags | `${__span.tags["acm.equipment"]}` | Map `key: acm.equipment, value: equipment` then use `${__span.tags.equipment}` |
 
 ---
 
