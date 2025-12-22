@@ -201,6 +201,67 @@ _sql_sink: Optional["_SqlLogSink"] = None
 _metrics: Dict[str, Any] = {}
 _init_lock = threading.Lock()
 
+# Phase-specific tracers for Tempo coloring (v10.3.0)
+# Each phase gets a unique color in Tempo waterfall view because each has a different service name
+_phase_tracers: Dict[str, Any] = {}
+
+# Map span prefixes to phase service names for Tempo coloring
+# Using "acm-{phase}" naming so they group together visually
+_PHASE_SERVICE_MAP = {
+    # acm-startup: Initialization phase (purple in most themes)
+    "startup": "acm-startup",
+    "acm": "acm-startup",
+    "config": "acm-startup",
+    
+    # acm-data: Data loading/processing (blue)
+    "load": "acm-data",
+    "load_data": "acm-data",
+    "data": "acm-data",
+    "baseline": "acm-data",
+    
+    # acm-features: Feature engineering (orange)
+    "features": "acm-features",
+    "sensor": "acm-features",
+    "normalize": "acm-features",
+    "impute": "acm-features",
+    "hash": "acm-features",
+    
+    # acm-models: Model training/fitting (green)  
+    "fit": "acm-models",
+    "train": "acm-models",
+    "models": "acm-models",
+    "calibrate": "acm-models",
+    
+    # acm-score: Inference/scoring (cyan)
+    "score": "acm-score",
+    "regimes": "acm-score",
+    "compute": "acm-score",
+    
+    # acm-fusion: Anomaly fusion/episodes (yellow)
+    "fusion": "acm-fusion",
+    "thresholds": "acm-fusion",
+    "episodes": "acm-fusion",
+    "culprits": "acm-fusion",
+    
+    # acm-forecast: RUL/health forecasting (magenta)
+    "forecast": "acm-forecast",
+    "analytics": "acm-forecast",
+    
+    # acm-persist: SQL writes/persistence (red)
+    "persist": "acm-persist",
+    "sql": "acm-persist",
+    "write": "acm-persist",
+    "outputs": "acm-persist",
+    
+    # acm-monitor: Drift monitoring (teal)
+    "drift": "acm-monitor",
+    "adaptive": "acm-monitor",
+    
+    # acm-finalize: Cleanup/shutdown (gray)
+    "finalize": "acm-finalize",
+    "shutdown": "acm-finalize",
+}
+
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -354,17 +415,33 @@ def init(
         
         resource = Resource.create({SERVICE_NAME: service_name})
         
-        # Tracing via OTLP
+        # Tracing via OTLP with phase-specific tracers for Tempo coloring
         if enable_tracing:
+            global _phase_tracers
+            
+            # Create the main tracer provider (for default/fallback tracer)
             trace_provider = TracerProvider(resource=resource)
-            trace_provider.add_span_processor(
-                BatchSpanProcessor(
-                    OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
-                )
+            span_processor = BatchSpanProcessor(
+                OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
             )
+            trace_provider.add_span_processor(span_processor)
             otel_trace.set_tracer_provider(trace_provider)
             _tracer = otel_trace.get_tracer(service_name)
-            Console.ok(f"Traces -> {otlp_endpoint}/v1/traces", component="OTEL")
+            
+            # Create phase-specific tracers for colored spans in Tempo
+            # Each phase gets its own service name = different color in Tempo waterfall
+            phase_services = set(_PHASE_SERVICE_MAP.values())
+            for phase_service in phase_services:
+                phase_resource = Resource.create({SERVICE_NAME: phase_service})
+                phase_provider = TracerProvider(resource=phase_resource)
+                phase_provider.add_span_processor(
+                    BatchSpanProcessor(
+                        OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
+                    )
+                )
+                _phase_tracers[phase_service] = phase_provider.get_tracer(phase_service)
+            
+            Console.ok(f"Traces -> {otlp_endpoint}/v1/traces ({len(phase_services)} phase colors)", component="OTEL")
         
         # Metrics via OTLP
         if enable_metrics:
@@ -1073,6 +1150,18 @@ class Span:
         kind_str = _SPAN_KIND_MAP.get(prefix, "INTERNAL")
         return getattr(SpanKind, kind_str, SpanKind.INTERNAL)
     
+    def _get_phase_tracer(self) -> Any:
+        """Get phase-specific tracer for Tempo coloring.
+        
+        Returns tracer with service name matching this span's phase.
+        Falls back to global tracer if phase not mapped.
+        """
+        prefix = self.name.split(".")[0]
+        phase_service = _PHASE_SERVICE_MAP.get(prefix)
+        if phase_service and phase_service in _phase_tracers:
+            return _phase_tracers[phase_service]
+        return _tracer  # Fallback to default tracer
+    
     def __enter__(self) -> "Span":
         self._start_time = time.perf_counter()
         
@@ -1081,13 +1170,15 @@ class Span:
             self._mem_start = self._get_memory_mb()
             self._cpu_start = self._get_cpu_times()
         
-        if _tracer is not None:
+        # Use phase-specific tracer for Tempo coloring (v10.3.0)
+        tracer = self._get_phase_tracer()
+        if tracer is not None:
             span_kind = self._get_span_kind()
             # Include equipment in span name for easy identification in Tempo
             # e.g., "fit.pca" -> "fit.pca:FD_FAN"
             equip_suffix = f":{_config.equipment}" if _config.equipment else ""
             span_display_name = f"{self.name}{equip_suffix}"
-            self._span = _tracer.start_span(span_display_name, kind=span_kind)
+            self._span = tracer.start_span(span_display_name, kind=span_kind)
             self._context_token = otel_trace.use_span(self._span, end_on_exit=False)
             self._context_token.__enter__()
             

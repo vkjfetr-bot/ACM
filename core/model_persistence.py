@@ -54,6 +54,14 @@ import pandas as pd
 import numpy as np
 from core.observability import Console, Heartbeat
 
+# Import tracing support (optional)
+try:
+    from core.observability import Span
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+    Span = None
+
 
 # ============================================================================
 # Forecast State Persistence (FORECAST-STATE-01)
@@ -525,32 +533,56 @@ class ModelVersionManager:
         Returns:
             Version number used
         """
-        if not self.sql_client or self.equip_id is None:
-            Console.error("Cannot save models - SQL client/equip_id missing", component="MODEL", equipment=self.equip, equip_id=self.equip_id)
-            raise ValueError("SQL client and equip_id required for model persistence")
+        # Start span for model persistence (v10.3.0 tracing enhancement)
+        span_context = None
+        if OTEL_AVAILABLE and Span is not None:
+            span_context = Span(
+                f"persist.save_model",
+                model_count=len(models) if models else 0,
+                equipment=self.equip,
+            )
+            span_context.__enter__()
         
-        # Determine version
-        if version is None:
-            version = self.get_next_version()
-        
-        Console.info(f"Saving models to SQL ModelRegistry v{version}", component="MODEL")
-        
-        # Create manifest
-        manifest = {
-            "version": version,
-            "created_at": datetime.now().isoformat(),
-            "equip": self.equip,
-            "saved_models": list(models.keys()),
-            **metadata
-        }
-        
-        # Save to SQL
         try:
-            self._save_models_to_sql(models, metadata, version)
-            Console.info(f"Saved {len(models)} models to SQL ModelRegistry v{version}", component="MODEL")
-        except Exception as e:
-            Console.error(f"Failed to save models to SQL: {e}", component="MODEL-SQL", equip_id=self.equip_id, version=version, error_type=type(e).__name__, error=str(e)[:200])
-            raise
+            if not self.sql_client or self.equip_id is None:
+                Console.error("Cannot save models - SQL client/equip_id missing", component="MODEL", equipment=self.equip, equip_id=self.equip_id)
+                if span_context:
+                    span_context._span.set_attribute("acm.error", True)
+                raise ValueError("SQL client and equip_id required for model persistence")
+            
+            # Determine version
+            if version is None:
+                version = self.get_next_version()
+            
+            if span_context:
+                span_context._span.set_attribute("acm.model_version", version)
+            
+            Console.info(f"Saving models to SQL ModelRegistry v{version}", component="MODEL")
+            
+            # Create manifest
+            manifest = {
+                "version": version,
+                "created_at": datetime.now().isoformat(),
+                "equip": self.equip,
+                "saved_models": list(models.keys()),
+                **metadata
+            }
+            
+            # Save to SQL
+            try:
+                self._save_models_to_sql(models, metadata, version)
+                Console.info(f"Saved {len(models)} models to SQL ModelRegistry v{version}", component="MODEL")
+                if span_context:
+                    span_context._span.set_attribute("acm.models_saved", len(models))
+                return version
+            except Exception as e:
+                Console.error(f"Failed to save models to SQL: {e}", component="MODEL-SQL", equip_id=self.equip_id, version=version, error_type=type(e).__name__, error=str(e)[:200])
+                if span_context:
+                    span_context._span.set_attribute("acm.error", True)
+                raise
+        finally:
+            if span_context:
+                span_context.__exit__(None, None, None)
         
         return version
     
@@ -794,26 +826,50 @@ class ModelVersionManager:
         Returns:
             Tuple of (models_dict, manifest_dict), or (None, None) if not found
         """
-        # Determine version to load
-        if version is None:
-            version = self.get_latest_version()
+        # Start span for model loading (v10.3.0 tracing enhancement)
+        span_context = None
+        if OTEL_AVAILABLE and Span is not None:
+            span_context = Span(
+                f"persist.load_model",
+                equipment=self.equip,
+            )
+            span_context.__enter__()
+        
+        try:
+            # Determine version to load
             if version is None:
-                Console.info("No cached models found - will train from scratch", component="MODEL")
+                version = self.get_latest_version()
+                if version is None:
+                    Console.info("No cached models found - will train from scratch", component="MODEL")
+                    if span_context:
+                        span_context._span.set_attribute("acm.models_loaded", 0)
+                    return None, None
+            
+            if span_context:
+                span_context._span.set_attribute("acm.model_version", version)
+            
+            # SQL-ONLY MODE: Load from SQL ModelRegistry only
+            if not self.sql_client or self.equip_id is None:
+                Console.warn("Cannot load models - SQL client/equip_id missing", component="MODEL", equipment=self.equip, equip_id=self.equip_id)
+                if span_context:
+                    span_context._span.set_attribute("acm.error", True)
                 return None, None
-        
-        # SQL-ONLY MODE: Load from SQL ModelRegistry only
-        if not self.sql_client or self.equip_id is None:
-            Console.warn("Cannot load models - SQL client/equip_id missing", component="MODEL", equipment=self.equip, equip_id=self.equip_id)
-            return None, None
-        
-        result = self._load_models_from_sql(version)
-        if result:
-            sql_models, sql_manifest = result
-            Console.info(f"✓ Loaded from SQL ModelRegistry successfully", component="MODEL")
-            return sql_models, sql_manifest
-        else:
-            Console.warn(f"Failed to load models from SQL ModelRegistry", component="MODEL", equipment=self.equip, equip_id=self.equip_id, version=version)
-            return None, None
+            
+            result = self._load_models_from_sql(version)
+            if result:
+                sql_models, sql_manifest = result
+                if span_context:
+                    span_context._span.set_attribute("acm.models_loaded", len(sql_models))
+                Console.info(f"✓ Loaded from SQL ModelRegistry successfully", component="MODEL")
+                return sql_models, sql_manifest
+            else:
+                Console.warn(f"Failed to load models from SQL ModelRegistry", component="MODEL", equipment=self.equip, equip_id=self.equip_id, version=version)
+                if span_context:
+                    span_context._span.set_attribute("acm.error", True)
+                return None, None
+        finally:
+            if span_context:
+                span_context.__exit__(None, None, None)
     
     def update_models_incremental(
         self,

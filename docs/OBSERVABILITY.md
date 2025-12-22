@@ -400,6 +400,63 @@ In your Loki datasource settings, add a derived field:
 - **Internal link**: Enable, select Tempo datasource
 - **URL**: `${__value.raw}`
 
+## Trace Coloring via Virtual Services (v10.3.0)
+
+ACM spans are automatically color-coded in Grafana Tempo based on their **phase** (high-level pipeline stage). This provides immediate visual feedback about which part of the pipeline is executing and helps identify bottlenecks.
+
+### How It Works
+
+Each ACM span is tagged with:
+1. **Resource service**: Always `acm-pipeline` (for correlation across logs/metrics/profiles)
+2. **Virtual service attribute**: `acm-{phase}` (for Tempo coloring)
+3. **Phase attribute**: The phase group (startup, features, fit, score, fusion, etc.)
+
+Tempo automatically colors spans by the **service.name** attribute, so each phase appears in a distinct color on the trace timeline and service map.
+
+### Virtual Services & Colors
+
+| Virtual Service | Phase | Color | Example Spans | Purpose |
+|-----------------|-------|-------|---------------|---------|
+| **acm-startup** | startup | 🟣 Purple | `startup.load_data`, `startup.config` | Init, config loading, SQL connection |
+| **acm-features** | features | 🟠 Orange | `features.build_features`, `features.normalize` | Feature engineering, data prep |
+| **acm-fit** | fit | 🟢 Green | `fit.ar1`, `fit.pca`, `fit.iforest` | Model training and fitting |
+| **acm-score** | score | 🟢 Green | `score.ar1`, `score.regimes`, `score.calibrate` | Model inference and scoring |
+| **acm-fusion** | fusion | 🟡 Yellow | `fusion.thresholds`, `fusion.episodes` | Detector fusion, threshold calc |
+| **acm-monitoring** | monitoring | 🟢 Green | `monitoring.drift`, `monitoring.adaptive` | Drift detection, adaptive tuning |
+| **acm-forecast** | forecast | 🟠 Orange | `forecast.run`, `forecast.rul.simulate`, `forecast.rul.quantiles` | RUL estimation, health forecasting |
+| **acm-analytics** | analytics | 🟠 Orange | `analytics.comprehensive`, `analytics.outputs` | Analytics generation, reporting |
+| **acm-persist** | persist | 🔵 Blue | `persist.write`, `persist.save_model`, `persist.load_model` | SQL writes, model persistence |
+| **acm-finalize** | finalize | 🟣 Purple | `finalize.cleanup`, `finalize.shutdown` | Cleanup and shutdown |
+
+### Span Naming Convention
+
+All ACM spans follow the pattern: `{phase}.{component}.{operation?}`
+
+Examples:
+- `startup.load_data` - Loading data during startup
+- `fit.pca` - Fitting PCA detector (component = pca, no operation)
+- `persist.write` - Generic write operation
+- `sql.execute` - SQL execute operation
+- `forecast.rul.simulate` - Monte Carlo simulation sub-operation
+
+### Why Virtual Services?
+
+- **Single Resource Service**: `acm-pipeline` remains the canonical service name for logs, metrics, profiles, and cross-tool correlation
+- **Multi-Color Traces**: Virtual services enable per-phase coloring without breaking the unified service identity
+- **Automatic Coloring**: No dashboard changes needed—Tempo auto-colors based on span attributes
+
+### Viewing Colored Traces in Grafana
+
+1. **Service Map**: Visit Grafana → Tempo → Service Map. You'll see `acm-pipeline` with colored nodes representing each phase encountered in recent traces.
+
+2. **Trace Search**: Use TraceQL to search by virtual service:
+   ```traceql
+   { service.name =~ "acm-.*" }  # All ACM spans
+   { service.name = "acm-forecast" }  # Only forecasting spans
+   ```
+
+3. **Timeline View**: In a trace detail view, each span shows its color based on its phase. Green spans (fit, score) are typically fast; orange spans (features, forecast, analytics) are longer. Blue spans (persist) indicate I/O operations.
+
 ### Message Sequence: Batch Run (Coldstart)
 
 **Phase 1: Initialization**

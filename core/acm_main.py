@@ -1198,7 +1198,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             span_name,
             context=parent_context,  # Link to parent trace if available
             attributes={
-                "service.name": "acm-run",  # Virtual service for Tempo coloring
+                "service.name": "acm-startup",  # Virtual service for Tempo coloring (aligns with phase mapping)
+                "acm.phase": "startup",  # High-level phase for coloring
                 "acm.equipment": equip,
                 "acm.equip_id": equip_id,
                 "acm.run_id": run_id,

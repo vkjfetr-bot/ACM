@@ -38,6 +38,14 @@ try:
 except Exception as e:
     raise SystemExit("pyodbc is required. Install with: pip install pyodbc") from e
 
+# Import tracing support (optional)
+try:
+    from core.observability import Span
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+    Span = None
+
 
 class SQLClient:
     """
@@ -273,34 +281,112 @@ class SQLClient:
 
     # Optional helpers if you ever need one-off SQL
     def execute(self, tsql: str, *args) -> int:
-        cur = self.cursor()
+        """Execute a single T-SQL statement with optional span tracing."""
+        # Extract table name and operation type for span attributes
+        operation_type = "query"
+        table_name = None
+        if "INSERT" in tsql.upper():
+            operation_type = "insert"
+            match = re.search(r'INTO\s+(\w+)', tsql, re.IGNORECASE)
+            if match:
+                table_name = match.group(1)
+        elif "UPDATE" in tsql.upper():
+            operation_type = "update"
+            match = re.search(r'UPDATE\s+(\w+)', tsql, re.IGNORECASE)
+            if match:
+                table_name = match.group(1)
+        elif "DELETE" in tsql.upper():
+            operation_type = "delete"
+            match = re.search(r'FROM\s+(\w+)', tsql, re.IGNORECASE)
+            if match:
+                table_name = match.group(1)
+        else:
+            operation_type = "select"
+            match = re.search(r'FROM\s+(\w+)', tsql, re.IGNORECASE)
+            if match:
+                table_name = match.group(1)
+        
+        # Use Span for tracing (optional, graceful fallback if not available)
+        span_context = None
+        if OTEL_AVAILABLE and Span is not None:
+            span_context = Span(
+                f"sql.execute",
+                operation_type=operation_type,
+                table=table_name or "unknown",
+            )
+            span_context.__enter__()
+        
         try:
-            cur.execute(tsql, args)
-            if not self.conn.autocommit:
-                self.conn.commit()
-            return cur.rowcount if cur.rowcount is not None else -1
-        except Exception:
-            if not self.conn.autocommit:
-                self.conn.rollback()
-            raise
+            cur = self.cursor()
+            try:
+                cur.execute(tsql, args)
+                if not self.conn.autocommit:
+                    self.conn.commit()
+                rows_affected = cur.rowcount if cur.rowcount is not None else -1
+                
+                # Set span attributes for result
+                if span_context is not None:
+                    span_context._span.set_attribute("acm.rows_affected", rows_affected)
+                
+                return rows_affected
+            except Exception:
+                if not self.conn.autocommit:
+                    self.conn.rollback()
+                if span_context is not None:
+                    span_context._span.set_attribute("acm.error", True)
+                raise
+            finally:
+                cur.close()
         finally:
-            cur.close()
+            if span_context is not None:
+                span_context.__exit__(None, None, None)
 
     def executemany(self, tsql: str, seq_of_params) -> int:
-        cur = self.cursor()
+        """Execute a batch of statements with optional span tracing."""
+        # Extract table name for span attributes
+        table_name = None
+        if "INSERT" in tsql.upper():
+            match = re.search(r'INTO\s+(\w+)', tsql, re.IGNORECASE)
+            if match:
+                table_name = match.group(1)
+        
+        # Use Span for tracing
+        span_context = None
+        if OTEL_AVAILABLE and Span is not None:
+            span_context = Span(
+                f"sql.executemany",
+                operation_type="insert_batch",
+                table=table_name or "unknown",
+                batch_size=len(seq_of_params) if hasattr(seq_of_params, '__len__') else -1,
+            )
+            span_context.__enter__()
+        
         try:
-            cur.fast_executemany = True
-            cur.executemany(tsql, seq_of_params)
-            if not self.conn.autocommit:
-                self.conn.commit()
-            # len(seq_of_params) is generally a better inserted count than rowcount with ODBC
+            cur = self.cursor()
             try:
-                return len(seq_of_params)
+                cur.fast_executemany = True
+                cur.executemany(tsql, seq_of_params)
+                if not self.conn.autocommit:
+                    self.conn.commit()
+                # len(seq_of_params) is generally a better inserted count than rowcount with ODBC
+                try:
+                    rows_affected = len(seq_of_params)
+                except Exception:
+                    rows_affected = cur.rowcount if cur.rowcount is not None else -1
+                
+                # Set span attributes for result
+                if span_context is not None:
+                    span_context._span.set_attribute("acm.rows_affected", rows_affected)
+                
+                return rows_affected
             except Exception:
-                return cur.rowcount if cur.rowcount is not None else -1
-        except Exception:
-            if not self.conn.autocommit:
-                self.conn.rollback()
-            raise
+                if not self.conn.autocommit:
+                    self.conn.rollback()
+                if span_context is not None:
+                    span_context._span.set_attribute("acm.error", True)
+                raise
+            finally:
+                cur.close()
         finally:
-            cur.close()
+            if span_context is not None:
+                span_context.__exit__(None, None, None)

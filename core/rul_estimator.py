@@ -26,7 +26,7 @@ from scipy import stats
 
 from core.degradation_model import BaseDegradationModel, DegradationForecast
 from core.failure_probability import compute_failure_statistics
-from core.observability import Console, Heartbeat
+from core.observability import Console, Heartbeat, Span
 
 
 @dataclass
@@ -148,31 +148,33 @@ class RULEstimator:
         # Extract model uncertainty (std_error)
         model_std = baseline_forecast.std_error * self.noise_factor
         
-        # Run Monte Carlo simulations
-        simulation_times = self._run_monte_carlo_simulations(
-            baseline_forecast=baseline_forecast.point_forecast,
-            model_std=model_std,
-            dt_hours=dt_hours,
-            max_steps=max_steps
-        )
-        
-        # Compute quantiles
-        p10 = float(np.percentile(simulation_times, 10))
-        p50 = float(np.percentile(simulation_times, 50))
-        p90 = float(np.percentile(simulation_times, 90))
-        mean_rul = float(np.mean(simulation_times))
-        std_rul = float(np.std(simulation_times))
-        
-        # Compute failure probability within forecast horizon
-        failures_within_horizon = np.sum(simulation_times < max_horizon_hours)
-        failure_prob = float(failures_within_horizon / len(simulation_times))
-        
-        # Agresti-Coull adjustment for binomial confidence intervals
-        # Reference: Agresti & Coull (1998)
-        if self.n_simulations >= 10:
-            p10, p50, p90 = self._agresti_coull_adjustment(
-                p10, p50, p90, self.n_simulations, self.confidence_level
+        # Run Monte Carlo simulations with detailed span tracking (v10.3.0)
+        with Span("forecast.rul.simulate", n_simulations=self.n_simulations, max_steps=max_steps):
+            simulation_times = self._run_monte_carlo_simulations(
+                baseline_forecast=baseline_forecast.point_forecast,
+                model_std=model_std,
+                dt_hours=dt_hours,
+                max_steps=max_steps
             )
+        
+        # Compute quantiles with sub-span for analytics (v10.3.0)
+        with Span("forecast.rul.quantiles"):
+            p10 = float(np.percentile(simulation_times, 10))
+            p50 = float(np.percentile(simulation_times, 50))
+            p90 = float(np.percentile(simulation_times, 90))
+            mean_rul = float(np.mean(simulation_times))
+            std_rul = float(np.std(simulation_times))
+            
+            # Compute failure probability within forecast horizon
+            failures_within_horizon = np.sum(simulation_times < max_horizon_hours)
+            failure_prob = float(failures_within_horizon / len(simulation_times))
+            
+            # Agresti-Coull adjustment for binomial confidence intervals
+            # Reference: Agresti & Coull (1998)
+            if self.n_simulations >= 10:
+                p10, p50, p90 = self._agresti_coull_adjustment(
+                    p10, p50, p90, self.n_simulations, self.confidence_level
+                )
         
         Console.info(
             f"RUL estimate: P50={p50:.1f}h, P10={p10:.1f}h, P90={p90:.1f}h, "

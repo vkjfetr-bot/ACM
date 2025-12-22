@@ -1358,67 +1358,91 @@ class OutputManager:
 
     def write_table(self, table_name: str, df: pd.DataFrame, delete_existing: bool = False) -> int:
         """Generic SQL table writer with RunID/EquipID injection, defaults, and upsert routing."""
-        if not self._check_sql_health() or df is None or df.empty:
-            return 0
+        # Start span for this write operation (v10.3.0 tracing enhancement)
+        span_context = None
+        if _OBSERVABILITY_AVAILABLE and Span is not None:
+            span_context = Span(
+                f"persist.write",
+                table=table_name,
+                delete_existing=delete_existing,
+            )
+            span_context.__enter__()
+        
         try:
-            sql_df = df.copy()
-            now = pd.Timestamp.now().tz_localize(None)
+            if not self._check_sql_health() or df is None or df.empty:
+                if span_context:
+                    span_context._span.set_attribute("acm.rows_written", 0)
+                return 0
+            try:
+                sql_df = df.copy()
+                now = pd.Timestamp.now().tz_localize(None)
 
-            # Inject metadata
-            if 'RunID' not in sql_df.columns:
-                sql_df['RunID'] = self.run_id
-            if 'EquipID' not in sql_df.columns:
-                sql_df['EquipID'] = self.equip_id or 0
+                # Inject metadata
+                if 'RunID' not in sql_df.columns:
+                    sql_df['RunID'] = self.run_id
+                if 'EquipID' not in sql_df.columns:
+                    sql_df['EquipID'] = self.equip_id or 0
 
-            # Apply required defaults/repairs
-            sql_df, _ = self._apply_sql_required_defaults(table_name, sql_df, allow_repair=True)
+                # Apply required defaults/repairs
+                sql_df, _ = self._apply_sql_required_defaults(table_name, sql_df, allow_repair=True)
 
-            # Fill common fields when present
-            if 'Method' in sql_df.columns:
-                sql_df['Method'] = sql_df['Method'].fillna('default')
-            if 'LastUpdate' in sql_df.columns:
-                sql_df['LastUpdate'] = pd.to_datetime(sql_df['LastUpdate']).dt.tz_localize(None).fillna(now)
-            if 'EarliestMaintenance' in sql_df.columns:
-                sql_df['EarliestMaintenance'] = pd.to_datetime(sql_df['EarliestMaintenance']).dt.tz_localize(None).fillna(now)
-            if 'PreferredWindowStart' in sql_df.columns:
-                sql_df['PreferredWindowStart'] = pd.to_datetime(sql_df['PreferredWindowStart']).dt.tz_localize(None).fillna(now)
-            if 'PreferredWindowEnd' in sql_df.columns:
-                sql_df['PreferredWindowEnd'] = pd.to_datetime(sql_df['PreferredWindowEnd']).dt.tz_localize(None).fillna(now)
+                # Fill common fields when present
+                if 'Method' in sql_df.columns:
+                    sql_df['Method'] = sql_df['Method'].fillna('default')
+                if 'LastUpdate' in sql_df.columns:
+                    sql_df['LastUpdate'] = pd.to_datetime(sql_df['LastUpdate']).dt.tz_localize(None).fillna(now)
+                if 'EarliestMaintenance' in sql_df.columns:
+                    sql_df['EarliestMaintenance'] = pd.to_datetime(sql_df['EarliestMaintenance']).dt.tz_localize(None).fillna(now)
+                if 'PreferredWindowStart' in sql_df.columns:
+                    sql_df['PreferredWindowStart'] = pd.to_datetime(sql_df['PreferredWindowStart']).dt.tz_localize(None).fillna(now)
+                if 'PreferredWindowEnd' in sql_df.columns:
+                    sql_df['PreferredWindowEnd'] = pd.to_datetime(sql_df['PreferredWindowEnd']).dt.tz_localize(None).fillna(now)
 
-            # Normalize types/nulls for SQL
-            sql_df = self._prepare_dataframe_for_sql(sql_df)
+                # Normalize types/nulls for SQL
+                sql_df = self._prepare_dataframe_for_sql(sql_df)
 
-            # Optional delete-existing by RunID (+EquipID when available)
-            if delete_existing and self.sql_client is not None and self.run_id:
-                try:
-                    with self.sql_client.cursor() as cur:
-                        if 'EquipID' in sql_df.columns and self.equip_id is not None:
-                            cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0)))
-                        else:
-                            cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,))
-                        if hasattr(self.sql_client, "commit"):
-                            self.sql_client.commit()
-                        elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
-                            if not getattr(self.sql_client.conn, "autocommit", True):
-                                self.sql_client.conn.commit()
-                except Exception as del_ex:
-                    Console.warn(f"delete_existing failed for {table_name}: {del_ex}", component="OUTPUT", table=table_name, equip_id=self.equip_id, run_id=self.run_id, error_type=type(del_ex).__name__)
+                # Optional delete-existing by RunID (+EquipID when available)
+                if delete_existing and self.sql_client is not None and self.run_id:
+                    try:
+                        with self.sql_client.cursor() as cur:
+                            if 'EquipID' in sql_df.columns and self.equip_id is not None:
+                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0)))
+                            else:
+                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,))
+                            if hasattr(self.sql_client, "commit"):
+                                self.sql_client.commit()
+                            elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                                if not getattr(self.sql_client.conn, "autocommit", True):
+                                    self.sql_client.conn.commit()
+                    except Exception as del_ex:
+                        Console.warn(f"delete_existing failed for {table_name}: {del_ex}", component="OUTPUT", table=table_name, equip_id=self.equip_id, run_id=self.run_id, error_type=type(del_ex).__name__)
 
-            # Route known upsert tables (v10 schema)
-            if table_name == "ACM_HealthForecast":
-                return self._upsert_health_forecast(sql_df)
-            if table_name == "ACM_FailureForecast":
-                return self._upsert_failure_forecast(sql_df)
-            if table_name == "ACM_SensorForecast":
-                return self._upsert_sensor_forecast(sql_df)
-            if table_name == "ACM_PCA_Metrics":
-                return self._upsert_pca_metrics(sql_df)
-
-            # Default: bulk insert
-            return self._bulk_insert_sql(table_name, sql_df)
-        except Exception as e:
-            Console.warn(f"write_table failed for {table_name}: {e}", component="OUTPUT", table=table_name, rows=len(df) if df is not None else 0, equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
+                # Route known upsert tables (v10 schema)
+                if table_name == "ACM_HealthForecast":
+                    rows_written = self._upsert_health_forecast(sql_df)
+                elif table_name == "ACM_FailureForecast":
+                    rows_written = self._upsert_failure_forecast(sql_df)
+                elif table_name == "ACM_SensorForecast":
+                    rows_written = self._upsert_sensor_forecast(sql_df)
+                elif table_name == "ACM_PCA_Metrics":
+                    rows_written = self._upsert_pca_metrics(sql_df)
+                else:
+                    # Default: bulk insert
+                    rows_written = self._bulk_insert_sql(table_name, sql_df)
+                
+                # Record rows written in span
+                if span_context:
+                    span_context._span.set_attribute("acm.rows_written", rows_written)
+                
+                return rows_written
+            except Exception as e:
+                Console.warn(f"write_table failed for {table_name}: {e}", component="OUTPUT", table=table_name, rows=len(df) if df is not None else 0, equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
+                if span_context:
+                    span_context._span.set_attribute("acm.error", True)
+                return 0
+        finally:
+            if span_context:
+                span_context.__exit__(None, None, None)
 
     def _apply_sql_required_defaults(self, table_name: str, df: pd.DataFrame, allow_repair: bool = True) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Fill required columns with safe defaults to satisfy NOT NULL constraints.
