@@ -12,12 +12,12 @@
 | Phase | Name | Items | Status | Progress |
 |-------|------|-------|--------|----------|
 | 0 | Setup & Versioning | 3 | ✅ Complete | 3/3 |
-| 1 | Core Architecture | 9 | ⏳ Not Started | 0/9 |
-| 2 | Regime System | 12 | ⏳ Not Started | 0/12 |
+| 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
+| 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
 | 3 | Detector/Fusion | 6 | ⏳ Not Started | 0/6 |
 | 4 | Health/Episode/RUL | 6 | ⏳ Not Started | 0/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **3/50** |
+| **Total** | | **50** | | **10/50** |
 
 ---
 
@@ -876,11 +876,11 @@ class ActiveModelsManager:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `ACM_ActiveModels` table schema | `scripts/sql/migrations/` | ⏳ |
-| [ ] Create `ActiveModelsManager` class | `core/regime_manager.py` | ⏳ |
-| [ ] Force all regime reads through pointer | `core/regime_manager.py` | ⏳ |
-| [ ] Force all threshold reads through pointer | `core/regime_manager.py` | ⏳ |
-| [ ] Force all forecasting reads through pointer | `core/regime_manager.py` | ⏳ |
+| [x] Create `ACM_ActiveModels` table schema | `scripts/sql/migrations/v11/010_acm_active_models.sql` | ✅ |
+| [x] Create `ActiveModelsManager` class | `core/regime_manager.py` | ✅ |
+| [x] Force all regime reads through pointer | `core/regime_manager.py` | ✅ |
+| [x] Force all threshold reads through pointer | `core/regime_manager.py` | ✅ |
+| [x] Force all forecasting reads through pointer | `core/regime_manager.py` | ✅ |
 
 ### P2.2 — Cold Start Handling (Item 3)
 
@@ -907,9 +907,9 @@ if active_models.is_cold_start:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Define `ActiveRegimeVersion = NULL` as cold-start | `core/regime_manager.py` | ⏳ |
-| [ ] Disable all regime-aware logic when NULL | `core/regime_manager.py` | ⏳ |
-| [ ] Add `is_cold_start()` method | `core/regime_manager.py` | ⏳ |
+| [x] Define `ActiveRegimeVersion = NULL` as cold-start | `core/regime_manager.py` | ✅ |
+| [x] Disable all regime-aware logic when NULL | `core/regime_manager.py` | ✅ |
+| [x] Add `is_cold_start()` method | `core/regime_manager.py` | ✅ |
 | [ ] Update pipeline to check cold-start state | `core/acm_main.py` | ⏳ |
 
 ### P2.3 — UNKNOWN/EMERGING Regime (Item 4)
@@ -966,9 +966,9 @@ def assign_regime(self, X: np.ndarray, threshold: float = 2.0) -> Tuple[int, flo
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Allow `RegimeLabel = -1` for UNKNOWN | `core/regimes.py` | ⏳ |
-| [ ] Allow `RegimeLabel = -2` for EMERGING | `core/regimes.py` | ⏳ |
-| [ ] Remove forced nearest-regime assignment | `core/regimes.py` | ⏳ |
+| [x] Allow `RegimeLabel = -1` for UNKNOWN | `core/regime_manager.py` | ✅ |
+| [x] Allow `RegimeLabel = -2` for EMERGING | `core/regime_manager.py` | ✅ |
+| [x] Remove forced nearest-regime assignment | `core/regime_manager.py` | ✅ |
 | [ ] Update downstream logic for unknown regimes | `core/*.py` | ⏳ |
 
 ### P2.4 — Clean Regime Discovery Inputs (Item 5)
@@ -1010,10 +1010,10 @@ def discover_regimes(self, feature_matrix: FeatureMatrix, ...) -> RegimeModel:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Remove anomaly scores from regime inputs | `core/regimes.py` | ⏳ |
-| [ ] Remove health indices from regime inputs | `core/regimes.py` | ⏳ |
-| [ ] Remove residuals from regime inputs | `core/regimes.py` | ⏳ |
-| [ ] Remove detector outputs from regime inputs | `core/regimes.py` | ⏳ |
+| [x] Remove anomaly scores from regime inputs | `core/regime_manager.py` | ✅ |
+| [x] Remove health indices from regime inputs | `core/regime_manager.py` | ✅ |
+| [x] Remove residuals from regime inputs | `core/regime_manager.py` | ✅ |
+| [x] Remove detector outputs from regime inputs | `core/regime_manager.py` | ✅ |
 | [ ] Document clean input requirements | `docs/V11_ARCHITECTURE.md` | ⏳ |
 
 ### P2.5 — ACM_RegimeDefinitions Table (Item 11)
