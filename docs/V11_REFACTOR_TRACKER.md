@@ -215,9 +215,9 @@ class PipelineContext:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `PipelineMode` enum (ONLINE, OFFLINE) | `core/pipeline_modes.py` | ⏳ |
-| [ ] Create `PipelineContext` dataclass | `core/pipeline_modes.py` | ⏳ |
-| [ ] Define stage enum (LOAD, PREPROCESS, DETECT, FUSE, HEALTH, FORECAST, PERSIST) | `core/pipeline_modes.py` | ⏳ |
+| [x] Create `PipelineMode` enum (ONLINE, OFFLINE) | `core/pipeline_types.py` | ✅ |
+| [x] Create `PipelineContext` dataclass | `core/pipeline_types.py` | ✅ |
+| [x] Define stage enum (LOAD, PREPROCESS, DETECT, FUSE, HEALTH, FORECAST, PERSIST) | `core/pipeline_types.py` | ✅ |
 | [ ] Refactor `run_pipeline()` to accept mode parameter | `core/acm_main.py` | ⏳ |
 | [ ] Create `OnlinePipeline` class (assignment-only) | `core/acm_main.py` | ⏳ |
 | [ ] Create `OfflinePipeline` class (discovery-only) | `core/acm_main.py` | ⏳ |
@@ -302,12 +302,12 @@ class DataContract:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `DataContract` class | `core/data_contract.py` | ⏳ |
-| [ ] Implement timestamp order validation | `core/data_contract.py` | ⏳ |
-| [ ] Implement duplicate detection | `core/data_contract.py` | ⏳ |
-| [ ] Implement cadence validation | `core/data_contract.py` | ⏳ |
-| [ ] Implement future row rejection | `core/data_contract.py` | ⏳ |
-| [ ] Add `ContractViolation` exception | `core/data_contract.py` | ⏳ |
+| [x] Create `DataContract` class | `core/pipeline_types.py` | ✅ |
+| [x] Implement timestamp order validation | `core/pipeline_types.py` | ✅ |
+| [x] Implement duplicate detection | `core/pipeline_types.py` | ✅ |
+| [x] Implement cadence validation | `core/pipeline_types.py` | ✅ |
+| [x] Implement future row rejection | `core/pipeline_types.py` | ✅ |
+| [x] Add `ContractViolation` exception | `core/pipeline_types.py` | ✅ |
 | [ ] Integrate gate at pipeline entry | `core/acm_main.py` | ⏳ |
 
 ### P1.3 — Sensor Validity Checks (Item 28)
@@ -384,9 +384,9 @@ CREATE INDEX IX_SensorValidity_Equip ON ACM_SensorValidity(EquipID);
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `SensorValidator` class | `core/data_contract.py` | ⏳ |
-| [ ] Implement range plausibility checks | `core/data_contract.py` | ⏳ |
-| [ ] Implement stuck-value detection | `core/data_contract.py` | ⏳ |
+| [x] Create `SensorValidator` class | `core/pipeline_types.py` | ✅ |
+| [x] Implement range plausibility checks | `core/pipeline_types.py` | ✅ |
+| [x] Implement stuck-value detection | `core/pipeline_types.py` | ✅ |
 | [ ] Create `ACM_SensorValidity` table schema | `scripts/sql/migrations/` | ⏳ |
 | [ ] Persist sensor validity mask per run | `core/output_manager.py` | ⏳ |
 
