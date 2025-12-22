@@ -14,10 +14,10 @@
 | 0 | Setup & Versioning | 3 | ✅ Complete | 3/3 |
 | 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
-| 3 | Detector/Fusion | 6 | ⏳ Not Started | 0/6 |
+| 3 | Detector/Fusion | 6 | 🔄 In Progress | 2/6 |
 | 4 | Health/Episode/RUL | 6 | ⏳ Not Started | 0/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **10/50** |
+| **Total** | | **50** | | **12/50** |
 
 ---
 
@@ -1585,7 +1585,7 @@ pca_detector.fit_baseline(baseline_normalizer.normalize(baseline_df))
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `BaselineNormalizer` class | `core/baseline_normalizer.py` | ⏳ |
+| [x] Create `BaselineNormalizer` class | `core/baseline_normalizer.py` | ✅ |
 | [ ] Remove detector-specific normalization | `core/ar1_detector.py` | ⏳ |
 | [ ] Remove detector-specific normalization | `core/outliers.py` | ⏳ |
 | [ ] Integrate normalizer into pipeline | `core/acm_main.py` | ⏳ |
@@ -1732,10 +1732,10 @@ class AR1Detector(DetectorProtocol):
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `DetectorProtocol` ABC | `core/detector_protocol.py` | ⏳ |
-| [ ] Define `fit_baseline(X_train)` method | `core/detector_protocol.py` | ⏳ |
-| [ ] Define `score(X_score) -> DataFrame` method | `core/detector_protocol.py` | ⏳ |
-| [ ] Define output schema (z_score, raw_score, etc.) | `core/detector_protocol.py` | ⏳ |
+| [x] Create `DetectorProtocol` ABC | `core/detector_protocol.py` | ✅ |
+| [x] Define `fit_baseline(X_train)` method | `core/detector_protocol.py` | ✅ |
+| [x] Define `score(X_score) -> DataFrame` method | `core/detector_protocol.py` | ✅ |
+| [x] Define output schema (z_score, raw_score, etc.) | `core/detector_protocol.py` | ✅ |
 | [ ] Refactor AR1 to implement protocol | `core/ar1_detector.py` | ⏳ |
 | [ ] Refactor PCA to implement protocol | `core/outliers.py` | ⏳ |
 | [ ] Refactor IForest to implement protocol | `core/outliers.py` | ⏳ |
