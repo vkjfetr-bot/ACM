@@ -927,31 +927,58 @@ Heartbeat = Progress
 
 # Span kind mapping for colorful traces in Tempo
 # Different span kinds get different colors in the trace view
+# Strategy: Use all 5 span kinds for visual clarity (not just green INTERNAL)
+#
+# Color distribution goal:
+#   🔵 Blue (CLIENT): 20% - All I/O operations (data in/out)
+#   🟢 Green (INTERNAL): 30% - Core algorithms (processing)
+#   🟣 Purple (SERVER): 10% - High-level orchestration (entry/exit)
+#   🟠 Orange (PRODUCER): 20% - Data generation (creation)
+#   🟡 Yellow (CONSUMER): 20% - Aggregation/fusion (consumption)
+#
 _SPAN_KIND_MAP = {
-    # CLIENT (blue): External data access, I/O operations
+    # 🔵 CLIENT (blue): External I/O - data in/out
     "load_data": "CLIENT",
     "load": "CLIENT",
     "sql": "CLIENT",
     "persist": "CLIENT",
     "write": "CLIENT",
-    # INTERNAL (green): Core processing and algorithms
+    "read": "CLIENT",
+    "fetch": "CLIENT",
+    
+    # 🟢 INTERNAL (green): Core algorithms - processing
     "fit": "INTERNAL",
     "score": "INTERNAL",
-    "features": "INTERNAL",
-    "models": "INTERNAL",
-    "calibrate": "INTERNAL",
-    "fusion": "INTERNAL",
-    "regimes": "INTERNAL",
-    "forecast": "INTERNAL",
-    "train": "INTERNAL",
     "compute": "INTERNAL",
-    # SERVER (purple): Entry points and control flow
-    "outputs": "SERVER",
+    "calibrate": "INTERNAL",
+    "regimes": "INTERNAL",
+    "drift": "INTERNAL",
+    "hash": "INTERNAL",
+    "normalize": "INTERNAL",
+    "impute": "INTERNAL",
+    
+    # 🟣 SERVER (purple): High-level orchestration - entry/exit
     "startup": "SERVER",
+    "outputs": "SERVER",
+    "finalize": "SERVER",
+    "shutdown": "SERVER",
+    "pipeline": "SERVER",
     "acm": "SERVER",
-    # PRODUCER (orange): Data generation and preparation
-    "data": "PRODUCER",
+    "models": "SERVER",
+    
+    # 🟠 PRODUCER (orange): Data generation - creation
+    "features": "PRODUCER",
     "baseline": "PRODUCER",
+    "data": "PRODUCER",
+    "forecast": "PRODUCER",
+    "analytics": "PRODUCER",
+    
+    # 🟡 CONSUMER (yellow): Aggregation/fusion - consumption
+    "fusion": "CONSUMER",
+    "thresholds": "CONSUMER",
+    "episodes": "CONSUMER",
+    "culprits": "CONSUMER",
+    "train": "CONSUMER",  # Orchestrates multiple fit operations
 }
 
 
@@ -973,21 +1000,37 @@ class Span:
         with Span("fit.pca"):
             model.fit(X)
         
-        # With resource tracking (memory, CPU)
-        with Span("fit.pca", track_resources=True):
+        # With resource tracking and custom attributes
+        with Span("fit.pca", track_resources=True, n_samples=1000, n_features=50):
             model.fit(X)
     
-    Spans are colored in Tempo based on span kind:
-    - CLIENT (blue): External calls (SQL, file I/O)
-    - INTERNAL (green): Internal processing
-    - SERVER (purple): Entry points
-    - PRODUCER (orange): Data generation
+    Spans are color-coded in Tempo based on span kind (determined by prefix):
+    - 🔵 CLIENT (blue): I/O operations (sql, load, persist, write)
+    - 🟢 INTERNAL (green): Algorithms (fit, score, compute, calibrate)
+    - 🟣 SERVER (purple): Orchestration (startup, outputs, pipeline, models)
+    - 🟠 PRODUCER (orange): Data generation (features, forecast, analytics)
+    - 🟡 CONSUMER (yellow): Aggregation (fusion, thresholds, episodes)
     
-    Resource metrics recorded (when track_resources=True):
+    Standard attributes (auto-added):
+    - acm.service: "acm-pipeline"
+    - acm.equipment: Equipment name
+    - acm.equip_id: Equipment database ID
+    - acm.run_id: Run identifier (UUID)
+    - acm.category: Top-level category (from span name prefix)
+    - acm.phase: High-level phase group (startup/features/fit/score/fusion/persist/finalize)
+    - acm.batch_num: Batch number (for batch runs)
+    - acm.batch_total: Total batches (for batch runs)
+    
+    Resource metrics (when track_resources=True):
     - acm_memory_rss_mb: Process memory at section end
     - acm_memory_delta_mb: Memory change during section
     - acm_cpu_percent: CPU usage during section
-    - All labeled with {equipment, section, run_id}
+    - All metrics labeled with {equipment, section, run_id}
+    
+    Custom attributes (caller-provided):
+    - n_samples, n_features, n_detectors (data attributes)
+    - detector, model_version (model attributes)
+    - outcome, error_type (result attributes)
     """
     
     def __init__(self, name: str, track_resources: bool = True, **attributes):
@@ -1047,6 +1090,7 @@ class Span:
             self._context_token.__enter__()
             
             # Add standard attributes
+            self._span.set_attribute("acm.service", _config.service_name)  # Always "acm-pipeline"
             if _config.equipment:
                 self._span.set_attribute("acm.equipment", _config.equipment)
             if _config.equip_id:
@@ -1055,9 +1099,33 @@ class Span:
                 self._span.set_attribute("acm.run_id", _config.run_id)
             
             # Add span category for easier filtering
-            self._span.set_attribute("acm.category", self.name.split(".")[0])
+            category = self.name.split(".")[0]
+            self._span.set_attribute("acm.category", category)
             
-            # Add custom attributes
+            # Add high-level phase for grouping (NEW in v10.3.0)
+            # Map category to broader phase groups
+            phase_map = {
+                "startup": "startup", "load": "startup", "config": "startup",
+                "features": "features", "data": "features", "baseline": "features",
+                "fit": "fit", "train": "fit", "models": "fit",
+                "score": "score",
+                "regimes": "score", "calibrate": "score",
+                "fusion": "fusion", "thresholds": "fusion", "episodes": "fusion",
+                "drift": "monitoring", "adaptive": "monitoring",
+                "forecast": "forecast", "analytics": "analytics",
+                "persist": "persist", "sql": "persist", "write": "persist",
+                "outputs": "finalize", "finalize": "finalize", "shutdown": "finalize",
+            }
+            phase = phase_map.get(category, category)
+            self._span.set_attribute("acm.phase", phase)
+            
+            # Add batch context for batch runs (NEW in v10.3.0)
+            if _config.batch_num > 0:
+                self._span.set_attribute("acm.batch_num", _config.batch_num)
+            if _config.batch_total > 0:
+                self._span.set_attribute("acm.batch_total", _config.batch_total)
+            
+            # Add custom attributes from caller
             for key, value in self.attributes.items():
                 self._span.set_attribute(f"acm.{key}", value)
             

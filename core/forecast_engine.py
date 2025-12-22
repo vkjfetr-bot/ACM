@@ -66,7 +66,7 @@ from core.sensor_attribution import SensorAttributor
 from core.metrics import compute_comprehensive_metrics, log_metrics_summary, compute_forecast_diagnostics, log_forecast_diagnostics
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
-from core.observability import Console, Heartbeat
+from core.observability import Console, Heartbeat, Span
 
 
 # ========================================================================
@@ -191,144 +191,145 @@ class ForecastEngine:
             - 'tables_written': List[str] (SQL tables updated)
             - 'error': str (if success=False)
         """
-        try:
-            # Step 1: Load health timeline with DataSummary (M3)
-            health_df, data_quality, data_summary = self._load_health_timeline()
-            
-            if health_df is None:
-                Console.warn("No health data available; skipping forecast",
-                             component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
-                return {
-                    'success': False,
-                    'error': 'No health data available',
-                    'data_quality': 'NONE'
-                }
-            
-            # M3.2 + M14: Early quality gating before expensive operations
-            # Allow GAPPY data (historical replay) but block SPARSE/FLAT/NOISY
-            if data_quality in [HealthQuality.SPARSE, HealthQuality.FLAT, HealthQuality.NOISY]:
-                # M14: Friendly message for coldstart/quality issues (not fatal)
-                quality_messages = {
-                    HealthQuality.SPARSE: "Insufficient data samples - need more historical data for reliable forecast",
-                    HealthQuality.FLAT: "Health data shows no variance - equipment may be in steady state",
-                    HealthQuality.NOISY: "Health data has excessive noise - consider smoothing or filtering"
-                }
-                friendly_msg = quality_messages.get(data_quality, f"Data quality issue: {data_quality.value}")
-                Console.warn(f"{friendly_msg}; skipping forecast (not fatal)",
-                             component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
-                             quality=data_quality.value)
-                return {
-                    'success': False,
-                    'error': friendly_msg,
-                    'data_quality': data_quality.value
-                }
-            
-            if data_quality == HealthQuality.GAPPY:
-                Console.warn("GAPPY data detected - proceeding with available data (historical replay mode)",
-                             component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
-            
-            # Step 2: Load persistent state
-            state = self.state_mgr.load_state(self.equip_id)
-            if state is None:
-                state = ForecastingState(equip_id=self.equip_id, state_version=0)
-            
-            # Step 3: Load adaptive configuration
-            forecast_config = self._load_forecast_config()
-            
-            # M3.3: Use dt_hours from DataSummary (computed once, not recomputed)
-            if data_summary and data_summary.dt_hours > 0:
-                forecast_config['dt_hours'] = data_summary.dt_hours
-            
-            # Step 4: Check auto-tuning trigger
-            current_volume = len(health_df)
-            state.data_volume_analyzed += current_volume
-            should_tune = self.config_mgr.should_tune(self.equip_id, state.data_volume_analyzed)
-            
-            if should_tune:
-                Console.info(f"Auto-tuning triggered at DataVolume={state.data_volume_analyzed}",
-                             component="FORECAST", equip_id=self.equip_id, data_volume=state.data_volume_analyzed)
-                # TODO: Implement grid search tuning in future PR
-                # For now, use configured values
-            
-            # Step 5: Fit degradation model
-            degradation_model = self._fit_degradation_model(health_df, forecast_config, state)
-            
-            # Step 6: Generate forecast and estimate RUL
-            forecast_results = self._generate_forecast_and_rul(
-                health_df, degradation_model, forecast_config
-            )
-            
-            # Step 6b: Compute forecast diagnostics (M9)
-            diagnostics = compute_forecast_diagnostics(forecast_results, data_summary)
-            log_forecast_diagnostics(diagnostics)
-            
-            # Step 7: Rank sensor attributions (M10)
-            sensor_attributions = self._load_sensor_attributions()
-            # Add to forecast_results for unified access
-            attributor = SensorAttributor(sql_client=self.sql_client)
-            top_sensors_str = attributor.format_top_n(sensor_attributions, n=3)
-            forecast_results['sensor_attributions'] = sensor_attributions
-            forecast_results['top_sensors'] = top_sensors_str
-            
-            # Step 8: Compute metrics (if we have historical forecasts to compare)
-            # metrics = self._compute_metrics(forecast_results)
-            
-            # Step 9: Write outputs to SQL (M13: pass diagnostics for operator context)
-            tables_written = self._write_outputs(
-                forecast_results, sensor_attributions, diagnostics, data_summary
-            )
-            
-            # Step 9b (v10.1.0): Regime-conditioned forecasting
-            # Only run if regime data is available and feature is enabled
-            enable_regime_forecasting = bool(forecast_config.get('enable_regime_conditioned', True))
-            if enable_regime_forecasting:
-                try:
-                    regime_tables = self._run_regime_conditioned_forecasting(
-                        health_df=health_df,
-                        degradation_model=degradation_model,
-                        forecast_config=forecast_config,
-                        forecast_results=forecast_results
-                    )
-                    tables_written.extend(regime_tables)
-                except Exception as e:
-                    # Non-fatal: regime forecasting is optional enhancement
-                    Console.warn(f"Regime-conditioned forecasting skipped: {e}",
+        with Span("forecast.run", equip_id=self.equip_id):
+            try:
+                # Step 1: Load health timeline with DataSummary (M3)
+                health_df, data_quality, data_summary = self._load_health_timeline()
+                
+                if health_df is None:
+                    Console.warn("No health data available; skipping forecast",
                                  component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
-            
-            # Step 10: Update state with diagnostics (M9)
-            state.model_coefficients_json = degradation_model.get_parameters()
-            state.updated_at = datetime.now()
-            
-            # Store diagnostics in state for persistence
-            # Include health values in the diagnostics dict for state persistence
-            diagnostics['last_health_value'] = float(health_df['HealthIndex'].iloc[-1])
-            diagnostics['last_health_timestamp'] = health_df['Timestamp'].iloc[-1].isoformat() if hasattr(health_df['Timestamp'].iloc[-1], 'isoformat') else str(health_df['Timestamp'].iloc[-1])
-            state.last_forecast_json = diagnostics
-            state.recent_mae = diagnostics.get('forecast_std')  # Use forecast_std as proxy
-            
-            self.state_mgr.save_state(state)
-            
-            # Build success response
-            return {
-                'success': True,
-                'rul_p50': forecast_results['rul_p50'],
-                'rul_p10': forecast_results['rul_p10'],
-                'rul_p90': forecast_results['rul_p90'],
-                'top_sensors': forecast_results['top_sensors'],
-                'data_quality': data_quality.value,
-                'tables_written': tables_written,
-                'state_version': state.state_version
-            }
-            
-        except Exception as e:
-            Console.error(f"Forecast failed: {e}",
-                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
-                          error_type=type(e).__name__, error_msg=str(e)[:500])
-            return {
-                'success': False,
-                'error': str(e),
-                'data_quality': 'UNKNOWN'
-            }
+                    return {
+                        'success': False,
+                        'error': 'No health data available',
+                        'data_quality': 'NONE'
+                    }
+                
+                # M3.2 + M14: Early quality gating before expensive operations
+                # Allow GAPPY data (historical replay) but block SPARSE/FLAT/NOISY
+                if data_quality in [HealthQuality.SPARSE, HealthQuality.FLAT, HealthQuality.NOISY]:
+                    # M14: Friendly message for coldstart/quality issues (not fatal)
+                    quality_messages = {
+                        HealthQuality.SPARSE: "Insufficient data samples - need more historical data for reliable forecast",
+                        HealthQuality.FLAT: "Health data shows no variance - equipment may be in steady state",
+                        HealthQuality.NOISY: "Health data has excessive noise - consider smoothing or filtering"
+                    }
+                    friendly_msg = quality_messages.get(data_quality, f"Data quality issue: {data_quality.value}")
+                    Console.warn(f"{friendly_msg}; skipping forecast (not fatal)",
+                                 component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                                 quality=data_quality.value)
+                    return {
+                        'success': False,
+                        'error': friendly_msg,
+                        'data_quality': data_quality.value
+                    }
+                
+                if data_quality == HealthQuality.GAPPY:
+                    Console.warn("GAPPY data detected - proceeding with available data (historical replay mode)",
+                                 component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
+                
+                # Step 2: Load persistent state
+                state = self.state_mgr.load_state(self.equip_id)
+                if state is None:
+                    state = ForecastingState(equip_id=self.equip_id, state_version=0)
+                
+                # Step 3: Load adaptive configuration
+                forecast_config = self._load_forecast_config()
+                
+                # M3.3: Use dt_hours from DataSummary (computed once, not recomputed)
+                if data_summary and data_summary.dt_hours > 0:
+                    forecast_config['dt_hours'] = data_summary.dt_hours
+                
+                # Step 4: Check auto-tuning trigger
+                current_volume = len(health_df)
+                state.data_volume_analyzed += current_volume
+                should_tune = self.config_mgr.should_tune(self.equip_id, state.data_volume_analyzed)
+                
+                if should_tune:
+                    Console.info(f"Auto-tuning triggered at DataVolume={state.data_volume_analyzed}",
+                                 component="FORECAST", equip_id=self.equip_id, data_volume=state.data_volume_analyzed)
+                    # TODO: Implement grid search tuning in future PR
+                    # For now, use configured values
+                
+                # Step 5: Fit degradation model
+                degradation_model = self._fit_degradation_model(health_df, forecast_config, state)
+                
+                # Step 6: Generate forecast and estimate RUL
+                forecast_results = self._generate_forecast_and_rul(
+                    health_df, degradation_model, forecast_config
+                )
+                
+                # Step 6b: Compute forecast diagnostics (M9)
+                diagnostics = compute_forecast_diagnostics(forecast_results, data_summary)
+                log_forecast_diagnostics(diagnostics)
+                
+                # Step 7: Rank sensor attributions (M10)
+                sensor_attributions = self._load_sensor_attributions()
+                # Add to forecast_results for unified access
+                attributor = SensorAttributor(sql_client=self.sql_client)
+                top_sensors_str = attributor.format_top_n(sensor_attributions, n=3)
+                forecast_results['sensor_attributions'] = sensor_attributions
+                forecast_results['top_sensors'] = top_sensors_str
+                
+                # Step 8: Compute metrics (if we have historical forecasts to compare)
+                # metrics = self._compute_metrics(forecast_results)
+                
+                # Step 9: Write outputs to SQL (M13: pass diagnostics for operator context)
+                tables_written = self._write_outputs(
+                    forecast_results, sensor_attributions, diagnostics, data_summary
+                )
+                
+                # Step 9b (v10.1.0): Regime-conditioned forecasting
+                # Only run if regime data is available and feature is enabled
+                enable_regime_forecasting = bool(forecast_config.get('enable_regime_conditioned', True))
+                if enable_regime_forecasting:
+                    try:
+                        regime_tables = self._run_regime_conditioned_forecasting(
+                            health_df=health_df,
+                            degradation_model=degradation_model,
+                            forecast_config=forecast_config,
+                            forecast_results=forecast_results
+                        )
+                        tables_written.extend(regime_tables)
+                    except Exception as e:
+                        # Non-fatal: regime forecasting is optional enhancement
+                        Console.warn(f"Regime-conditioned forecasting skipped: {e}",
+                                     component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
+                
+                # Step 10: Update state with diagnostics (M9)
+                state.model_coefficients_json = degradation_model.get_parameters()
+                state.updated_at = datetime.now()
+                
+                # Store diagnostics in state for persistence
+                # Include health values in the diagnostics dict for state persistence
+                diagnostics['last_health_value'] = float(health_df['HealthIndex'].iloc[-1])
+                diagnostics['last_health_timestamp'] = health_df['Timestamp'].iloc[-1].isoformat() if hasattr(health_df['Timestamp'].iloc[-1], 'isoformat') else str(health_df['Timestamp'].iloc[-1])
+                state.last_forecast_json = diagnostics
+                state.recent_mae = diagnostics.get('forecast_std')  # Use forecast_std as proxy
+                
+                self.state_mgr.save_state(state)
+                
+                # Build success response
+                return {
+                    'success': True,
+                    'rul_p50': forecast_results['rul_p50'],
+                    'rul_p10': forecast_results['rul_p10'],
+                    'rul_p90': forecast_results['rul_p90'],
+                    'top_sensors': forecast_results['top_sensors'],
+                    'data_quality': data_quality.value,
+                    'tables_written': tables_written,
+                    'state_version': state.state_version
+                }
+                
+            except Exception as e:
+                Console.error(f"Forecast failed: {e}",
+                              component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                              error_type=type(e).__name__, error_msg=str(e)[:500])
+                return {
+                    'success': False,
+                    'error': str(e),
+                    'data_quality': 'UNKNOWN'
+                }
     
     def _load_health_timeline(self) -> tuple[Optional[pd.DataFrame], HealthQuality, Optional[DataSummary]]:
         """
@@ -412,34 +413,35 @@ class ForecastEngine:
         state: ForecastingState
     ) -> LinearTrendModel:
         """Fit degradation model with warm-start from previous state"""
-        # Create model with adaptive config
-        model = LinearTrendModel(
-            alpha=float(forecast_config.get('alpha', 0.3)),
-            beta=float(forecast_config.get('beta', 0.1)),
-            max_trend_per_hour=float(forecast_config.get('max_trend_per_hour', 5.0)),
-            enable_adaptive=bool(forecast_config.get('enable_adaptive_smoothing', True))
-        )
-        
-        # Warm-start from previous state if available
-        if state.model_coefficients_json:
-            try:
-                model.set_parameters(state.model_coefficients_json)
-                Console.info("Warm-started degradation model from previous state",
-                             component="FORECAST", equip_id=self.equip_id)
-            except Exception as e:
-                Console.warn(f"Failed to warm-start model: {e}",
-                             component="FORECAST", equip_id=self.equip_id, error=str(e))
-        
-        # Prepare health series
-        health_series = pd.Series(
-            health_df['HealthIndex'].values,
-            index=pd.to_datetime(health_df['Timestamp'])
-        )
-        
-        # Fit model
-        model.fit(health_series)
-        
-        return model
+        with Span("forecast.fit_degradation", n_samples=len(health_df)):
+            # Create model with adaptive config
+            model = LinearTrendModel(
+                alpha=float(forecast_config.get('alpha', 0.3)),
+                beta=float(forecast_config.get('beta', 0.1)),
+                max_trend_per_hour=float(forecast_config.get('max_trend_per_hour', 5.0)),
+                enable_adaptive=bool(forecast_config.get('enable_adaptive_smoothing', True))
+            )
+            
+            # Warm-start from previous state if available
+            if state.model_coefficients_json:
+                try:
+                    model.set_parameters(state.model_coefficients_json)
+                    Console.info("Warm-started degradation model from previous state",
+                                 component="FORECAST", equip_id=self.equip_id)
+                except Exception as e:
+                    Console.warn(f"Failed to warm-start model: {e}",
+                                 component="FORECAST", equip_id=self.equip_id, error=str(e))
+            
+            # Prepare health series
+            health_series = pd.Series(
+                health_df['HealthIndex'].values,
+                index=pd.to_datetime(health_df['Timestamp'])
+            )
+            
+            # Fit model
+            model.fit(health_series)
+            
+            return model
     
     def _generate_forecast_and_rul(
         self,
@@ -502,18 +504,19 @@ class ForecastEngine:
         # Estimate RUL via Monte Carlo
         current_health = float(health_df['HealthIndex'].iloc[-1])
         
-        rul_estimator = RULEstimator(
-            degradation_model=degradation_model,
-            failure_threshold=failure_threshold,
-            n_simulations=n_simulations,
-            confidence_level=confidence_level
-        )
-        
-        rul_estimate = rul_estimator.estimate_rul(
-            current_health=current_health,
-            dt_hours=dt_hours,
-            max_horizon_hours=max_forecast_hours
-        )
+        with Span("forecast.estimate_rul", current_health=int(current_health), n_simulations=n_simulations):
+            rul_estimator = RULEstimator(
+                degradation_model=degradation_model,
+                failure_threshold=failure_threshold,
+                n_simulations=n_simulations,
+                confidence_level=confidence_level
+            )
+            
+            rul_estimate = rul_estimator.estimate_rul(
+                current_health=current_health,
+                dt_hours=dt_hours,
+                max_horizon_hours=max_forecast_hours
+            )
         
         # Note: Sensor attributions are loaded separately in run_forecast() via _load_sensor_attributions()
         # to avoid duplicate SQL queries. The 'sensor_attributions' key is populated there.
