@@ -1104,22 +1104,48 @@ class Span:
             category = self.name.split(".")[0]
             self._span.set_attribute("acm.category", category)
             
-            # Add high-level phase for grouping (NEW in v10.3.0)
-            # Map category to broader phase groups
+            # Add high-level phase for grouping and COLORING in Tempo (v10.3.0)
+            # Map category to broader phase groups - each phase gets a distinct color
+            # Categories extracted from all T.section() calls in acm_main.py
             phase_map = {
-                "startup": "startup", "load": "startup", "config": "startup",
-                "features": "features", "data": "features", "baseline": "features",
+                # Startup phase (loading, config, initialization)
+                "startup": "startup", "load": "startup", "load_data": "startup", "config": "startup",
+                # Features phase (data prep, baseline, feature engineering)
+                "features": "features", "data": "features", "baseline": "features", "sensor": "features",
+                # Fit phase (model training/fitting)
                 "fit": "fit", "train": "fit", "models": "fit",
-                "score": "score",
-                "regimes": "score", "calibrate": "score",
+                # Score phase (model inference, regime detection, calibration)
+                "score": "score", "regimes": "score", "calibrate": "score",
+                # Fusion phase (threshold, episodes, fusing detectors)
                 "fusion": "fusion", "thresholds": "fusion", "episodes": "fusion",
+                # Monitoring phase (drift detection, adaptive thresholds)
                 "drift": "monitoring", "adaptive": "monitoring",
-                "forecast": "forecast", "analytics": "analytics",
+                # Forecast phase (RUL, health forecasting)
+                "forecast": "forecast",
+                # Analytics phase (comprehensive analytics)
+                "analytics": "analytics", "outputs": "analytics",
+                # Persist phase (SQL writes, caching)
                 "persist": "persist", "sql": "persist", "write": "persist",
-                "outputs": "finalize", "finalize": "finalize", "shutdown": "finalize",
+                # Finalize phase (cleanup, shutdown)
+                "finalize": "finalize", "shutdown": "finalize",
             }
             phase = phase_map.get(category, category)
             self._span.set_attribute("acm.phase", phase)
+            
+            # Set VIRTUAL SERVICE NAME for Tempo coloring (v10.3.0)
+            # Each major phase appears as a different "service" with distinct color
+            # Format: "acm-{phase}" e.g., "acm-features", "acm-fit", "acm-forecast"
+            virtual_service = f"acm-{phase}"
+            self._span.set_attribute("service.name", virtual_service)
+            
+            # Keep parent service reference for correlation
+            self._span.set_attribute("acm.service", _config.service_name)  # Always "acm-pipeline"
+            if _config.equipment:
+                self._span.set_attribute("acm.equipment", _config.equipment)
+            if _config.equip_id:
+                self._span.set_attribute("acm.equip_id", _config.equip_id)
+            if _config.run_id:
+                self._span.set_attribute("acm.run_id", _config.run_id)
             
             # Add batch context for batch runs (NEW in v10.3.0)
             if _config.batch_num > 0:
