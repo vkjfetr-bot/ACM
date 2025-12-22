@@ -1178,7 +1178,18 @@ class Span:
             # e.g., "fit.pca" -> "fit.pca:FD_FAN"
             equip_suffix = f":{_config.equipment}" if _config.equipment else ""
             span_display_name = f"{self.name}{equip_suffix}"
-            self._span = tracer.start_span(span_display_name, kind=span_kind)
+            
+            # CRITICAL: Pass current context to link spans across different TracerProviders
+            # Without this, spans from phase-specific tracers won't link to parent spans
+            # from the main tracer, causing "root span not yet received" in Tempo
+            from opentelemetry import context as otel_context
+            current_context = otel_context.get_current()
+            
+            self._span = tracer.start_span(
+                span_display_name, 
+                kind=span_kind,
+                context=current_context  # Explicit parent context for cross-tracer linking
+            )
             self._context_token = otel_trace.use_span(self._span, end_on_exit=False)
             self._context_token.__enter__()
             
