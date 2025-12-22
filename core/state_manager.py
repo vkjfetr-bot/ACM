@@ -144,7 +144,7 @@ class StateManager:
             return state
             
         except Exception as e:
-            Console.warn(f"[StateManager] Failed to load state for EquipID={equip_id}: {e}", component="STATE", equip_id=equip_id, error_type=type(e).__name__, error=str(e)[:200])
+            Console.warn(f"Failed to load state for EquipID={equip_id}: {e}", component="STATE", equip_id=equip_id, error_type=type(e).__name__, error=str(e)[:200])
             return None
     
     def save_state(self, state: ForecastingState) -> bool:
@@ -263,7 +263,7 @@ class StateManager:
                 return True
                 
             except Exception as e:
-                Console.warn(f"[StateManager] Failed to save state (attempt {attempt + 1}): {e}", component="STATE", equip_id=state.equip_id, attempt=attempt + 1, max_retries=self.max_retries, error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Failed to save state (attempt {attempt + 1}): {e}", component="STATE", equip_id=state.equip_id, attempt=attempt + 1, max_retries=self.max_retries, error_type=type(e).__name__, error=str(e)[:200])
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delays[attempt])
                 else:
@@ -353,7 +353,7 @@ class AdaptiveConfigManager:
                 return default
                 
         except Exception as e:
-            Console.warn(f"[AdaptiveConfigManager] Failed to get config '{key}': {e}", component="CONFIG", config_key=key, equip_id=equip_id, error_type=type(e).__name__, error=str(e)[:200])
+            Console.warn(f"Failed to get config '{key}': {e}", component="CONFIG", config_key=key, equip_id=equip_id, error_type=type(e).__name__, error=str(e)[:200])
             return default
     
     def get_all_configs(self, equip_id: Optional[int] = None) -> Dict[str, Any]:
@@ -397,7 +397,7 @@ class AdaptiveConfigManager:
             return configs
             
         except Exception as e:
-            Console.warn(f"[AdaptiveConfigManager] Failed to load all configs: {e}", component="CONFIG", equip_id=equip_id, error_type=type(e).__name__, error=str(e)[:200])
+            Console.warn(f"Failed to load all configs: {e}", component="CONFIG", equip_id=equip_id, error_type=type(e).__name__, error=str(e)[:200])
             return {}
     
     def should_tune(self, equip_id: int, current_volume: int) -> bool:
@@ -442,7 +442,7 @@ class AdaptiveConfigManager:
             return (current_volume - last_tuned_volume) >= threshold
             
         except Exception as e:
-            Console.warn(f"[AdaptiveConfigManager] Failed to check tuning status: {e}", component="CONFIG", equip_id=equip_id, current_volume=current_volume, error_type=type(e).__name__, error=str(e)[:200])
+            Console.warn(f"Failed to check tuning status: {e}", component="CONFIG", equip_id=equip_id, current_volume=current_volume, error_type=type(e).__name__, error=str(e)[:200])
             return False
     
     def update_config(
@@ -510,7 +510,7 @@ class AdaptiveConfigManager:
             return True
             
         except Exception as e:
-            Console.warn(f"[AdaptiveConfigManager] Failed to update config '{key}': {e}", component="CONFIG", equip_id=equip_id, config_key=key, config_value=str(value)[:50], error_type=type(e).__name__, error=str(e)[:200])
+            Console.warn(f"Failed to update config '{key}': {e}", component="CONFIG", equip_id=equip_id, config_key=key, config_value=str(value)[:50], error_type=type(e).__name__, error=str(e)[:200])
             return False
     
     def _parse_config_value(self, value: Any) -> Any:

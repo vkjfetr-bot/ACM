@@ -1496,7 +1496,7 @@ class OutputManager:
             # Debug-level only - applying defaults is expected behavior, not a warning
             pass  # Console.debug(f"{table_name}: applied defaults {filled}", component="SCHEMA")
         if not allow_repair and repair_info['repairs_needed']:
-            Console.warn(f"[SCHEMA] {table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}", component="OUTPUT", table=table_name, missing_fields=missing_fields)
+            Console.warn(f"{table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}", component="SCHEMA", table=table_name, missing_fields=missing_fields)
             
         return out, repair_info
 

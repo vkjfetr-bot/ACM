@@ -2039,7 +2039,7 @@ class _PyroscopePusher:
                 self._profiling_active = True
                 self._profile_start_time = time.time()
             except Exception as e:
-                Console.warn(f"[PROFILE] Failed to start CPU profiling: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Failed to start CPU profiling: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
         
         # Start memory profiling with tracemalloc
         if TRACEMALLOC_AVAILABLE and not self._memory_profiling_active:
@@ -2047,7 +2047,7 @@ class _PyroscopePusher:
                 tracemalloc.start(25)  # Track 25 frames for detailed stacks
                 self._memory_profiling_active = True
             except Exception as e:
-                Console.warn(f"[PROFILE] Failed to start memory profiling: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Failed to start memory profiling: {e}", component="PROFILE", error_type=type(e).__name__, error=str(e)[:200])
     
     def stop_and_push(self) -> None:
         """Stop CPU and memory profiling and push results to Pyroscope."""
@@ -2078,7 +2078,7 @@ class _PyroscopePusher:
                             units="samples",
                         )
             except Exception as e:
-                Console.warn(f"[PROFILE] Failed to push CPU profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Failed to push CPU profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
             finally:
                 try:
                     yappi.clear_stats()
@@ -2113,7 +2113,7 @@ class _PyroscopePusher:
                             units="bytes",
                         )
             except Exception as e:
-                Console.warn(f"[PROFILE] Failed to push memory profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Failed to push memory profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
     
     def _memory_snapshot_to_collapsed(self, snapshot, use_bytes: bool = False, top_n: int = 500) -> List[str]:
         """Convert tracemalloc snapshot to collapsed stack format.
@@ -2321,16 +2321,16 @@ class _PyroscopePusher:
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
-                    Console.ok(f"[PROFILE] {profile_type} profile pushed successfully")
+                    Console.ok(f"{profile_type} profile pushed successfully", component="PROFILE")
         except urllib.error.HTTPError as e:
             if e.code != 200:
                 try:
                     body = e.read().decode('utf-8', errors='ignore')
-                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code} - {body[:200]}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, http_status=e.code, response=body[:100])
+                    Console.warn(f"Pyroscope push failed: {e.code} - {body[:200]}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, http_status=e.code, response=body[:100])
                 except Exception:
-                    Console.warn(f"[PROFILE] Pyroscope push failed: {e.code}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, http_status=e.code)
+                    Console.warn(f"Pyroscope push failed: {e.code}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, http_status=e.code)
         except Exception as e:
-            Console.warn(f"[PROFILE] Pyroscope push error: {e}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
+            Console.warn(f"Pyroscope push error: {e}", component="PROFILE", profile_type=profile_type, endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
 
 
 # =============================================================================
