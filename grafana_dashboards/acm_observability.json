@@ -2661,6 +2661,188 @@
       ],
       "title": "📋 Detailed Module Tables",
       "type": "row"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "id": 700,
+      "panels": [],
+      "title": "🔍 Traces & Profiles",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo-ds"
+      },
+      "description": "Service graph showing trace flow between ACM pipeline phases. Each node represents a phase (features, fit, fusion, etc.) and edges show call relationships.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "id": 701,
+      "options": {
+        "nodes": {},
+        "edges": {}
+      },
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo-ds"
+          },
+          "filters": [
+            {
+              "id": "service-name",
+              "operator": "=~",
+              "scope": "resource",
+              "tag": "service.name",
+              "value": "acm.*"
+            }
+          ],
+          "limit": 100,
+          "queryType": "serviceMap",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "🗺️ Trace Service Map",
+      "type": "nodeGraph"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo-ds"
+      },
+      "description": "Recent traces from ACM pipeline runs. Click a trace to see the full span timeline.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "id": 702,
+      "options": {},
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo-ds"
+          },
+          "filters": [
+            {
+              "id": "service-name",
+              "operator": "=~",
+              "scope": "resource",
+              "tag": "service.name",
+              "value": "acm.*"
+            }
+          ],
+          "limit": 20,
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "📊 Recent Traces",
+      "type": "traces"
+    },
+    {
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "pyroscope-ds"
+      },
+      "description": "CPU time flame graph showing which functions consume the most processing time. Wider bars = more CPU time.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 0,
+        "y": 65
+      },
+      "id": 703,
+      "options": {},
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "pyroscope-ds"
+          },
+          "groupBy": [],
+          "labelSelector": "{service_name=\"acm-pipeline\"}",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "queryType": "profile",
+          "refId": "A",
+          "spanSelector": []
+        }
+      ],
+      "title": "🔥 CPU Profile (Flame Graph)",
+      "type": "flamegraph"
+    },
+    {
+      "datasource": {
+        "type": "grafana-pyroscope-datasource",
+        "uid": "pyroscope-ds"
+      },
+      "description": "Memory allocation flame graph showing which functions allocate the most memory (bytes). Wider bars = more memory allocated.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 12,
+        "x": 12,
+        "y": 65
+      },
+      "id": 704,
+      "options": {},
+      "pluginVersion": "12.3.1",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-pyroscope-datasource",
+            "uid": "pyroscope-ds"
+          },
+          "groupBy": [],
+          "labelSelector": "{service_name=\"acm-pipeline\"}",
+          "profileTypeId": "memory:alloc_space:bytes:space:bytes",
+          "queryType": "profile",
+          "refId": "A",
+          "spanSelector": []
+        }
+      ],
+      "title": "💾 Memory Profile (Flame Graph)",
+      "type": "flamegraph"
     }
   ],
   "preload": false,
