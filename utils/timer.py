@@ -249,7 +249,7 @@ class Timer:
             print(json.dumps(data))
         elif _Console:
             extra = " ".join(f"{k}={v}" for k, v in kv.items())
-            _Console.info(f"[TIMER] {name:<20} {extra}".rstrip())
+            _Console.info(f"{name:<20} {extra}".rstrip(), component="TIMER")
         else:
             timestamp = self._get_timestamp()
             extra = " ".join(f"{k}={v}" for k, v in kv.items())

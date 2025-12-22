@@ -445,7 +445,7 @@ def build_feature_basis(
         
         if pca_variance_ratio < variance_min:
             Console.warn(
-                f"[REGIME] PCA variance coverage {pca_variance_ratio:.3f} below target {variance_min:.3f}.",
+                f"PCA variance coverage {pca_variance_ratio:.3f} below target {variance_min:.3f}.",
                 component="REGIME", variance_ratio=pca_variance_ratio, variance_min=variance_min, n_pca=n_pca_used
             )
     return train_basis, score_basis, meta
@@ -513,7 +513,7 @@ def _fit_kmeans_scaled(
         # Warn if sample distribution deviates significantly from full data
         if mean_diff > 0.5 or std_diff > 0.5:
             Console.warn(
-                f"[REGIME] Auto-k sample may not represent full data well. "
+                f"Auto-k sample may not represent full data well. "
                 f"Mean deviation: {mean_diff:.3f}, Std deviation: {std_diff:.3f}. "
                 f"Consider increasing max_eval_samples.",
                 component="REGIME", mean_diff=mean_diff, std_diff=std_diff, sample_size=max_eval_samples, full_size=n_samples
@@ -563,7 +563,7 @@ def _fit_kmeans_scaled(
         # Degenerate case: fallback to minimal feasible clusters but flag quality
         fallback_k = min(max(2, k_min), n_samples)
         Console.warn(
-            f"[REGIME] Unable to evaluate silhouette for candidate k; defaulting to k={fallback_k}.",
+            f"Unable to evaluate silhouette for candidate k; defaulting to k={fallback_k}.",
             component="REGIME", fallback_k=fallback_k, n_samples=n_samples, k_min=k_min, k_max=k_max
         )
         best_k = fallback_k
@@ -578,7 +578,7 @@ def _fit_kmeans_scaled(
         )
         if low_quality:
             Console.warn(
-                "[REGIME] All silhouette scores below quality threshold; retaining best_k but flagging quality.",
+                "All silhouette scores below quality threshold; retaining best_k but flagging quality.",
                 component="REGIME", sil_threshold=sil_threshold, best_k=best_k, best_score=best_score
             )
 
@@ -592,7 +592,8 @@ def _fit_kmeans_scaled(
 
     score_str = "nan" if np.isnan(best_score) else f"{best_score:.3f}"
     Console.info(
-        f"[REGIME] Auto-k selection complete: k={best_k}, metric={best_metric}, score={score_str}."
+        f"Auto-k selection complete: k={best_k}, metric={best_metric}, score={score_str}.",
+        component="REGIME"
     )
     if silhouette_scores:
         formatted = ", ".join(f"k={k}: {score:.3f}" for k, score in sorted(silhouette_scores))
@@ -717,21 +718,22 @@ def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
         missing_pct = len(missing_cols) / len(expected_cols) * 100
         if missing_pct > 50:
             Console.warn(
-                f"[REGIME] CRITICAL: {len(missing_cols)}/{len(expected_cols)} features missing ({missing_pct:.1f}%). "
+                f"CRITICAL: {len(missing_cols)}/{len(expected_cols)} features missing ({missing_pct:.1f}%). "
                 f"Missing: {list(missing_cols)[:5]}{'...' if len(missing_cols) > 5 else ''}. "
                 f"Predictions may be unreliable - filling with 0.0",
                 component="REGIME", missing_count=len(missing_cols), expected_count=len(expected_cols), missing_pct=missing_pct
             )
         elif missing_cols:
             Console.warn(
-                f"[REGIME] {len(missing_cols)} features missing: {list(missing_cols)[:3]}{'...' if len(missing_cols) > 3 else ''}. "
+                f"{len(missing_cols)} features missing: {list(missing_cols)[:3]}{'...' if len(missing_cols) > 3 else ''}. "
                 f"Filling with 0.0",
                 component="REGIME", missing_count=len(missing_cols), expected_count=len(expected_cols)
             )
     
     if extra_cols:
         Console.info(
-            f"[REGIME] {len(extra_cols)} extra features ignored: {list(extra_cols)[:3]}{'...' if len(extra_cols) > 3 else ''}"
+            f"{len(extra_cols)} extra features ignored: {list(extra_cols)[:3]}{'...' if len(extra_cols) > 3 else ''}",
+            component="REGIME"
         )
     
     aligned = basis_df.reindex(columns=model.feature_columns, fill_value=0.0)
@@ -1230,7 +1232,7 @@ def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None,
         invalid_range_count = invalid_range_mask.sum()
         if invalid_range_count > 0:
             Console.warn(
-                f"[REGIME] Filtering {invalid_range_count} episodes where end_ts < start_ts (invalid time range)",
+                f"Filtering {invalid_range_count} episodes where end_ts < start_ts (invalid time range)",
                 component="REGIME", invalid_count=invalid_range_count, valid_count=len(df) - invalid_range_count
             )
             df = df[~invalid_range_mask]
@@ -1789,7 +1791,7 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
     if bool(_cfg_get(cfg, "regimes.allow_legacy_label", False)):
         Console.warn("Falling back to legacy labeling path (allow_legacy_label=True)", component="REGIME", n_samples=len(score_df) if hasattr(score_df, '__len__') else 0)
         return _legacy_label(score_df, ctx, out, cfg)
-    raise RuntimeError("[REGIME] Regime model unavailable and legacy path disabled (regimes.allow_legacy_label=False)")
+    raise RuntimeError("Regime model unavailable and legacy path disabled (regimes.allow_legacy_label=False)")
 
 
 def _legacy_label(score_df, ctx: Dict[str, Any], out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -2236,7 +2238,8 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
             )
         elif version and version != REGIME_MODEL_VERSION:
             Console.info(
-                f"[REGIME] Cached model version {version} compatible with {REGIME_MODEL_VERSION} (same major)"
+                f"Cached model version {version} compatible with {REGIME_MODEL_VERSION} (same major)",
+                component="REGIME"
             )
             
         model = RegimeModel(
@@ -2254,7 +2257,8 @@ def load_regime_model(models_dir: Path) -> Optional[RegimeModel]:
         Console.info(f"Loaded cached regime model from {joblib_path}", component="REGIME")
         cluster_count = getattr(kmeans, "n_clusters", model.meta.get("best_k"))
         Console.info(
-            f"[REGIME]   - K={cluster_count}, features={len(model.feature_columns)}, train_hash={train_hash}"
+            f"  - K={cluster_count}, features={len(model.feature_columns)}, train_hash={train_hash}",
+            component="REGIME"
         )
         return model
         

@@ -678,8 +678,9 @@ def _calculate_adaptive_thresholds(
         # Store in SQL via OutputManager if available
         if output_manager is not None and output_manager.sql_client is not None:
             Console.info(
-                f"[THRESHOLD] Persisting to SQL: equip_id={equip_id} | samples={len(fused_scores)} | "
-                f"method={threshold_results.get('method')} | conf={threshold_results.get('confidence')}"
+                f"Persisting to SQL: equip_id={equip_id} | samples={len(fused_scores)} | "
+                f"method={threshold_results.get('method')} | conf={threshold_results.get('confidence')}",
+                component="THRESHOLD"
             )
             config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
             
@@ -721,10 +722,11 @@ def _calculate_adaptive_thresholds(
                 cfg["regimes"]["health"]["fused_warn_z_per_regime"] = threshold_results['fused_warn_z']
             else:
                 Console.info(
-                    f"[THRESHOLD] Global thresholds: "
+                    f"Global thresholds: "
                     f"alert={threshold_results['fused_alert_z']:.3f}, "
                     f"warn={threshold_results['fused_warn_z']:.3f} "
-                    f"(method={threshold_results['method']}, conf={threshold_results['confidence']})"
+                    f"(method={threshold_results['method']}, conf={threshold_results['confidence']})",
+                    component="THRESHOLD"
                 )
                 # Override static config values with adaptive ones
                 if "regimes" not in cfg:
@@ -736,9 +738,10 @@ def _calculate_adaptive_thresholds(
         else:
             Console.warn("SQL client not available - thresholds not persisted", component="THRESHOLD",
                          equip_id=equip_id, has_output_manager=output_manager is not None)
-            Console.warn(f"[THRESHOLD] Debug: output_manager is {'set' if output_manager is not None else 'None'} | "
+            Console.warn(f"Debug: output_manager is {'set' if output_manager is not None else 'None'} | "
                          f"sql_client is {'set' if (getattr(output_manager, 'sql_client', None) is not None) else 'None'} | "
-                         f"SQL_MODE={cfg.get('runtime', {}).get('storage_backend', 'unknown')}")
+                         f"SQL_MODE={cfg.get('runtime', {}).get('storage_backend', 'unknown')}",
+                         component="THRESHOLD")
         
         return threshold_results
         
@@ -1501,8 +1504,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         var_median = float(train_stds.median())
                         var_p95 = float(train_stds.quantile(0.95))
                         Console.debug(
-                            f"[DATA] Baseline variance: min={var_min:.2e}, "
-                            f"median={var_median:.2e}, p95={var_p95:.2e}"
+                            f"Baseline variance: min={var_min:.2e}, "
+                            f"median={var_median:.2e}, p95={var_p95:.2e}",
+                            component="DATA"
                         )
 
                 # 3) Missing data report (per-tag null counts) â†’ tables/data_quality.csv
@@ -3734,8 +3738,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     
                     frame["alert_mode"] = alert_mode
                     Console.info(
-                        f"[DRIFT] Multi-feature: {drift_col} P95={drift_p95:.3f}, trend={drift_trend:.4f}, "
-                        f"fused_P95={fused_p95:.3f}, regime_vol={regime_volatility:.3f} -> {alert_mode}"
+                        f"Multi-feature: {drift_col} P95={drift_p95:.3f}, trend={drift_trend:.4f}, "
+                        f"fused_P95={fused_p95:.3f}, regime_vol={regime_volatility:.3f} -> {alert_mode}",
+                        component="DRIFT"
                     )
                 else:
                     # Fallback to legacy simple threshold (CFG-06)

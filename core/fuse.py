@@ -483,20 +483,20 @@ class ScoreCalibrator:
         max_thresh = float(self.self_tune_cfg.get("max_threshold", 1000.0))
         
         if not np.isfinite(self.q_thresh):
-            Console.warn(f"[CAL:{self.name}] Non-finite threshold computed ({self.q_thresh}) - using fallback 3.0", component="CAL", calibrator=self.name, computed_threshold=self.q_thresh, fallback=3.0)
+            Console.warn(f"Non-finite threshold computed ({self.q_thresh}) - using fallback 3.0", component="CAL", calibrator=self.name, computed_threshold=self.q_thresh, fallback=3.0)
             self.q_thresh = 3.0
         elif self.q_thresh <= 0:
-            Console.debug(f"[CAL:{self.name}] Non-positive threshold ({self.q_thresh:.6f}) - clamping to {min_thresh}")
+            Console.debug(f"Non-positive threshold ({self.q_thresh:.6f}) - clamping to {min_thresh}", component="CAL", calibrator=self.name)
             self.q_thresh = min_thresh
         elif self.q_thresh > max_thresh:
-            Console.debug(f"[CAL:{self.name}] Extreme threshold ({self.q_thresh:.2f}) - clamping to {max_thresh}")
+            Console.debug(f"Extreme threshold ({self.q_thresh:.2f}) - clamping to {max_thresh}", component="CAL", calibrator=self.name)
             self.q_thresh = max_thresh
         
         self.q_z = (self.q_thresh - self.med) / self.scale if self.scale > 1e-9 else 1.0
         
         # FUSE-FIX-05: Clamp q_z to reasonable z-score range
         if not np.isfinite(self.q_z) or abs(self.q_z) > 20.0:
-            Console.debug(f"[CAL:{self.name}] Extreme q_z ({self.q_z:.2f}) - clamping to ±20")
+            Console.debug(f"Extreme q_z ({self.q_z:.2f}) - clamping to +/-20", component="CAL", calibrator=self.name)
             self.q_z = float(np.clip(self.q_z, -20.0, 20.0)) if np.isfinite(self.q_z) else 3.0
 
         # Per-regime thresholding

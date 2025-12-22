@@ -4682,9 +4682,10 @@ class OutputManager:
             with self.sql_client.cursor() as cur:
                 cur.executemany(insert_sql, params)
             
-            Console.info(f"[THRESHOLD] Threshold metadata written: {threshold_type} = "
+            Console.info(f"Threshold metadata written: {threshold_type} = "
                         f"{threshold_value if not isinstance(threshold_value, dict) else f'{len(threshold_value)} regimes'} "
-                        f"({calculation_method})")
+                        f"({calculation_method})",
+                        component="THRESHOLD")
             
         except Exception as e:
             Console.error(f"Failed to write threshold metadata: {e}", component="THRESHOLD", equip_id=equip_id, threshold_type=threshold_type, error_type=type(e).__name__, error=str(e)[:200])

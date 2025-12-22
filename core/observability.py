@@ -73,7 +73,7 @@ class _Colors:
     WARN = Fore.YELLOW + Style.BRIGHT
     ERROR = Fore.RED + Style.BRIGHT
     OK = Fore.GREEN + Style.BRIGHT
-    DEBUG = Style.DIM
+    DEBUG = Fore.CYAN + Style.DIM  # Dim cyan for visibility without prominence
     STATUS = Fore.MAGENTA + Style.BRIGHT  # Console-only status (purple/magenta)
     # Component tag (module name like CAL, FUSE, THRESHOLD)
     COMPONENT = Fore.WHITE + Style.BRIGHT  # Neutral color works with all levels
