@@ -1148,16 +1148,47 @@ def main() -> None:
     tracer = get_tracer() if _OBSERVABILITY_AVAILABLE else None
     _span_ctx = None
     root_span = None
+    
+    # Check for parent trace context from batch runner (passed via environment)
+    # This enables end-to-end trace correlation across subprocess boundaries
+    parent_trace_id = os.environ.get("TRACEPARENT_TRACE_ID")
+    parent_span_id = os.environ.get("TRACEPARENT_SPAN_ID")
+    parent_context = None
+    
     if tracer and hasattr(tracer, 'start_as_current_span'):
+        # If we have parent trace context from batch runner, create a linked span
+        if parent_trace_id and parent_span_id and OTEL_AVAILABLE:
+            try:
+                from opentelemetry.trace import SpanContext, TraceFlags, set_span_in_context
+                from opentelemetry.trace.propagation import _SPAN_KEY
+                from opentelemetry import context as otel_context
+                
+                # Recreate parent span context from environment variables
+                parent_span_context = SpanContext(
+                    trace_id=int(parent_trace_id, 16),
+                    span_id=int(parent_span_id, 16),
+                    is_remote=True,
+                    trace_flags=TraceFlags(0x01),  # Sampled
+                )
+                # Create a non-recording span with the parent context
+                from opentelemetry.trace import NonRecordingSpan
+                parent_span = NonRecordingSpan(parent_span_context)
+                parent_context = set_span_in_context(parent_span)
+            except Exception as e:
+                Console.warn(f"Failed to restore parent trace context: {e}", component="OTEL")
+                parent_context = None
+        
         span_name = f"acm.run:{equip}" if equip else "acm.run"
         _span_ctx = tracer.start_as_current_span(
             span_name,
+            context=parent_context,  # Link to parent trace if available
             attributes={
                 "acm.equipment": equip,
                 "acm.equip_id": equip_id,
                 "acm.run_id": run_id,
                 "acm.batch_num": batch_num,
                 "acm.batch_mode": BATCH_MODE,
+                "acm.parent_trace_id": parent_trace_id or "",  # Record for debugging
             }
         )
         root_span = _span_ctx.__enter__()

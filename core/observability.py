@@ -646,6 +646,42 @@ def stop_profiling() -> None:
         pass
 
 
+def get_trace_context() -> Dict[str, Optional[str]]:
+    """Get the current trace context (trace_id and span_id).
+    
+    Returns a dictionary with 'trace_id' and 'span_id' keys.
+    Values are None if no active trace context exists.
+    
+    This is useful for:
+    - Adding trace context to custom log entries
+    - Correlating external operations with the current trace
+    - Debugging trace propagation issues
+    
+    Returns:
+        Dict with 'trace_id' (32-char hex) and 'span_id' (16-char hex),
+        or None values if no valid context.
+    
+    Example:
+        ctx = get_trace_context()
+        if ctx["trace_id"]:
+            log_external_system(message, trace_id=ctx["trace_id"])
+    """
+    result: Dict[str, Optional[str]] = {"trace_id": None, "span_id": None}
+    
+    if OTEL_AVAILABLE and otel_trace is not None:
+        try:
+            current_span = otel_trace.get_current_span()
+            if current_span is not None:
+                span_ctx = current_span.get_span_context()
+                if span_ctx is not None and span_ctx.is_valid:
+                    result["trace_id"] = format(span_ctx.trace_id, '032x')
+                    result["span_id"] = format(span_ctx.span_id, '016x')
+        except Exception:
+            pass
+    
+    return result
+
+
 @contextmanager
 def profile_section(name: str) -> Generator[None, None, None]:
     """Context manager to profile a specific section of code.
@@ -1698,6 +1734,12 @@ class _LokiPusher:
         
         The message is sent as-is. Component becomes a Loki label.
         No regex extraction - component is passed explicitly from Console methods.
+        
+        Trace context:
+            trace_id and span_id are automatically captured from the current
+            OpenTelemetry span context. This enables Grafana's logs-to-traces
+            correlation. The trace_id is formatted as a 32-char hex string
+            (matching Tempo's format), and span_id as 16-char hex.
         """
         if not self._connected:
             return
@@ -1715,16 +1757,18 @@ class _LokiPusher:
         }
         
         # Add trace_id and span_id from current span for trace-to-logs correlation
+        # This enables Grafana's "derived fields" to link logs -> traces
         if OTEL_AVAILABLE and otel_trace is not None:
             try:
                 current_span = otel_trace.get_current_span()
-                if current_span and current_span.is_recording():
+                if current_span is not None:
                     span_ctx = current_span.get_span_context()
-                    if span_ctx and span_ctx.trace_id:
-                        # Format as 32-char hex string (Tempo format)
+                    # Use is_valid to check if context has valid trace/span IDs
+                    # Don't use is_recording() - non-recording spans still have valid context
+                    if span_ctx is not None and span_ctx.is_valid:
+                        # Format as 32-char hex string (Tempo format) - trace_id is 128-bit
                         labels["trace_id"] = format(span_ctx.trace_id, '032x')
-                    if span_ctx and span_ctx.span_id:
-                        # Format as 16-char hex string
+                        # Format as 16-char hex string - span_id is 64-bit
                         labels["span_id"] = format(span_ctx.span_id, '016x')
             except Exception:
                 pass  # Best effort - don't break logging
@@ -2240,12 +2284,28 @@ class _SqlLogSink:
         self._thread.start()
     
     def log(self, level: str, message: str, **context) -> None:
-        """Queue a log record."""
+        """Queue a log record with trace context."""
+        # Capture trace context for correlation
+        trace_id = None
+        span_id = None
+        if OTEL_AVAILABLE and otel_trace is not None:
+            try:
+                current_span = otel_trace.get_current_span()
+                if current_span is not None:
+                    span_ctx = current_span.get_span_context()
+                    if span_ctx is not None and span_ctx.is_valid:
+                        trace_id = format(span_ctx.trace_id, '032x')
+                        span_id = format(span_ctx.span_id, '016x')
+            except Exception:
+                pass
+        
         record = {
             "timestamp": datetime.now().isoformat(),
             "level": level,
             "message": message[:4000],
             "context": context,
+            "trace_id": trace_id,
+            "span_id": span_id,
         }
         self._queue.put(record)
     
@@ -2271,6 +2331,13 @@ class _SqlLogSink:
         try:
             with self._sql_client.cursor() as cur:
                 for record in batch:
+                    # Include trace context in the context dict for correlation
+                    ctx = dict(record.get("context", {}))
+                    if record.get("trace_id"):
+                        ctx["trace_id"] = record["trace_id"]
+                    if record.get("span_id"):
+                        ctx["span_id"] = record["span_id"]
+                    
                     cur.execute(
                         """INSERT INTO ACM_RunLogs 
                            (RunID, EquipID, LoggedAt, Level, Message, Context)
@@ -2281,7 +2348,7 @@ class _SqlLogSink:
                             record["timestamp"],
                             record["level"],
                             record["message"],
-                            str(record.get("context", {})),
+                            str(ctx),
                         )
                     )
             self._written += len(batch)
@@ -2303,6 +2370,7 @@ __all__ = [
     "init",
     "shutdown",
     "set_context",
+    "get_trace_context",  # Utility to get current trace_id/span_id
     "log",
     "Console",
     "Progress",

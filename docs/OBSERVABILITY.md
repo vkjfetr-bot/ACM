@@ -367,6 +367,39 @@ Each log has a `component` tag for filtering in Loki:
 | `RUN_META` | Finalize | Run metadata persistence |
 | `CULPRITS` | Finalize | Episode culprit analysis |
 
+### Log Labels (Loki)
+
+Each log pushed to Loki includes structured labels for filtering and correlation:
+
+| Label | Description | Example |
+|-------|-------------|---------|
+| `app` | Application identifier | `acm` |
+| `level` | Log level | `INFO`, `WARN`, `ERROR` |
+| `component` | Pipeline component (see table above) | `FORECAST`, `DATA` |
+| `equipment` | Equipment code being processed | `FD_FAN` |
+| `equip_id` | Equipment database ID | `1` |
+| `run_id` | Current run identifier | `abc123-def456` |
+| `trace_id` | Active OpenTelemetry trace ID (32-char hex) | `a1b2c3d4e5f6...` |
+| `span_id` | Active OpenTelemetry span ID (16-char hex) | `1234567890abcdef` |
+
+### Logs-to-Traces Correlation
+
+The `trace_id` and `span_id` labels enable seamless navigation between logs and traces in Grafana:
+
+1. **From Logs to Traces**: In Grafana Loki Explore, click on a log line's `trace_id` label to jump directly to the corresponding trace in Tempo.
+
+2. **From Traces to Logs**: In Grafana Tempo, view related logs by clicking "Logs for this span" (requires Loki derived field configuration).
+
+3. **Cross-Process Tracing**: When ACM runs in batch mode via `sql_batch_runner.py`, trace context is propagated to subprocess runs via environment variables (`TRACEPARENT_TRACE_ID`, `TRACEPARENT_SPAN_ID`), enabling end-to-end trace correlation across the parent orchestrator and child equipment runs.
+
+**Grafana Loki Derived Field Configuration (for trace link):**
+
+In your Loki datasource settings, add a derived field:
+- **Name**: `TraceID`  
+- **Regex**: `"trace_id":"([a-f0-9]+)"`
+- **Internal link**: Enable, select Tempo datasource
+- **URL**: `${__value.raw}`
+
 ### Message Sequence: Batch Run (Coldstart)
 
 **Phase 1: Initialization**

@@ -49,6 +49,7 @@ from core.observability import (
     record_error,
     start_profiling,
     stop_profiling,
+    get_trace_context,  # For propagating trace context to subprocess
 )
 
 
@@ -677,6 +678,15 @@ class SQLBatchRunner:
         env = dict(os.environ)
         env["ACM_FORCE_SQL_MODE"] = "1"
         env["ACM_BATCH_MODE"] = "1"
+        
+        # Propagate trace context to subprocess for end-to-end trace correlation
+        # This allows child process logs to be linked to the parent batch runner trace
+        trace_ctx = get_trace_context()
+        if trace_ctx.get("trace_id") is not None:
+            env["TRACEPARENT_TRACE_ID"] = str(trace_ctx["trace_id"])
+        if trace_ctx.get("span_id") is not None:
+            env["TRACEPARENT_SPAN_ID"] = str(trace_ctx["span_id"])
+        
         # Propagate start-from-beginning intent to forecasting layer (used to force full-history model init)
         # Note: batch_num is 0-indexed internally; display as 1-indexed for users
         display_batch = batch_num + 1
