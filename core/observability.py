@@ -2155,12 +2155,37 @@ class _PyroscopePusher:
         import linecache
         import os
         
+        # Filter out profiler noise (yappi, tracemalloc itself, threading internals)
+        NOISE_PATTERNS = {
+            'yappi', 'tracemalloc', '_yappi', 'threading_bootstrap',
+            'weakrefset', '_weakrefset', 'profile_thread_callback',
+        }
+        
         lines = []
         try:
             # Group by traceback and sum allocations
-            stats = snapshot.statistics('traceback')[:top_n]
+            stats = snapshot.statistics('traceback')[:top_n * 2]  # Get more to compensate for filtering
             
+            filtered_count = 0
             for stat in stats:
+                if filtered_count >= top_n:
+                    break
+                    
+                # Skip if any frame is from profiler internals
+                is_noise = False
+                for frame in stat.traceback:
+                    filename_lower = frame.filename.lower()
+                    for pattern in NOISE_PATTERNS:
+                        if pattern in filename_lower:
+                            is_noise = True
+                            break
+                    if is_noise:
+                        break
+                
+                if is_noise:
+                    continue
+                    
+                filtered_count += 1
                 # Build stack from traceback (reversed for Pyroscope - oldest first)
                 stack_parts = []
                 for frame in reversed(stat.traceback):
