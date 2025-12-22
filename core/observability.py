@@ -2212,6 +2212,14 @@ class _PyroscopePusher:
         import linecache
         import re
         
+        # Skip frozen/built-in modules - no source available
+        if filename.startswith('<frozen') or filename.startswith('<'):
+            return None
+            
+        # Skip if file doesn't exist or isn't readable
+        if not filename or not os.path.isfile(filename):
+            return None
+        
         try:
             # Search backward from lineno to find enclosing function/class
             for search_line in range(lineno, max(1, lineno - 100), -1):
@@ -2219,8 +2227,8 @@ class _PyroscopePusher:
                 if not line:
                     continue
                 
-                # Match function definition
-                func_match = re.match(r'\s*def\s+(\w+)\s*\(', line)
+                # Match function definition (including async def)
+                func_match = re.match(r'\s*(?:async\s+)?def\s+(\w+)\s*\(', line)
                 if func_match:
                     return func_match.group(1)
                 
