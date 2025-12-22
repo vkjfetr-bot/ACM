@@ -47,22 +47,22 @@ datasources:
         # Use label filter {trace_id="xxx"} not line filter |trace_id=xxx
         query: '{app="acm", trace_id="${__trace.traceId}"}'
         tags:
-          - key: equipment
+          - key: acm.equipment
             value: ''
-          - key: run_id
+          - key: acm.run_id
             value: ''
       tracesToMetrics:
         datasourceUid: prometheus-ds
         spanStartTimeShift: '-5m'
         spanEndTimeShift: '5m'
         tags:
-          - key: equipment
+          - key: acm.equipment
             value: ''
         queries:
           - name: Stage Duration
-            query: 'acm_stage_duration_seconds_sum{equipment="${__span.tags.equipment}"}'
+            query: 'acm_stage_duration_seconds_sum{equipment="${__span.tags["acm.equipment"]}"}'
           - name: Memory Usage
-            query: 'acm_memory_rss_mb{equipment="${__span.tags.equipment}"}'
+            query: 'acm_memory_rss_mb{equipment="${__span.tags["acm.equipment"]}"}'
       # Trace-to-Profile correlation
       # Links from Tempo traces to Pyroscope profiles using service_name label
       tracesToProfiles:
