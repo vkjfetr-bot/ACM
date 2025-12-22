@@ -5,20 +5,20 @@ This module defines the current version of ACM and provides utilities for versio
 across logs, outputs, and database entries. Version follows semantic versioning (MAJOR.MINOR.PATCH).
 
 Versioning Strategy:
-- MAJOR: Significant architecture changes or breaking changes (e.g., v8→v9)
-- MINOR: New features, detector improvements, algorithm enhancements (e.g., v9.0→v9.1)
-- PATCH: Bug fixes, refinements, performance improvements (e.g., v9.0.0→v9.0.1)
+- MAJOR: Significant architecture changes or breaking changes (e.g., v10→v11)
+- MINOR: New features, detector improvements, algorithm enhancements (e.g., v11.0→v11.1)
+- PATCH: Bug fixes, refinements, performance improvements (e.g., v11.0.0→v11.0.1)
 
 Release Management:
-- All releases tagged with git annotated tags (e.g., v9.0.0)
+- All releases tagged with git annotated tags (e.g., v11.0.0)
 - Each tag includes comprehensive release notes
 - Feature branches use descriptive names: feature/*, fix/*, refactor/*, docs/*
 - Merges to main use --no-ff to preserve history
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "10.3.0"
-__version_date__ = "2025-12-17"  # v10.3.0: Consolidated Observability Stack (OpenTelemetry + structlog + Pyroscope)
+__version__ = "11.0.0"
+__version_date__ = "2025-12-22"  # v11.0.0: Major Refactor - ONLINE/OFFLINE split, Regime versioning, Detector protocols
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))
@@ -87,6 +87,69 @@ def format_version_for_output(context=""):
         return f"{get_version_string()} [{context}]"
     return get_version_string()
 
+
+# v11.0.0 Release Notes (from v10.x)
+RELEASE_NOTES_V11 = """
+ACM v11.0.0 - MAJOR RELEASE: Pipeline Architecture Overhaul (2025-12-22)
+
+BREAKING CHANGES:
+  ⚠ Pipeline split into ONLINE (assignment-only) and OFFLINE (discovery) modes
+  ⚠ Regime system refactored with versioning and maturity states
+  ⚠ Detector API standardized with DetectorProtocol ABC
+  ⚠ Episodes become the sole alerting primitive (point anomalies deprecated)
+  ⚠ SQL schema additions for 19 new tables
+  ⚠ No backward compatibility with v10.x regime data without migration
+
+ARCHITECTURE OVERHAUL (50 Execution Items):
+  Phase 1 - Core Architecture:
+    ✓ PipelineMode enum (ONLINE, OFFLINE) with stage gating
+    ✓ DataContract class for input validation (timestamps, duplicates, cadence)
+    ✓ FeatureMatrix standardized schema across all detectors
+    ✓ Hardened OutputManager with strict schema guards
+    ✓ Idempotent SQL writes via MERGE statements
+
+  Phase 2 - Regime System:
+    ✓ ACM_ActiveModels pointer table for production model tracking
+    ✓ ACM_RegimeDefinitions with immutable versioned storage
+    ✓ MaturityState gating (INITIALIZING → LEARNING → CONVERGED → DEPRECATED)
+    ✓ UNKNOWN (-1) and EMERGING (-2) regime labels
+    ✓ Confidence-gated normalization and thresholds
+    ✓ Offline historical replay for regime discovery
+    ✓ Promotion procedure with acceptance criteria
+
+  Phase 3 - Detector/Fusion:
+    ✓ DetectorProtocol ABC with fit_baseline/score contract
+    ✓ Train-score separation (batch cannot influence own score)
+    ✓ Calibrated fusion with detector disagreement handling
+    ✓ Per-run fusion quality diagnostics
+
+  Phase 4 - Health/Episode/RUL:
+    ✓ Episodes as sole alerting primitive
+    ✓ Time-evolving health state with HealthConfidence
+    ✓ RUL reliability gate (RUL_NOT_RELIABLE outcome)
+    ✓ Unified confidence model across all outputs
+
+  Phase 5 - Operational:
+    ✓ Drift/novelty control plane with triggers
+    ✓ Operator feedback capture
+    ✓ Alert fatigue controls (rate limits, escalation ladders)
+    ✓ Episode clustering for pattern mining
+    ✓ Experiment tracking and configuration versioning
+
+NEW SQL TABLES (19):
+  - ACM_SensorValidity, ACM_MaintenanceEvents, ACM_PipelineMetrics
+  - ACM_FeatureMatrix, ACM_ActiveModels, ACM_RegimeDefinitions
+  - ACM_RegimeMetrics, ACM_RegimePromotionLog, ACM_FusionQuality
+  - ACM_DetectorCorrelation, ACM_ForecastDiagnostics, ACM_NoveltyPressure
+  - ACM_DriftEvents, ACM_BaselinePolicy, ACM_DecisionOutput
+  - ACM_OperatorFeedback, ACM_EpisodeFamilies, ACM_ExperimentLog
+  - ACM_ModelDeprecationLog
+
+MIGRATION REQUIRED:
+  - Run scripts/sql/migrations/v11_schema.sql before first v11 run
+  - Regime data requires reprocessing with offline_replay.py
+  - Model registry compatible with forward migration only
+"""
 
 # v10.0.0 Release Notes (from v9.0.0)
 RELEASE_NOTES_V10 = """
