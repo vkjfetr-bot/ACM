@@ -48,21 +48,21 @@ datasources:
         query: '{app="acm", trace_id="${__trace.traceId}"}'
         tags:
           - key: acm.equipment
-            value: ''
+            value: equipment
           - key: acm.run_id
-            value: ''
+            value: run_id
       tracesToMetrics:
         datasourceUid: prometheus-ds
         spanStartTimeShift: '-5m'
         spanEndTimeShift: '5m'
         tags:
           - key: acm.equipment
-            value: ''
+            value: equipment
         queries:
           - name: Stage Duration
-            query: 'acm_stage_duration_seconds_sum{equipment="${__span.tags["acm.equipment"]}"}'
+            query: 'acm_stage_duration_seconds_sum{equipment="${__span.tags.equipment}"}'
           - name: Memory Usage
-            query: 'acm_memory_rss_mb{equipment="${__span.tags["acm.equipment"]}"}'
+            query: 'acm_memory_rss_mb{equipment="${__span.tags.equipment}"}'
       # Trace-to-Profile correlation
       # Links from Tempo traces to Pyroscope profiles using service_name label
       tracesToProfiles:
@@ -72,14 +72,12 @@ datasources:
         customQuery: true
         # Match using service_name label (standard Grafana label set by ACM)
         # Also include equipment for filtering
-        query: '{service_name="${__span.serviceName}",equipment="${__span.tags["acm.equipment"]}"}'
+        query: '{service_name="${__span.serviceName}",equipment="${__span.tags.equipment}"}'
         tags:
-          - key: service_name
-            value: ''
-          - key: equipment
-            value: ''
-          - key: run_id
-            value: ''
+          - key: acm.equipment
+            value: equipment
+          - key: acm.run_id
+            value: run_id
 
   # Loki - Log Aggregation
   - name: Loki
