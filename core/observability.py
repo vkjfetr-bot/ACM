@@ -2124,8 +2124,11 @@ class _PyroscopePusher:
             top_n: Limit to top N allocations
         
         Returns:
-            List of collapsed stack lines
+            List of collapsed stack lines with readable function names
         """
+        import linecache
+        import os
+        
         lines = []
         try:
             # Group by traceback and sum allocations
@@ -2138,22 +2141,31 @@ class _PyroscopePusher:
                     filename = frame.filename
                     lineno = frame.lineno
                     
-                    # Clean up filename
+                    # Try to get function name from source code
+                    func_name = self._get_function_name_at_line(filename, lineno)
+                    
+                    # Clean up module name from filename
+                    module_name = filename
                     if "/" in filename or "\\" in filename:
-                        import os
                         parts = filename.replace("\\", "/").split("/")
                         # Keep ACM package structure
                         if "core" in parts:
                             idx = parts.index("core")
-                            filename = ".".join(parts[idx:])
+                            module_name = ".".join(parts[idx:])
                         elif "scripts" in parts:
                             idx = parts.index("scripts")
-                            filename = ".".join(parts[idx:])
+                            module_name = ".".join(parts[idx:])
                         else:
-                            filename = os.path.basename(filename)
-                        filename = filename.replace(".py", "")
+                            module_name = os.path.basename(filename)
+                        module_name = module_name.replace(".py", "")
                     
-                    stack_parts.append(f"{filename}:{lineno}")
+                    # Build readable symbol: module.function or module.<line N> if no function found
+                    if func_name:
+                        symbol = f"{module_name}.{func_name}"
+                    else:
+                        symbol = f"{module_name}.<line {lineno}>"
+                    
+                    stack_parts.append(symbol)
                 
                 if stack_parts:
                     stack = ";".join(stack_parts)
@@ -2164,6 +2176,36 @@ class _PyroscopePusher:
             pass
         
         return lines
+    
+    def _get_function_name_at_line(self, filename: str, lineno: int) -> Optional[str]:
+        """Try to determine the function name containing the given line.
+        
+        Uses linecache to read the file and searches backward from the line
+        to find the enclosing 'def' or 'class' statement.
+        """
+        import linecache
+        import re
+        
+        try:
+            # Search backward from lineno to find enclosing function/class
+            for search_line in range(lineno, max(1, lineno - 100), -1):
+                line = linecache.getline(filename, search_line)
+                if not line:
+                    continue
+                
+                # Match function definition
+                func_match = re.match(r'\s*def\s+(\w+)\s*\(', line)
+                if func_match:
+                    return func_match.group(1)
+                
+                # Match class definition
+                class_match = re.match(r'\s*class\s+(\w+)\s*[:\(]', line)
+                if class_match:
+                    return class_match.group(1)
+            
+            return None
+        except Exception:
+            return None
     
     def _log_top_functions(self, stats, top_n: int = 10) -> None:
         """Log the top N CPU-consuming functions."""
