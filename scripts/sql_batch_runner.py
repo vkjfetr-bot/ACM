@@ -257,12 +257,12 @@ class SQLBatchRunner:
             inferred = max(min_tick, min(inferred, max_tick))
 
             Console.info(
-                f"[CONFIG] Inferred tick_minutes={inferred} for {equip_name} "
+                f"Inferred tick_minutes={inferred} for {equip_name} "
                 f"(rows={total_rows}, minutes={total_minutes:.1f}, cadence={cadence_minutes:.2f}m)",
                 component="CONFIG", tick_minutes=inferred, equipment=equip_name, total_rows=total_rows
             )
             if inferred == max_tick:
-                Console.warn("[CONFIG] Clamped by ACM_SQL_MAX_TICK_MINUTES; override env var to expand further", component="CONFIG", max_tick=max_tick)
+                Console.warn("Clamped by ACM_SQL_MAX_TICK_MINUTES; override env var to expand further", component="CONFIG", max_tick=max_tick)
             return inferred
         except Exception as e:
             Console.warn(f"Could not infer tick_minutes from raw table for {equip_name}: {e}", component="CONFIG", equipment=equip_name, error=str(e), error_type=type(e).__name__)

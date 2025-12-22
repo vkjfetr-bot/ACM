@@ -187,7 +187,7 @@ class HealthTimeline:
         
         # SQL path
         if self.sql_client is None:
-            Console.warn("[HealthTracker] No SQL client provided; cannot load health timeline")
+            Console.warn("No SQL client provided; cannot load health timeline", component="HEALTH")
             return None, HealthQuality.MISSING
         
         try:

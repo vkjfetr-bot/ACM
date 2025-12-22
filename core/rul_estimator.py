@@ -175,8 +175,9 @@ class RULEstimator:
             )
         
         Console.info(
-            f"[RULEstimator] RUL estimate: P50={p50:.1f}h, P10={p10:.1f}h, P90={p90:.1f}h, "
-            f"mean={mean_rul:.1f}h, std={std_rul:.1f}h, failure_prob={failure_prob:.3f}"
+            f"RUL estimate: P50={p50:.1f}h, P10={p10:.1f}h, P90={p90:.1f}h, "
+            f"mean={mean_rul:.1f}h, std={std_rul:.1f}h, failure_prob={failure_prob:.3f}",
+            component="RUL"
         )
         
         return RULEstimate(

@@ -2386,7 +2386,7 @@ class OutputManager:
             elif df is not None:
                 # Legacy path: DataFrame must have ComponentName and MetricType columns
                 if 'ComponentName' not in df.columns or 'MetricType' not in df.columns:
-                    Console.warn("[OUTPUT] write_pca_metrics legacy path requires ComponentName and MetricType columns. "
+                    Console.warn("write_pca_metrics legacy path requires ComponentName and MetricType columns. "
                                  + "Provided DataFrame has columns: " + str(list(df.columns)), component="OUTPUT", columns=list(df.columns))
                     return 0
                 sql_df = df.copy()

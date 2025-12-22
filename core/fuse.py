@@ -886,9 +886,9 @@ def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict
                 else:
                     h_sigma = base_h_sigma
 
-                Console.info("[FUSE] Auto-tuned CUSUM parameters (source=%s):" % stats_source)
-                Console.info(f"  k_sigma: {base_k_sigma:.3f} -> {k_sigma:.3f} (std={std:.3f})")
-                Console.info(f"  h_sigma: {base_h_sigma:.3f} -> {h_sigma:.3f} (p50={p50:.3f}, p95={p95:.3f})")
+                Console.info("Auto-tuned CUSUM parameters (source=%s):" % stats_source, component="FUSE")
+                Console.info(f"  k_sigma: {base_k_sigma:.3f} -> {k_sigma:.3f} (std={std:.3f})", component="FUSE")
+                Console.info(f"  h_sigma: {base_h_sigma:.3f} -> {h_sigma:.3f} (p50={p50:.3f}, p95={p95:.3f})", component="FUSE")
             else:
                 Console.warn("Auto-tune skipped: insufficient data for statistics", component="FUSE", stats_source=stats_source if 'stats_source' in dir() else "unknown", n_samples=n_total if 'n_total' in dir() else 0)
         except Exception as tune_e:

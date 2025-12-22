@@ -181,7 +181,7 @@ class LinearTrendModel(BaseDegradationModel):
             health_series: Time-indexed health values (pd.Series with DatetimeIndex)
         """
         if health_series is None or len(health_series) == 0:
-            Console.warn("[DegradationModel] Empty health series provided")
+            Console.warn("Empty health series provided", component="DEGRADE")
             return
         
         # Prepare series (robust median imputation)
@@ -217,15 +217,15 @@ class LinearTrendModel(BaseDegradationModel):
         
         if is_flatline:
             self.trend = 0.0
-            Console.info("[DegradationModel] Flatline detected; zeroing trend")
+            Console.info("Flatline detected; zeroing trend", component="DEGRADE")
         
         # Adaptive smoothing (if enabled and sufficient samples)
         if self.enable_adaptive and n >= self.min_samples_for_adaptive:
             try:
                 self.alpha, self.beta = self._adaptive_smoothing(health_values)
-                Console.info(f"[DegradationModel] Adaptive smoothing: alpha={self.alpha:.3f}, beta={self.beta:.3f}")
+                Console.info(f"Adaptive smoothing: alpha={self.alpha:.3f}, beta={self.beta:.3f}", component="DEGRADE")
             except Exception as e:
-                Console.warn(f"[DegradationModel] Adaptive smoothing failed: {e}")
+                Console.warn(f"Adaptive smoothing failed: {e}", component="DEGRADE", error_type=type(e).__name__, error=str(e)[:200])
         
         # Forward pass (Holt's equations)
         self.level_history = [self.level]
@@ -264,8 +264,9 @@ class LinearTrendModel(BaseDegradationModel):
             self.std_error = 1.0
         
         Console.info(
-            f"[DegradationModel] Fitted: level={self.level:.2f}, trend={self.trend:.4f}/hr, "
-            f"std_error={self.std_error:.2f}, n={n}"
+            f"Fitted: level={self.level:.2f}, trend={self.trend:.4f}/hr, "
+            f"std_error={self.std_error:.2f}, n={n}",
+            component="DEGRADE"
         )
     
     def predict(
@@ -433,8 +434,9 @@ class LinearTrendModel(BaseDegradationModel):
         self.n_fitted = int(params.get("n_fitted", 0))
         
         Console.info(
-            f"[DegradationModel] Restored state: level={self.level:.2f}, trend={self.trend:.4f}/hr, "
-            f"std_error={self.std_error:.2f}"
+            f"Restored state: level={self.level:.2f}, trend={self.trend:.4f}/hr, "
+            f"std_error={self.std_error:.2f}",
+            component="DEGRADE"
         )
     
     def _detect_and_remove_outliers(self, series: pd.Series, n_std: float = 3.0) -> pd.Series:
@@ -452,7 +454,7 @@ class LinearTrendModel(BaseDegradationModel):
         outliers = z_scores > n_std
         
         if outliers.sum() > 0:
-            Console.info(f"[DegradationModel] Detected {outliers.sum()} outliers (z > {n_std})")
+            Console.info(f"Detected {outliers.sum()} outliers (z > {n_std})", component="DEGRADE")
             series = series.copy()
             series[outliers] = np.nan
         

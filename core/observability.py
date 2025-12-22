@@ -20,8 +20,8 @@ API:
     log.error("SQL failed", table="ACM_Scores")
 
     # Console - backwards compatible wrapper
-    Console.info("[DATA] Loaded 5000 rows")
-    Console.warn("Warning message")
+    Console.info("Loaded 5000 rows", component="DATA")
+    Console.warn("Warning message", component="MODEL")
 
     # Progress - uses rich.progress (replaces Heartbeat)
     with Progress("Loading data") as p:
@@ -75,6 +75,8 @@ class _Colors:
     OK = Fore.GREEN + Style.BRIGHT
     DEBUG = Style.DIM
     STATUS = Fore.MAGENTA + Style.BRIGHT  # Console-only status (purple/magenta)
+    # Component tag (module name like CAL, FUSE, THRESHOLD)
+    COMPONENT = Fore.WHITE + Style.BRIGHT  # Neutral color works with all levels
     # Message
     MSG = Fore.WHITE
     RESET = Style.RESET_ALL
@@ -300,9 +302,9 @@ def init(
                 },
             )
             if _loki_pusher._connected:
-                Console.ok(f"[OTEL] Loki logs -> {loki_endpoint}")
+                Console.ok(f"Loki logs -> {loki_endpoint}", component="OTEL")
             else:
-                Console.warn(f"[OTEL] Loki not connected at {loki_endpoint}", component="OTEL", endpoint=loki_endpoint, service="loki")
+                Console.warn(f"Loki not connected at {loki_endpoint}", component="OTEL", endpoint=loki_endpoint, service="loki")
         
         # Pyroscope continuous profiling (via yappi + tracemalloc + HTTP API - no Rust required)
         global _pyroscope_enabled, _pyroscope_pusher
@@ -330,13 +332,13 @@ def init(
                     profile_types = ["cpu (yappi)"]
                     if TRACEMALLOC_AVAILABLE:
                         profile_types.append("memory (tracemalloc)")
-                    Console.ok(f"[OTEL] Profiling -> {pyroscope_endpoint} [{', '.join(profile_types)}]")
+                    Console.ok(f"Profiling -> {pyroscope_endpoint} [{', '.join(profile_types)}]", component="OTEL")
                 else:
-                    Console.warn(f"[OTEL] Pyroscope not reachable at {pyroscope_endpoint} - profiling disabled", component="OTEL", endpoint=pyroscope_endpoint, service="pyroscope")
+                    Console.warn(f"Pyroscope not reachable at {pyroscope_endpoint} - profiling disabled", component="OTEL", endpoint=pyroscope_endpoint, service="pyroscope")
             except Exception as e:
-                Console.warn(f"[OTEL] Pyroscope setup failed: {e}", component="OTEL", endpoint=pyroscope_endpoint, service="pyroscope", error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Pyroscope setup failed: {e}", component="OTEL", endpoint=pyroscope_endpoint, service="pyroscope", error_type=type(e).__name__, error=str(e)[:200])
         elif enable_profiling and not YAPPI_AVAILABLE:
-            Console.warn("[OTEL] yappi not installed - profiling disabled (pip install yappi)", component="OTEL", service="pyroscope", reason="yappi_not_installed")
+            Console.warn("yappi not installed - profiling disabled (pip install yappi)", component="OTEL", service="pyroscope", reason="yappi_not_installed")
         
         # OpenTelemetry setup for tracing
         if not OTEL_AVAILABLE or not OTEL_EXPORTERS_AVAILABLE:
@@ -346,7 +348,7 @@ def init(
         # Pre-check OTLP endpoint connectivity to avoid noisy export errors
         otlp_reachable = _check_endpoint_reachable(otlp_endpoint)
         if not otlp_reachable:
-            Console.warn(f"[OTEL] OTLP endpoint not reachable at {otlp_endpoint} - tracing/metrics disabled", component="OTEL", endpoint=otlp_endpoint, service="otlp")
+            Console.warn(f"OTLP endpoint not reachable at {otlp_endpoint} - tracing/metrics disabled", component="OTEL", endpoint=otlp_endpoint, service="otlp")
             _initialized = True
             return
         
@@ -362,7 +364,7 @@ def init(
             )
             otel_trace.set_tracer_provider(trace_provider)
             _tracer = otel_trace.get_tracer(service_name)
-            Console.ok(f"[OTEL] Traces -> {otlp_endpoint}/v1/traces")
+            Console.ok(f"Traces -> {otlp_endpoint}/v1/traces", component="OTEL")
         
         # Metrics via OTLP
         if enable_metrics:
@@ -557,7 +559,7 @@ def init(
                 
                 Console.ok(f"Metrics -> {otlp_endpoint}/v1/metrics", component="OTEL")
             except Exception as e:
-                Console.warn(f"[OTEL] Metrics setup failed: {e}", component="OTEL", endpoint=otlp_endpoint, service="metrics", error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Metrics setup failed: {e}", component="OTEL", endpoint=otlp_endpoint, service="metrics", error_type=type(e).__name__, error=str(e)[:200])
         
         _initialized = True
         atexit.register(shutdown)
@@ -625,7 +627,7 @@ def start_profiling() -> None:
     global _pyroscope_pusher
     if _pyroscope_pusher is not None:
         _pyroscope_pusher.start()
-        Console.info("[PROFILE] Started CPU profiling")
+        Console.info("Started CPU profiling", component="PROFILE")
     else:
         # Silently skip if not initialized
         pass
@@ -638,9 +640,9 @@ def stop_profiling() -> None:
     """
     global _pyroscope_pusher
     if _pyroscope_pusher is not None:
-        Console.info("[PROFILE] Stopping and pushing profile data...")
+        Console.info("Stopping and pushing profile data...", component="PROFILE")
         _pyroscope_pusher.stop_and_push()
-        Console.ok("[PROFILE] Profile data pushed to Pyroscope")
+        Console.ok("Profile data pushed to Pyroscope", component="PROFILE")
     else:
         # Silently skip if not initialized
         pass
@@ -787,7 +789,7 @@ class Console:
         level_tag = f"{level_color}[{level}]{_Colors.RESET}"
         
         if component:
-            comp_tag = f"{_Colors.INFO}[{component.upper()}]{_Colors.RESET} "
+            comp_tag = f"{level_color}[{component.upper()}]{_Colors.RESET} "
         else:
             comp_tag = ""
         

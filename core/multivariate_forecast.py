@@ -121,7 +121,7 @@ class MultivariateSensorForecaster:
                 rows = cur.fetchall()
             
             if not rows:
-                Console.warn("[MultivariateForecast] No sensor data found")
+                Console.warn("No sensor data found", component="MV_FORECAST")
                 return None
             
             # Convert to long format first
@@ -244,7 +244,7 @@ class MultivariateSensorForecaster:
             from statsmodels.tsa.api import VAR
             from statsmodels.tsa.stattools import adfuller
         except ImportError:
-            Console.warn("[MultivariateForecast] statsmodels.tsa.VAR not available")
+            Console.warn("statsmodels.tsa.VAR not available", component="MV_FORECAST")
             return None
         
         n_steps = int(horizon_hours / dt_hours)
@@ -426,7 +426,7 @@ class MultivariateSensorForecaster:
         # Filter to requested sensors only
         available_sensors = [s for s in sensor_names if s in df.columns]
         if len(available_sensors) < 2:
-            Console.warn("[MultivariateForecast] Need at least 2 sensors for multivariate forecasting")
+            Console.warn("Need at least 2 sensors for multivariate forecasting", component="MV_FORECAST")
             return None
         
         df = df[available_sensors]
@@ -439,7 +439,7 @@ class MultivariateSensorForecaster:
         strong_corrs = [(r.sensor_a, r.sensor_b, r.correlation) 
                        for r in lead_lag if abs(r.correlation) > 0.7]
         if strong_corrs:
-            Console.info(f"[MultivariateForecast] Strong correlations: {strong_corrs[:3]}")
+            Console.info(f"Strong correlations: {strong_corrs[:3]}", component="MV_FORECAST")
         
         # Try VAR first
         forecast_df = None

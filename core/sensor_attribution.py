@@ -122,7 +122,7 @@ class SensorAttributor:
                     rank=idx + 1  # 1-indexed rank
                 ))
             
-            Console.info(f"[SensorAttributor] Loaded {len(attributions)} sensor attributions from SQL")
+            Console.info(f"Loaded {len(attributions)} sensor attributions from SQL", component="SENSOR_ATTR")
             return attributions
             
         except Exception as e:

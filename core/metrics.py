@@ -520,16 +520,17 @@ def log_forecast_diagnostics(diagnostics: Dict[str, any], prefix: str = "[Foreca
     
     Args:
         diagnostics: Dictionary from compute_forecast_diagnostics()
-        prefix: Log message prefix
+        prefix: Log message prefix (deprecated, uses component now)
     """
     Console.info(
-        f"{prefix} RUL_P50={diagnostics.get('rul_p50', float('nan')):.1f}h, "
+        f"RUL_P50={diagnostics.get('rul_p50', float('nan')):.1f}h, "
         f"RUL_Spread={diagnostics.get('rul_spread', float('nan')):.1f}h, "
         f"RUL_CV={diagnostics.get('rul_cv', float('nan')):.2f}, "
         f"CI_Width={diagnostics.get('ci_width_mean', float('nan')):.2f}, "
         f"Health={diagnostics.get('current_health', float('nan')):.1f}, "
         f"N={diagnostics.get('n_samples', 0)}, "
-        f"Quality={diagnostics.get('data_quality', 'UNKNOWN')}"
+        f"Quality={diagnostics.get('data_quality', 'UNKNOWN')}",
+        component="FORECAST"
     )
 
 

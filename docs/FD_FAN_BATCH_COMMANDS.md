@@ -1,4 +1,4 @@
-# FD_FAN Batch Processing Commands
+﻿# FD_FAN Batch Processing Commands
 
 This document contains static commands for running ACM batches on the FD_FAN equipment. Each command processes a non-overlapping time window.
 

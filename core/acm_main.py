@@ -862,8 +862,20 @@ def _sql_finalize_run(cli: Any, run_id: str, outcome: str, rows_read: int, rows_
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--equip", required=True)
+    ap = argparse.ArgumentParser(
+        prog="python -m core.acm_main",
+        description="ACM - Automated Condition Monitoring pipeline for equipment health analysis.",
+        epilog="""
+Examples:
+  python -m core.acm_main --equip FD_FAN --start-time "2023-10-15T00:00:00" --end-time "2023-11-15T00:00:00"
+  python -m core.acm_main --equip GAS_TURBINE --log-level DEBUG
+
+Note: For automated batch processing, use sql_batch_runner.py instead:
+  python scripts/sql_batch_runner.py --equip FD_FAN --start-from-beginning
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--equip", required=True, help="Equipment name (e.g., FD_FAN, GAS_TURBINE)")
     ap.add_argument("--config", default=None, help="Config file path (auto-discovers configs/ directory if not specified)")
     ap.add_argument("--train-csv", help="Path to baseline CSV (historical normal data), overrides config.")
     ap.add_argument("--baseline-csv", dest="train_csv", help="Alias for --train-csv (baseline data)")
@@ -875,8 +887,8 @@ def main() -> None:
     ap.add_argument("--log-file", help="Write logs to the specified file.")
     ap.add_argument("--log-module-level", action="append", default=[], metavar="MODULE=LEVEL",
                     help="Set per-module log level overrides (repeatable).")
-    ap.add_argument("--start-time", help="Override start time for SQL run (ISO format).")
-    ap.add_argument("--end-time", help="Override end time for SQL run (ISO format).")
+    ap.add_argument("--start-time", help="Start time for analysis window (ISO format: 2023-10-15T00:00:00)")
+    ap.add_argument("--end-time", help="End time for analysis window (ISO format: 2023-11-15T00:00:00)")
     args = ap.parse_args()
 
     # Initialize observability (traces/metrics to OTLP collector, logs to Loki)
@@ -1321,7 +1333,7 @@ def main() -> None:
             f"future_drop={getattr(meta, 'future_rows_dropped', 0)} "
             f"dup_removed={getattr(meta, 'dup_timestamps_removed', 0)}"
         )
-        T.log("shapes", train=train.shape, score=score.shape)
+        T.log("data_split_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
         train_numeric = train.copy()
         score_numeric = score.copy()
 
@@ -1748,7 +1760,7 @@ def main() -> None:
                         train = train.apply(pd.to_numeric, errors="coerce")
                         score = score.apply(pd.to_numeric, errors="coerce")
 
-                    T.log("shapes_post_features", train=train.shape, score=score.shape)
+                    T.log("feature_engineering_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
                 else:
                     Console.warn("fast_features not available; continuing with raw sensor inputs", component="FEAT",
                                  equip=equip)
