@@ -44,7 +44,8 @@ datasources:
         filterByTraceID: true
         filterBySpanID: false
         customQuery: true
-        query: '{app="acm"} | trace_id=`${__trace.traceId}`'
+        # Use label filter {trace_id="xxx"} not line filter |trace_id=xxx
+        query: '{app="acm", trace_id="${__trace.traceId}"}'
         tags:
           - key: equipment
             value: ''
