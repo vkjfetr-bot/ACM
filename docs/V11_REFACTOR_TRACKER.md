@@ -14,10 +14,10 @@
 | 0 | Setup & Versioning | 3 | ✅ Complete | 3/3 |
 | 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
-| 3 | Detector/Fusion | 6 | 🔄 In Progress | 2/6 |
+| 3 | Detector/Fusion | 6 | 🔄 In Progress | 5/6 |
 | 4 | Health/Episode/RUL | 6 | ⏳ Not Started | 0/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **12/50** |
+| **Total** | | **50** | | **15/50** |
 
 ---
 
@@ -1862,10 +1862,10 @@ class CalibratedFusion:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Redesign fusion as calibrated evidence combiner | `core/fuse.py` | ⏳ |
-| [ ] Add explicit missingness handling (NaN → confidence dampening) | `core/fuse.py` | ⏳ |
-| [ ] Add detector weight calibration | `core/fuse.py` | ⏳ |
-| [ ] Add disagreement penalty | `core/fuse.py` | ⏳ |
+| [x] Redesign fusion as calibrated evidence combiner | `core/calibrated_fusion.py` | ✅ |
+| [x] Add explicit missingness handling (NaN → confidence dampening) | `core/calibrated_fusion.py` | ✅ |
+| [x] Add detector weight calibration | `core/calibrated_fusion.py` | ✅ |
+| [x] Add disagreement penalty | `core/calibrated_fusion.py` | ✅ |
 
 ### P3.5 — Per-Run Fusion Quality (Item 23)
 
@@ -1899,10 +1899,10 @@ CREATE TABLE ACM_FusionQuality (
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `FusionQualityMetrics` class | `core/fuse.py` | ⏳ |
-| [ ] Track which detectors contributed | `core/fuse.py` | ⏳ |
-| [ ] Track detector agreement level | `core/fuse.py` | ⏳ |
-| [ ] Track confidence impact | `core/fuse.py` | ⏳ |
+| [x] Create `FusionQualityMetrics` class | `core/calibrated_fusion.py` | ✅ |
+| [x] Track which detectors contributed | `core/calibrated_fusion.py` | ✅ |
+| [x] Track detector agreement level | `core/calibrated_fusion.py` | ✅ |
+| [x] Track confidence impact | `core/calibrated_fusion.py` | ✅ |
 | [ ] Create `ACM_FusionQuality` table | `scripts/sql/migrations/` | ⏳ |
 | [ ] Persist fusion quality per run | `core/output_manager.py` | ⏳ |
 
@@ -1977,10 +1977,10 @@ CREATE TABLE ACM_DetectorCorrelation (
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `DetectorCorrelation` class | `core/detector_correlation.py` | ⏳ |
-| [ ] Track pairwise correlations per run | `core/detector_correlation.py` | ⏳ |
-| [ ] Flag redundant detectors (correlation > 0.95) | `core/detector_correlation.py` | ⏳ |
-| [ ] Flag unstable detectors (high variance) | `core/detector_correlation.py` | ⏳ |
+| [x] Create `DetectorCorrelation` class | `core/calibrated_fusion.py` | ✅ |
+| [x] Track pairwise correlations per run | `core/calibrated_fusion.py` | ✅ |
+| [x] Flag redundant detectors (correlation > 0.95) | `core/calibrated_fusion.py` | ✅ |
+| [x] Flag unstable detectors (high variance) | `core/calibrated_fusion.py` | ✅ |
 | [ ] Create `ACM_DetectorCorrelation` table | `scripts/sql/migrations/` | ⏳ |
 
 ---
