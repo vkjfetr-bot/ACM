@@ -1,10 +1,13 @@
 ﻿"""
-Sensor Attribution via Counterfactual Analysis (v10.0.0)
+Sensor Attribution via Counterfactual Analysis (v11.0.0)
 
 Identifies which sensors contribute most to failure risk via counterfactual analysis.
 Replaces logic from rul_engine.py (lines 489-611).
 
-Key Features:
+Key Features (v11):
+- UnifiedAttribution: Uses frozen baseline artifacts for consistent attribution
+- SensorContribution: Per-sensor attribution with z-scores and direction
+- AttributionResult: Complete attribution with top-3 sensors and explanation
 - Counterfactual analysis: RUL impact when zeroing each sensor
 - Rank sensors by failure contribution
 - Top-N sensor identification for maintenance prioritization
@@ -33,12 +36,363 @@ TODO: SENSOR_INTERACTION_GRAPH - Build sensor dependency network
       - Output: NetworkX graph for root cause analysis
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from enum import Enum
 import numpy as np
 import pandas as pd
 
 from core.observability import Console, Heartbeat
+
+
+# =============================================================================
+# P5.4: UNIFIED SENSOR ATTRIBUTION (v11.0.0)
+# =============================================================================
+
+
+class DeviationDirection(Enum):
+    """Direction of sensor deviation from baseline."""
+    HIGH = "HIGH"           # Significantly above baseline
+    LOW = "LOW"             # Significantly below baseline
+    VOLATILE = "VOLATILE"   # High variance / oscillating
+    NORMAL = "NORMAL"       # Within expected range
+
+
+@dataclass
+class SensorStats:
+    """Statistics for a single sensor from frozen baseline."""
+    mean: float
+    std: float
+    min_val: float = 0.0
+    max_val: float = 0.0
+    
+    def compute_z_score(self, value: float) -> float:
+        """Compute z-score for a value using these statistics."""
+        if pd.isna(value):
+            return 0.0
+        return (value - self.mean) / (self.std + 1e-10)
+
+
+@dataclass
+class SensorContribution:
+    """Attribution of a single sensor to an anomaly.
+    
+    Attributes:
+        sensor_name: Name of the sensor
+        contribution_pct: Percentage contribution to anomaly (0-100)
+        z_score: Individual sensor z-score relative to baseline
+        direction: HIGH, LOW, VOLATILE, or NORMAL
+        baseline_deviation: Absolute deviation from baseline (|z|)
+    """
+    sensor_name: str
+    contribution_pct: float = 0.0   # 0-100, % contribution to anomaly
+    z_score: float = 0.0            # Individual sensor z-score
+    direction: DeviationDirection = DeviationDirection.NORMAL
+    baseline_deviation: float = 0.0  # How far from baseline (abs z)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "sensor_name": self.sensor_name,
+            "contribution_pct": round(self.contribution_pct, 2),
+            "z_score": round(self.z_score, 3),
+            "direction": self.direction.value,
+            "baseline_deviation": round(self.baseline_deviation, 3)
+        }
+
+
+@dataclass
+class AttributionResult:
+    """Complete attribution for an anomaly or episode.
+    
+    Attributes:
+        timestamp: When the attribution was computed
+        total_z_score: Fused z-score for the anomaly
+        contributions: List of all sensor contributions
+        top_3_sensors: Names of top 3 contributing sensors
+        explanation: Human-readable explanation of the anomaly
+    """
+    timestamp: Optional[pd.Timestamp] = None
+    total_z_score: float = 0.0
+    contributions: List[SensorContribution] = field(default_factory=list)
+    top_3_sensors: List[str] = field(default_factory=list)
+    explanation: str = ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "timestamp": str(self.timestamp) if self.timestamp else None,
+            "total_z_score": round(self.total_z_score, 3),
+            "contributions": [c.to_dict() for c in self.contributions],
+            "top_3_sensors": self.top_3_sensors,
+            "explanation": self.explanation
+        }
+    
+    def to_sql_row(self, equip_id: int, run_id: str) -> Dict[str, Any]:
+        """Convert to SQL row format for ACM_SensorAttribution table."""
+        return {
+            "EquipID": equip_id,
+            "RunID": run_id,
+            "Timestamp": self.timestamp,
+            "TotalZScore": round(self.total_z_score, 3),
+            "TopSensor1": self.top_3_sensors[0] if len(self.top_3_sensors) > 0 else None,
+            "TopSensor2": self.top_3_sensors[1] if len(self.top_3_sensors) > 1 else None,
+            "TopSensor3": self.top_3_sensors[2] if len(self.top_3_sensors) > 2 else None,
+            "Explanation": self.explanation[:500] if self.explanation else None
+        }
+
+
+@runtime_checkable
+class BaselineNormalizerProtocol(Protocol):
+    """Protocol for baseline normalizer providing frozen statistics."""
+    
+    def get_sensor_stats(self, sensor_name: str) -> Optional[SensorStats]:
+        """Get frozen baseline statistics for a sensor."""
+        ...
+    
+    @property
+    def sensor_names(self) -> List[str]:
+        """List of sensors with frozen statistics."""
+        ...
+
+
+class UnifiedAttribution:
+    """
+    Unified sensor attribution using frozen baseline artifacts.
+    
+    Key Principle: All attribution uses the SAME normalization as detection.
+    No separate statistics computed during attribution - only frozen baseline
+    statistics are used for consistency.
+    
+    Usage:
+        normalizer = MyBaselineNormalizer(baseline_stats)
+        attribution = UnifiedAttribution(normalizer)
+        result = attribution.attribute(
+            raw_data=df,
+            fused_z=4.5,
+            sensor_cols=["Temp1", "Vibration", "Pressure"]
+        )
+        print(result.explanation)  # "Elevated anomaly driven by: Vibration is HIGH (3.2σ)"
+    
+    Attributes:
+        normalizer: Baseline normalizer providing frozen statistics
+        z_threshold_high: Z-score threshold for HIGH direction (default 2.0)
+        z_threshold_low: Z-score threshold for LOW direction (default -2.0)
+    """
+    
+    def __init__(
+        self,
+        baseline_normalizer: Optional[BaselineNormalizerProtocol] = None,
+        z_threshold_high: float = 2.0,
+        z_threshold_low: float = -2.0
+    ):
+        """
+        Initialize UnifiedAttribution.
+        
+        Args:
+            baseline_normalizer: Normalizer providing frozen baseline statistics.
+                                If None, attribution will use raw values.
+            z_threshold_high: Z-score above which direction is HIGH (default 2.0)
+            z_threshold_low: Z-score below which direction is LOW (default -2.0)
+        """
+        self.normalizer = baseline_normalizer
+        self.z_threshold_high = z_threshold_high
+        self.z_threshold_low = z_threshold_low
+    
+    def attribute(
+        self,
+        raw_data: pd.DataFrame,
+        fused_z: float,
+        sensor_cols: Optional[List[str]] = None,
+        detector_outputs: Optional[Dict[str, pd.DataFrame]] = None,
+        timestamp_col: str = "Timestamp"
+    ) -> AttributionResult:
+        """
+        Compute sensor contributions to an anomaly.
+        
+        Uses frozen baseline statistics from normalizer for consistent
+        attribution that matches detection normalization.
+        
+        Args:
+            raw_data: Raw sensor data DataFrame
+            fused_z: Fused z-score for the anomaly (from detectors)
+            sensor_cols: List of sensor columns to attribute. If None, uses all
+                        numeric columns except timestamp.
+            detector_outputs: Optional detector-specific outputs for advanced attribution
+            timestamp_col: Name of timestamp column (default "Timestamp")
+        
+        Returns:
+            AttributionResult with sensor contributions and explanation
+        """
+        if raw_data.empty:
+            return AttributionResult(
+                total_z_score=fused_z,
+                explanation="No data available for attribution."
+            )
+        
+        # Determine timestamp
+        ts = None
+        if timestamp_col in raw_data.columns:
+            ts = pd.to_datetime(raw_data[timestamp_col].iloc[-1])
+        
+        # Determine sensor columns
+        if sensor_cols is None:
+            sensor_cols = [
+                c for c in raw_data.columns
+                if c != timestamp_col and pd.api.types.is_numeric_dtype(raw_data[c])
+            ]
+        
+        contributions = self._compute_contributions(raw_data, sensor_cols)
+        
+        # Sort by contribution percentage
+        contributions.sort(key=lambda c: c.contribution_pct, reverse=True)
+        top_3 = [c.sensor_name for c in contributions[:3]]
+        
+        # Generate explanation
+        explanation = self._generate_explanation(contributions[:3], fused_z)
+        
+        return AttributionResult(
+            timestamp=ts,
+            total_z_score=fused_z,
+            contributions=contributions,
+            top_3_sensors=top_3,
+            explanation=explanation
+        )
+    
+    def _compute_contributions(
+        self,
+        raw_data: pd.DataFrame,
+        sensor_cols: List[str]
+    ) -> List[SensorContribution]:
+        """Compute contributions for each sensor."""
+        contributions = []
+        
+        for col in sensor_cols:
+            if col not in raw_data.columns:
+                continue
+            
+            value = raw_data[col].iloc[-1]
+            if pd.isna(value):
+                continue
+            
+            # Compute z-score using baseline statistics if available
+            if self.normalizer is not None:
+                stats = self.normalizer.get_sensor_stats(col)
+                if stats is not None:
+                    z = stats.compute_z_score(value)
+                else:
+                    # No baseline stats for this sensor, use column stats
+                    col_mean = raw_data[col].mean()
+                    col_std = raw_data[col].std()
+                    z = (value - col_mean) / (col_std + 1e-10)
+            else:
+                # No normalizer, use column-level stats
+                col_mean = raw_data[col].mean()
+                col_std = raw_data[col].std()
+                z = (value - col_mean) / (col_std + 1e-10)
+            
+            # Determine direction
+            direction = self._determine_direction(z)
+            
+            contributions.append(SensorContribution(
+                sensor_name=col,
+                contribution_pct=0.0,  # Filled below
+                z_score=float(z),
+                direction=direction,
+                baseline_deviation=abs(z)
+            ))
+        
+        # Compute contribution percentages
+        total_deviation = sum(c.baseline_deviation for c in contributions)
+        if total_deviation > 0:
+            for c in contributions:
+                c.contribution_pct = (c.baseline_deviation / total_deviation) * 100
+        
+        return contributions
+    
+    def _determine_direction(self, z_score: float) -> DeviationDirection:
+        """Determine direction based on z-score thresholds."""
+        if z_score > self.z_threshold_high:
+            return DeviationDirection.HIGH
+        elif z_score < self.z_threshold_low:
+            return DeviationDirection.LOW
+        else:
+            return DeviationDirection.NORMAL
+    
+    def _generate_explanation(
+        self,
+        top_contributors: List[SensorContribution],
+        fused_z: float
+    ) -> str:
+        """Generate human-readable explanation of the anomaly."""
+        if not top_contributors:
+            return "No significant sensor deviations detected."
+        
+        parts = []
+        for c in top_contributors:
+            if c.direction != DeviationDirection.NORMAL:
+                parts.append(f"{c.sensor_name} is {c.direction.value} ({c.z_score:.1f}σ)")
+        
+        if not parts:
+            return "Minor deviations within normal range."
+        
+        # Severity based on fused z-score
+        if fused_z > 5:
+            severity = "Critical"
+        elif fused_z > 3:
+            severity = "Elevated"
+        elif fused_z > 2:
+            severity = "Minor"
+        else:
+            severity = "Low"
+        
+        return f"{severity} anomaly driven by: {', '.join(parts)}"
+    
+    def attribute_episode(
+        self,
+        episode_data: pd.DataFrame,
+        fused_z_col: str = "fused_z",
+        sensor_cols: Optional[List[str]] = None,
+        timestamp_col: str = "Timestamp"
+    ) -> AttributionResult:
+        """
+        Compute aggregated attribution for an entire episode.
+        
+        Uses the maximum fused z-score and aggregates sensor contributions
+        across all rows in the episode.
+        
+        Args:
+            episode_data: DataFrame containing all rows in the episode
+            fused_z_col: Column name for fused z-scores (default "fused_z")
+            sensor_cols: List of sensor columns to attribute
+            timestamp_col: Name of timestamp column
+        
+        Returns:
+            AttributionResult with aggregated contributions
+        """
+        if episode_data.empty:
+            return AttributionResult(explanation="Empty episode data.")
+        
+        # Find peak anomaly row
+        if fused_z_col in episode_data.columns:
+            peak_idx = episode_data[fused_z_col].idxmax()
+            peak_row = episode_data.loc[[peak_idx]]
+            fused_z = float(episode_data[fused_z_col].max())
+        else:
+            peak_row = episode_data.iloc[[-1]]
+            fused_z = 0.0
+        
+        return self.attribute(
+            raw_data=peak_row,
+            fused_z=fused_z,
+            sensor_cols=sensor_cols,
+            timestamp_col=timestamp_col
+        )
+
+
+# =============================================================================
+# LEGACY SENSOR ATTRIBUTION (v10.0.0)
+# =============================================================================
 
 
 @dataclass
