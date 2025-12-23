@@ -12,12 +12,12 @@
 | Phase | Name | Items | Status | Progress |
 |-------|------|-------|--------|----------|
 | 0 | Setup & Versioning | 3 | ✅ Complete | 3/3 |
-| 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
+| 1 | Core Architecture | 9 | 🔄 In Progress | 6/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
 | 4 | Health/Episode/RUL | 6 | ✅ Complete | 6/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **22/50** |
+| **Total** | | **50** | | **25/50** |
 
 ---
 
@@ -470,9 +470,9 @@ CREATE TABLE ACM_MaintenanceEvents (
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `MaintenanceEventHandler` | `core/data_contract.py` | ⏳ |
-| [ ] Detect recalibration signatures | `core/data_contract.py` | ⏳ |
-| [ ] Implement baseline segmentation on events | `core/data_contract.py` | ⏳ |
+| [x] Create `MaintenanceEventHandler` | `core/maintenance_events.py` | ✅ |
+| [x] Detect recalibration signatures | `core/maintenance_events.py` | ✅ |
+| [x] Implement baseline segmentation on events | `core/maintenance_events.py` | ✅ |
 | [ ] Create `ACM_MaintenanceEvents` table schema | `scripts/sql/migrations/` | ⏳ |
 
 ### P1.5 — Pipeline Stage Instrumentation (Item 18)
@@ -529,10 +529,10 @@ CREATE TABLE ACM_PipelineMetrics (
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Add `StageTimer` context manager | `core/pipeline_modes.py` | ⏳ |
-| [ ] Emit per-stage timing via `Metrics.time()` | `core/acm_main.py` | ⏳ |
-| [ ] Emit per-stage row counts | `core/acm_main.py` | ⏳ |
-| [ ] Emit per-stage feature counts | `core/acm_main.py` | ⏳ |
+| [x] Add `StageTimer` context manager | `core/pipeline_instrumentation.py` | ✅ |
+| [x] Emit per-stage timing via `Metrics.time()` | `core/pipeline_instrumentation.py` | ✅ |
+| [x] Emit per-stage row counts | `core/pipeline_instrumentation.py` | ✅ |
+| [x] Emit per-stage feature counts | `core/pipeline_instrumentation.py` | ✅ |
 | [ ] Create `ACM_PipelineMetrics` table | `scripts/sql/migrations/` | ⏳ |
 
 ### P1.6 — Standardized Feature Matrix (Item 19)
@@ -636,8 +636,8 @@ def compute_features(...) -> FeatureMatrix:  # Changed return type
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `FeatureMatrix` class | `core/feature_matrix.py` | ⏳ |
-| [ ] Define canonical column schema | `core/feature_matrix.py` | ⏳ |
+| [x] Create `FeatureMatrix` class | `core/feature_matrix.py` | ✅ |
+| [x] Define canonical column schema | `core/feature_matrix.py` | ✅ |
 | [ ] Refactor `fast_features.py` to produce `FeatureMatrix` | `core/fast_features.py` | ⏳ |
 | [ ] Create `ACM_FeatureMatrix` table schema | `scripts/sql/migrations/` | ⏳ |
 | [ ] Update all detectors to consume `FeatureMatrix` | `core/*.py` | ⏳ |
