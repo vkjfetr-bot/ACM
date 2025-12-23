@@ -4456,63 +4456,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
             # Legacy enhanced_forecasting removed - ForecastEngine (v10) handles all forecasting
 
-        # === SQL-SPECIFIC ARTIFACT WRITING (BATCHED TRANSACTION) ===
-        # Batch all SQL writes in a single transaction to prevent connection pool exhaustion
-        if sql_client:
-            with T.section("sql.batch_writes"):
-                try:
-                    Console.info("Starting batched artifact writes...", component="SQL")
-                    
-                    # 1) ScoresTS: write fused + calibrated z streams (as sensors)
-                    rows_scores = 0
-                    out_scores_wide = pd.DataFrame(index=frame.index)
-                    # Name them explicitly to keep clarity in Grafana
-                    if "fused" in frame.columns:       out_scores_wide["ACM_fused"] = frame["fused"]
-                    if "pca_spe_z" in frame.columns:   out_scores_wide["ACM_pca_spe_z"] = frame["pca_spe_z"]
-                    if "pca_t2_z" in frame.columns:    out_scores_wide["ACM_pca_t2_z"] = frame["pca_t2_z"]
-                    if "mhal_z" in frame.columns:      out_scores_wide["ACM_mhal_z"] = frame["mhal_z"]
-                    if "iforest_z" in frame.columns:   out_scores_wide["ACM_iforest_z"] = frame["iforest_z"]
-                    if "gmm_z" in frame.columns:       out_scores_wide["ACM_gmm_z"] = frame["gmm_z"]
-                    if "river_hst_z" in frame.columns: out_scores_wide["ACM_river_hst_z"] = frame["river_hst_z"]
-
-                    if len(out_scores_wide.columns):
-                        with T.section("sql.scores.melt"):
-                            long_scores = output_manager.melt_scores_long(out_scores_wide, equip_id=equip_id, run_id=run_id or "", source="ACM")
-                        with T.section("sql.scores.write"):
-                            rows_scores = output_manager.write_scores_ts(long_scores, run_id or "")
-                        
-                except Exception as e:
-                    Console.warn(f"Batched SQL writes failed, continuing with individual writes: {e}", component="SQL",
-                                 equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:200])
-                    rows_scores = 0
-        else:
-            Console.info("No SQL client available, skipping SQL writes", component="SQL")
-            rows_scores = 0
-            
-        # Fallback to individual writes if batching not available
-        if sql_client and rows_scores == 0:
-            # 1) ScoresTS: write fused + calibrated z streams (as sensors)
-            with T.section("sql.scores.individual"):
-                rows_scores = 0
-                try:
-                    out_scores_wide = pd.DataFrame(index=frame.index)
-                    # Name them explicitly to keep clarity in Grafana
-                    if "fused" in frame.columns:       out_scores_wide["ACM_fused"] = frame["fused"]
-                    if "pca_spe_z" in frame.columns:   out_scores_wide["ACM_pca_spe_z"] = frame["pca_spe_z"]
-                    if "pca_t2_z" in frame.columns:    out_scores_wide["ACM_pca_t2_z"] = frame["pca_t2_z"]
-                    if "mhal_z" in frame.columns:      out_scores_wide["ACM_mhal_z"] = frame["mhal_z"]
-                    if "iforest_z" in frame.columns:   out_scores_wide["ACM_iforest_z"] = frame["iforest_z"]
-                    if "gmm_z" in frame.columns:       out_scores_wide["ACM_gmm_z"] = frame["gmm_z"]
-                    if "river_hst_z" in frame.columns: out_scores_wide["ACM_river_hst_z"] = frame["river_hst_z"]
-
-                    if len(out_scores_wide.columns):
-                        with T.section("sql.scores.melt"):
-                            long_scores = output_manager.melt_scores_long(out_scores_wide, equip_id=equip_id, run_id=run_id or "", source="ACM")
-                        with T.section("sql.scores.write"):
-                            rows_scores = output_manager.write_scores_ts(long_scores, run_id or "")
-                except Exception as e:
-                    Console.warn(f"ScoresTS write skipped: {e}", component="SQL",
-                                 equip=equip, run_id=run_id, error=str(e)[:200])
+        # === SQL-SPECIFIC ARTIFACT WRITING ===
+        # NOTE: ScoresTS/write_scores_ts deprecated (ACM_Scores_Long removed) - scores in ACM_Scores_Wide only
 
         # 2) DriftTS (if drift_z exists) â€” method from config
         rows_drift = 0

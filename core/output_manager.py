@@ -315,39 +315,6 @@ def _resample(df: pd.DataFrame, sampling_secs: int, interp_method: str = "linear
             raise ValueError(f"Too much missing data after resample: {fill_ratio:.1%} > {max_fill_ratio:.1%}")
     return df_resampled
 
-def _read_csv_with_peek(path: Union[str, Path], ts_col_hint: Optional[str], engine: Optional[str] = None) -> Tuple[pd.DataFrame, str]:
-    """Read CSV and auto-detect timestamp column."""
-    path = Path(path)
-    try:
-        # Ensure engine is one of accepted options for pandas
-        _engine = engine if engine in {None, 'c', 'python', 'pyarrow', 'python-fwf'} else None
-        df = pd.read_csv(path, engine=cast(Any, _engine))
-    except Exception as e:
-        raise ValueError(f"Failed to read CSV {path}: {e}")
-    if df.empty:
-        raise ValueError(f"Empty CSV: {path}")
-    
-    # Auto-detect timestamp column if not provided
-    ts_col = ts_col_hint
-    if not ts_col:
-        candidates = ['timestamp', 'time', 'datetime', 'date']
-        for candidate in candidates:
-            if candidate in df.columns:
-                ts_col = candidate
-                break
-        if not ts_col:
-            for col in df.columns:
-                if df[col].dtype == 'object':
-                    try:
-                        pd.to_datetime(df[col].iloc[:10], errors='raise')
-                        ts_col = col
-                        break
-                    except:
-                        continue
-    if not ts_col:
-        raise ValueError(f"Could not find timestamp column in {path}")
-    return df, ts_col
-
 
 def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
     """
@@ -701,192 +668,24 @@ class OutputManager:
     
     # ==================== DATA LOADING METHOD ====================
     
-    def load_data(self, cfg: Dict[str, Any], start_utc: Optional[pd.Timestamp] = None, end_utc: Optional[pd.Timestamp] = None, equipment_name: Optional[str] = None, sql_mode: bool = False):
+    def load_data(self, cfg: Dict[str, Any], start_utc: Optional[pd.Timestamp] = None, end_utc: Optional[pd.Timestamp] = None, equipment_name: Optional[str] = None, sql_mode: bool = True):
         """
-        Load training and scoring data from CSV files or SQL historian.
+        Load training and scoring data from SQL historian.
         
-        Consolidates data loading into OutputManager since it's part of the I/O pipeline.
+        ACM v11.0.0: SQL-only mode. CSV loading removed.
         
         Args:
             cfg: Configuration dictionary
-            start_utc: Optional start time for SQL window queries
-            end_utc: Optional end time for SQL window queries
+            start_utc: Start time for SQL window queries
+            end_utc: End time for SQL window queries
             equipment_name: Equipment name for SQL historian queries (e.g., 'FD_FAN', 'GAS_TURBINE')
-            sql_mode: If True, load from SQL historian; if False, load from CSV files
+            sql_mode: Legacy parameter, always True. Kept for API compatibility.
         """
-        # Use consistent config access with fallback
-        data_cfg = cfg.get("data", {})
-        train_path = data_cfg.get("train_csv")
-        score_path = data_cfg.get("score_csv")
-        
-        # SQL mode: Load from historian SP instead of CSV
-        if sql_mode:
-            if not self.sql_client:
-                raise ValueError("[DATA] SQL mode requested but no SQL client available")
-            if not equipment_name:
-                raise ValueError("[DATA] SQL mode requires equipment_name parameter")
-            return self._load_data_from_sql(cfg, equipment_name, start_utc, end_utc)
-        
-        # ACM is SQL-only mode - CSV operations removed
-        
-        # CSV mode: Cold-start mode: If no training data, use first N% of score data for training
-        cold_start_mode = False
-        if not train_path and score_path:
-            Console.info("" + "Cold-start mode: No training data provided, will split score data", component="DATA")
-            cold_start_mode = True
-        elif not train_path or not score_path:
-            raise ValueError("[DATA] Please set data.train_csv and data.score_csv in config.")
-
-        _sampling = data_cfg.get("sampling_secs", 1)
-        # Treat empty/invalid values as "auto" (let cadence be inferred)
-        try:
-            if _sampling in (None, "", "auto", "null"):
-                sampling_secs: Optional[int] = None
-            else:
-                sampling_secs = int(_sampling)
-        except (TypeError, ValueError):
-            sampling_secs = None
-
-        allow_resample = bool(_cfg_get(data_cfg, "allow_resample", True))
-        resample_strict = bool(_cfg_get(data_cfg, "resample_strict", False))
-        interp_method = str(_cfg_get(data_cfg, "interp_method", "linear"))
-        ts_col_cfg = _cfg_get(data_cfg, "timestamp_col", None)
-        io_engine = _cfg_get(data_cfg, "io_engine", None)
-        # Allow override in data.max_fill_ratio (preferred), fallback to runtime.max_fill_ratio
-        max_fill_ratio = float(_cfg_get(data_cfg, "max_fill_ratio", _cfg_get(cfg, "runtime.max_fill_ratio", 0.20)))
-        
-        # COLD-02: Configurable cold-start split ratio (default 0.6 = 60% train, 40% score)
-        cold_start_split_ratio = float(_cfg_get(data_cfg, "cold_start_split_ratio", 0.6))
-        if not (0.1 <= cold_start_split_ratio <= 0.9):
-            Console.warn(f"Invalid cold_start_split_ratio={cold_start_split_ratio}, using default 0.6", component="DATA", invalid_value=cold_start_split_ratio)
-            cold_start_split_ratio = 0.6
-        
-        # COLD-03: Minimum samples validation (default 500)
-        min_train_samples = int(_cfg_get(data_cfg, "min_train_samples", 500))
-
-        # Read CSVs (with heartbeat)
-        if cold_start_mode:
-            hb = Heartbeat("Reading CSV (cold-start: will split data)", next_hint="parse timestamps", eta_hint=10).start()
-            score_raw, ts_score = _read_csv_with_peek(score_path, ts_col_cfg, engine=io_engine)
-            
-            # COLD-03: Validate sufficient data for cold-start
-            if len(score_raw) < 10:
-                raise ValueError(f"[DATA] Cold-start requires at least 10 rows, got {len(score_raw)}")
-            
-            ts_col = ts_col_cfg or ts_score
-            split_idx = int(len(score_raw) * cold_start_split_ratio)
-            train_raw = score_raw.iloc[:split_idx].copy()
-            score_raw = score_raw.iloc[split_idx:].copy()
-            ts_train = ts_score
-            
-            # COLD-03: Warn if training samples below recommended minimum
-            if len(train_raw) < min_train_samples:
-                Console.warn(f"Cold-start training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)", component="DATA", actual_rows=len(train_raw), min_required=min_train_samples)
-                Console.warn(f"Model quality may be degraded. Consider: more data, higher split_ratio (current: {cold_start_split_ratio:.2f})", component="DATA", split_ratio=cold_start_split_ratio)
-            
-            Console.info("" + f"Cold-start split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows", component="DATA")
-            hb.stop()
-        else:
-            hb = Heartbeat("Reading CSVs (train & score)", next_hint="parse timestamps", eta_hint=10).start()
-            train_raw, ts_train = _read_csv_with_peek(train_path, ts_col_cfg, engine=io_engine)
-            score_raw, ts_score = _read_csv_with_peek(score_path, ts_col_cfg, engine=io_engine)
-            hb.stop()
-            ts_col = ts_col_cfg or ts_train or ts_score
-
-        # Apply window constraints if provided (for SQL mode)
-        if start_utc:
-            train_raw = train_raw[pd.to_datetime(train_raw[ts_col], errors='coerce') >= start_utc]
-        if end_utc:
-            score_raw = score_raw[pd.to_datetime(score_raw[ts_col], errors='coerce') < end_utc]
-
-        # Parse timestamps / index
-        hb = Heartbeat("Parsing timestamps & indexing", next_hint="numeric pruning", eta_hint=8).start()
-        train = _parse_ts_index(train_raw, ts_col)
-        score = _parse_ts_index(score_raw, ts_col)
-        hb.stop()
-
-        now_cutoff = _future_cutoff_ts(cfg)
-        train, tz_stripped_train, future_train = _coerce_local_and_filter_future(train, "TRAIN", now_cutoff)
-        score, tz_stripped_score, future_score = _coerce_local_and_filter_future(score, "SCORE", now_cutoff)
-        tz_stripped_total = tz_stripped_train + tz_stripped_score
-        future_rows_total = future_train + future_score
-        
-        # COLD-03: Validate training sample count (both cold-start and normal modes)
-        if len(train) < min_train_samples:
-            if cold_start_mode:
-                # Already warned during split
-                pass
-            else:
-                Console.warn(f"Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)", component="DATA", actual_rows=len(train), min_required=min_train_samples)
-                Console.warn("Model quality may be degraded. Consider providing more training data.", component="DATA", actual_rows=len(train), min_required=min_train_samples)
-
-        # Keep numeric only (same set across train/score)
-        hb = Heartbeat("Selecting numeric sensor columns", next_hint="cadence check", eta_hint=4).start()
-        train_num = _infer_numeric_cols(train)
-        score_num = _infer_numeric_cols(score)
-        kept = sorted(list(set(train_num).intersection(score_num)))
-        dropped = [c for c in train.columns if c not in kept]
-        train = train[kept]
-        score = score[kept]
-        train = train.astype(np.float32)
-        score = score.astype(np.float32)
-        hb.stop()
-
-        # Cadence check + guardrails
-        hb = Heartbeat("Cadence check / resample / fill small gaps", next_hint="finalize", eta_hint=15).start()
-        # Ensure type stability for indexes
-        train.index = pd.DatetimeIndex(train.index)
-        score.index = pd.DatetimeIndex(score.index)
-        train.index = pd.DatetimeIndex(train.index)
-        score.index = pd.DatetimeIndex(score.index)
-        cad_ok_train = _check_cadence(cast(pd.DatetimeIndex, train.index), sampling_secs)
-        cad_ok_score = _check_cadence(cast(pd.DatetimeIndex, score.index), sampling_secs)
-        cadence_ok = bool(cad_ok_train and cad_ok_score)
-
-        native_train = _native_cadence_secs(cast(pd.DatetimeIndex, train.index))
-        if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
-            Console.warn(f"Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) - skipping to avoid upsample.", component="DATA", requested_secs=sampling_secs, native_secs=native_train)
-            sampling_secs = None
-
-        if sampling_secs is not None:
-            base_secs = float(sampling_secs)
-        else:
-            base_secs = native_train if math.isfinite(native_train) else 1.0
-        max_gap_secs = int(_cfg_get(data_cfg, "max_gap_secs", base_secs * 3))
-
-        explode_guard_factor = float(_cfg_get(data_cfg, "explode_guard_factor", 2.0))
-        will_resample = allow_resample and (not cadence_ok) and (sampling_secs is not None)
-        if will_resample:
-            span_secs = (train.index[-1].value - train.index[0].value) / 1e9 if len(train.index) else 0.0
-            safe_sampling = float(sampling_secs) if sampling_secs is not None else 1.0
-            approx_rows = int(span_secs / max(1.0, safe_sampling)) + 1
-            if len(train) and approx_rows > explode_guard_factor * len(train):
-                Console.warn(f"Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.", component="DATA")
-                will_resample = False
-
-        if will_resample:
-            assert sampling_secs is not None
-            train = _resample(train, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
-            score = _resample(score, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
-            train = train.astype(np.float32)
-            score = score.astype(np.float32)
-            cadence_ok = True
-        hb.stop()
-
-        meta = DataMeta(
-            timestamp_col=ts_col,
-            cadence_ok=cadence_ok,
-            kept_cols=kept,
-            dropped_cols=dropped,
-            start_ts=train.index.min() if len(train) else pd.Timestamp.now(),
-            end_ts=score.index.max() if len(score) else pd.Timestamp.now(),
-            n_rows=len(train) + len(score),
-            sampling_seconds=sampling_secs or native_train,
-            tz_stripped=tz_stripped_total,
-            future_rows_dropped=future_rows_total,
-            dup_timestamps_removed=0
-        )
-        return train, score, meta
+        if not self.sql_client:
+            raise ValueError("[DATA] SQL mode requested but no SQL client available")
+        if not equipment_name:
+            raise ValueError("[DATA] SQL mode requires equipment_name parameter")
+        return self._load_data_from_sql(cfg, equipment_name, start_utc, end_utc)
     
     def _load_data_from_sql(self, cfg: Dict[str, Any], equipment_name: str, start_utc: Optional[pd.Timestamp], end_utc: Optional[pd.Timestamp], is_coldstart: bool = False):
         """
@@ -1750,24 +1549,6 @@ class OutputManager:
     def list_cached_tables(self) -> List[str]:
         """Return list of tables currently in the artifact cache."""
         return list(self._artifact_cache.keys())
-    
-    # ==================== DATA TRANSFORMATION METHODS ====================
-    
-    def melt_scores_long(self, df_wide: pd.DataFrame, equip_id: int, run_id: str, source: str = "ACM") -> pd.DataFrame:
-        """
-        Convert a wide sensor frame (index = timestamps, columns = sensors) to
-        the canonical long format for dbo.ScoresTS.
-        """
-        if not isinstance(df_wide.index, pd.DatetimeIndex):
-            raise ValueError("melt_scores_long expects a DatetimeIndex.")
-        out = df_wide.copy()
-        out.index = pd.to_datetime(out.index)
-        out = out.reset_index().rename(columns={"index": "EntryDateTime"})
-        long = out.melt(id_vars=["EntryDateTime"], var_name="Sensor", value_name="Value")
-        long["EquipID"] = int(equip_id)
-        long["Source"] = source
-        long["RunID"] = run_id
-        return long
 
     # ==================== MISSING ANALYTICS GENERATORS (MED-03..MED-09) ====================
 
@@ -2147,70 +1928,8 @@ class OutputManager:
             - Threshold (FLOAT) - threshold used for this detector
             - IsAnomaly (BIT) - whether score exceeds threshold
         """
-        # v11.0.0: Skip writing to deprecated ACM_Scores_Long table
-        # Scores are already written to ACM_Scores_Wide by write_scores()
+        # v11.0.0: DEPRECATED - ACM_Scores_Long removed, use ACM_Scores_Wide instead
         return 0
-        
-        # --- ORIGINAL CODE BELOW (preserved for reference) ---
-        if not self._check_sql_health():
-            return 0
-            
-        try:
-            sql_df = df.copy()
-
-            if sql_df.empty:
-                return 0
-
-            # Case A: already long from melt_scores_long (legacy format)
-            if {'EntryDateTime', 'Sensor', 'Value'}.issubset(set(sql_df.columns)):
-                sql_df = sql_df.rename(columns={
-                    'EntryDateTime': 'Timestamp',
-                    'Sensor': 'DetectorName',  # Map to correct SQL column
-                    'Value': 'Score'  # Map to correct SQL column
-                })
-                # Ensure required metadata exists
-                if 'RunID' not in sql_df.columns:
-                    sql_df['RunID'] = run_id
-                if 'EquipID' not in sql_df.columns:
-                    sql_df['EquipID'] = self.equip_id or 0
-                # Add missing columns with defaults
-                if 'SensorName' not in sql_df.columns:
-                    sql_df['SensorName'] = None  # Detector-level scores, no specific sensor
-                if 'Threshold' not in sql_df.columns:
-                    sql_df['Threshold'] = 3.0  # Default threshold
-                if 'IsAnomaly' not in sql_df.columns:
-                    sql_df['IsAnomaly'] = (sql_df['Score'].abs() >= 3.0).astype(int)
-                sql_df['Timestamp'] = pd.to_datetime(sql_df['Timestamp']).dt.tz_localize(None)
-                sql_df = sql_df.dropna(subset=['Score'])
-                return self._bulk_insert_sql('ACM_Scores_Long', sql_df)
-
-            # Case B: wide - melt to long
-            if sql_df.index.name == 'timestamp' or isinstance(sql_df.index, pd.DatetimeIndex):
-                sql_df = sql_df.reset_index().rename(columns={sql_df.columns[0]: 'Timestamp'})
-            detector_cols = [c for c in sql_df.columns if c.endswith('_z') or c.startswith('ACM_')]
-            if not detector_cols:
-                return 0
-            long_df = sql_df.melt(
-                id_vars=['Timestamp'],
-                value_vars=detector_cols,
-                var_name='DetectorName',  # Map to correct SQL column
-                value_name='Score'  # Map to correct SQL column
-            )
-            # Normalize detector names (remove _z suffix)
-            long_df['DetectorName'] = long_df['DetectorName'].str.replace('_z', '', regex=False)
-            long_df['Timestamp'] = pd.to_datetime(long_df['Timestamp']).dt.tz_localize(None)
-            long_df['RunID'] = run_id
-            long_df['EquipID'] = self.equip_id or 0
-            # Add missing columns with defaults
-            long_df['SensorName'] = None  # Detector-level scores, no specific sensor
-            long_df['Threshold'] = 3.0  # Default threshold
-            long_df['IsAnomaly'] = (long_df['Score'].abs() >= 3.0).astype(int)
-            long_df = long_df.dropna(subset=['Score'])
-            return self._bulk_insert_sql('ACM_Scores_Long', long_df)
-            
-        except Exception as e:
-            Console.warn(f"write_scores_ts failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=run_id, rows=len(df) if df is not None else 0, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
     
     def write_drift_ts(self, df: pd.DataFrame, run_id: str) -> int:
         """Write drift timeseries to ACM_DriftSeries table."""
