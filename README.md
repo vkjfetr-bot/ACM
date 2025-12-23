@@ -325,7 +325,7 @@ The same command-line options work for both file and SQL batch runs because ACM 
 - `--clear-cache`: delete any cached model for this equipment to force retraining.
 - Logging: `--log-level`, `--log-format`, `--log-module-level`, `--log-file`.
 
-ACM decides between file and SQL mode based on the configuration (see `core/sql_logger.py` and the `storage_backend` entry). SQL mode wraps data ingestion/output with `core.sql_client.SQLClient` and calls stored procedures instead of writing to CSV files.
+ACM uses SQL mode exclusively via `core.sql_client.SQLClient`, calling stored procedures for data ingestion and output.
 
 ## Feature highlights
 
