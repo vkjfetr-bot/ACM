@@ -68,6 +68,9 @@ from core.output_manager import OutputManager
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score, write_timer_stats
 from core.episode_culprits_writer import write_episode_culprits_enhanced
 
+# v11.0.0: Pipeline types for data validation
+from core.pipeline_types import DataContract, ValidationResult, PipelineMode
+
 # Observability - Unified OpenTelemetry + logging (v3.0)
 try:
     from core.observability import (
@@ -1313,6 +1316,25 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                  f"Total: {len(score)}, Unique: {score.index.nunique()}")
             meta.dup_timestamps_removed = int(train_dups + score_dups)
             Console.info(f"Index integrity verified: BASELINE={len(train)} unique, BATCH={len(score)} unique", component="DATA")
+
+            # v11.0.0: DataContract validation at pipeline entry
+            with T.section("data.contract"):
+                contract = DataContract(
+                    required_sensors=[],  # Auto-detect from available columns
+                    optional_sensors=list(meta.kept_cols) if hasattr(meta, 'kept_cols') else [],
+                    timestamp_col=meta.timestamp_col if hasattr(meta, 'timestamp_col') else 'Timestamp',
+                    min_rows=100,
+                    max_null_fraction=0.5,
+                    equip_id=equip_id,
+                    equip_code=equip,
+                )
+                validation = contract.validate(score)
+                if not validation.passed:
+                    Console.warn(f"DataContract validation issues: {validation.issues}", component="DATA",
+                                equip=equip, run_id=run_id, issues=validation.issues)
+                if validation.warnings:
+                    for w in validation.warnings[:3]:  # Limit warning spam
+                        Console.info(f"DataContract warning: {w}", component="DATA")
 
             if len(score) == 0:
                 Console.warn("SCORE window empty after cleaning; marking run as NOOP", component="DATA",

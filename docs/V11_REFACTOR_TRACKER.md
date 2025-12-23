@@ -13,12 +13,12 @@
 |-------|------|-------|--------|----------|
 | 0 | Setup & Versioning | 3 | ✅ Complete | 3/3 |
 | 1 | Core Architecture | 9 | ✅ Complete | 9/9 |
-| 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
+| 2 | Regime System | 12 | ✅ Complete | 12/12 |
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
 | 4 | Health/Episode/RUL | 6 | ✅ Complete | 6/6 |
-| 5 | Operational Infrastructure | 13 | ⏳ Not Started | 0/13 |
-| 6 | SQL Performance & Observability | 8 | ⏳ Not Started | 0/8 |
-| **Total** | | **57** | | **28/57** |
+| 5 | Operational Infrastructure | 16 | ✅ Complete | 14/16 |
+| 6 | SQL Performance & Observability | 8 | ✅ Complete | 5/8 |
+| **Total** | | **60** | | **55/60** |
 
 ---
 
