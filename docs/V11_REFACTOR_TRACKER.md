@@ -15,9 +15,9 @@
 | 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
-| 4 | Health/Episode/RUL | 6 | 🔄 In Progress | 2/6 |
+| 4 | Health/Episode/RUL | 6 | 🔄 In Progress | 4/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **18/50** |
+| **Total** | | **50** | | **20/50** |
 
 ---
 
@@ -2373,9 +2373,9 @@ def exponential_decay_recovery(self,
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Implement hysteresis for state transitions | `core/health_tracker.py` | ⏳ |
-| [ ] Implement cooldown after critical state | `core/health_tracker.py` | ⏳ |
-| [ ] Implement exponential decay for recovery | `core/health_tracker.py` | ⏳ |
+| [x] Implement hysteresis for state transitions | `core/health_state.py` | ✅ |
+| [x] Implement cooldown after critical state | `core/health_state.py` | ✅ |
+| [x] Implement exponential decay for recovery | `core/health_state.py` | ✅ |
 | [ ] Add configurable thresholds | `configs/config_table.csv` | ⏳ |
 
 ### P4.4 — RUL Reliability Gate (Item 7)
@@ -2531,10 +2531,10 @@ ALTER TABLE ACM_RUL ADD
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Add `RUL_NOT_RELIABLE` outcome | `core/rul_estimator.py` | ⏳ |
-| [ ] Define prerequisite checks | `core/rul_estimator.py` | ⏳ |
-| [ ] Prevent numeric RUL when prerequisites fail | `core/rul_estimator.py` | ⏳ |
-| [ ] Add `RULStatus` enum (RELIABLE, NOT_RELIABLE, INSUFFICIENT_DATA) | `core/rul_estimator.py` | ⏳ |
+| [x] Add `RUL_NOT_RELIABLE` outcome | `core/rul_reliability.py` | ✅ |
+| [x] Define prerequisite checks | `core/rul_reliability.py` | ✅ |
+| [x] Prevent numeric RUL when prerequisites fail | `core/rul_reliability.py` | ✅ |
+| [x] Add `RULStatus` enum (RELIABLE, NOT_RELIABLE, INSUFFICIENT_DATA) | `core/rul_reliability.py` | ✅ |
 | [ ] Update SQL writes to include status | `core/output_manager.py` | ⏳ |
 
 ### P4.5 — Forecasting Diagnostics (Item 36)
