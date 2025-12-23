@@ -17,7 +17,8 @@
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
 | 4 | Health/Episode/RUL | 6 | ✅ Complete | 6/6 |
 | 5 | Operational Infrastructure | 13 | ⏳ Not Started | 0/13 |
-| **Total** | | **49** | | **28/49** |
+| 6 | SQL Performance & Observability | 8 | ⏳ Not Started | 0/8 |
+| **Total** | | **57** | | **28/57** |
 
 ---
 
@@ -2800,8 +2801,8 @@ class ConfidenceModel:
 **Current State Analysis**:
 - **Drift Detection** (`drift.py`): Uses KL divergence and PSI, but drift signals are logged only - not actionable triggers
 - **Novelty**: No explicit novelty pressure tracking separate from regimes
-- **Operator Feedback**: No mechanism to capture operator confirmation/dismissal of alerts
 - **Decision Policy**: Analytics and operational behavior are coupled in same code paths
+- **NOTE**: ACM is fully autonomous - NO human-in-the-loop feedback required
 
 ### P5.1 — Drift/Novelty Control Plane (Item 10)
 
@@ -5380,6 +5381,603 @@ CREATE TABLE ACM_PolicyAssignments (
 
 ---
 
+## Phase 6: SQL Performance & Observability
+
+**Goal**: Fix SQL performance bottlenecks, implement data retention, add per-operation profiling
+
+**Root Cause Analysis** (Discovered 2025-01-XX):
+
+| Problem | Evidence | Impact |
+|---------|----------|--------|
+| Long-format table explosion | `ACM_SensorNormalized_TS`: 3M rows (11,240 rows/batch × 20 sensors × 562 timestamps) | ~35% of all rows |
+| OMR contributions growth | `ACM_OMRContributionsLong`: 1.2M rows (8,430 rows/batch even with top_n=15) | ~12% of all rows |
+| Baseline buffer unbounded | `ACM_BaselineBuffer`: 1M rows (long-format raw sensor data) | ~11% of all rows |
+| PCA loadings explosion | `ACM_PCA_Loadings`: 939K rows (per-sensor loadings repeated per-run) | ~10% of all rows |
+| No data retention | 973 runs in 10 days, 9.7M total rows, tables grow forever | Unbounded growth |
+| Too many tables | 74 ACM tables, 65+ in ALLOWED_TABLES | Maintenance overhead |
+| DELETE-INSERT pattern | Every batch deletes then reinserts for 26+ analytics tables | ~2-3s overhead |
+
+**Critical Tables by Size** (largest first):
+1. `ACM_SensorNormalized_TS` - 3,024,705 rows
+2. `ACM_OMRContributionsLong` - 1,199,315 rows
+3. `ACM_BaselineBuffer` - 1,075,083 rows
+4. `ACM_PCA_Loadings` - 939,725 rows
+5. `ACM_Scores_Long` - 698,786 rows
+6. `ACM_RunLogs` - 656,958 rows
+7. `ACM_SensorHotspotTimeline` - 391,335 rows
+8. `ACM_ContributionTimeline` - 241,548 rows
+
+### P6.1 — Per-Table SQL Operation Tracing (Item 50)
+
+**Problem**: No visibility into which table writes are slow. Current observability only tracks aggregate timings.
+
+**Implementation**:
+```python
+# core/sql_performance.py (ENHANCE EXISTING)
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+import time
+import threading
+
+@dataclass
+class TableOperation:
+    """Record of a single table operation."""
+    table_name: str
+    operation: str  # 'INSERT', 'DELETE', 'SELECT'
+    rows_affected: int
+    duration_ms: float
+    batch_size: int
+    timestamp: datetime
+
+class SQLProfiler:
+    """
+    Profile every SQL operation by table for performance analysis.
+    
+    Reports to ACM_SQLProfileMetrics for Grafana dashboards.
+    """
+    
+    _local = threading.local()
+    
+    def __init__(self, sql_client, run_id: str, equip_id: int):
+        self.sql_client = sql_client
+        self.run_id = run_id
+        self.equip_id = equip_id
+        self.operations: List[TableOperation] = []
+    
+    def record(self, table: str, op: str, rows: int, duration_ms: float, batch_size: int = 0):
+        """Record a table operation."""
+        self.operations.append(TableOperation(
+            table_name=table,
+            operation=op,
+            rows_affected=rows,
+            duration_ms=duration_ms,
+            batch_size=batch_size,
+            timestamp=datetime.now()
+        ))
+    
+    def summarize(self) -> Dict[str, Dict[str, float]]:
+        """Summarize operations by table."""
+        summary = {}
+        for op in self.operations:
+            if op.table_name not in summary:
+                summary[op.table_name] = {
+                    'total_ms': 0, 'total_rows': 0, 'count': 0,
+                    'insert_ms': 0, 'delete_ms': 0
+                }
+            s = summary[op.table_name]
+            s['total_ms'] += op.duration_ms
+            s['total_rows'] += op.rows_affected
+            s['count'] += 1
+            if op.operation == 'INSERT':
+                s['insert_ms'] += op.duration_ms
+            elif op.operation == 'DELETE':
+                s['delete_ms'] += op.duration_ms
+        return summary
+    
+    def flush_to_sql(self):
+        """Write profiling data to ACM_SQLProfileMetrics table."""
+        if not self.operations:
+            return
+        summary = self.summarize()
+        records = []
+        for table, stats in summary.items():
+            records.append({
+                'RunID': self.run_id,
+                'EquipID': self.equip_id,
+                'TableName': table,
+                'OperationCount': stats['count'],
+                'TotalRows': stats['total_rows'],
+                'TotalDurationMs': stats['total_ms'],
+                'InsertDurationMs': stats['insert_ms'],
+                'DeleteDurationMs': stats['delete_ms'],
+                'AvgMsPerRow': stats['total_ms'] / max(1, stats['total_rows']),
+                'CreatedAt': datetime.now()
+            })
+        # Bulk insert to ACM_SQLProfileMetrics
+        # ... implementation
+```
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Add `SQLProfiler` class | `core/sql_performance.py` | ⏳ |
+| [ ] Wrap `_bulk_insert_sql()` with profiler | `core/output_manager.py` | ⏳ |
+| [ ] Wrap `_bulk_delete_analytics_tables()` with profiler | `core/output_manager.py` | ⏳ |
+| [ ] Create `ACM_SQLProfileMetrics` table | `install/sql/migrations/` | ⏳ |
+| [ ] Add SQL profiling dashboard panel | `grafana_dashboards/` | ⏳ |
+
+### P6.2 — Replace Long-Format with Wide-Format Where Possible (Item 51)
+
+**Problem**: Long-format tables explode row counts. `ACM_SensorNormalized_TS` has 20 sensors × 562 timestamps = 11,240 rows per batch. Wide format would be 562 rows.
+
+**Tables to Convert**:
+| Table | Current (Long) | Target (Wide) | Row Reduction |
+|-------|----------------|---------------|---------------|
+| `ACM_SensorNormalized_TS` | 11,240/batch | 562/batch | 95% |
+| `ACM_OMRContributionsLong` | 8,430/batch | 562/batch | 93% |
+| `ACM_SensorHotspotTimeline` | 1,686/batch | 562/batch | 67% |
+| `ACM_ContributionTimeline` | 562×sensors | 562/batch | 80%+ |
+
+**Implementation Strategy**:
+```python
+# Option A: Pivot to wide format before insert
+def _generate_sensor_normalized_wide(self, ...):
+    """
+    Generate WIDE format sensor normalized data.
+    
+    Schema: Timestamp, Sensor1_Value, Sensor1_Z, Sensor2_Value, Sensor2_Z, ...
+    
+    Reduces ACM_SensorNormalized_TS from 3M rows to ~150K rows (95% reduction).
+    """
+    # Keep long-format generation for analysis
+    long_df = self._generate_sensor_normalized_ts(...)
+    
+    # Pivot to wide
+    wide_value = long_df.pivot(index='Timestamp', columns='SensorName', values='NormValue')
+    wide_z = long_df.pivot(index='Timestamp', columns='SensorName', values='ZScore')
+    
+    # Combine with suffixes
+    wide_value.columns = [f"{c}_Value" for c in wide_value.columns]
+    wide_z.columns = [f"{c}_Z" for c in wide_z.columns]
+    
+    return pd.concat([wide_value, wide_z], axis=1).reset_index()
+
+# Option B: Store summary stats instead of raw values
+def _generate_sensor_summary_ts(self, ...):
+    """
+    Generate per-timestamp summary instead of per-sensor rows.
+    
+    Schema: Timestamp, MaxAbsZ, AvgAbsZ, SensorsAboveWarn, SensorsAboveAlert, TopSensor, TopZ
+    
+    Reduces 20-100 sensor rows to 1 summary row per timestamp.
+    """
+```
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Audit which long-format tables are actually queried | Analysis | ⏳ |
+| [ ] Create wide-format alternative for sensor timelines | `core/output_manager.py` | ⏳ |
+| [ ] Create wide-format alternative for OMR contributions | `core/output_manager.py` | ⏳ |
+| [ ] Update Grafana queries to use wide format | `grafana_dashboards/` | ⏳ |
+| [ ] Deprecate old long-format tables (keep for 1 version) | Migration | ⏳ |
+
+### P6.3 — Implement Data Retention Policies (Item 52)
+
+**Problem**: 973 runs in 10 days, tables grow forever. Need automated cleanup.
+
+**Retention Policy Design**:
+```python
+# core/data_retention.py (NEW FILE)
+
+from dataclasses import dataclass
+from typing import Dict, Optional
+from datetime import timedelta
+
+@dataclass
+class RetentionPolicy:
+    """Data retention policy for a table category."""
+    category: str
+    max_age_days: int
+    max_rows_per_equip: Optional[int]
+    priority: str  # 'critical', 'operational', 'diagnostic'
+
+DEFAULT_RETENTION = {
+    'critical': RetentionPolicy('critical', 365, None, 'critical'),      # Keep 1 year
+    'operational': RetentionPolicy('operational', 90, None, 'operational'),  # Keep 3 months
+    'diagnostic': RetentionPolicy('diagnostic', 30, 100000, 'diagnostic'),   # Keep 30 days, max 100K rows
+    'temporary': RetentionPolicy('temporary', 7, 50000, 'temporary'),        # Keep 7 days, max 50K rows
+}
+
+TABLE_CATEGORIES = {
+    # Critical: Core analytics that must be kept
+    'ACM_Runs': 'critical',
+    'ACM_RUL': 'critical',
+    'ACM_Episodes': 'critical',
+    'ACM_Scores_Wide': 'critical',
+    
+    # Operational: Important but can be trimmed
+    'ACM_HealthTimeline': 'operational',
+    'ACM_HealthForecast': 'operational',
+    'ACM_FailureForecast': 'operational',
+    
+    # Diagnostic: For troubleshooting, short retention
+    'ACM_SensorNormalized_TS': 'diagnostic',
+    'ACM_OMRContributionsLong': 'diagnostic',
+    'ACM_ContributionTimeline': 'diagnostic',
+    'ACM_SensorHotspotTimeline': 'diagnostic',
+    
+    # Temporary: Can be purged aggressively
+    'ACM_RunLogs': 'temporary',
+    'ACM_RunTimers': 'temporary',
+    'ACM_SQLProfileMetrics': 'temporary',
+}
+
+class DataRetentionManager:
+    """
+    Manage data retention across all ACM tables.
+    
+    Run as scheduled job or after each batch.
+    """
+    
+    def __init__(self, sql_client):
+        self.sql_client = sql_client
+    
+    def apply_retention(self, dry_run: bool = True) -> Dict[str, int]:
+        """
+        Apply retention policies to all tables.
+        
+        Returns: Dict of table -> rows deleted
+        """
+        results = {}
+        for table, category in TABLE_CATEGORIES.items():
+            policy = DEFAULT_RETENTION.get(category)
+            if not policy:
+                continue
+            
+            deleted = self._apply_policy(table, policy, dry_run)
+            if deleted > 0:
+                results[table] = deleted
+        
+        return results
+    
+    def _apply_policy(self, table: str, policy: RetentionPolicy, dry_run: bool) -> int:
+        """Apply retention policy to a single table."""
+        # Delete by age
+        cutoff = datetime.now() - timedelta(days=policy.max_age_days)
+        
+        if dry_run:
+            sql = f"""
+            SELECT COUNT(*) FROM dbo.[{table}] 
+            WHERE CreatedAt < ?
+            """
+        else:
+            sql = f"""
+            DELETE FROM dbo.[{table}] 
+            WHERE CreatedAt < ?
+            """
+        
+        # Execute and return rows affected
+        # ... implementation
+```
+
+**Stored Procedure for Retention**:
+```sql
+-- install/sql/migrations/XXX_add_retention_procedure.sql
+
+CREATE OR ALTER PROCEDURE dbo.usp_ApplyDataRetention
+    @DryRun BIT = 1,
+    @Category NVARCHAR(50) = NULL  -- Optional: only run for specific category
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    DECLARE @Results TABLE (
+        TableName NVARCHAR(128),
+        RowsDeleted INT,
+        Category NVARCHAR(50)
+    );
+    
+    -- Diagnostic tables: 30 day retention
+    IF @Category IS NULL OR @Category = 'diagnostic'
+    BEGIN
+        DECLARE @DiagnosticCutoff DATETIME2 = DATEADD(DAY, -30, GETDATE());
+        
+        IF @DryRun = 0
+        BEGIN
+            DELETE FROM dbo.ACM_SensorNormalized_TS WHERE CreatedAt < @DiagnosticCutoff;
+            INSERT INTO @Results VALUES ('ACM_SensorNormalized_TS', @@ROWCOUNT, 'diagnostic');
+            
+            DELETE FROM dbo.ACM_OMRContributionsLong WHERE CreatedAt < @DiagnosticCutoff;
+            INSERT INTO @Results VALUES ('ACM_OMRContributionsLong', @@ROWCOUNT, 'diagnostic');
+            
+            -- ... other diagnostic tables
+        END
+        ELSE
+        BEGIN
+            INSERT INTO @Results 
+            SELECT 'ACM_SensorNormalized_TS', COUNT(*), 'diagnostic'
+            FROM dbo.ACM_SensorNormalized_TS WHERE CreatedAt < @DiagnosticCutoff;
+            -- ... other tables
+        END
+    END
+    
+    -- Return results
+    SELECT * FROM @Results WHERE RowsDeleted > 0 ORDER BY RowsDeleted DESC;
+END;
+```
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Create `DataRetentionManager` class | `core/data_retention.py` | ⏳ |
+| [ ] Define retention categories and policies | `core/data_retention.py` | ⏳ |
+| [ ] Create `usp_ApplyDataRetention` stored procedure | `install/sql/migrations/` | ⏳ |
+| [ ] Add retention job to batch runner | `scripts/sql_batch_runner.py` | ⏳ |
+| [ ] Add `--skip-retention` flag for debugging | `scripts/sql_batch_runner.py` | ⏳ |
+
+### P6.4 — Optimize Batch Transaction Handling (Item 53)
+
+**Problem**: Current `batched_transaction()` does a single commit at end, but still has 26+ individual DELETE statements.
+
+**Optimization Strategy**:
+```python
+# core/output_manager.py - ENHANCE batched_transaction()
+
+def _bulk_delete_analytics_tables(self, tables: List[str]) -> int:
+    """
+    OPTIMIZATION: Delete all tables in a SINGLE SQL batch.
+    
+    Instead of 26 DELETE statements, execute ONE batched DELETE.
+    """
+    if not tables or not self.run_id:
+        return 0
+    
+    # Build single batch DELETE statement
+    delete_statements = []
+    for table_name in tables:
+        if table_name not in ALLOWED_TABLES:
+            continue
+        # Check if table has RunID column
+        table_cols = self._get_table_cols_cached(table_name)
+        if "RunID" not in table_cols:
+            continue
+        
+        if "EquipID" in table_cols and self.equip_id:
+            delete_statements.append(
+                f"DELETE FROM dbo.[{table_name}] WHERE RunID = @RunID AND EquipID = @EquipID"
+            )
+        else:
+            delete_statements.append(
+                f"DELETE FROM dbo.[{table_name}] WHERE RunID = @RunID"
+            )
+    
+    if not delete_statements:
+        return 0
+    
+    # Execute ALL deletes in single round-trip
+    batch_sql = ";\n".join(delete_statements)
+    with self.sql_client.cursor() as cur:
+        cur.execute(batch_sql, {'RunID': self.run_id, 'EquipID': self.equip_id or 0})
+        # Note: @@ROWCOUNT only returns last statement's count
+        # For total, would need to sum or use OUTPUT clause
+    
+    return len(delete_statements)  # Approximate
+```
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Batch all DELETE statements into single SQL call | `core/output_manager.py` | ⏳ |
+| [ ] Use parameterized batch for INSERTS | `core/output_manager.py` | ⏳ |
+| [ ] Consider MERGE/UPSERT instead of DELETE+INSERT | `core/output_manager.py` | ⏳ |
+| [ ] Profile batched vs. individual operations | Benchmark | ⏳ |
+
+### P6.5 — Table Consolidation Audit (Item 54)
+
+**Problem**: 74 ACM tables, many with overlapping data. Some tables may be unused.
+
+**Audit Questions**:
+1. Which tables are actually queried by Grafana dashboards?
+2. Which tables are only written, never read?
+3. Can any tables be merged (e.g., `ACM_HealthTimeline` + `ACM_OMRTimeline`)?
+4. Which tables can be dropped entirely?
+
+**Implementation**:
+```python
+# scripts/sql/audit_table_usage.py (NEW SCRIPT)
+
+"""
+Audit ACM table usage:
+1. Scan Grafana JSON dashboards for table references
+2. Check SQL query logs for recent reads
+3. Compare against ALLOWED_TABLES list
+4. Generate consolidation recommendations
+"""
+
+def scan_grafana_dashboards(dashboards_dir: Path) -> Dict[str, List[str]]:
+    """Find all table references in Grafana dashboards."""
+    table_refs = {}
+    for json_file in dashboards_dir.glob("*.json"):
+        content = json_file.read_text()
+        # Find all ACM_* table references
+        matches = re.findall(r'ACM_\w+', content)
+        for table in set(matches):
+            if table not in table_refs:
+                table_refs[table] = []
+            table_refs[table].append(json_file.name)
+    return table_refs
+
+def identify_unused_tables(sql_client, allowed_tables: set, grafana_refs: dict) -> List[str]:
+    """Find tables that exist but are never queried."""
+    # Tables in ALLOWED_TABLES but not referenced anywhere
+    unused = []
+    for table in allowed_tables:
+        if table not in grafana_refs:
+            # Check if table is read by any code
+            # ... implementation
+            unused.append(table)
+    return unused
+```
+
+**Candidate Tables for Review**:
+| Table | Rows | Usage | Recommendation |
+|-------|------|-------|----------------|
+| `ACM_Scores_Long` | 698K | Duplicate of Wide | Consider dropping |
+| `ACM_PCA_Loadings` | 939K | Once per model fit | Store in ModelRegistry |
+| `ACM_ContributionTimeline` | 241K | Diagnostic only | Reduce retention |
+| `ACM_SensorHotspotTimeline` | 391K | Diagnostic only | Reduce retention |
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Create table usage audit script | `scripts/sql/audit_table_usage.py` | ⏳ |
+| [ ] Scan Grafana dashboards for table refs | `scripts/sql/audit_table_usage.py` | ⏳ |
+| [ ] Identify unused tables | Analysis | ⏳ |
+| [ ] Propose table consolidation plan | Documentation | ⏳ |
+| [ ] Remove deprecated tables from ALLOWED_TABLES | `core/output_manager.py` | ⏳ |
+
+### P6.6 — SQL Performance Dashboard (Item 55)
+
+**Problem**: No visibility into SQL write performance. Users only see "outputs.comprehensive_analytics took 23.8s".
+
+**Dashboard Requirements**:
+- Per-table row counts over time
+- Per-table write duration trends
+- Total database size growth
+- Retention policy effectiveness
+- Slow query identification
+
+**Grafana Panel Queries**:
+```sql
+-- Panel 1: Largest Tables
+SELECT TOP 10 TableName, TotalRows 
+FROM (
+    SELECT t.name AS TableName, SUM(p.rows) AS TotalRows
+    FROM sys.tables t
+    JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1) AND t.name LIKE 'ACM%'
+    GROUP BY t.name
+) sub
+ORDER BY TotalRows DESC;
+
+-- Panel 2: Write Duration by Table (from ACM_SQLProfileMetrics)
+SELECT 
+    TableName,
+    AVG(TotalDurationMs) AS AvgWriteMs,
+    SUM(TotalRows) AS TotalRowsWritten
+FROM ACM_SQLProfileMetrics
+WHERE CreatedAt > DATEADD(DAY, -7, GETDATE())
+GROUP BY TableName
+ORDER BY AVG(TotalDurationMs) DESC;
+
+-- Panel 3: Row Growth Over Time
+SELECT 
+    CAST(CreatedAt AS DATE) AS Date,
+    TableName,
+    SUM(TotalRows) AS RowsWritten
+FROM ACM_SQLProfileMetrics
+WHERE CreatedAt > DATEADD(DAY, -30, GETDATE())
+GROUP BY CAST(CreatedAt AS DATE), TableName
+ORDER BY Date, TableName;
+```
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Create `ACM_SQLProfileMetrics` table | `install/sql/migrations/` | ⏳ |
+| [ ] Create SQL Performance dashboard | `grafana_dashboards/acm_sql_performance.json` | ⏳ |
+| [ ] Add table size panels | `grafana_dashboards/` | ⏳ |
+| [ ] Add write duration trends | `grafana_dashboards/` | ⏳ |
+| [ ] Add retention effectiveness panel | `grafana_dashboards/` | ⏳ |
+
+### P6.7 — PCA Loadings Optimization (Item 56)
+
+**Problem**: `ACM_PCA_Loadings` has 939K rows. Loadings are per-model, not per-run. Storing per-run is wasteful.
+
+**Current Pattern**:
+```
+RunID=abc, EquipID=1, PC=1, Sensor1=0.23, Sensor2=0.45, ...
+RunID=abc, EquipID=1, PC=2, Sensor1=0.12, Sensor2=0.34, ...
+... (repeated for every run, even if model unchanged)
+```
+
+**Optimized Pattern**:
+```
+ModelHash=sha256, EquipID=1, PC=1, Sensor1=0.23, Sensor2=0.45, ...
+(Store once per unique model, reference by hash)
+```
+
+**Implementation**:
+```python
+# core/model_persistence.py - ENHANCE
+
+def _store_pca_loadings(self, model_hash: str, loadings: pd.DataFrame):
+    """
+    Store PCA loadings once per unique model.
+    
+    Avoids storing identical loadings for every run that uses same model.
+    """
+    # Check if loadings already exist for this model hash
+    existing = self._check_loadings_exist(model_hash)
+    if existing:
+        return  # Skip - already stored
+    
+    # Insert loadings with model hash
+    loadings['ModelHash'] = model_hash
+    # ... insert
+```
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Change `ACM_PCA_Loadings` to use ModelHash instead of RunID | Migration | ⏳ |
+| [ ] Skip storing loadings if model unchanged | `core/model_persistence.py` | ⏳ |
+| [ ] Add foreign key to `ACM_Runs.ModelHash` | Migration | ⏳ |
+| [ ] Migrate existing data (deduplicate) | Migration script | ⏳ |
+
+### P6.8 — BaselineBuffer Wide Format (Item 57)
+
+**Problem**: `ACM_BaselineBuffer` stores 1M rows in long format (timestamp × sensor). Wide format would be ~50x smaller.
+
+**Current Schema** (long format):
+```
+| EquipID | Timestamp | SensorName | SensorValue | DataQuality |
+|---------|-----------|------------|-------------|-------------|
+| 1       | 2025-01-01| Temp1      | 72.3        | GOOD        |
+| 1       | 2025-01-01| Temp2      | 73.1        | GOOD        |
+| 1       | 2025-01-01| Pressure1  | 14.7        | GOOD        |
+... 20 rows per timestamp
+```
+
+**Proposed Schema** (wide format):
+```
+| EquipID | Timestamp  | Temp1 | Temp2 | Pressure1 | ... | DataQualityFlags |
+|---------|------------|-------|-------|-----------|-----|------------------|
+| 1       | 2025-01-01 | 72.3  | 73.1  | 14.7      | ... | GOOD,GOOD,GOOD   |
+... 1 row per timestamp
+```
+
+**Challenges**:
+- Dynamic sensor columns (different equipment has different sensors)
+- SQL Server sparse columns or JSON blob for flexibility
+
+**Implementation Options**:
+```python
+# Option A: JSON blob for sensor values
+# ACM_BaselineBufferWide (EquipID, Timestamp, SensorValuesJSON)
+# {"Temp1": 72.3, "Temp2": 73.1, "Pressure1": 14.7}
+
+# Option B: Keep long format but add downsampling
+# Only store every Nth timestamp for baseline (e.g., every 10 min not every 1 min)
+
+# Option C: Store aggregated stats instead of raw values
+# ACM_BaselineStats (EquipID, Sensor, Hour, Mean, Std, Min, Max, Count)
+```
+
+| Task | File | Status |
+|------|------|--------|
+| [ ] Evaluate JSON blob vs. sparse columns | Analysis | ⏳ |
+| [ ] Implement wide-format baseline buffer | `core/acm_main.py` | ⏳ |
+| [ ] Add downsampling option for baseline | `core/acm_main.py` | ⏳ |
+| [ ] Migrate existing long-format data | Migration script | ⏳ |
+
+---
+
 ## New SQL Tables Summary
 
 | Table | Phase | Purpose |
@@ -5399,10 +5997,27 @@ CREATE TABLE ACM_PolicyAssignments (
 | `ACM_DriftEvents` | 5 | Drift events as objects |
 | `ACM_BaselinePolicy` | 5 | Per-equipment baseline window policy |
 | `ACM_DecisionOutput` | 5 | Compact operational output |
-| `ACM_OperatorFeedback` | 5 | Operator feedback capture |
 | `ACM_EpisodeFamilies` | 5 | Clustered episode patterns |
 | `ACM_ExperimentLog` | 5 | Experiment/configuration tracking |
 | `ACM_ModelDeprecationLog` | 5 | Model deprecation audit |
+| `ACM_SQLProfileMetrics` | 6 | Per-table SQL operation profiling |
+| `ACM_RetentionLog` | 6 | Data retention audit trail |
+
+---
+
+## Tables to Consolidate/Drop (Phase 6)
+
+| Table | Current Rows | Action | Reason |
+|-------|--------------|--------|--------|
+| `ACM_SensorNormalized_TS` | 3M | Convert to wide format | 95% row reduction |
+| `ACM_OMRContributionsLong` | 1.2M | Convert to wide format | 93% row reduction |
+| `ACM_Scores_Long` | 699K | Consider dropping | Duplicate of Wide format |
+| `ACM_PCA_Loadings` | 940K | Store by ModelHash | Remove per-run duplication |
+| `ACM_BaselineBuffer` | 1M | Convert to wide format | 95% row reduction |
+| `ACM_SensorHotspotTimeline` | 391K | Reduce retention to 7 days | Diagnostic only |
+| `ACM_ContributionTimeline` | 242K | Reduce retention to 7 days | Diagnostic only |
+| `ACM_RunLogs` | 657K | Reduce retention to 7 days | Temporary data |
+| `ACM_RunTimers` | 203K | Reduce retention to 7 days | Temporary data |
 
 ---
 
@@ -5423,6 +6038,10 @@ CREATE TABLE ACM_PolicyAssignments (
 | SQL schema migrations fail | Medium | Test migrations on copy of production DB first |
 | Regression in anomaly detection | High | Golden dataset regression tests |
 | Performance degradation | Medium | Benchmark each phase before/after |
+| Wide-format breaks Grafana queries | High | Update all dashboard queries before migration |
+| Data loss during retention cleanup | High | Dry-run mode + backup before first run |
+| Long migration for existing data | Medium | Schedule during maintenance window |
+| Batch runner slowdown during migration | Medium | Phased rollout per table |
 
 ---
 
