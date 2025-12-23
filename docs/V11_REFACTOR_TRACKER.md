@@ -16,8 +16,8 @@
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
 | 4 | Health/Episode/RUL | 6 | ✅ Complete | 6/6 |
-| 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **28/50** |
+| 5 | Operational Infrastructure | 13 | ⏳ Not Started | 0/13 |
+| **Total** | | **49** | | **28/49** |
 
 ---
 
@@ -4199,178 +4199,11 @@ class AssetSimilarity:
 | [ ] Implement transfer learning for cold start | `core/asset_similarity.py` | ⏳ |
 | [ ] Add full auditability | `core/asset_similarity.py` | ⏳ |
 
-### P5.11 — Operator Feedback (Item 42)
+### ~~P5.11 — Operator Feedback~~ (REMOVED)
 
-**Implementation**:
-```python
-# core/operator_feedback.py (NEW FILE)
-
-from dataclasses import dataclass
-from enum import Enum
-from typing import Optional, List
-import pandas as pd
-
-class FeedbackType(Enum):
-    """Types of operator feedback."""
-    FALSE_ALARM = "FALSE_ALARM"       # Alert was wrong
-    TRUE_ALARM = "TRUE_ALARM"         # Alert was correct
-    MISSED_ALARM = "MISSED_ALARM"     # Should have alerted but didn't
-    MAINTENANCE = "MAINTENANCE"       # Maintenance was performed
-    CALIBRATION = "CALIBRATION"       # Sensor was recalibrated
-    OPERATIONAL = "OPERATIONAL"       # Operational change (not fault)
-
-class FeedbackResolution(Enum):
-    """How feedback should affect the system."""
-    ADJUST_THRESHOLD = "ADJUST_THRESHOLD"  # Tune thresholds
-    RETRAIN_MODEL = "RETRAIN_MODEL"        # Trigger retraining
-    IGNORE = "IGNORE"                       # No action needed
-    BASELINE_RESET = "BASELINE_RESET"      # Reset baseline window
-
-@dataclass
-class OperatorFeedbackRecord:
-    """Record of operator feedback."""
-    id: str
-    equip_id: int
-    timestamp: pd.Timestamp
-    feedback_type: FeedbackType
-    
-    # Context
-    related_episode_id: Optional[str]
-    related_alert_id: Optional[str]
-    
-    # Details
-    operator_notes: str
-    affected_sensors: List[str]
-    
-    # Resolution
-    resolution: Optional[FeedbackResolution]
-    resolution_applied_at: Optional[pd.Timestamp]
-
-class OperatorFeedback:
-    """
-    Capture and process operator feedback for continuous improvement.
-    """
-    
-    def __init__(self):
-        self.feedback_history: List[OperatorFeedbackRecord] = []
-        self.false_alarm_rate: float = 0.0
-        self.detection_rate: float = 1.0
-    
-    def record_feedback(self,
-                        equip_id: int,
-                        feedback_type: FeedbackType,
-                        episode_id: Optional[str] = None,
-                        notes: str = "",
-                        sensors: Optional[List[str]] = None) -> OperatorFeedbackRecord:
-        """Record operator feedback."""
-        record = OperatorFeedbackRecord(
-            id=f"FB_{equip_id}_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}",
-            equip_id=equip_id,
-            timestamp=pd.Timestamp.now(),
-            feedback_type=feedback_type,
-            related_episode_id=episode_id,
-            related_alert_id=None,
-            operator_notes=notes,
-            affected_sensors=sensors or [],
-            resolution=None,
-            resolution_applied_at=None
-        )
-        
-        self.feedback_history.append(record)
-        self._update_rates()
-        
-        return record
-    
-    def _update_rates(self) -> None:
-        """Update false alarm and detection rates from history."""
-        recent = [f for f in self.feedback_history 
-                  if (pd.Timestamp.now() - f.timestamp).days < 30]
-        
-        if not recent:
-            return
-        
-        false_alarms = sum(1 for f in recent if f.feedback_type == FeedbackType.FALSE_ALARM)
-        true_alarms = sum(1 for f in recent if f.feedback_type == FeedbackType.TRUE_ALARM)
-        missed = sum(1 for f in recent if f.feedback_type == FeedbackType.MISSED_ALARM)
-        
-        total_alarms = false_alarms + true_alarms
-        if total_alarms > 0:
-            self.false_alarm_rate = false_alarms / total_alarms
-        
-        total_events = true_alarms + missed
-        if total_events > 0:
-            self.detection_rate = true_alarms / total_events
-    
-    def suggest_resolution(self, record: OperatorFeedbackRecord) -> FeedbackResolution:
-        """Suggest resolution based on feedback type and history."""
-        if record.feedback_type == FeedbackType.FALSE_ALARM:
-            # Check if repeated false alarms on same sensors
-            similar = [f for f in self.feedback_history
-                       if f.feedback_type == FeedbackType.FALSE_ALARM
-                       and set(f.affected_sensors) & set(record.affected_sensors)]
-            
-            if len(similar) >= 3:
-                return FeedbackResolution.ADJUST_THRESHOLD
-            return FeedbackResolution.IGNORE
-        
-        elif record.feedback_type == FeedbackType.MISSED_ALARM:
-            return FeedbackResolution.RETRAIN_MODEL
-        
-        elif record.feedback_type in [FeedbackType.MAINTENANCE, FeedbackType.CALIBRATION]:
-            return FeedbackResolution.BASELINE_RESET
-        
-        return FeedbackResolution.IGNORE
-    
-    def get_threshold_adjustment(self, equip_id: int) -> float:
-        """Compute threshold adjustment based on feedback."""
-        # If too many false alarms, raise threshold
-        if self.false_alarm_rate > 0.3:
-            return 0.5  # Raise by 0.5 sigma
-        
-        # If too many missed alarms, lower threshold  
-        if self.detection_rate < 0.8:
-            return -0.5  # Lower by 0.5 sigma
-        
-        return 0.0
-```
-
-**SQL Schema**:
-```sql
-CREATE TABLE ACM_OperatorFeedback (
-    ID INT IDENTITY(1,1) PRIMARY KEY,
-    FeedbackID NVARCHAR(100) NOT NULL UNIQUE,
-    EquipID INT NOT NULL,
-    Timestamp DATETIME2 NOT NULL,
-    FeedbackType NVARCHAR(30) NOT NULL,
-    
-    -- Context
-    RelatedEpisodeID NVARCHAR(100) NULL,
-    RelatedAlertID NVARCHAR(100) NULL,
-    
-    -- Details
-    OperatorNotes NVARCHAR(MAX) NULL,
-    AffectedSensors NVARCHAR(MAX) NULL,
-    
-    -- Resolution
-    Resolution NVARCHAR(30) NULL,
-    ResolutionAppliedAt DATETIME2 NULL,
-    
-    -- Metadata
-    OperatorID NVARCHAR(50) NULL,
-    CreatedAt DATETIME2 DEFAULT GETDATE(),
-    CONSTRAINT FK_OperatorFeedback_Equipment FOREIGN KEY (EquipID) REFERENCES Equipment(EquipID)
-);
-CREATE INDEX IX_OperatorFeedback_Equip ON ACM_OperatorFeedback(EquipID, Timestamp DESC);
-CREATE INDEX IX_OperatorFeedback_Type ON ACM_OperatorFeedback(FeedbackType, Timestamp DESC);
-```
-
-| Task | File | Status |
-|------|------|--------|
-| [ ] Create `OperatorFeedback` class | `core/operator_feedback.py` | ⏳ |
-| [ ] Capture false alarm feedback | `core/operator_feedback.py` | ⏳ |
-| [ ] Capture valid alarm feedback | `core/operator_feedback.py` | ⏳ |
-| [ ] Capture maintenance feedback | `core/operator_feedback.py` | ⏳ |
-| [ ] Create `ACM_OperatorFeedback` table | `scripts/sql/migrations/` | ⏳ |
+> **REMOVED**: ACM is a fully autonomous system with NO human-in-the-loop feedback.
+> All learning and adaptation is automated via drift detection, novelty scoring,
+> and statistical monitoring. Human intervention is explicitly NOT part of the design.
 
 ### P5.12 — Alert Fatigue Controls (Item 43)
 
