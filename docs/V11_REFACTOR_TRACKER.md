@@ -15,9 +15,9 @@
 | 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
-| 4 | Health/Episode/RUL | 6 | 🔄 In Progress | 4/6 |
+| 4 | Health/Episode/RUL | 6 | ✅ Complete | 6/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **20/50** |
+| **Total** | | **50** | | **22/50** |
 
 ---
 
@@ -2662,10 +2662,10 @@ CREATE TABLE ACM_ForecastDiagnostics (
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `ForecastDiagnostics` class | `core/forecast_diagnostics.py` | ⏳ |
-| [ ] Implement coverage metric | `core/forecast_diagnostics.py` | ⏳ |
-| [ ] Implement sharpness metric | `core/forecast_diagnostics.py` | ⏳ |
-| [ ] Implement calibration metric | `core/forecast_diagnostics.py` | ⏳ |
+| [x] Create `ForecastDiagnostics` class | `core/forecast_diagnostics.py` | ✅ |
+| [x] Implement coverage metric | `core/forecast_diagnostics.py` | ✅ |
+| [x] Implement sharpness metric | `core/forecast_diagnostics.py` | ✅ |
+| [x] Implement calibration metric | `core/forecast_diagnostics.py` | ✅ |
 | [ ] Create `ACM_ForecastDiagnostics` table | `scripts/sql/migrations/` | ⏳ |
 | [ ] Persist diagnostics on every run | `core/output_manager.py` | ⏳ |
 
@@ -2783,10 +2783,10 @@ class ConfidenceModel:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `ConfidenceModel` class | `core/confidence_model.py` | ⏳ |
-| [ ] Combine regime confidence | `core/confidence_model.py` | ⏳ |
-| [ ] Combine detector agreement | `core/confidence_model.py` | ⏳ |
-| [ ] Combine data quality signal | `core/confidence_model.py` | ⏳ |
+| [x] Create `ConfidenceModel` class | `core/confidence_model.py` | ✅ |
+| [x] Combine regime confidence | `core/confidence_model.py` | ✅ |
+| [x] Combine detector agreement | `core/confidence_model.py` | ✅ |
+| [x] Combine data quality signal | `core/confidence_model.py` | ✅ |
 | [ ] Apply to health outputs | `core/health_tracker.py` | ⏳ |
 | [ ] Apply to episode outputs | `core/episode_manager.py` | ⏳ |
 | [ ] Apply to RUL outputs | `core/rul_estimator.py` | ⏳ |
