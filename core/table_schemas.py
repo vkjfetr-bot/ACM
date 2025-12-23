@@ -286,6 +286,97 @@ TABLE_SCHEMAS: Dict[str, TableSchema] = {
         },
         key_columns=["RunID", "EquipID", "Sensor"],
     ),
+    
+    # =========================================================================
+    # v11.0.0 New Tables
+    # =========================================================================
+    "ACM_ActiveModels": TableSchema(
+        required_columns={
+            "EquipID": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "ActiveRegimeVersion": _INT_NULLABLE,
+            "RegimeMaturityState": _STR_NULLABLE,
+            "RegimePromotedAt": _DATETIME_NULLABLE,
+            "ActiveThresholdVersion": _INT_NULLABLE,
+            "ThresholdPromotedAt": _DATETIME_NULLABLE,
+            "ActiveForecastVersion": _INT_NULLABLE,
+            "ForecastPromotedAt": _DATETIME_NULLABLE,
+            "LastUpdatedAt": _DATETIME_NULLABLE,
+            "LastUpdatedBy": _STR_NULLABLE,
+        },
+        key_columns=["EquipID"],
+    ),
+    
+    "ACM_RegimeDefinitions": TableSchema(
+        required_columns={
+            "EquipID": _INT_NOT_NULL,
+            "RegimeVersion": _INT_NOT_NULL,
+            "RegimeID": _INT_NOT_NULL,
+            "RegimeName": _STR_NOT_NULL,
+            "CentroidJSON": _STR_NOT_NULL,
+            "FeatureColumns": _STR_NOT_NULL,
+            "DataPointCount": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "SilhouetteScore": _FLOAT_NULLABLE,
+            "CreatedAt": _DATETIME_NULLABLE,
+            "CreatedByRunID": _STR_NULLABLE,
+        },
+        key_columns=["EquipID", "RegimeVersion", "RegimeID"],
+    ),
+    
+    "ACM_DataContractValidation": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Passed": _INT_NOT_NULL,
+            "RowsValidated": _INT_NOT_NULL,
+            "ColumnsValidated": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "IssuesJSON": _STR_NULLABLE,
+            "WarningsJSON": _STR_NULLABLE,
+            "ContractSignature": _STR_NULLABLE,
+            "ValidatedAt": _DATETIME_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID"],
+    ),
+    
+    "ACM_SeasonalPatterns": TableSchema(
+        required_columns={
+            "EquipID": _INT_NOT_NULL,
+            "SensorName": _STR_NOT_NULL,
+            "PatternType": _STR_NOT_NULL,
+            "PeriodHours": _FLOAT_NOT_NULL,
+            "Amplitude": _FLOAT_NOT_NULL,
+        },
+        optional_columns={
+            "PhaseShift": _FLOAT_NULLABLE,
+            "Confidence": _FLOAT_NULLABLE,
+            "DetectedAt": _DATETIME_NULLABLE,
+            "DetectedByRunID": _STR_NULLABLE,
+        },
+        key_columns=["EquipID", "SensorName", "PatternType"],
+    ),
+    
+    "ACM_AssetProfiles": TableSchema(
+        required_columns={
+            "EquipID": _INT_NOT_NULL,
+            "EquipType": _STR_NOT_NULL,
+            "SensorNamesJSON": _STR_NOT_NULL,
+            "SensorMeansJSON": _STR_NOT_NULL,
+            "SensorStdsJSON": _STR_NOT_NULL,
+        },
+        optional_columns={
+            "RegimeCount": _INT_NULLABLE,
+            "TypicalHealth": _FLOAT_NULLABLE,
+            "DataHours": _FLOAT_NULLABLE,
+            "LastUpdatedAt": _DATETIME_NULLABLE,
+            "LastUpdatedByRunID": _STR_NULLABLE,
+        },
+        key_columns=["EquipID"],
+    ),
 }
 
 

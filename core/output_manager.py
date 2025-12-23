@@ -96,6 +96,12 @@ ALLOWED_TABLES = {
     'ACM_AdaptiveThresholds_ByRegime',  # Per-regime adaptive thresholds
     # v10.2.0 Resource monitoring
     'ACM_ResourceMetrics',        # Per-section CPU/memory/time metrics
+    # v11.0.0 New tables
+    'ACM_ActiveModels',           # Active model versions per equipment
+    'ACM_RegimeDefinitions',      # Regime centroids and metadata
+    'ACM_DataContractValidation', # Data contract validation history
+    'ACM_SeasonalPatterns',       # Detected seasonal patterns
+    'ACM_AssetProfiles',          # Asset similarity profiles
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
