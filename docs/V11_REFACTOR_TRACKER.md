@@ -136,13 +136,13 @@ Phase 5 (Operational) ─────── Mostly independent
 
 ### P0.2 — Version Bump ✅
 - [x] Update `utils/version.py` to `11.0.0`
-- [ ] Update CHANGELOG with v11.0.0 section
-- [ ] Update `.github/copilot-instructions.md` with v11 contracts
+- [x] Update CHANGELOG with v11.0.0 section
+- [x] Update `.github/copilot-instructions.md` with v11 contracts
 
-### P0.3 — Documentation Foundation
-- [ ] Create `docs/V11_ARCHITECTURE.md` with new system design
-- [ ] Create `docs/V11_MIGRATION_GUIDE.md` for breaking changes
-- [ ] Update `docs/ACM_SYSTEM_OVERVIEW.md` with v11 concepts
+### P0.3 — Documentation Foundation ✅
+- [x] Create `docs/V11_ARCHITECTURE.md` with new system design
+- [x] Create `docs/V11_MIGRATION_GUIDE.md` for breaking changes
+- [x] Update `docs/ACM_SYSTEM_OVERVIEW.md` with v11 concepts
 
 ---
 
