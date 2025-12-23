@@ -14,10 +14,10 @@
 | 0 | Setup & Versioning | 3 | ✅ Complete | 3/3 |
 | 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
-| 3 | Detector/Fusion | 6 | 🔄 In Progress | 5/6 |
+| 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
 | 4 | Health/Episode/RUL | 6 | ⏳ Not Started | 0/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **15/50** |
+| **Total** | | **50** | | **16/50** |
 
 ---
 
@@ -1442,15 +1442,23 @@ class AR1Detector:
         return z_scores
 ```
 
+**Audit Summary (2025-01-08)**: All existing detectors PASS train-score separation:
+- **AR1Detector** (`core/ar1_detector.py`): `phimap`, `sdmap` stored at fit time, used in score()
+- **PCASubspaceDetector** (`core/correlation.py`): `pca`, `scaler`, `col_medians` from training
+- **IsolationForestDetector** (`core/outliers.py`): sklearn model trained once, score_samples() used
+- **GMMDetector** (`core/outliers.py`): model, scaler, _score_mu_, _score_sd_ from training
+- **OMRDetector** (`core/omr.py`): OMRModel contains train_residual_std for z-scoring
+- **ScoreCalibrator** (`core/fuse.py`): med, mad, scale, regime_params_ stored at fit time
+
 | Task | File | Status |
 |------|------|--------|
-| [ ] Define separation contract (batch cannot influence own score) | `docs/V11_ARCHITECTURE.md` | ⏳ |
-| [ ] Audit AR1 detector for separation | `core/ar1_detector.py` | ⏳ |
-| [ ] Audit PCA detector for separation | `core/outliers.py` | ⏳ |
-| [ ] Audit IForest detector for separation | `core/outliers.py` | ⏳ |
-| [ ] Audit GMM detector for separation | `core/outliers.py` | ⏳ |
-| [ ] Audit OMR detector for separation | `core/omr.py` | ⏳ |
-| [ ] Add separation validation in tests | `tests/test_detectors.py` | ⏳ |
+| [x] Define separation contract (batch cannot influence own score) | `docs/V11_REFACTOR_TRACKER.md` | ✅ |
+| [x] Audit AR1 detector for separation | `core/ar1_detector.py` | ✅ |
+| [x] Audit PCA detector for separation | `core/correlation.py` | ✅ |
+| [x] Audit IForest detector for separation | `core/outliers.py` | ✅ |
+| [x] Audit GMM detector for separation | `core/outliers.py` | ✅ |
+| [x] Audit OMR detector for separation | `core/omr.py` | ✅ |
+| [x] Add separation validation in tests | `tests/test_detector_protocol.py` | ✅ |
 
 ### P3.2 — Unified Baseline Normalization (Item 20)
 
