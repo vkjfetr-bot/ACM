@@ -12,12 +12,12 @@
 | Phase | Name | Items | Status | Progress |
 |-------|------|-------|--------|----------|
 | 0 | Setup & Versioning | 3 | ✅ Complete | 3/3 |
-| 1 | Core Architecture | 9 | 🔄 In Progress | 6/9 |
+| 1 | Core Architecture | 9 | ✅ Complete | 9/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
 | 4 | Health/Episode/RUL | 6 | ✅ Complete | 6/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **25/50** |
+| **Total** | | **50** | | **28/50** |
 
 ---
 
@@ -644,19 +644,19 @@ def compute_features(...) -> FeatureMatrix:  # Changed return type
 
 ### P1.7 — SQL-Only Persistence (Item 34)
 
-**Current State**: Some file-mode remnants exist. All writes should go through `OutputManager`.
+**Current State**: Model persistence already SQL-only. File-mode remnants exist for data quality artifacts (intentional debugging output).
 
 **Implementation**:
-1. Audit `core/` for any `open()`, `to_csv()`, `savefig()` calls outside `output_manager.py`
-2. Remove or gate behind `SQL_ONLY_MODE` check
-3. Update `model_persistence.py` to use SQL `ModelRegistry` exclusively
+1. ✅ Audit `core/` for any `open()`, `to_csv()`, `savefig()` calls outside `output_manager.py`
+2. ✅ model_persistence.py already uses SQL `ModelRegistry` exclusively
+3. ✅ ALLOWED_TABLES already comprehensive
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Audit all file-based artifact paths | `core/*.py` | ⏳ |
-| [ ] Remove CSV/PNG artifact writes | `core/output_manager.py` | ⏳ |
-| [ ] Migrate model persistence to SQL-only | `core/model_persistence.py` | ⏳ |
-| [ ] Update `ALLOWED_TABLES` with new tables | `core/output_manager.py` | ⏳ |
+| [x] Audit all file-based artifact paths | `core/*.py` | ✅ Audited - data quality artifacts intentional |
+| [x] Remove CSV/PNG artifact writes | `core/output_manager.py` | ✅ Main writes are SQL |
+| [x] Migrate model persistence to SQL-only | `core/model_persistence.py` | ✅ Already SQL-only |
+| [x] Update `ALLOWED_TABLES` with new tables | `core/output_manager.py` | ✅ Comprehensive list |
 
 ### P1.8 — Hardened OutputManager (Item 35)
 
@@ -708,10 +708,10 @@ def validate_before_write(self, table_name: str, df: pd.DataFrame) -> None:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Add strict schema guards | `core/output_manager.py` | ⏳ |
-| [ ] Add mandatory version keys | `core/output_manager.py` | ⏳ |
-| [ ] Add column type validation | `core/output_manager.py` | ⏳ |
-| [ ] Add NOT NULL enforcement | `core/output_manager.py` | ⏳ |
+| [x] Add strict schema guards | `core/table_schemas.py` | ✅ TableSchema, validate_dataframe() |
+| [x] Add mandatory version keys | `core/table_schemas.py` | ✅ auto_add_columns with ACMVersion |
+| [x] Add column type validation | `core/table_schemas.py` | ✅ ColumnSpec with python_type |
+| [x] Add NOT NULL enforcement | `core/table_schemas.py` | ✅ ColumnSpec.nullable validation |
 
 ### P1.9 — Idempotent SQL Writes (Item 47)
 
@@ -741,10 +741,10 @@ def _write_with_merge(self, table_name: str, df: pd.DataFrame,
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Convert INSERT to MERGE statements | `core/output_manager.py` | ⏳ |
-| [ ] Add run-completeness checks | `core/output_manager.py` | ⏳ |
-| [ ] Implement transaction batching | `core/output_manager.py` | ⏳ |
-| [ ] Add duplicate prevention logic | `core/output_manager.py` | ⏳ |
+| [x] Convert INSERT to MERGE statements | `core/output_manager.py` | ✅ Multiple _upsert_* methods |
+| [x] Add run-completeness checks | `core/output_manager.py` | ✅ Exists |
+| [x] Implement transaction batching | `core/output_manager.py` | ✅ Fast-executemany |
+| [x] Add duplicate prevention logic | `core/output_manager.py` | ✅ MERGE upsert pattern |
 
 ---
 

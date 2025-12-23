@@ -1,0 +1,396 @@
+"""
+Table Schema Validation for ACM v11.0.0
+
+Provides schema definitions and validation for SQL table writes.
+Ensures data integrity before persisting to database.
+
+Phase 1.8 Implementation
+"""
+
+from dataclasses import dataclass, field
+from typing import Dict, Set, Optional, Type, Any, List
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+from core.observability import Console
+from utils.version import __version__
+
+
+# =============================================================================
+# Schema Definition Classes
+# =============================================================================
+
+@dataclass
+class ColumnSpec:
+    """
+    Specification for a single column.
+    
+    Attributes:
+        python_type: Expected Python/pandas type
+        nullable: Whether NULL values are allowed
+        default: Default value if missing (None means no default)
+    """
+    python_type: Type
+    nullable: bool = True
+    default: Optional[Any] = None
+
+
+@dataclass
+class TableSchema:
+    """
+    Schema definition for SQL table validation.
+    
+    Attributes:
+        required_columns: Columns that must exist (column_name -> ColumnSpec)
+        optional_columns: Columns that may exist
+        auto_add_columns: Columns to auto-add with defaults if missing
+        key_columns: Primary/unique key columns for MERGE operations
+    """
+    required_columns: Dict[str, ColumnSpec] = field(default_factory=dict)
+    optional_columns: Dict[str, ColumnSpec] = field(default_factory=dict)
+    auto_add_columns: Dict[str, Any] = field(default_factory=dict)  # column -> default value
+    key_columns: List[str] = field(default_factory=list)
+    
+    def validate(self, df: pd.DataFrame, table_name: str) -> List[str]:
+        """
+        Validate DataFrame against schema.
+        
+        Returns:
+            List of error messages (empty if valid)
+        """
+        errors = []
+        
+        # Check required columns exist
+        for col, spec in self.required_columns.items():
+            if col not in df.columns:
+                errors.append(f"Missing required column '{col}' for {table_name}")
+            elif not spec.nullable:
+                null_count = df[col].isna().sum()
+                if null_count > 0:
+                    errors.append(f"Column '{col}' has {null_count} NULL values but is NOT NULL")
+        
+        return errors
+    
+    def apply_defaults(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply default values for missing columns.
+        
+        Returns:
+            DataFrame with defaults applied (modifies in place)
+        """
+        for col, default in self.auto_add_columns.items():
+            if col not in df.columns:
+                df[col] = default
+        
+        # Apply column-level defaults
+        for col, spec in self.required_columns.items():
+            if spec.default is not None and col in df.columns:
+                df[col] = df[col].fillna(spec.default)
+        
+        return df
+
+
+# =============================================================================
+# Schema Registry
+# =============================================================================
+
+# Common column specs
+_INT_NOT_NULL = ColumnSpec(int, nullable=False)
+_INT_NULLABLE = ColumnSpec(int, nullable=True)
+_FLOAT_NULLABLE = ColumnSpec(float, nullable=True)
+_FLOAT_NOT_NULL = ColumnSpec(float, nullable=False)
+_STR_NOT_NULL = ColumnSpec(str, nullable=False)
+_STR_NULLABLE = ColumnSpec(str, nullable=True)
+_DATETIME_NOT_NULL = ColumnSpec(datetime, nullable=False)
+_DATETIME_NULLABLE = ColumnSpec(datetime, nullable=True)
+
+
+TABLE_SCHEMAS: Dict[str, TableSchema] = {
+    # =========================================================================
+    # Core Scoring Tables
+    # =========================================================================
+    "ACM_Scores_Wide": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Timestamp": _DATETIME_NOT_NULL,
+        },
+        optional_columns={
+            "ar1_z": _FLOAT_NULLABLE,
+            "pca_spe_z": _FLOAT_NULLABLE,
+            "pca_t2_z": _FLOAT_NULLABLE,
+            "iforest_z": _FLOAT_NULLABLE,
+            "gmm_z": _FLOAT_NULLABLE,
+            "omr_z": _FLOAT_NULLABLE,
+            "fused_z": _FLOAT_NULLABLE,
+        },
+        auto_add_columns={
+            "ACMVersion": __version__,
+        },
+        key_columns=["RunID", "EquipID", "Timestamp"],
+    ),
+    
+    # =========================================================================
+    # Health Tables
+    # =========================================================================
+    "ACM_HealthTimeline": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Timestamp": _DATETIME_NOT_NULL,
+            "Health": _FLOAT_NOT_NULL,
+        },
+        optional_columns={
+            "HealthZone": _STR_NULLABLE,
+            "Regime": _STR_NULLABLE,
+        },
+        auto_add_columns={
+            "ACMVersion": __version__,
+        },
+        key_columns=["RunID", "EquipID", "Timestamp"],
+    ),
+    
+    "ACM_HealthForecast": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "ForecastTimestamp": _DATETIME_NOT_NULL,
+        },
+        optional_columns={
+            "Method": _STR_NULLABLE,
+            "Health": _FLOAT_NULLABLE,
+            "HealthLower": _FLOAT_NULLABLE,
+            "HealthUpper": _FLOAT_NULLABLE,
+            "Confidence": _FLOAT_NULLABLE,
+        },
+        auto_add_columns={
+            "ACMVersion": __version__,
+        },
+        key_columns=["RunID", "EquipID", "ForecastTimestamp", "Method"],
+    ),
+    
+    # =========================================================================
+    # Episode Tables
+    # =========================================================================
+    "ACM_Episodes": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "EpisodeID": _INT_NOT_NULL,
+            "StartTime": _DATETIME_NOT_NULL,
+        },
+        optional_columns={
+            "EndTime": _DATETIME_NULLABLE,
+            "DurationMinutes": _FLOAT_NULLABLE,
+            "MaxSeverity": _FLOAT_NULLABLE,
+            "TopSensor": _STR_NULLABLE,
+        },
+        auto_add_columns={
+            "ACMVersion": __version__,
+        },
+        key_columns=["RunID", "EquipID", "EpisodeID"],
+    ),
+    
+    "ACM_EpisodeDiagnostics": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "episode_count": _INT_NULLABLE,
+            "duration_h": _FLOAT_NULLABLE,
+            "avg_severity": _FLOAT_NULLABLE,
+        },
+        auto_add_columns={},
+        key_columns=["RunID", "EquipID"],
+    ),
+    
+    # =========================================================================
+    # RUL Tables
+    # =========================================================================
+    "ACM_RUL": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "RUL_Hours": _FLOAT_NULLABLE,
+            "P10_LowerBound": _FLOAT_NULLABLE,
+            "P50_Median": _FLOAT_NULLABLE,
+            "P90_UpperBound": _FLOAT_NULLABLE,
+            "Confidence": _FLOAT_NULLABLE,
+            "Method": _STR_NULLABLE,
+            "TopSensor1": _STR_NULLABLE,
+            "TopSensor2": _STR_NULLABLE,
+            "TopSensor3": _STR_NULLABLE,
+        },
+        auto_add_columns={
+            "ACMVersion": __version__,
+        },
+        key_columns=["RunID", "EquipID"],
+    ),
+    
+    # =========================================================================
+    # Regime Tables
+    # =========================================================================
+    "ACM_RegimeTimeline": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Timestamp": _DATETIME_NOT_NULL,
+        },
+        optional_columns={
+            "Regime": _STR_NULLABLE,
+            "RegimeID": _INT_NULLABLE,
+            "Confidence": _FLOAT_NULLABLE,
+        },
+        auto_add_columns={},
+        key_columns=["RunID", "EquipID", "Timestamp"],
+    ),
+    
+    # =========================================================================
+    # Forecast Tables
+    # =========================================================================
+    "ACM_FailureForecast": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "Method": _STR_NULLABLE,
+            "ThresholdUsed": _FLOAT_NULLABLE,
+            "FailureProbability": _FLOAT_NULLABLE,
+            "TimeToThreshold_Hours": _FLOAT_NULLABLE,
+        },
+        auto_add_columns={
+            "ACMVersion": __version__,
+        },
+        key_columns=["RunID", "EquipID", "Method"],
+    ),
+    
+    "ACM_SensorForecast": TableSchema(
+        required_columns={
+            "RunID": _INT_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Sensor": _STR_NOT_NULL,
+        },
+        optional_columns={
+            "Method": _STR_NULLABLE,
+            "ForecastValue": _FLOAT_NULLABLE,
+            "LowerBound": _FLOAT_NULLABLE,
+            "UpperBound": _FLOAT_NULLABLE,
+        },
+        auto_add_columns={
+            "ACMVersion": __version__,
+        },
+        key_columns=["RunID", "EquipID", "Sensor"],
+    ),
+}
+
+
+# =============================================================================
+# Validation Functions
+# =============================================================================
+
+def validate_dataframe(df: pd.DataFrame, table_name: str, 
+                       raise_on_error: bool = True) -> List[str]:
+    """
+    Validate DataFrame against table schema.
+    
+    Args:
+        df: DataFrame to validate
+        table_name: Target SQL table name
+        raise_on_error: Whether to raise exception on validation failure
+        
+    Returns:
+        List of validation errors (empty if valid)
+        
+    Raises:
+        ValueError: If validation fails and raise_on_error is True
+    """
+    if table_name not in TABLE_SCHEMAS:
+        # No schema defined - allow write with warning
+        Console.warn(f"No schema defined for table '{table_name}'", 
+                    component="SCHEMA", table=table_name)
+        return []
+    
+    schema = TABLE_SCHEMAS[table_name]
+    errors = schema.validate(df, table_name)
+    
+    if errors and raise_on_error:
+        error_msg = f"Schema validation failed for {table_name}: " + "; ".join(errors)
+        Console.error(error_msg, component="SCHEMA", table=table_name, 
+                     error_count=len(errors))
+        raise ValueError(error_msg)
+    
+    return errors
+
+
+def apply_schema_defaults(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
+    """
+    Apply schema defaults to DataFrame.
+    
+    Adds missing auto-add columns and fills NULL defaults.
+    
+    Args:
+        df: DataFrame to process
+        table_name: Target SQL table name
+        
+    Returns:
+        DataFrame with defaults applied
+    """
+    if table_name not in TABLE_SCHEMAS:
+        return df
+    
+    schema = TABLE_SCHEMAS[table_name]
+    return schema.apply_defaults(df)
+
+
+def get_key_columns(table_name: str) -> List[str]:
+    """
+    Get key columns for a table (for MERGE operations).
+    
+    Args:
+        table_name: Target SQL table name
+        
+    Returns:
+        List of key column names
+    """
+    if table_name not in TABLE_SCHEMAS:
+        return []
+    
+    return TABLE_SCHEMAS[table_name].key_columns
+
+
+def has_schema(table_name: str) -> bool:
+    """Check if a schema is defined for a table."""
+    return table_name in TABLE_SCHEMAS
+
+
+def list_validated_tables() -> List[str]:
+    """Return list of tables with schema validation."""
+    return list(TABLE_SCHEMAS.keys())
+
+
+# =============================================================================
+# Schema Registration (for dynamic schema additions)
+# =============================================================================
+
+def register_schema(table_name: str, schema: TableSchema) -> None:
+    """
+    Register a new table schema.
+    
+    Args:
+        table_name: SQL table name
+        schema: TableSchema definition
+    """
+    if table_name in TABLE_SCHEMAS:
+        Console.warn(f"Overwriting existing schema for '{table_name}'", 
+                    component="SCHEMA", table=table_name)
+    
+    TABLE_SCHEMAS[table_name] = schema
+    Console.info(f"Registered schema for '{table_name}'", 
+                component="SCHEMA", table=table_name,
+                required_cols=len(schema.required_columns),
+                key_cols=len(schema.key_columns))
