@@ -575,6 +575,146 @@ class RegimeInputValidator:
 
 
 # =============================================================================
+# P2.5/P2.6 - Integration with RegimeDefinitionStore
+# =============================================================================
+
+from core.regime_definitions import (
+    RegimeDefinition,
+    RegimeDefinitionStore,
+    RegimeCentroid,
+)
+
+
+@dataclass
+class RegimeContext:
+    """
+    Full regime context for pipeline execution.
+    
+    Combines active model info with loaded definition.
+    """
+    equip_id: int
+    active_models: ActiveModels
+    definition: Optional[RegimeDefinition] = None
+    assigner: Optional[RegimeAssigner] = None
+    
+    @property
+    def is_ready(self) -> bool:
+        """Check if regime model is ready for production use."""
+        return (
+            self.definition is not None and
+            self.active_models.regime_maturity == MaturityState.CONVERGED
+        )
+    
+    @property
+    def should_use_global(self) -> bool:
+        """Check if should use global (non-regime-conditioned) processing."""
+        return not self.is_ready
+    
+    @property
+    def regime_version(self) -> Optional[int]:
+        """Get active regime version."""
+        return self.active_models.regime_version
+
+
+class RegimeManager:
+    """
+    Unified facade for regime management.
+    
+    Combines ActiveModelsManager and RegimeDefinitionStore for
+    convenient access during pipeline execution.
+    """
+    
+    def __init__(self, sql_client: "SQLClient"):
+        """
+        Initialize regime manager.
+        
+        Args:
+            sql_client: SQL client instance
+        """
+        self.sql = sql_client
+        self.active_models = ActiveModelsManager(sql_client)
+        self.definitions = RegimeDefinitionStore(sql_client)
+        self.input_validator = RegimeInputValidator()
+    
+    def get_context(self, equip_id: int) -> RegimeContext:
+        """
+        Get full regime context for equipment.
+        
+        Args:
+            equip_id: Equipment ID
+            
+        Returns:
+            RegimeContext with active models and loaded definition
+        """
+        active = self.active_models.get_active(equip_id)
+        
+        definition = None
+        assigner = None
+        
+        if active.regime_version is not None:
+            definition = self.definitions.load(equip_id, active.regime_version)
+            
+            if definition is not None:
+                # Create assigner from definition
+                avg_dist = float(np.mean([c.radius for c in definition.centroids]) or 1.0)
+                assigner = RegimeAssigner(
+                    centroids=definition.centroid_array,
+                    scaler_mean=definition.scaler_mean,
+                    scaler_scale=definition.scaler_scale,
+                    avg_centroid_distance=avg_dist,
+                )
+        
+        return RegimeContext(
+            equip_id=equip_id,
+            active_models=active,
+            definition=definition,
+            assigner=assigner,
+        )
+    
+    def is_cold_start(self, equip_id: int) -> bool:
+        """Check if equipment is in cold-start state."""
+        return self.active_models.check_cold_start(equip_id)
+    
+    def save_and_activate(self, 
+                          definition: RegimeDefinition,
+                          maturity: MaturityState = MaturityState.LEARNING,
+                          updated_by: str = "SYSTEM") -> int:
+        """
+        Save new regime definition and activate it.
+        
+        Args:
+            definition: RegimeDefinition to save
+            maturity: Initial maturity state
+            updated_by: Audit user
+            
+        Returns:
+            New version number
+        """
+        version = self.definitions.save(definition)
+        self.active_models.promote_regime(
+            definition.equip_id, version, maturity, updated_by
+        )
+        return version
+    
+    def validate_inputs(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Validate and filter DataFrame for regime discovery.
+        
+        Args:
+            df: Input DataFrame
+            
+        Returns:
+            Cleaned DataFrame
+        """
+        return self.input_validator.filter_clean_columns(df)
+    
+    def clear_caches(self) -> None:
+        """Clear all caches."""
+        self.active_models.clear_cache()
+        self.definitions.clear_cache()
+
+
+# =============================================================================
 # Exports
 # =============================================================================
 
@@ -590,9 +730,16 @@ __all__ = [
     # Dataclasses
     "ActiveModels",
     "RegimeAssignment",
+    "RegimeContext",
     
     # Managers
     "ActiveModelsManager",
     "RegimeAssigner",
     "RegimeInputValidator",
+    "RegimeManager",
+    
+    # Re-exports from regime_definitions
+    "RegimeDefinition",
+    "RegimeDefinitionStore",
+    "RegimeCentroid",
 ]
