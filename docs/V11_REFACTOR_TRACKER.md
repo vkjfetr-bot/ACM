@@ -15,9 +15,9 @@
 | 1 | Core Architecture | 9 | 🔄 In Progress | 3/9 |
 | 2 | Regime System | 12 | 🔄 In Progress | 4/12 |
 | 3 | Detector/Fusion | 6 | ✅ Complete | 6/6 |
-| 4 | Health/Episode/RUL | 6 | ⏳ Not Started | 0/6 |
+| 4 | Health/Episode/RUL | 6 | 🔄 In Progress | 2/6 |
 | 5 | Operational Infrastructure | 14 | ⏳ Not Started | 0/14 |
-| **Total** | | **50** | | **16/50** |
+| **Total** | | **50** | | **18/50** |
 
 ---
 
@@ -2164,8 +2164,8 @@ class EpisodeManager:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Create `EpisodeManager` class | `core/episode_manager.py` | ⏳ |
-| [ ] Make episode construction the only alerting primitive | `core/episode_manager.py` | ⏳ |
+| [x] Create `EpisodeManager` class | `core/episode_manager.py` | ✅ |
+| [x] Make episode construction the only alerting primitive | `core/episode_manager.py` | ✅ |
 | [ ] Remove point-anomaly-driven alerts | `core/acm_main.py` | ⏳ |
 | [ ] Refactor episode culprits writer | `core/episode_culprits_writer.py` | ⏳ |
 
@@ -2307,10 +2307,10 @@ class HealthTracker:
 
 | Task | File | Status |
 |------|------|--------|
-| [ ] Redefine health as time-evolving state | `core/health_tracker.py` | ⏳ |
-| [ ] Add `HealthConfidence` field | `core/health_tracker.py` | ⏳ |
-| [ ] Add state persistence across runs | `core/health_tracker.py` | ⏳ |
-| [ ] Add `HealthState` enum (HEALTHY, DEGRADED, CRITICAL, UNKNOWN) | `core/health_tracker.py` | ⏳ |
+| [x] Redefine health as time-evolving state | `core/health_state.py` | ✅ |
+| [x] Add `HealthConfidence` field | `core/health_state.py` | ✅ |
+| [x] Add state persistence across runs | `core/health_state.py` | ✅ |
+| [x] Add `HealthState` enum (HEALTHY, DEGRADED, CRITICAL, UNKNOWN) | `core/health_state.py` | ✅ |
 
 ### P4.3 — Recovery Logic (Item 25)
 
