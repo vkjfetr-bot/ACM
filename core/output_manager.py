@@ -1927,7 +1927,7 @@ class OutputManager:
         return pd.DataFrame(rows)
 
     def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame, 
-                                          top_n: int = 15) -> pd.DataFrame:
+                                          top_n: int = 5, downsample_factor: int = 10) -> pd.DataFrame:
         """Melt OMR contributions wide DataFrame to long format, keeping only TOP N contributors per timestamp.
         
         This optimization reduces storage by ~95% for equipment with many sensors (e.g., 792 sensors â†’ 15 per timestamp).
@@ -1936,13 +1936,19 @@ class OutputManager:
         Args:
             scores_df: Scores DataFrame with omr_z column
             omr_contributions: Wide-format OMR contributions (columns = sensors)
-            top_n: Number of top contributors to keep per timestamp (default 15)
+            top_n: Number of top contributors to keep per timestamp (default 5, reduced from 15 for P6.2)
+            downsample_factor: Keep every Nth timestamp (default 10 for P6.2)
         """
         if omr_contributions is None or len(omr_contributions) == 0:
             return pd.DataFrame(columns=["Timestamp","SensorName","ContributionScore","ContributionPct","OMR_Z","RunID","EquipID"])
         df = omr_contributions.copy()
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index, errors="coerce")
+        
+        # P6.2: Apply timestamp downsampling before melting (reduces timestamps by factor of N)
+        if downsample_factor > 1:
+            df = df.iloc[::downsample_factor]
+        
         # Reset index - preserve original index name or use 'index'
         df = df.reset_index()
         # Rename first column (the old index) to 'Timestamp' regardless of its original name
@@ -2845,90 +2851,97 @@ class OutputManager:
     
     def _bulk_delete_analytics_tables(self, tables: List[str]) -> int:
         """
-        PERF-OPT: Delete existing rows for RunID/EquipID from multiple tables in a single batch.
+        PERF-OPT v11: Delete existing rows for RunID/EquipID from multiple tables in a SINGLE SQL batch.
         
-        This eliminates 26+ individual DELETE round-trips, replacing them with one batched operation.
+        Optimization: Instead of 26+ individual DELETE round-trips, builds ONE batched SQL statement
+        that deletes from all tables at once. This eliminates network round-trip overhead.
+        
         Typical speedup: 2-3 seconds saved on comprehensive analytics.
         
         Args:
             tables: List of table names to clear for current RunID/EquipID
             
         Returns:
-            Total rows deleted across all tables
+            Total tables processed (rows deleted not trackable with batched approach)
         """
         if not self.sql_client or not self.run_id:
             return 0
         
-        total_deleted = 0
         start_time = time.perf_counter()
+        tables_processed = 0
         
         try:
             cursor_factory = lambda: cast(Any, self.sql_client).cursor()
-            cur = cursor_factory()
             
-            try:
-                # Build batch DELETE statements
-                for table_name in tables:
-                    if table_name not in ALLOWED_TABLES:
-                        continue
-                    
-                    # Check if table exists (use cache)
-                    exists = self._table_exists_cache.get(table_name)
-                    if exists is None:
-                        exists = _table_exists(cursor_factory, table_name)
-                        self._table_exists_cache[table_name] = bool(exists)
-                    if not exists:
-                        continue
-                    
-                    # Get table columns to check for RunID/EquipID
-                    if table_name in self._table_insertable_cache:
-                        table_cols = self._table_insertable_cache[table_name]
-                    elif table_name in self._table_columns_cache:
-                        table_cols = self._table_columns_cache[table_name]
-                    else:
-                        try:
-                            cols = set(_get_insertable_columns(cursor_factory, table_name))
-                            if not cols:
-                                cols = set(_get_table_columns(cursor_factory, table_name))
-                            self._table_insertable_cache[table_name] = cols
-                            table_cols = cols
-                        except Exception:
-                            continue
-                    
-                    # Execute DELETE
-                    try:
-                        if "RunID" in table_cols and "EquipID" in table_cols and self.equip_id is not None:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?",
-                                (self.run_id, int(self.equip_id or 0))
-                            ).rowcount or 0
-                        elif "RunID" in table_cols:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?",
-                                (self.run_id,)
-                            ).rowcount or 0
-                        else:
-                            rows_deleted = 0
-                        total_deleted += rows_deleted
-                        # PERF-OPT: Track that this table was pre-deleted (skip in _bulk_insert_sql)
-                        self._bulk_predeleted_tables.add(table_name)
-                    except Exception:
-                        pass  # Individual table failures are non-fatal
+            # Phase 1: Build list of valid tables and their DELETE statements
+            delete_statements = []
+            for table_name in tables:
+                if table_name not in ALLOWED_TABLES:
+                    continue
                 
-            finally:
+                # Check if table exists (use cache)
+                exists = self._table_exists_cache.get(table_name)
+                if exists is None:
+                    exists = _table_exists(cursor_factory, table_name)
+                    self._table_exists_cache[table_name] = bool(exists)
+                if not exists:
+                    continue
+                
+                # Get table columns to check for RunID/EquipID
+                if table_name in self._table_insertable_cache:
+                    table_cols = self._table_insertable_cache[table_name]
+                elif table_name in self._table_columns_cache:
+                    table_cols = self._table_columns_cache[table_name]
+                else:
+                    try:
+                        cols = set(_get_insertable_columns(cursor_factory, table_name))
+                        if not cols:
+                            cols = set(_get_table_columns(cursor_factory, table_name))
+                        self._table_insertable_cache[table_name] = cols
+                        table_cols = cols
+                    except Exception:
+                        continue
+                
+                # Build DELETE statement for this table
+                if "RunID" in table_cols and "EquipID" in table_cols and self.equip_id is not None:
+                    delete_statements.append(
+                        f"DELETE FROM dbo.[{table_name}] WHERE RunID = @RunID AND EquipID = @EquipID"
+                    )
+                elif "RunID" in table_cols:
+                    delete_statements.append(
+                        f"DELETE FROM dbo.[{table_name}] WHERE RunID = @RunID"
+                    )
+                
+                # Mark as pre-deleted regardless of execution (skip in _bulk_insert_sql)
+                self._bulk_predeleted_tables.add(table_name)
+                tables_processed += 1
+            
+            # Phase 2: Execute ALL deletes in a single batch (one network round-trip)
+            if delete_statements:
+                batch_sql = ";\n".join(delete_statements)
+                cur = cursor_factory()
                 try:
-                    cur.close()
-                except Exception:
-                    pass
+                    # Use sp_executesql for parameterized batch
+                    param_sql = f"""
+                    DECLARE @RunID NVARCHAR(36) = ?;
+                    DECLARE @EquipID INT = ?;
+                    {batch_sql}
+                    """
+                    cur.execute(param_sql, (self.run_id, int(self.equip_id or 0)))
+                finally:
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
             
             elapsed = time.perf_counter() - start_time
-            if total_deleted > 0:
-                Console.info(f"Bulk pre-delete: {total_deleted} rows from {len(tables)} tables in {elapsed:.2f}s", component="OUTPUT")
+            if tables_processed > 0:
+                Console.info(f"Bulk pre-delete: {tables_processed} tables in {elapsed:.2f}s (batched)", component="OUTPUT")
             
         except Exception as e:
             Console.warn(f"Bulk pre-delete failed (non-fatal): {e}", component="OUTPUT", tables=len(tables), equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__)
         
-        return total_deleted
+        return tables_processed
 
     # ==================== COMPREHENSIVE ANALYTICS TABLES ====================
     
@@ -3307,8 +3320,10 @@ class OutputManager:
                     if result.get('sql_written'): sql_count += 1
 
                     # Normalized raw sensor timeline with anomaly flags and episode overlays
+                    # P6.2: Reduced defaults for SQL performance (5 sensors, every 10th timestamp)
                     try:
-                        norm_top_n = int((cfg.get('output', {}) or {}).get('sensor_normalized_top_n', 20) or 20)
+                        norm_top_n = int((cfg.get('output', {}) or {}).get('sensor_normalized_top_n', 5) or 5)
+                        norm_downsample = int((cfg.get('output', {}) or {}).get('sensor_normalized_downsample', 10) or 10)
                         sensor_norm_df = self._generate_sensor_normalized_ts(
                             sensor_values=sensor_values if sensor_values is not None else pd.DataFrame(),
                             sensor_train_mean=sensor_train_mean,
@@ -3317,7 +3332,8 @@ class OutputManager:
                             episodes_df=episodes_df,
                             warn_z=warn_threshold,
                             alert_z=alert_threshold,
-                            top_n=norm_top_n
+                            top_n=norm_top_n,
+                            downsample_factor=norm_downsample
                         )
                         result = self.write_dataframe(
                             sensor_norm_df,
@@ -3894,9 +3910,15 @@ class OutputManager:
         episodes_df: Optional[pd.DataFrame],
         warn_z: float,
         alert_z: float,
-        top_n: int = 20,
+        top_n: int = 5,  # P6.2: Reduced from 20 to 5 for 75% row reduction
+        downsample_factor: int = 1,  # P6.2: Keep every Nth timestamp (1=all, 10=10%)
     ) -> pd.DataFrame:
         """Build a long-form normalized sensor timeline with anomalies and episode overlays.
+
+        PERFORMANCE OPTIMIZATION (v11 P6.2):
+        - Default top_n reduced from 20 to 5 (75% row reduction)
+        - Optional downsample_factor to keep every Nth timestamp
+        - Combined: 5 sensors × 56 timestamps = 280 rows instead of 11,240
 
         Columns: Timestamp, SensorName, NormValue, ZScore, AnomalyLevel, EpisodeActive
         """
@@ -3918,6 +3940,10 @@ class OutputManager:
             sensors = list(sensor_values.columns)
 
         values = sensor_values[sensors].copy()
+        
+        # P6.2: Apply timestamp downsampling if requested (keeps every Nth row)
+        if downsample_factor > 1:
+            values = values.iloc[::downsample_factor]
 
         # Compute normalized values using training mean/std when present; otherwise fallback to zscores or per-column std
         if isinstance(sensor_train_mean, pd.Series) and isinstance(sensor_train_std, pd.Series):
