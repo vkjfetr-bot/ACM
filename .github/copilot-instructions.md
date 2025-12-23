@@ -1,8 +1,17 @@
-# ACM - Automated Condition Monitoring (v10.3.0)
+# ACM - Automated Condition Monitoring (v11.0.0)
 
 ACM is a predictive maintenance and equipment health monitoring system. It ingests sensor data from industrial equipment (FD_FAN, GAS_TURBINE, etc.) via SQL Server, runs anomaly detection algorithms, calculates health scores, and forecasts Remaining Useful Life (RUL). Results are visualized through Grafana dashboards for operations teams.
 
 **Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
+
+**v11.0.0 New Features**:
+- DataContract validation at pipeline entry
+- MaturityState-based regime lifecycle management  
+- Standardized FeatureMatrix with schema enforcement
+- DetectorProtocol ABC for all detectors
+- Seasonality detection and adjustment
+- Asset similarity for cold-start transfer learning
+- SQL performance optimizations (deprecated ACM_Scores_Long, batched DELETEs)
 
 ---
 
@@ -23,7 +32,7 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 - **Grafana** - Dashboards in `grafana_dashboards/*.json`
 - **MS SQL datasource** - Direct SQL queries with `$__timeFrom()`, `$__timeTo()` macros
 
-### Observability Stack (v10.3.0 - Docker-based)
+### Observability Stack (v11.0.0 - Docker-based)
 - **Docker Compose** - Complete stack in `install/observability/docker-compose.yaml`
 - **Grafana** - Dashboard UI on port 3000 (admin/admin), auto-provisioned datasources
 - **Grafana Alloy** - OTLP collector on ports 4317 (gRPC), 4318 (HTTP)
@@ -60,6 +69,14 @@ ACM/
 |   +-- forecast_engine.py # RUL and health forecasting
 |   +-- model_persistence.py  # SQL-only model storage
 |   +-- episode_culprits_writer.py  # Episode diagnostics
+|   # v11.0.0 New Core Modules:
+|   +-- pipeline_types.py     # DataContract, PipelineMode, SensorValidator
+|   +-- feature_matrix.py     # FeatureMatrix with schema enforcement
+|   +-- detector_protocol.py  # DetectorProtocol ABC
+|   +-- regime_manager.py     # MaturityState-based regime lifecycle
+|   +-- seasonality.py        # Diurnal/weekly pattern detection
+|   +-- asset_similarity.py   # Cold-start transfer learning
+|   +-- table_schemas.py      # SQL table schema validation
 +-- scripts/              # Operational scripts
 |   +-- sql_batch_runner.py   # Batch processing
 |   +-- sql/              # SQL utilities, schema export
