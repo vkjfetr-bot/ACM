@@ -67,7 +67,8 @@ ALLOWED_TABLES = {
     'ACM_RegimeDwellStats','ACM_DriftEvents','ACM_EpisodeMetrics',
     'ACM_EpisodeDiagnostics','ACM_EpisodeCulprits',
     'ACM_DataQuality',
-    'ACM_Scores_Long','ACM_DriftSeries',
+    # 'ACM_Scores_Long', -- DEPRECATED v11.0.0: Redundant with ACM_Scores_Wide
+    'ACM_DriftSeries',
     'ACM_Anomaly_Events','ACM_Regime_Episodes',
     'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
     'ACM_Run_Stats','ACM_SinceWhen',
@@ -2117,7 +2118,19 @@ class OutputManager:
     def write_scores_ts(self, df: pd.DataFrame, run_id: str) -> int:
         """Write scores timeseries to ACM_Scores_Long table.
         
-        SQL Schema for ACM_Scores_Long:
+        DEPRECATED (v11.0.0): This table is redundant with ACM_Scores_Wide.
+        ACM_Scores_Long stores melted detector scores (one row per timestamp+detector),
+        while ACM_Scores_Wide stores the same data in wide format (one row per timestamp).
+        
+        Wide format is:
+        - More efficient for time-series queries (fewer rows, less I/O)
+        - Used by all Grafana dashboards
+        - The authoritative scores table
+        
+        This function now returns 0 immediately without writing.
+        The table will be dropped in a future version.
+        
+        SQL Schema for ACM_Scores_Long (for reference):
             - Id (BIGINT, identity)
             - RunID (UNIQUEIDENTIFIER)
             - EquipID (INT)
@@ -2128,6 +2141,11 @@ class OutputManager:
             - Threshold (FLOAT) - threshold used for this detector
             - IsAnomaly (BIT) - whether score exceeds threshold
         """
+        # v11.0.0: Skip writing to deprecated ACM_Scores_Long table
+        # Scores are already written to ACM_Scores_Wide by write_scores()
+        return 0
+        
+        # --- ORIGINAL CODE BELOW (preserved for reference) ---
         if not self._check_sql_health():
             return 0
             

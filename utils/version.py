@@ -130,8 +130,7 @@ ARCHITECTURE OVERHAUL (50 Execution Items):
     ✓ Unified confidence model across all outputs
 
   Phase 5 - Operational:
-    ✓ Drift/novelty control plane with triggers
-    ✓ Operator feedback capture
+    ✓ Drift/novelty control plane with triggers (fully automated)
     ✓ Alert fatigue controls (rate limits, escalation ladders)
     ✓ Episode clustering for pattern mining
     ✓ Experiment tracking and configuration versioning
@@ -142,7 +141,7 @@ NEW SQL TABLES (19):
   - ACM_RegimeMetrics, ACM_RegimePromotionLog, ACM_FusionQuality
   - ACM_DetectorCorrelation, ACM_ForecastDiagnostics, ACM_NoveltyPressure
   - ACM_DriftEvents, ACM_BaselinePolicy, ACM_DecisionOutput
-  - ACM_OperatorFeedback, ACM_EpisodeFamilies, ACM_ExperimentLog
+  - ACM_EpisodeFamilies, ACM_ExperimentLog
   - ACM_ModelDeprecationLog
 
 MIGRATION REQUIRED:
