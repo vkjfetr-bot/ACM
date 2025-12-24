@@ -31,21 +31,25 @@
 ### Wave 3: Phase Extraction 🔄 IN PROGRESS
 | Phase Function | Target Lines | Status |
 |----------------|--------------|--------|
-| `_phase_initialize_runtime()` | 500-700 | 🔲 Not Started |
-| `_phase_load_data()` | 700-1100 | 🔲 Not Started |
-| `_phase_build_features()` | 1100-1500 | 🔲 Not Started |
-| `_phase_fit_models()` | 1500-1800 | 🔲 Not Started |
-| `_phase_score_detectors()` | 1800-2200 | 🔲 Not Started |
-| `_phase_fuse_and_episodes()` | 2200-2700 | 🔲 Not Started |
-| `_phase_persist_results()` | 2700-3500 | 🔲 Not Started |
-| `_phase_finalize_run()` | 3500-end | 🔲 Not Started |
+| Context dataclasses | - | ✅ Done (b6fa58e) |
+| `_score_all_detectors()` | - | ✅ Done (d9401f7) |
+| `_phase_initialize_runtime()` | 840-1183 (~343 lines) | 🔲 Not Started |
+| `_phase_load_data()` | 1183-1915 (~732 lines) | 🔲 Not Started |
+| `_phase_fit_models()` | 1915-2311 (~396 lines) | 🔲 Not Started |
+| `_phase_label_regimes()` | 2333-2595 (~262 lines) | 🔲 Not Started |
+| `_phase_calibrate()` | 2595-2769 (~174 lines) | 🔲 Not Started |
+| `_phase_fuse_and_episodes()` | 2769-3419 (~650 lines) | 🔲 Not Started |
+| `_phase_persist_results()` | 3771-end (~490 lines) | 🔲 Not Started |
+
+**Wave 3 Progress**: Added context dataclasses + extracted `_score_all_detectors()` helper
 
 ### Wave 4: Pattern Improvements 🔲 PLANNED
 | Pattern | Status |
 |---------|--------|
 | `@safe_section` decorator | 🔲 Not Started |
 | `ConfigAccessor` class | 🔲 Not Started |
-| Context dataclasses | 🔲 Not Started |
+
+**Current Line Count**: 4,261 lines (down from 4,663 original)
 
 ---
 
