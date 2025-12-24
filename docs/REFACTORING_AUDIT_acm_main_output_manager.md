@@ -1613,6 +1613,538 @@ finalize_run()
 
 ---
 
+---
+
+## Part 8: Implementation Examples & Best Practices
+
+### 8.1 Pipeline Stage Pattern
+
+**Standard Pattern for Each Stage**:
+```python
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+import pandas as pd
+
+@dataclass
+class StageResult:
+    """Base class for stage results."""
+    success: bool
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = None
+
+@dataclass  
+class DetectorResults(StageResult):
+    """Results from detector fitting stage."""
+    ar1_detector: Any
+    pca_detector: Any
+    iforest_detector: Any
+    gmm_detector: Any
+    omr_detector: Any
+    calibration_params: Dict[str, float]
+    train_samples: int
+    
+def fit_all_detectors(train: pd.DataFrame, cfg: Dict[str, Any]) -> DetectorResults:
+    """
+    Fit all anomaly detectors on training data.
+    
+    Args:
+        train: Training data (normalized sensor values)
+        cfg: Configuration dictionary
+        
+    Returns:
+        DetectorResults with fitted models and calibration parameters
+        
+    Raises:
+        ValueError: If training data insufficient
+        RuntimeError: If detector fitting fails
+    """
+    try:
+        # Validate inputs
+        if len(train) < cfg.get("min_train_samples", 500):
+            raise ValueError(f"Insufficient training data: {len(train)} rows")
+        
+        # Fit AR1
+        ar1 = AR1Detector()
+        ar1.fit(train)
+        
+        # Fit PCA
+        pca = PCADetector(n_components=cfg.get("pca_components", 5))
+        pca.fit(train)
+        
+        # ... other detectors ...
+        
+        # Calibrate thresholds
+        calibration = {
+            'ar1_q': ar1.calibrate(quantile=0.95),
+            'pca_spe_q': pca.calibrate_spe(quantile=0.95),
+            # ... other calibrations ...
+        }
+        
+        return DetectorResults(
+            success=True,
+            ar1_detector=ar1,
+            pca_detector=pca,
+            # ... other detectors ...
+            calibration_params=calibration,
+            train_samples=len(train)
+        )
+        
+    except Exception as e:
+        return DetectorResults(
+            success=False,
+            error=str(e),
+            # ... set detectors to None ...
+        )
+```
+
+### 8.2 Error Handling Strategy
+
+**Pattern for Graceful Degradation**:
+```python
+def main() -> None:
+    """Orchestrator with stage-level error handling."""
+    ctx = None
+    frame = None
+    episodes = None
+    outcome = "FAIL"
+    
+    try:
+        # Stage 1: Initialization (critical - fail fast)
+        ctx = initialize_pipeline(args)
+        
+        # Stage 2: Data loading (critical - fail fast)
+        train, score, meta = load_pipeline_data(ctx)
+        
+        # Stage 3: Model loading (can use fallback)
+        try:
+            models = load_or_fit_models(train, ctx)
+        except Exception as e:
+            Console.error(f"Model loading failed, using defaults: {e}")
+            models = create_default_models(train, ctx.cfg)
+        
+        # Stage 4: Detector fitting (critical)
+        detectors = fit_all_detectors(train, ctx.cfg)
+        if not detectors.success:
+            raise RuntimeError(f"Detector fitting failed: {detectors.error}")
+        
+        # ... continue with other stages ...
+        
+        # If we got this far, mark as success
+        outcome = "OK"
+        
+    except KeyboardInterrupt:
+        Console.warn("Pipeline interrupted by user")
+        outcome = "INTERRUPTED"
+        
+    except Exception as e:
+        Console.error(f"Pipeline failed: {e}")
+        record_error(ctx.equip if ctx else "UNKNOWN", str(e), type(e).__name__)
+        outcome = "FAIL"
+        
+    finally:
+        # Always finalize, even on failure
+        if ctx:
+            finalize_run(ctx, outcome, frame, episodes)
+```
+
+### 8.3 Testing Strategy Details
+
+**Unit Test Example**:
+```python
+# tests/test_pipeline_stages.py
+import pytest
+import pandas as pd
+from core.pipeline_stages import fit_all_detectors, DetectorResults
+
+class TestDetectorFitting:
+    """Test suite for detector fitting stage."""
+    
+    @pytest.fixture
+    def minimal_train_data(self):
+        """Create minimal valid training data."""
+        return pd.DataFrame({
+            'sensor1': np.random.randn(1000),
+            'sensor2': np.random.randn(1000),
+            'sensor3': np.random.randn(1000),
+        }, index=pd.date_range('2024-01-01', periods=1000, freq='1min'))
+    
+    @pytest.fixture
+    def minimal_config(self):
+        """Create minimal configuration."""
+        return {
+            'min_train_samples': 500,
+            'pca_components': 3,
+            'detectors': {
+                'ar1': {'enabled': True, 'window': 10},
+                'pca': {'enabled': True, 'n_components': 3},
+            }
+        }
+    
+    def test_fit_all_detectors_success(self, minimal_train_data, minimal_config):
+        """Test successful detector fitting."""
+        result = fit_all_detectors(minimal_train_data, minimal_config)
+        
+        assert result.success is True
+        assert result.error is None
+        assert result.ar1_detector is not None
+        assert result.pca_detector is not None
+        assert result.train_samples == 1000
+        assert 'ar1_q' in result.calibration_params
+    
+    def test_fit_all_detectors_insufficient_data(self, minimal_config):
+        """Test failure with insufficient training data."""
+        small_data = pd.DataFrame({
+            'sensor1': np.random.randn(100),
+        }, index=pd.date_range('2024-01-01', periods=100, freq='1min'))
+        
+        result = fit_all_detectors(small_data, minimal_config)
+        
+        assert result.success is False
+        assert "Insufficient training data" in result.error
+    
+    def test_fit_all_detectors_invalid_config(self, minimal_train_data):
+        """Test handling of invalid configuration."""
+        bad_config = {'pca_components': -1}  # Invalid
+        
+        result = fit_all_detectors(minimal_train_data, bad_config)
+        
+        assert result.success is False
+```
+
+**Integration Test Example**:
+```python
+# tests/test_pipeline_integration.py
+import pytest
+from core.acm_main import main
+from core.pipeline_stages import PipelineContext
+
+class TestPipelineIntegration:
+    """Test complete pipeline execution."""
+    
+    @pytest.fixture
+    def test_equipment(self):
+        """Equipment for testing."""
+        return "TEST_EQUIPMENT"
+    
+    @pytest.fixture
+    def test_time_range(self):
+        """Time range for testing."""
+        return {
+            'start': '2024-01-01T00:00:00',
+            'end': '2024-01-02T00:00:00'
+        }
+    
+    def test_full_pipeline_run(self, test_equipment, test_time_range):
+        """Test complete pipeline execution."""
+        # Mock command line args
+        import sys
+        sys.argv = [
+            'acm_main.py',
+            '--equip', test_equipment,
+            '--start-time', test_time_range['start'],
+            '--end-time', test_time_range['end']
+        ]
+        
+        # Run pipeline
+        try:
+            main()
+            # If we get here, pipeline succeeded
+            assert True
+        except Exception as e:
+            pytest.fail(f"Pipeline failed: {e}")
+    
+    def test_pipeline_stage_data_flow(self, test_equipment):
+        """Test data flows correctly between stages."""
+        # Initialize
+        ctx = initialize_pipeline(test_args)
+        assert ctx.equip == test_equipment
+        
+        # Load data
+        train, score, meta = load_pipeline_data(ctx)
+        assert len(train) > 0
+        assert len(score) > 0
+        
+        # Fit models
+        models = load_or_fit_models(train, ctx)
+        assert models is not None
+        
+        # Fit detectors
+        detectors = fit_all_detectors(train, ctx.cfg)
+        assert detectors.success is True
+```
+
+### 8.4 Performance Optimization Guidelines
+
+**Before Refactoring - Current Bottlenecks**:
+```python
+# SLOW: Single-threaded detector fitting
+ar1.fit(train)       # 5 seconds
+pca.fit(train)       # 15 seconds  
+iforest.fit(train)   # 20 seconds
+gmm.fit(train)       # 10 seconds
+omr.fit(train)       # 8 seconds
+# Total: 58 seconds sequential
+```
+
+**After Refactoring - Optimization Opportunities**:
+```python
+# FAST: Parallel detector fitting (if BLAS/OpenMP resolved)
+from concurrent.futures import ThreadPoolExecutor
+
+def fit_all_detectors_parallel(train, cfg):
+    """Fit detectors in parallel for better performance."""
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            'ar1': executor.submit(fit_ar1, train, cfg),
+            'pca': executor.submit(fit_pca, train, cfg),
+            'iforest': executor.submit(fit_iforest, train, cfg),
+            'gmm': executor.submit(fit_gmm, train, cfg),
+            'omr': executor.submit(fit_omr, train, cfg),
+        }
+        
+        results = {
+            name: future.result() 
+            for name, future in futures.items()
+        }
+    
+    return results
+# Potential: 20 seconds parallel (limited by slowest detector)
+```
+
+**Caching Strategy**:
+```python
+def load_or_fit_models(train, ctx):
+    """Load from SQL cache or fit new models."""
+    # Check SQL model registry first
+    cached_models = ctx.sql_client.load_models(
+        equip_id=ctx.equip_id,
+        config_signature=ctx.config_signature
+    )
+    
+    if cached_models and cached_models.is_valid():
+        Console.info(f"Loaded models from cache (age: {cached_models.age_hours}h)")
+        return cached_models
+    
+    # Cache miss - fit new models
+    Console.info("Cache miss - fitting new models")
+    new_models = fit_all_models(train, ctx.cfg)
+    
+    # Persist to SQL for next run
+    ctx.sql_client.save_models(
+        models=new_models,
+        equip_id=ctx.equip_id,
+        config_signature=ctx.config_signature
+    )
+    
+    return new_models
+```
+
+### 8.5 Migration Path for Existing Deployments
+
+**Step-by-Step Migration**:
+
+**Week 1: Extract First 3 Stages (No Breaking Changes)**
+```python
+# Stage 1: Add new functions alongside old code
+def initialize_pipeline(args):
+    """New initialization function."""
+    # ... extracted code ...
+    
+def main():
+    """Main function - use new init function."""
+    # NEW WAY (toggle with feature flag)
+    if os.getenv("USE_NEW_PIPELINE", "0") == "1":
+        ctx = initialize_pipeline(args)
+        # ... use ctx ...
+    else:
+        # OLD WAY (existing code, unchanged)
+        cfg = _load_config(...)
+        # ... existing logic ...
+```
+
+**Week 2: Enable for Test Equipment**
+```python
+# Enable new pipeline only for test equipment
+PILOT_EQUIPMENT = {"TEST_FAN", "TEST_TURBINE"}
+
+def main():
+    equip = args.equip
+    use_new = equip in PILOT_EQUIPMENT or os.getenv("USE_NEW_PIPELINE") == "1"
+    
+    if use_new:
+        # New modular pipeline
+        ctx = initialize_pipeline(args)
+        # ... new stages ...
+    else:
+        # Legacy monolithic pipeline
+        # ... old code ...
+```
+
+**Week 3-5: Gradual Rollout**
+```python
+# Expand to all equipment with rollback capability
+def main():
+    try:
+        # Always try new pipeline first
+        ctx = initialize_pipeline(args)
+        # ... new stages ...
+    except Exception as e:
+        Console.error(f"New pipeline failed, falling back: {e}")
+        # Automatic fallback to old code
+        # ... old monolithic main() ...
+```
+
+**Week 6: Remove Legacy Code**
+```python
+# Delete old monolithic code entirely
+def main():
+    """Refactored modular pipeline (v11.0.0)."""
+    ctx = initialize_pipeline(args)
+    train, score, meta = load_pipeline_data(ctx)
+    # ... only new code remains ...
+```
+
+### 8.6 Code Review Checklist
+
+**Before Submitting Each Stage Extraction**:
+
+- [ ] **Functionality**
+  - [ ] Stage function has clear single responsibility
+  - [ ] All inputs/outputs are typed
+  - [ ] Return value uses dataclass (not raw dict/tuple)
+  - [ ] Error cases return structured error (not raise unless critical)
+  
+- [ ] **Testing**
+  - [ ] Unit tests for stage function (>80% coverage)
+  - [ ] Integration test for data flow to/from stage
+  - [ ] Error handling tested (invalid inputs, missing data)
+  - [ ] Performance benchmarked (within ±10% of baseline)
+  
+- [ ] **Documentation**
+  - [ ] Docstring with Args/Returns/Raises
+  - [ ] Type hints on all parameters
+  - [ ] Comments for complex logic only
+  - [ ] Updated REFACTORING_CHANGELOG.md
+  
+- [ ] **SQL Compatibility**
+  - [ ] No CSV file operations
+  - [ ] No filesystem paths (except SQL connection.ini)
+  - [ ] All persistence via OutputManager
+  - [ ] SQL transactions properly committed
+  
+- [ ] **Observability**
+  - [ ] Console logging for key events
+  - [ ] OTEL spans for performance tracking
+  - [ ] Metrics recorded (if applicable)
+  - [ ] Errors logged with context
+
+### 8.7 Rollback Plan
+
+**If Refactoring Causes Issues**:
+
+**Immediate Rollback (< 5 minutes)**:
+```bash
+# Revert to last known good commit
+git revert <bad-commit-sha>
+git push origin main
+
+# Or revert entire PR
+git revert -m 1 <merge-commit-sha>
+```
+
+**Partial Rollback (specific stage)**:
+```bash
+# Revert only the problematic stage
+git checkout <before-stage-commit> -- core/pipeline_stages.py
+git commit -m "Rollback problematic stage X"
+```
+
+**Feature Flag Disable**:
+```python
+# Disable new pipeline via environment variable
+export USE_NEW_PIPELINE=0
+# Or config override
+python -m core.acm_main --equip FD_FAN  # uses legacy path
+```
+
+### 8.8 Database Schema Considerations
+
+**SQL Tables Requiring No Changes**:
+- All 50+ ACM tables remain unchanged
+- Schema stays at current migration version
+- No ALTER TABLE statements needed
+
+**SQL Stored Procedures Requiring No Changes**:
+- `usp_ACM_GetHistorianData_TEMP` - unchanged
+- `usp_CleanupBaselineBuffer` - unchanged  
+- All existing SPs continue working
+
+**What DOES Change**:
+- Internal Python code structure only
+- No database objects modified
+- No Grafana dashboards affected
+- No breaking changes to external APIs
+
+### 8.9 Monitoring & Alerting
+
+**Key Metrics to Track During Rollout**:
+
+```python
+# Add to each stage for monitoring
+from core.observability import record_custom_metric
+
+def fit_all_detectors(train, cfg):
+    start = time.time()
+    
+    try:
+        # ... detector fitting ...
+        
+        duration = time.time() - start
+        record_custom_metric(
+            "pipeline.stage.duration",
+            duration,
+            tags={"stage": "detector_fitting", "success": "true"}
+        )
+        
+    except Exception as e:
+        duration = time.time() - start
+        record_custom_metric(
+            "pipeline.stage.duration", 
+            duration,
+            tags={"stage": "detector_fitting", "success": "false", "error": type(e).__name__}
+        )
+        raise
+```
+
+**Grafana Dashboard Queries**:
+```sql
+-- Stage performance comparison (before/after refactor)
+SELECT 
+    stage_name,
+    AVG(duration_seconds) as avg_duration,
+    MAX(duration_seconds) as max_duration,
+    COUNT(*) as executions,
+    SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failures
+FROM ACM_ResourceMetrics
+WHERE CreatedAt >= DATEADD(day, -7, GETDATE())
+GROUP BY stage_name
+ORDER BY avg_duration DESC
+
+-- Error rate by stage
+SELECT 
+    stage_name,
+    COUNT(*) as total,
+    SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as errors,
+    CAST(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 as error_rate_pct
+FROM ACM_ResourceMetrics  
+WHERE CreatedAt >= DATEADD(day, -1, GETDATE())
+GROUP BY stage_name
+HAVING COUNT(*) > 10
+ORDER BY error_rate_pct DESC
+```
+
+---
+
 ## Conclusion
 
 This audit identifies **4,930 lines of bloat** across acm_main.py and output_manager.py, representing nearly 50% of the current codebase. The primary issues are:
@@ -1632,3 +2164,14 @@ The refactoring plan provides a detailed, non-lazy approach with 130+ specific t
 **Estimated effort**: 6 weeks with proper testing and validation.
 
 **Expected outcome**: Cleaner, more maintainable codebase with 50% fewer lines, better modularity, and no loss of functionality.
+
+**Added in this revision** (Part 8):
+- Complete code examples for pipeline stages
+- Error handling patterns
+- Unit and integration test examples
+- Performance optimization strategies
+- Step-by-step migration path
+- Code review checklist
+- Rollback procedures
+- Database impact analysis
+- Monitoring and alerting setup
