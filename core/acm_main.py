@@ -170,11 +170,6 @@ except ImportError:
 from core.observability import Console
 
 
-def _apply_module_overrides(entries):
-    # ACMLog does not support per-module levels yet; skip or implement if needed
-    pass
-
-
 def _configure_logging(logging_cfg, args):
     """Apply CLI/config logging overrides and return flags."""
     enable_sql_logging_cfg = (logging_cfg or {}).get("enable_sql_sink")
@@ -419,9 +414,6 @@ def _compute_config_signature(cfg: Dict[str, Any]) -> str:
     return hashlib.sha256(config_str.encode("utf-8")).hexdigest()[:16]
 
 
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
-
 def _ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure the DataFrame index is a timezone-naive local DatetimeIndex.
 
@@ -442,17 +434,6 @@ def _ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
 # =======================
 # SQL helpers (local)
 # =======================
-def _sql_mode(cfg: Dict[str, Any]) -> bool:
-    """SQL-only mode: use SQL backend unless ACM_FORCE_FILE_MODE env var is set."""
-    force_file_mode = os.getenv("ACM_FORCE_FILE_MODE", "0") == "1"
-    if force_file_mode:
-        return False
-    return True
-
-def _batch_mode() -> bool:
-    """Detect if running under sql_batch_runner (continuous learning mode)."""
-    return bool(os.getenv("ACM_BATCH_MODE", "0") == "1")
-
 def _continuous_learning_enabled(cfg: Dict[str, Any], batch_mode: bool) -> bool:
     """Check if continuous learning is enabled for this run."""
     # In batch mode, default to continuous learning unless explicitly disabled
@@ -809,11 +790,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     # CRITICAL FIX: Store signature in config for cache validation
     cfg["_signature"] = config_signature
 
-    # Inline Option A adapter (no extra file): derive SQL_MODE
-    SQL_MODE = _sql_mode(cfg)
+    # SQL-only mode: always True unless ACM_FORCE_FILE_MODE=1
+    SQL_MODE = os.getenv("ACM_FORCE_FILE_MODE", "0") != "1"
     
     # Detect batch mode (running under sql_batch_runner)
-    BATCH_MODE = _batch_mode()
+    BATCH_MODE = os.getenv("ACM_BATCH_MODE", "0") == "1"
     
     # Check if continuous learning is enabled
     CONTINUOUS_LEARNING = _continuous_learning_enabled(cfg, BATCH_MODE)
@@ -882,8 +863,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     # SQL MODE: disable legacy joblib cache reuse (SQL-only)
     reuse_models = False  # SQL-ONLY MODE: No filesystem model caching
  
-    # SQL-ONLY MODE: These variables unused but kept for legacy code compatibility
-    refit_flag_path = None
+    # SQL-ONLY MODE: Initialize state variables
     model_cache_path = None
     detector_cache: Optional[Dict[str, Any]] = None
     train_feature_hash: Optional[str] = None  # DEBT-09: Changed to str for stable hash
@@ -897,6 +877,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     score_numeric: Optional[pd.DataFrame] = None
     cache_payload: Optional[Dict[str, Any]] = None
     regime_quality_ok: bool = True
+    refit_requested: bool = False
 
     if args.clear_cache:
         if model_cache_path.exists():
@@ -1073,14 +1054,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             
             # Cold-start mode: If no baseline provided, will bootstrap from batch data
             train_csv_provided = "train_csv" in cfg.get("data", {}) or args.train_csv
-            if not SQL_MODE:
-                # File mode: Log CSV paths being used
-                if not train_csv_provided:
-                    Console.info("Cold-start mode: No baseline provided, will bootstrap from batch data", component="DATA")
-                else:
-                    Console.info(f"Using baseline (train_csv): {cfg.get('data', {}).get('train_csv', 'N/A')}", component="DATA")
-                Console.info(f"Using batch (score_csv): {cfg.get('data', {}).get('score_csv', 'N/A')}", component="DATA")
-            # SQL mode: Don't log CSV paths - we load from historian
 
             if SQL_MODE:
                 # SQL mode: Use smart coldstart with retry logic
@@ -1254,21 +1227,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             Console.warn(f"Failed to load from SQL ACM_BaselineBuffer: {sql_err}", component="BASELINE",
                                          equip=equip, equip_id=equip_id, error_type=type(sql_err).__name__, error=str(sql_err)[:200])
                     
-                    elif not SQL_MODE:
-                        # File mode: load from CSV baseline_buffer.csv
-                        buffer_path = stable_models_dir / "baseline_buffer.csv"
-                        if buffer_path.exists():
-                            buf = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
-                            buf = _ensure_local_index(buf)
-                            # Align TRAIN buffer to current SCORE columns to avoid drift
-                            if isinstance(score_numeric, pd.DataFrame) and hasattr(buf, "columns"):
-                                common_cols = [c for c in buf.columns if c in score_numeric.columns]
-                                if len(common_cols) > 0:
-                                    buf = buf[common_cols]
-                            train = buf.copy()
-                            train_numeric = train.copy()
-                            used = f"baseline_buffer.csv ({len(train)} rows)"
-                    
                     # Fallback: seed TRAIN from leading portion of SCORE
                     # CRITICAL: Ensure no overlap with score window to prevent train=(0,N) issue
                     if used is None:
@@ -1376,8 +1334,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 with T.section("data.guardrails.data_quality"):
                     try:
                         tables_dir = (run_dir / "tables")
-                        if not SQL_MODE:
-                            tables_dir.mkdir(parents=True, exist_ok=True)
                         interp_method = str((cfg.get("data", {}) or {}).get("interp_method", "linear"))
                         sampling_secs = (cfg.get("data", {}) or {}).get("sampling_secs", None)
                         # Build summary for intersecting columns only
@@ -1464,21 +1420,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 "sampling_secs": sampling_secs,
                                 "notes": ",".join(note_bits)
                             })
-                        # OM-CSV-03: Write data quality summary (file-mode: CSV, SQL-mode: ACM_DataQuality)
+                        # OM-CSV-03: Write data quality summary to SQL (ACM_DataQuality)
                         if records:
                             dq = pd.DataFrame(records)
-                            output_mgr = output_manager
-                            
-                            # File mode: CSV write
-                            if not SQL_MODE:
-                                output_mgr.write_dataframe(dq, tables_dir / "data_quality.csv")
-                                try:
-                                    Console.info(f"Wrote data quality summary -> {tables_dir / 'data_quality.csv'} ({len(records)} sensors)", component="DATA")
-                                except UnicodeEncodeError:
-                                    Console.info(f"Wrote data quality summary (path: {tables_dir / 'data_quality.csv'})", component="DATA")
                             
                             # SQL mode: ACM_DataQuality bulk insert - DQ-01: Write all quality metrics
-                            elif sql_client and SQL_MODE:
+                            if sql_client:
                                 insert_records = [
                                     (
                                         rec["sensor"],
@@ -1547,10 +1494,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                     "train_present": dropped_col in (train.columns if hasattr(train, 'columns') else []),
                                     "score_present": dropped_col in (score.columns if hasattr(score, 'columns') else []),
                                 })
-                            if dropped_records and not SQL_MODE:
-                                dropped_df = pd.DataFrame(dropped_records)
-                                output_mgr.write_dataframe(dropped_df, tables_dir / "dropped_sensors.csv")
-                                Console.info(f"Wrote dropped sensors summary -> {tables_dir / 'dropped_sensors.csv'} ({len(dropped_records)} dropped)", component="DATA")
+                            # SQL-only: dropped sensors logged to SQL tables via OutputManager
                     except Exception as dq_e:
                         Console.warn(f"Data quality summary skipped: {dq_e}", component="DATA",
                                      equip=equip, error_type=type(dq_e).__name__, error=str(dq_e)[:200])
@@ -1693,23 +1637,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                         "train_std": f"{std_val:.6f}" if not pd.isna(std_val) else "NaN",
                                     })
                                 
-                                if drop_records:
-                                    # File mode: CSV append
-                                    if not SQL_MODE:
-                                        tables_dir = (run_dir / "tables")
-                                        tables_dir.mkdir(parents=True, exist_ok=True)
-                                        drop_df = pd.DataFrame(drop_records)
-                                        drop_df["timestamp"] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-                                        drop_log_path = tables_dir / "feature_drop_log.csv"
-                                        # Append mode to preserve history across runs
-                                        if drop_log_path.exists():
-                                            drop_df.to_csv(drop_log_path, mode='a', header=False, index=False)
-                                        else:
-                                            drop_df.to_csv(drop_log_path, mode='w', header=True, index=False)
-                                        Console.info(f"Logged {len(drop_records)} dropped features -> {drop_log_path}", component="FEAT")
-                                    
-                                    # SQL mode: ACM_FeatureDropLog bulk insert
-                                    elif sql_client and SQL_MODE:
+                                if drop_records and sql_client:
                                         timestamp_now = pd.Timestamp.now()
                                         insert_records = [
                                             (
@@ -1771,28 +1699,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              equip=equip, error_type=type(e).__name__, error=str(e)[:200])
                 train_feature_hash = None
 
-        # Respect refit-request: file flag or SQL table entries
+        # Respect refit-request from SQL table entries
         refit_requested = False
         with T.section("models.refit_flag"):
             try:
-                # File-mode flag
-                if not SQL_MODE and (
-                    refit_flag_path is not None and (
-                        (Path(refit_flag_path).exists() if isinstance(refit_flag_path, str) else (
-                            refit_flag_path.exists() if isinstance(refit_flag_path, Path) else False
-                        ))
-                    )
-                ):
-                    refit_requested = True
-                    Console.warn(f"Refit requested by quality policy; bypassing cache this run", component="MODEL",
-                                 equip=equip, run_id=run_id)
-                    try:
-                        refit_flag_path.unlink()
-                    except Exception:
-                        pass
-
                 # SQL-mode: check ACM_RefitRequests (Acknowledged=0)
-                if SQL_MODE and sql_client:
+                if sql_client:
                     with sql_client.cursor() as cur:
                         cur.execute(
                             """
@@ -1849,23 +1761,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     Console.warn(f"Failed to load cached detectors: {e}", component="MODEL",
                                  equip=equip, error_type=type(e).__name__, error=str(e)[:200])
 
-        # Attempt to infer EquipID from config or meta if available (0 if unknown)
-        # CRITICAL: In SQL_MODE, equip_id is already set by _sql_start_run() from stored procedure
-        # Do NOT override it! Only infer for file/dual modes.
-        if not SQL_MODE:
-            with T.section("data.equip_id_infer"):
-                try:
-                    equip_id = int(getattr(meta, "equip_id", 0) or 0)
-                except Exception:
-                    equip_id = 0
-                
-                # For dual mode, try config fallback if meta didn't provide it
-                if dual_mode and equip_id == 0:
-                    equip_id_cfg = cfg.get("runtime", {}).get("equip_id", equip_id)
-                    try:
-                        equip_id = int(equip_id_cfg)
-                    except Exception:
-                        equip_id = 0
+        # EquipID: In SQL_MODE, equip_id is set by _sql_start_run() from stored procedure.
+        # File-mode inference removed (SQL-only architecture).
         
         # Validate equip_id for SQL/dual modes
         if (SQL_MODE or dual_mode) and equip_id <= 0:
@@ -2202,70 +2099,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         
         # NOTE: MHAL condition number / NaN checks removed v9.1.0 - detector deprecated
         
-        # ACM-CSV-03: Write parameter adjustments (file-mode: CSV, SQL-mode: ACM_ConfigHistory)
+        # ACM-CSV-03: Write parameter adjustments to SQL:ACM_ConfigHistory
         if param_adjustments:
             Console.info(f"Writing {len(param_adjustments)} parameter adjustment(s) to config...", component="ADAPTIVE")
             
-            # File mode: Update config_table.csv
-            if not SQL_MODE:
-                config_table_path = Path("configs/config_table.csv")
-                
-                if config_table_path.exists():
-                    try:
-                        df_config = pd.read_csv(config_table_path)
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        
-                        for adj in param_adjustments:
-                            param_parts = adj['param'].split('.')
-                            category = param_parts[0]
-                            param_path = '.'.join(param_parts[1:])
-                            
-                            # Try to parse EquipID from equip string
-                            try:
-                                equip_id_int = int(equip)
-                            except ValueError:
-                                equip_id_int = 0
-                            
-                            # Check if row exists
-                            mask = (df_config["EquipID"] == equip_id_int) & \
-                                   (df_config["Category"] == category) & \
-                                   (df_config["ParamPath"] == param_path)
-                            
-                            if mask.any():
-                                # Update existing
-                                df_config.loc[mask, "ParamValue"] = adj['new']
-                                df_config.loc[mask, "UpdatedDateTime"] = timestamp
-                                df_config.loc[mask, "UpdatedBy"] = "ADAPTIVE_TUNING"
-                                df_config.loc[mask, "ChangeReason"] = adj['reason']
-                                Console.info(f"  Updated {adj['param']}: {adj['old']} -> {adj['new']}")
-                            else:
-                                # Insert new
-                                new_row = {
-                                    "EquipID": equip_id_int,
-                                    "Category": category,
-                                    "ParamPath": param_path,
-                                    "ParamValue": adj['new'],
-                                    "ValueType": "float",
-                                    "UpdatedDateTime": timestamp,
-                                    "UpdatedBy": "ADAPTIVE_TUNING",
-                                    "ChangeReason": adj['reason']
-                                }
-                                df_config = pd.concat([df_config, pd.DataFrame([new_row])], ignore_index=True)
-                                Console.info(f"  Inserted {adj['param']}: {adj['new']}")
-                        
-                        df_config.to_csv(config_table_path, index=False)
-                        Console.info(f"Config updated: {config_table_path}", component="ADAPTIVE")
-                        Console.info(f"Rerun ACM to apply new parameters (current run continues with old params)", component="ADAPTIVE")
-                        
-                    except Exception as e:
-                        Console.error(f"Failed to update config CSV: {e}", component="ADAPTIVE",
-                                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-                else:
-                    Console.warn(f"Config table not found at {config_table_path}, skipping parameter updates", component="ADAPTIVE",
-                                 equip=equip, config_path=str(config_table_path))
-            
             # SQL mode: Write to ACM_ConfigHistory via config_history_writer
-            elif sql_client and SQL_MODE:
+            if sql_client:
                 try:
                     from core.config_history_writer import write_config_changes_bulk
                     
@@ -2930,13 +2769,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         fusion_weights_used = dict(tuned_weights)
                         Console.info("Using auto-tuned weights for final fusion", component="TUNE")
                         
-                        # Save tuning diagnostics to tables/weight_tuning.json
-                        if tuning_diagnostics and run_dir:
+                        # Save tuning diagnostics to ACM_RunMetrics
+                        if tuning_diagnostics and sql_client:
                             try:
-                                tables_dir = run_dir / "tables"
-                                tables_dir.mkdir(parents=True, exist_ok=True)
-                                tune_path = tables_dir / "weight_tuning.json"
-                                
                                 # Add timestamp and metadata
                                 tuning_diagnostics["timestamp"] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')  # CHART-04: Standard format
                                 # ANA-01: config_weights already captured in tune_detector_weights(), don't overwrite!
@@ -2945,12 +2780,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 if previous_weights:
                                     tuning_diagnostics["previous_weights"] = previous_weights
                                 
-                                if not SQL_MODE:
-                                    with open(tune_path, 'w') as f:
-                                        json.dump(tuning_diagnostics, f, indent=2)
-                                    Console.info(f"Saved tuning diagnostics -> {tune_path}", component="TUNE")
-                                
-                                # ACM-CSV-04: Export fusion metrics (file-mode: CSV, SQL-mode: ACM_RunMetrics)
+                                # ACM-CSV-04: Export fusion metrics (SQL-mode: ACM_RunMetrics)
                                 metrics_rows = []
                                 for detector_name, weight in fusion_weights_used.items():
                                     det_metrics = tuning_diagnostics.get("detector_metrics", {}).get(detector_name, {})
@@ -3408,75 +3238,53 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     else:
                         Console.info(f"No automatic parameter adjustments available", component="AUTO-TUNE")
 
-                    # Persist refit marker/request for next run
-                    # SQL mode: write to ACM_RefitRequests; File mode: write flag file
+                    # Persist refit marker/request for next run - SQL mode only
                     try:
-                        # File mode: atomic write to refit flag
-                        if not SQL_MODE:
-                            tmp_path = refit_flag_path.with_suffix(".pending")
-                            with tmp_path.open("w", encoding="utf-8") as rf:
-                                rf.write(f"requested_at={pd.Timestamp.now().isoformat()}\n")
-                                rf.write(f"reasons={'; '.join(reasons)}\n")
-                                if anomaly_rate_trigger:
-                                    rf.write(f"anomaly_rate={current_anomaly_rate:.2%}\n")
-                                if drift_score_trigger:
-                                    rf.write(f"drift_score={drift_score:.2f}\n")
-                            try:
-                                os.replace(tmp_path, refit_flag_path)
-                            except Exception:
-                                # Fallback to rename on platforms without os.replace edge cases
-                                tmp_path.rename(refit_flag_path)
-                            Console.info(f"Refit flag written atomically -> {refit_flag_path}", component="MODEL")
+                        # SQL mode: write to ACM_RefitRequests
+                        if sql_client:
+                            with sql_client.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
+                                    BEGIN
+                                        CREATE TABLE [dbo].[ACM_RefitRequests] (
+                                            [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                                            [EquipID] INT NOT NULL,
+                                            [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                                            [Reason] NVARCHAR(MAX) NULL,
+                                            [AnomalyRate] FLOAT NULL,
+                                            [DriftScore] FLOAT NULL,
+                                            [ModelAgeHours] FLOAT NULL,
+                                            [RegimeQuality] FLOAT NULL,
+                                            [Acknowledged] BIT NOT NULL DEFAULT 0,
+                                            [AcknowledgedAt] DATETIME2 NULL
+                                        );
+                                        CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
+                                    END
+                                    """
+                                )
+                                cur.execute(
+                                    """
+                                    INSERT INTO [dbo].[ACM_RefitRequests]
+                                        (EquipID, Reason, AnomalyRate, DriftScore, ModelAgeHours, RegimeQuality)
+                                    VALUES
+                                        (?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        int(equip_id),
+                                        "; ".join(reasons),
+                                        float(current_anomaly_rate) if anomaly_rate_trigger else None,
+                                        float(drift_score) if drift_score_trigger else None,
+                                        float(model_age_hours) if 'model_age_hours' in locals() else None,
+                                        float(regime_metrics.get("silhouette", 0.0)) if 'regime_metrics' in locals() else None,
+                                    ),
+                                )
+                            Console.info("SQL refit request recorded in ACM_RefitRequests", component="MODEL")
                         else:
-                            # SQL mode: write to ACM_RefitRequests
-                            try:
-                                if sql_client:
-                                    with sql_client.cursor() as cur:
-                                        cur.execute(
-                                            """
-                                            IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
-                                            BEGIN
-                                                CREATE TABLE [dbo].[ACM_RefitRequests] (
-                                                    [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                                                    [EquipID] INT NOT NULL,
-                                                    [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-                                                    [Reason] NVARCHAR(MAX) NULL,
-                                                    [AnomalyRate] FLOAT NULL,
-                                                    [DriftScore] FLOAT NULL,
-                                                    [ModelAgeHours] FLOAT NULL,
-                                                    [RegimeQuality] FLOAT NULL,
-                                                    [Acknowledged] BIT NOT NULL DEFAULT 0,
-                                                    [AcknowledgedAt] DATETIME2 NULL
-                                                );
-                                                CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
-                                            END
-                                            """
-                                        )
-                                        cur.execute(
-                                            """
-                                            INSERT INTO [dbo].[ACM_RefitRequests]
-                                                (EquipID, Reason, AnomalyRate, DriftScore, ModelAgeHours, RegimeQuality)
-                                            VALUES
-                                                (?, ?, ?, ?, ?, ?)
-                                            """,
-                                            (
-                                                int(equip_id),
-                                                "; ".join(reasons),
-                                                float(current_anomaly_rate) if anomaly_rate_trigger else None,
-                                                float(drift_score) if drift_score_trigger else None,
-                                                float(model_age_hours) if 'model_age_hours' in locals() else None,
-                                                float(regime_metrics.get("silhouette", 0.0)) if 'regime_metrics' in locals() else None,
-                                            ),
-                                        )
-                                    Console.info("SQL refit request recorded in ACM_RefitRequests", component="MODEL")
-                                else:
-                                    Console.warn("SQL client unavailable; cannot write refit request", component="MODEL",
-                                                 equip=equip)
-                            except Exception as sql_re:
-                                Console.warn(f"Failed to write SQL refit request: {sql_re}", component="MODEL",
-                                             equip=equip, error=str(sql_re)[:200])
+                            Console.warn("SQL client unavailable; cannot write refit request", component="MODEL",
+                                         equip=equip)
                     except Exception as re:
-                        Console.warn(f"Failed to write refit flag: {re}", component="MODEL",
+                        Console.warn(f"Failed to write refit request: {re}", component="MODEL",
                                      equip=equip, error=str(re)[:200])
                 
                 else:
@@ -3747,45 +3555,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     idx_local = pd.DatetimeIndex(to_append.index)
                 to_append.index = idx_local
                 
-                if not SQL_MODE:
-                    # ACM-CSV-01: File mode - write to baseline_buffer.csv
-                    buffer_path = stable_models_dir / "baseline_buffer.csv"
-                    if buffer_path.exists():
-                        try:
-                            prev = pd.read_csv(buffer_path, index_col=0, parse_dates=True)
-                        except Exception:
-                            prev = pd.DataFrame()
-                        # Keep only common columns to avoid drift issues
-                        common = [c for c in prev.columns if c in to_append.columns]
-                        if common:
-                            prev = prev[common]
-                            to_append = to_append[common]
-                        combined = pd.concat([prev, to_append], axis=0)
-                    else:
-                        combined = to_append
-
-                    # Normalize index, drop dups, sort
-                    try:
-                        norm_idx = pd.to_datetime(combined.index, errors="coerce")
-                    except Exception:
-                        norm_idx = pd.DatetimeIndex(combined.index)
-                    combined.index = norm_idx
-                    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-
-                    # Apply retention policy
-                    if len(combined):
-                        last_ts = pd.to_datetime(combined.index.max())
-                        if window_hours and window_hours > 0:
-                            cutoff = last_ts - pd.Timedelta(hours=window_hours)
-                            combined = combined[combined.index >= cutoff]
-                        if max_points and max_points > 0 and len(combined) > max_points:
-                            combined = combined.iloc[-max_points:]
-
-                    combined.to_csv(buffer_path, index=True, date_format="%Y-%m-%d %H:%M:%S")
-                    Console.info(f"Updated baseline_buffer.csv: rows={len(combined)} cols={len(combined.columns)}", component="BASELINE")
-                
-                elif sql_client and SQL_MODE:
-                    # ACM-CSV-01: SQL mode - write to ACM_BaselineBuffer
+                # SQL mode: write to ACM_BaselineBuffer
+                if sql_client:
                     # OPTIMIZATION v10.2.1: Vectorized pandas melt (100x faster than Python loops)
                     try:
                         # Reset index to make timestamp a column for melt
@@ -3891,169 +3662,79 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              equip=equip, error_type=type(sensor_ctx_err).__name__, error=str(sensor_ctx_err)[:200])
                 sensor_context = None
 
-        # ===== 8) Persist artifacts / Finalize (per-mode) =====
+        # ===== 8) Persist artifacts / Finalize (SQL-only) =====
         rows_read = int(score.shape[0])
         anomaly_count = int(len(episodes))
         
         # Check if dual-write mode is enabled (write to both file and SQL)
         dual_mode = cfg.get("output", {}).get("dual_mode", False)
         
-        # FILE_MODE: Now explicitly enabled via config flag (default is SQL-only)
-        file_mode_enabled = cfg.get("output", {}).get("enable_file_mode", False)
-        
-        if SQL_MODE or file_mode_enabled:
-            # ---------- FILE/SQL persistence for scores ----------
-            with T.section("persist"):
-                if not SQL_MODE:
-                    out_log = run_dir / "run.jsonl"
-                
-                # Use unified OutputManager for persistence
-                with T.section("persist.write_scores"):
+        # SQL-only persistence
+        with T.section("persist"):
+            # Use unified OutputManager for persistence
+            with T.section("persist.write_scores"):
+                try:
+                    output_manager.write_scores(frame, run_dir, enable_sql=True)
+                    
+                    # Build schema dict for metadata (not written to file in SQL-only mode)
                     try:
-                        output_manager.write_scores(frame, run_dir, enable_sql=(SQL_MODE or dual_mode))
+                        schema_dict = {
+                            "file": "scores.csv",
+                            "description": "ACM anomaly scores with detector outputs and fusion results",
+                            "timestamp_column": "index" if frame.index.name is None else frame.index.name,
+                            "columns": []
+                        }
                         
-                        # Generate schema.json descriptor for scores.csv
-                        try:
-                            schema_path = run_dir / "schema.json"
-                            schema_dict = {
-                                "file": "scores.csv",
-                                "description": "ACM anomaly scores with detector outputs and fusion results",
-                                "timestamp_column": "index" if frame.index.name is None else frame.index.name,
-                                "columns": []
+                        # Document each column with name, dtype, and description
+                        for col in frame.columns:
+                            col_info = {
+                                "name": str(col),
+                                "dtype": str(frame[col].dtype),
+                                "nullable": bool(frame[col].isnull().any())
                             }
                             
-                            # Document each column with name, dtype, and description
-                            for col in frame.columns:
-                                col_info = {
-                                    "name": str(col),
-                                    "dtype": str(frame[col].dtype),
-                                    "nullable": bool(frame[col].isnull().any())
-                                }
-                                
-                                # Add semantic descriptions based on column name patterns
-                                if col.endswith("_raw"):
-                                    col_info["description"] = f"Raw anomaly score from {col.replace('_raw', '')} detector"
-                                elif col.endswith("_z"):
-                                    col_info["description"] = f"Calibrated z-score from {col.replace('_z', '')} detector"
-                                elif col == "fused":
-                                    col_info["description"] = "Weighted fusion of all detector z-scores"
-                                elif col == "alert_level":
-                                    col_info["description"] = "Alert severity: NORMAL, CAUTION, or FAULT"
-                                elif col == "alert_mode":
-                                    col_info["description"] = "Alert mode based on threshold exceedance"
-                                elif col == "regime_label":
-                                    col_info["description"] = "Operating regime cluster label (0-based)"
-                                elif col == "regime_state":
-                                    col_info["description"] = "Regime health state: healthy, suspect, or critical"
-                                elif col == "episode_id":
-                                    col_info["description"] = "Episode identifier for anomaly periods (NaN outside episodes)"
-                                else:
-                                    col_info["description"] = f"Column {col}"
-                                
-                                schema_dict["columns"].append(col_info)
+                            # Add semantic descriptions based on column name patterns
+                            if col.endswith("_raw"):
+                                col_info["description"] = f"Raw anomaly score from {col.replace('_raw', '')} detector"
+                            elif col.endswith("_z"):
+                                col_info["description"] = f"Calibrated z-score from {col.replace('_z', '')} detector"
+                            elif col == "fused":
+                                col_info["description"] = "Weighted fusion of all detector z-scores"
+                            elif col == "alert_level":
+                                col_info["description"] = "Alert severity: NORMAL, CAUTION, or FAULT"
+                            elif col == "alert_mode":
+                                col_info["description"] = "Alert mode based on threshold exceedance"
+                            elif col == "regime_label":
+                                col_info["description"] = "Operating regime cluster label (0-based)"
+                            elif col == "regime_state":
+                                col_info["description"] = "Regime health state: healthy, suspect, or critical"
+                            elif col == "episode_id":
+                                col_info["description"] = "Episode identifier for anomaly periods (NaN outside episodes)"
+                            else:
+                                col_info["description"] = f"Column {col}"
                             
-                            # Write schema.json with pretty formatting
-                            if not SQL_MODE:
-                                with schema_path.open("w", encoding="utf-8") as sf:
-                                    json.dump(schema_dict, sf, indent=2, ensure_ascii=False)
-                                Console.info(f"Schema written to {schema_path}", component="ART", columns=len(schema_dict.get('columns', [])))
-                        except Exception as se:
-                            Console.warn(f"Failed to write schema.json: {se}", component="IO",
-                                         equip=equip, error=str(se)[:200])
-                            
-                    except Exception as we:
-                        Console.warn(f"Failed to write scores via OutputManager: {we}", component="IO",
-                                     equip=equip, run_id=run_id, error=str(we)[:200])
+                            schema_dict["columns"].append(col_info)
+                    except Exception as se:
+                        Console.warn(f"Failed to build schema dict: {se}", component="IO",
+                                     equip=equip, error=str(se)[:200])
+                        
+                except Exception as we:
+                    Console.warn(f"Failed to write scores via OutputManager: {we}", component="IO",
+                                 equip=equip, run_id=run_id, error=str(we)[:200])
 
-                # Skip all filesystem persistence in SQL-only mode
-                if not SQL_MODE:
-                    with T.section("persist.write_score_stream"):
-                        try:
-                            # Write score stream using OutputManager  
-                            stream = frame.copy().reset_index().rename(columns={"index": "ts"})
-                            output_manager.write_dataframe(
-                                stream, 
-                                models_dir / "score_stream.csv"
-                            )
-                        except Exception as se:
-                            Console.warn(f"Failed to write score_stream via OutputManager: {se}", component="IO",
-                                         equip=equip, run_id=run_id, error=str(se)[:200])
+            with T.section("persist.write_episodes"):
+                try:
+                    # Write episodes using OutputManager
+                    output_manager.write_episodes(episodes, run_dir, enable_sql=dual_mode)
+                    # Record episode count metric for Prometheus
+                    episode_count = len(episodes) if episodes is not None else 0
+                    if episode_count > 0:
+                        record_episode(equip, count=episode_count, severity="info")
+                except Exception as ee:
+                    Console.warn(f"Failed to write episodes via OutputManager: {ee}", component="IO",
+                                 equip=equip, run_id=run_id, error=str(ee)[:200])
 
-                    if regime_model is not None:
-                        with T.section("persist.regime_model"):
-                            try:
-                                # Save regime model with joblib persistence (KMeans + Scaler)
-                                regimes.save_regime_model(regime_model, models_dir)
-                            except Exception as e:
-                                Console.warn(f"Failed to persist regime model: {e}", component="REGIME",
-                                             equip=equip, error=str(e)[:200])
-                            promote_dir: Optional[Path] = None
-                            if stable_models_dir and stable_models_dir != models_dir:
-                                promote_dir = stable_models_dir
-
-                            if promote_dir and regime_quality_ok:
-                                try:
-                                    regimes.save_regime_model(regime_model, promote_dir)
-                                    Console.info(f"Promoted regime model to {promote_dir}", component="REGIME")
-                                except Exception as promote_exc:
-                                    Console.warn(f"Failed to promote regime model to stable cache: {promote_exc}", component="REGIME",
-                                                 equip=equip, error=str(promote_exc)[:200])
-                            elif promote_dir and not regime_quality_ok:
-                                Console.info("Skipping stable regime cache update because quality_ok=False", component="REGIME")
-
-                with T.section("persist.write_episodes"):
-                    try:
-                        # Write episodes using OutputManager
-                        output_manager.write_episodes(episodes, run_dir, enable_sql=dual_mode)
-                        # Record episode count metric for Prometheus
-                        episode_count = len(episodes) if episodes is not None else 0
-                        if episode_count > 0:
-                            record_episode(equip, count=episode_count, severity="info")
-                    except Exception as ee:
-                        Console.warn(f"Failed to write episodes via OutputManager: {ee}", component="IO",
-                                     equip=equip, run_id=run_id, error=str(ee)[:200])
-                # Emit a lightweight culprits.jsonl for episode-level attribution
-                with T.section("persist.write_culprits"):
-                    try:
-                        if not SQL_MODE:
-                            culprits_path = run_dir / "culprits.jsonl"
-                            with culprits_path.open("w", encoding="utf-8") as cj:
-                                for _, row in episodes.iterrows():
-                                    # CHART-04: Use uniform timestamp format without 'T' or 'Z' suffixes
-                                    start_ts_val = row.get("start_ts")
-                                    end_ts_val = row.get("end_ts")
-                                    start_ts_str = None
-                                    end_ts_str = None
-                                    if pd.notna(start_ts_val):
-                                        start_dt = pd.to_datetime(start_ts_val, errors="coerce")
-                                        if pd.notna(start_dt):
-                                            start_ts_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-                                    if pd.notna(end_ts_val):
-                                        end_dt = pd.to_datetime(end_ts_val, errors="coerce")
-                                        if pd.notna(end_dt):
-                                            end_ts_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
-                                    
-                                    rec = {
-                                    "start_ts": start_ts_str,
-                                    "end_ts": end_ts_str,
-                                    "duration_hours": float(row.get("duration_hours", np.nan)) if pd.notna(row.get("duration_hours", np.nan)) else None,
-                                    "culprits": row.get("culprits", ""),
-                                    "method": "episode_primary_detector"
-                                }
-                                cj.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                        if not SQL_MODE:
-                            Console.info(f"Culprits written to {culprits_path}", component="ART", episodes=len(culprits_df))
-                    except Exception as ce:
-                        Console.warn(f"Failed to write culprits.jsonl: {ce}", component="IO",
-                                     equip=equip, error=str(ce)[:200])
-                with T.section("persist.write_runlog"):
-                    if not SQL_MODE:
-                        with out_log.open("w", encoding="utf-8") as f:
-                            f.write(json.dumps({
-                                "equip": equip,
-                                "rows": int(len(frame)),
-                                "kept_cols": meta.kept_cols
-                            }, ensure_ascii=False) + "\n")
+            # Culprits now handled via SQL in OutputManager
 
                 if cache_payload:
                     with T.section("persist.cache_detectors"):
@@ -4064,20 +3745,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             Console.warn(f"Failed to cache detectors: {e}", component="MODEL",
                                          equip=equip, cache_path=str(model_cache_path), error=str(e)[:200])
 
-            if not SQL_MODE:
-                Console.info(f"rows={len(frame)} heads={','.join([c for c in frame.columns if c.endswith('_z')])} episodes={len(episodes)}", component="OK")
-                Console.info(f"{run_dir / 'scores.csv'}", component="ART") # type: ignore
-                Console.info(f"{run_dir / 'episodes.csv'}", component="ART")
-
             # === COMPREHENSIVE ANALYTICS GENERATION ===
             # Run in ALL modes to ensure SQL tables (HealthTimeline, RegimeTimeline) are populated
             try:
                 # Use OutputManager directly for all output operations
                 tables_dir = run_dir / "tables"
-                
-                # Create tables directory if writing files (or if needed for temporary artifacts)
-                if not SQL_MODE:
-                    tables_dir.mkdir(exist_ok=True)
 
                 with T.section("outputs.comprehensive_analytics"):
                     # Generate comprehensive analytics tables using OutputManager
@@ -4567,13 +4239,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     min_health_index=run_metadata.get("min_health_index"),
                     max_fused_z=run_metadata.get("max_fused_z"),
                     data_quality_score=data_quality_score,
-                    refit_requested=(
-                        False if 'refit_flag_path' not in locals() or refit_flag_path is None else (
-                            Path(refit_flag_path).exists() if isinstance(refit_flag_path, str) else (
-                                refit_flag_path.exists() if isinstance(refit_flag_path, Path) else False
-                            )
-                        )
-                    ),
+                    refit_requested=refit_requested if 'refit_requested' in locals() else False,
                     kept_columns=kept_cols_str,
                     error_message=err_json if outcome == "FAIL" and 'err_json' in locals() else None
                 )
