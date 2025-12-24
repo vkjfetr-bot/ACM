@@ -34,6 +34,7 @@
 | Context dataclasses | - | ✅ Done (b6fa58e) |
 | `_score_all_detectors()` | - | ✅ Done (d9401f7, 1004d8e) |
 | `_calibrate_all_detectors()` | - | ✅ Done (7d8f410) |
+| `_fit_all_detectors()` | - | ✅ Done (d16d2a8) |
 | `_phase_initialize_runtime()` | 840-1183 (~343 lines) | 🔲 Not Started |
 | `_phase_load_data()` | 1183-1915 (~732 lines) | 🔲 Not Started |
 | `_phase_fit_models()` | 1915-2311 (~396 lines) | 🔲 Not Started |
@@ -42,7 +43,7 @@
 | `_phase_fuse_and_episodes()` | 2769-3419 (~650 lines) | 🔲 Not Started |
 | `_phase_persist_results()` | 3771-end (~490 lines) | 🔲 Not Started |
 
-**Wave 3 Progress**: Added context dataclasses + extracted `_score_all_detectors()` and `_calibrate_all_detectors()` helpers
+**Wave 3 Progress**: Added context dataclasses + extracted `_score_all_detectors()`, `_calibrate_all_detectors()`, and `_fit_all_detectors()` helpers
 
 ### Wave 4: Pattern Improvements 🔲 PLANNED
 | Pattern | Status |
@@ -50,7 +51,7 @@
 | `@safe_section` decorator | 🔲 Not Started |
 | `ConfigAccessor` class | 🔲 Not Started |
 
-**Current Line Count**: 4,304 lines (down from 4,663 original)
+**Current Line Count**: 4,394 lines (original: 4,663; helpers added net +90 lines but main() simplified)
 
 ---
 
