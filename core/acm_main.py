@@ -1033,6 +1033,37 @@ def _fit_all_detectors(
     return result
 
 
+def _get_detector_enable_flags(cfg: Dict[str, Any]) -> Dict[str, bool]:
+    """
+    Determine which detectors are enabled based on fusion weights.
+    
+    A detector is enabled if its weight in fusion.weights is > 0.
+    
+    Args:
+        cfg: Configuration dict
+    
+    Returns:
+        Dict with keys: ar1_enabled, pca_enabled, iforest_enabled, gmm_enabled, omr_enabled
+    """
+    fusion_cfg = (cfg or {}).get("fusion", {})
+    fusion_weights = fusion_cfg.get("weights", {})
+    
+    flags = {
+        "ar1_enabled": fusion_weights.get("ar1_z", 0.0) > 0,
+        "pca_enabled": fusion_weights.get("pca_spe_z", 0.0) > 0 or fusion_weights.get("pca_t2_z", 0.0) > 0,
+        "iforest_enabled": fusion_weights.get("iforest_z", 0.0) > 0,
+        "gmm_enabled": fusion_weights.get("gmm_z", 0.0) > 0,
+        "omr_enabled": fusion_weights.get("omr_z", 0.0) > 0,
+    }
+    
+    # Log disabled detectors for observability
+    disabled = [name.replace("_enabled", "") for name, enabled in flags.items() if not enabled]
+    if disabled:
+        Console.info(f"Lazy evaluation: skipping disabled detectors: {', '.join(disabled)}", component="PERF")
+    
+    return flags
+
+
 # =======================
 
 
@@ -2184,23 +2215,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         pca_train_spe = pca_train_t2 = None
         
         # PERF-03: Check fusion weights to skip disabled detectors (lazy evaluation)
-        fusion_cfg = (cfg or {}).get("fusion", {})
-        fusion_weights = fusion_cfg.get("weights", {})
-        ar1_enabled = fusion_weights.get("ar1_z", 0.0) > 0
-        pca_enabled = fusion_weights.get("pca_spe_z", 0.0) > 0 or fusion_weights.get("pca_t2_z", 0.0) > 0
-        iforest_enabled = fusion_weights.get("iforest_z", 0.0) > 0
-        gmm_enabled = fusion_weights.get("gmm_z", 0.0) > 0
-        omr_enabled = fusion_weights.get("omr_z", 0.0) > 0
-        
-        disabled_detectors = []
-        if not ar1_enabled: disabled_detectors.append("ar1")
-        if not pca_enabled: disabled_detectors.append("pca")
-        if not iforest_enabled: disabled_detectors.append("iforest")
-        if not gmm_enabled: disabled_detectors.append("gmm")
-        if not omr_enabled: disabled_detectors.append("omr")
-        
-        if disabled_detectors:
-            Console.info(f"Lazy evaluation: skipping disabled detectors: {', '.join(disabled_detectors)}", component="PERF")
+        detector_flags = _get_detector_enable_flags(cfg)
+        ar1_enabled = detector_flags["ar1_enabled"]
+        pca_enabled = detector_flags["pca_enabled"]
+        iforest_enabled = detector_flags["iforest_enabled"]
+        gmm_enabled = detector_flags["gmm_enabled"]
+        omr_enabled = detector_flags["omr_enabled"]
         
         # Try loading cached regime model from joblib persistence (new system) OR RegimeState
         regime_model = None
