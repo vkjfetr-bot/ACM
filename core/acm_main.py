@@ -771,6 +771,69 @@ def _sql_finalize_run(cli: Any, run_id: str, outcome: str, rows_read: int, rows_
         except Exception:
             pass
 
+
+def _score_all_detectors(
+    score: pd.DataFrame,
+    ar1_detector: Optional[Any],
+    pca_detector: Optional[Any],
+    iforest_detector: Optional[Any],
+    gmm_detector: Optional[Any],
+    omr_detector: Optional[Any],
+    ar1_enabled: bool = True,
+    pca_enabled: bool = True,
+    iforest_enabled: bool = True,
+    gmm_enabled: bool = True,
+    omr_enabled: bool = True,
+) -> Tuple[pd.DataFrame, Optional[Any]]:
+    """
+    Score all enabled detectors and return raw scores frame.
+    
+    Args:
+        score: DataFrame with numeric features to score
+        *_detector: Detector instances (or None if not fitted)
+        *_enabled: Whether each detector is enabled
+    
+    Returns:
+        Tuple of (frame with raw scores, omr_contributions or None)
+    """
+    frame = pd.DataFrame(index=score.index)
+    omr_contributions_data = None
+    
+    # AR1 Detector
+    if ar1_enabled and ar1_detector:
+        res = ar1_detector.score(score)
+        frame["ar1_raw"] = pd.Series(res, index=frame.index).fillna(0)
+        Console.info(f"AR1 detector scored (samples={len(score)})", component="AR1", samples=len(score))
+    
+    # PCA Subspace Detector
+    if pca_enabled and pca_detector:
+        pca_spe, pca_t2 = pca_detector.score(score)
+        frame["pca_spe"] = pd.Series(pca_spe, index=frame.index).fillna(0)
+        frame["pca_t2"] = pd.Series(pca_t2, index=frame.index).fillna(0)
+        Console.info(f"PCA detector scored (samples={len(score)})", component="PCA", samples=len(score))
+    
+    # Isolation Forest Detector
+    if iforest_enabled and iforest_detector:
+        res = iforest_detector.score(score)
+        frame["iforest_raw"] = pd.Series(res, index=frame.index).fillna(0)
+        Console.info(f"IForest detector scored (samples={len(score)})", component="IFOREST", samples=len(score))
+    
+    # GMM Detector
+    if gmm_enabled and gmm_detector:
+        res = gmm_detector.score(score)
+        frame["gmm_raw"] = pd.Series(res, index=frame.index).fillna(0)
+        Console.info(f"GMM detector scored (samples={len(score)})", component="GMM", samples=len(score))
+    
+    # OMR Detector
+    if omr_enabled and omr_detector:
+        omr_z, omr_contributions = omr_detector.score(score, return_contributions=True)
+        frame["omr_raw"] = pd.Series(omr_z, index=frame.index).fillna(0)
+        omr_contributions_data = omr_contributions
+        Console.info(f"OMR detector scored (samples={len(score)})", component="OMR", samples=len(score))
+    
+    return frame, omr_contributions_data
+
+
 # =======================
 
 
@@ -2246,60 +2309,26 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 regime_model = None
 
         # ===== 3) Score on SCORE =====
-        frame = pd.DataFrame(index=score.index)
-        # Maintain the same ordering as `score` to prevent misalignment when
-        # assigning Series by position. Episode mapping uses a nearest-indexer
-        # that safely handles non-monotonic indexes, so no sort here.
-        
-        # PERF-03: Only score enabled detectors
-        # CRITICAL FIX #6: Replace NaN with 0 after all detector .score() calls to prevent NaN propagation
-        # NOTE: Sequential scoring to avoid BLAS/OpenMP thread deadlocks with ThreadPoolExecutor
+        # REFACTOR v11: Extracted to _score_all_detectors() helper function
         with T.section("score.detector_score"):
             Console.info("Starting detector scoring...", component="MODEL")
             score_start_time = time.perf_counter()
             
-            # AR1 Detector
-            if ar1_enabled and ar1_detector:
-                with T.section("score.ar1"):
-                    res = ar1_detector.score(score)
-                    frame["ar1_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                    Console.info(f"AR1 detector scored (samples={len(score)})", component="AR1", samples=len(score))
-            
-            # PCA Subspace Detector
-            if pca_enabled and pca_detector:
-                with T.section("score.pca"):
-                    pca_spe, pca_t2 = pca_detector.score(score)
-                    frame["pca_spe"] = pd.Series(pca_spe, index=frame.index).fillna(0)
-                    frame["pca_t2"] = pd.Series(pca_t2, index=frame.index).fillna(0)
-                    Console.info(f"PCA detector scored (samples={len(score)})", component="PCA", samples=len(score))
-            
-            # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
-            
-            # Isolation Forest Detector
-            if iforest_enabled and iforest_detector:
-                with T.section("score.iforest"):
-                    res = iforest_detector.score(score)
-                    frame["iforest_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                    Console.info(f"IForest detector scored (samples={len(score)})", component="IFOREST", samples=len(score))
-            
-            # GMM Detector
-            if gmm_enabled and gmm_detector:
-                with T.section("score.gmm"):
-                    res = gmm_detector.score(score)
-                    frame["gmm_raw"] = pd.Series(res, index=frame.index).fillna(0)
-                    Console.info(f"GMM detector scored (samples={len(score)})", component="GMM", samples=len(score))
-            
-            # OMR Detector (store contributions outside frame - pandas doesn't support custom attributes)
-            if omr_enabled and omr_detector:
-                with T.section("score.omr"):
-                    omr_z, omr_contributions = omr_detector.score(score, return_contributions=True)
-                    frame["omr_raw"] = pd.Series(omr_z, index=frame.index).fillna(0)
-                    omr_contributions_data = omr_contributions
-                    Console.info(f"OMR detector scored (samples={len(score)})", component="OMR", samples=len(score))
+            frame, omr_contributions_data = _score_all_detectors(
+                score=score,
+                ar1_detector=ar1_detector,
+                pca_detector=pca_detector,
+                iforest_detector=iforest_detector,
+                gmm_detector=gmm_detector,
+                omr_detector=omr_detector,
+                ar1_enabled=ar1_enabled,
+                pca_enabled=pca_enabled,
+                iforest_enabled=iforest_enabled,
+                gmm_enabled=gmm_enabled,
+                omr_enabled=omr_enabled,
+            )
         
         Console.info(f"All detectors scored in {time.perf_counter()-score_start_time:.2f}s", component="MODEL")
-        
-        
 
         # ===== 4) Regimes (Run before calibration to enable regime-aware thresholds) =====
         train_regime_labels = None
