@@ -7,6 +7,48 @@
 
 ---
 
+## 📊 REFACTORING PROGRESS
+
+### Wave 1: Dead Code Removal ✅ COMPLETE (Dec 24, 2025)
+| Task | Status | Commit |
+|------|--------|--------|
+| Delete `_apply_module_overrides()` | ✅ Done | 4b3f3db |
+| Delete `_ensure_dir()` | ✅ Done | 4b3f3db |
+| Inline `_sql_mode()` | ✅ Done | 4b3f3db |
+| Inline `_batch_mode()` | ✅ Done | 4b3f3db |
+
+### Wave 2: File-Mode Branch Removal ✅ COMPLETE (Dec 24, 2025)
+| Task | Status | Lines Removed |
+|------|--------|---------------|
+| Remove `if not SQL_MODE:` branches | ✅ Done | 18 branches |
+| Remove file-mode CSV writes | ✅ Done | ~150 lines |
+| Remove `refit_flag_path` | ✅ Done | ~20 lines |
+| Remove `file_mode_enabled` | ✅ Done | ~10 lines |
+| Simplify persist section | ✅ Done | ~50 lines |
+
+**Wave 1+2 Results**: 4,663 → 4,328 lines (**335 lines removed, 7.2% reduction**)
+
+### Wave 3: Phase Extraction 🔄 IN PROGRESS
+| Phase Function | Target Lines | Status |
+|----------------|--------------|--------|
+| `_phase_initialize_runtime()` | 500-700 | 🔲 Not Started |
+| `_phase_load_data()` | 700-1100 | 🔲 Not Started |
+| `_phase_build_features()` | 1100-1500 | 🔲 Not Started |
+| `_phase_fit_models()` | 1500-1800 | 🔲 Not Started |
+| `_phase_score_detectors()` | 1800-2200 | 🔲 Not Started |
+| `_phase_fuse_and_episodes()` | 2200-2700 | 🔲 Not Started |
+| `_phase_persist_results()` | 2700-3500 | 🔲 Not Started |
+| `_phase_finalize_run()` | 3500-end | 🔲 Not Started |
+
+### Wave 4: Pattern Improvements 🔲 PLANNED
+| Pattern | Status |
+|---------|--------|
+| `@safe_section` decorator | 🔲 Not Started |
+| `ConfigAccessor` class | 🔲 Not Started |
+| Context dataclasses | 🔲 Not Started |
+
+---
+
 ## 🎯 PRIORITY 1: Extract Core Pipeline Phases (70% Impact)
 
 ### Current Problem
@@ -53,29 +95,20 @@ def main() -> None:
 
 ---
 
-## 🗑️ PRIORITY 2: Remove Dead Code (20% Impact)
+## 🗑️ PRIORITY 2: Remove Dead Code (20% Impact) ✅ COMPLETE
 
-### Still Present - REMOVE THESE:
+### ~~Still Present - REMOVE THESE~~ ALL REMOVED:
 
-| Line | Function/Code | Why Dead | Action |
+| Line | Function/Code | Why Dead | Status |
 |------|---------------|----------|--------|
-| 256-258 | `_apply_module_overrides()` | Just `pass` | **DELETE** |
-| 638-639 | `_ensure_dir(p)` | Wraps `mkdir()` | **INLINE** everywhere |
-| 661-667 | `_sql_mode(cfg)` | Checks one env var | **INLINE** to `SQL_MODE = os.getenv("ACM_FORCE_FILE_MODE") != "1"` |
-| 668-670 | `_batch_mode()` | One-liner | **INLINE** to `BATCH_MODE = bool(os.getenv("ACM_BATCH_MODE") == "1")` |
-| 264-279 | `_maybe_write_run_meta_json` | File-mode only, SQL is default | **DELETE** or guard with `if not SQL_MODE` |
-
-### Pattern to Fix - Inline These Calls:
-
-```python
-# BEFORE (scattered 50+ times):
-if not SQL_MODE:
-    _ensure_dir(some_path)
-    
-# AFTER:
-if not SQL_MODE:
-    some_path.mkdir(parents=True, exist_ok=True)
-```
+| ~~256-258~~ | `_apply_module_overrides()` | Just `pass` | ✅ DELETED |
+| ~~638-639~~ | `_ensure_dir(p)` | Wraps `mkdir()` | ✅ DELETED |
+| ~~661-667~~ | `_sql_mode(cfg)` | Checks one env var | ✅ INLINED |
+| ~~668-670~~ | `_batch_mode()` | One-liner | ✅ INLINED |
+| ~~264-279~~ | `_maybe_write_run_meta_json` | File-mode only | ✅ DELETED |
+| N/A | All `if not SQL_MODE:` branches | 18 branches | ✅ REMOVED |
+| N/A | `refit_flag_path` variable | File-mode only | ✅ REMOVED |
+| N/A | `file_mode_enabled` variable | Dead code | ✅ REMOVED |
 
 ---
 
@@ -277,23 +310,22 @@ if cfg_accessor.drift_multi_feature_enabled():
 
 ## 📋 STEP-BY-STEP IMPLEMENTATION PLAN
 
-### Phase 1: Cleanup Dead Code (1 hour)
-1. Delete `_apply_module_overrides()` (line 256-258)
-2. Inline `_ensure_dir()` calls (search for `_ensure_dir(` - ~15 occurrences)
-3. Inline `_sql_mode()` → `SQL_MODE = os.getenv("ACM_FORCE_FILE_MODE") != "1"`
-4. Inline `_batch_mode()` → `BATCH_MODE = bool(os.getenv("ACM_BATCH_MODE") == "1")`
-5. Delete or guard `_maybe_write_run_meta_json()` with `if not SQL_MODE`
+### Phase 1: Cleanup Dead Code ✅ COMPLETE (1 hour)
+1. ✅ Delete `_apply_module_overrides()` (line 256-258)
+2. ✅ Inline `_ensure_dir()` calls (search for `_ensure_dir(` - ~15 occurrences)
+3. ✅ Inline `_sql_mode()` → `SQL_MODE = os.getenv("ACM_FORCE_FILE_MODE") != "1"`
+4. ✅ Inline `_batch_mode()` → `BATCH_MODE = bool(os.getenv("ACM_BATCH_MODE") == "1")`
+5. ✅ Delete all `if not SQL_MODE:` branches (18 removed)
 
-### Phase 2: Extract Data Loading (2 hours)
+### Phase 2: Extract Data Loading 🔄 NEXT (2 hours)
 1. Create `DataContext` dataclass
-2. Extract lines 700-1100 to `load_and_validate_data()`
+2. Extract lines 700-1100 to `_phase_load_data()`
 3. Extract SQL loading to `_load_from_sql()`
-4. Extract file loading to `_load_from_csv()`
-5. Test data loading in isolation
+4. Test data loading in isolation
 
 ### Phase 3: Extract Model Training (3 hours)
 1. Create `ModelContext` dataclass
-2. Extract lines 1100-1500 to `train_or_load_models()`
+2. Extract lines 1100-1500 to `_phase_fit_models()`
 3. Extract cache validation to `_validate_model_cache()`
 4. Extract detector fitting to `_fit_detectors()`
 5. Test model training independently

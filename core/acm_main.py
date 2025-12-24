@@ -169,6 +169,83 @@ except ImportError:
 # Console is now imported above from core.observability
 from core.observability import Console
 
+# =============================================================================
+# Pipeline Context Classes (v11.0.0)
+# These dataclasses provide structured data flow between pipeline phases
+# =============================================================================
+from dataclasses import dataclass, field
+
+
+@dataclass
+class RuntimeContext:
+    """Context from initialization phase - passed to all subsequent phases."""
+    equip: str
+    equip_id: int
+    run_id: Optional[str]
+    sql_client: Optional[Any]
+    output_manager: Any  # OutputManager
+    cfg: Dict[str, Any]
+    args: argparse.Namespace
+    SQL_MODE: bool
+    BATCH_MODE: bool
+    CONTINUOUS_LEARNING: bool
+    batch_num: int
+    config_signature: str
+    run_start_time: datetime
+    tracer: Optional[Any] = None
+    root_span: Optional[Any] = None
+
+
+@dataclass
+class DataContext:
+    """Context from data loading phase."""
+    train: pd.DataFrame
+    score: pd.DataFrame
+    train_numeric: pd.DataFrame
+    score_numeric: pd.DataFrame
+    meta: Any
+    coldstart_complete: bool = True
+
+
+@dataclass
+class FeatureContext:
+    """Context from feature construction phase."""
+    train: pd.DataFrame
+    score: pd.DataFrame
+    train_feature_hash: Optional[str] = None
+    current_train_columns: Optional[List[str]] = None
+
+
+@dataclass
+class ModelContext:
+    """Context from model training/loading phase."""
+    ar1_detector: Optional[Any] = None
+    pca_detector: Optional[Any] = None
+    iforest_detector: Optional[Any] = None
+    gmm_detector: Optional[Any] = None
+    omr_detector: Optional[Any] = None
+    regime_model: Optional[Any] = None
+    models_fitted: bool = False
+    refit_requested: bool = False
+    detector_cache: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class ScoreContext:
+    """Context from scoring phase."""
+    frame: pd.DataFrame  # Contains all z-scores
+    train_frame: pd.DataFrame
+    calibrators: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass  
+class FusionContext:
+    """Context from fusion phase."""
+    frame: pd.DataFrame  # With fused scores, health, episodes
+    episodes: pd.DataFrame
+    fusion_weights: Dict[str, float] = field(default_factory=dict)
+    health_stats: Dict[str, Any] = field(default_factory=dict)
+
 
 def _configure_logging(logging_cfg, args):
     """Apply CLI/config logging overrides and return flags."""
