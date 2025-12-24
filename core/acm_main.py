@@ -1972,6 +1972,114 @@ def _normalize_episodes_schema(
     return episodes, frame
 
 
+def _write_pca_artifacts(
+    output_manager: Any,
+    pca_detector: Any,
+    frame: pd.DataFrame,
+    train: pd.DataFrame,
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str,
+    spe_p95_train: float,
+    t2_p95_train: float,
+    cfg: Dict[str, Any],
+) -> Tuple[int, int, int]:
+    """Write PCA model, loadings, and metrics to SQL tables.
+    
+    This helper consolidates all PCA-related SQL writes:
+    - ACM_PCAModel: Model metadata, thresholds, scaler config
+    - ACM_PCALoadings: Component loadings per sensor
+    - ACM_PCAMetrics: P95 SPE/T2 score stats, variance explained
+    
+    Args:
+        output_manager: OutputManager instance for SQL writes
+        pca_detector: PCA detector instance with pca and scaler attributes
+        frame: Scored frame DataFrame with pca_spe and pca_t2 columns
+        train: Training DataFrame with sensor columns
+        run_id: Current run UUID
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        spe_p95_train: P95 SPE threshold from training data
+        t2_p95_train: P95 T2 threshold from training data
+        cfg: Config dictionary with runtime settings
+        
+    Returns:
+        Tuple of (rows_pca_model, rows_pca_load, rows_pca_metrics)
+    """
+    rows_pca_model = rows_pca_load = rows_pca_metrics = 0
+    
+    try:
+        now_utc = pd.Timestamp.now()
+        pca_model = getattr(pca_detector, "pca", None)
+
+        # PCA Model row (TRAIN window used)
+        var_ratio = getattr(pca_model, "explained_variance_ratio_", None)
+        var_json = json.dumps(var_ratio.tolist()) if var_ratio is not None else "[]"
+
+        # Capture actual scaler type from PCA detector
+        scaler_name = pca_detector.scaler.__class__.__name__ if hasattr(pca_detector, 'scaler') else "StandardScaler"
+        scaler_params = {}
+        if hasattr(pca_detector, 'scaler'):
+            scaler_params["with_mean"] = getattr(pca_detector.scaler, 'with_mean', True)
+            scaler_params["with_std"] = getattr(pca_detector.scaler, 'with_std', True)
+        else:
+            scaler_params = {"with_mean": True, "with_std": True}
+        
+        scaling_spec = json.dumps({"scaler": scaler_name, **scaler_params})
+        model_row = {
+            "RunID": run_id or "",
+            "EquipID": int(equip_id),
+            "EntryDateTime": now_utc,
+            "NComponents": int(getattr(pca_model, "n_components_", getattr(pca_model, "n_components", 0))),
+            "TargetVar": json.dumps({"SPE_P95_train": spe_p95_train, "T2_P95_train": t2_p95_train}),
+            "VarExplainedJSON": var_json,
+            "ScalingSpecJSON": scaling_spec,
+            "ModelVersion": cfg.get("runtime", {}).get("version", "v5.0.0"),
+            "TrainStartEntryDateTime": train.index.min() if len(train.index) else None,
+            "TrainEndEntryDateTime": train.index.max() if len(train.index) else None
+        }
+        rows_pca_model = output_manager.write_pca_model(model_row)
+
+        # PCA Loadings
+        comps = getattr(pca_model, "components_", None)
+        if comps is not None and hasattr(train, "columns"):
+            load_rows = []
+            for k in range(comps.shape[0]):
+                for j, sensor in enumerate(train.columns):
+                    load_rows.append({
+                        "RunID": run_id or "",
+                        "EntryDateTime": now_utc,
+                        "ComponentNo": int(k + 1),
+                        "Sensor": str(sensor),
+                        "Loading": float(comps[k, j])
+                    })
+            df_load = pd.DataFrame(load_rows)
+            rows_pca_load = output_manager.write_pca_loadings(df_load, run_id or "")
+
+        # PCA Metrics
+        spe_p95 = float(np.nanpercentile(frame["pca_spe"].to_numpy(dtype=np.float32), 95)) if "pca_spe" in frame.columns else None
+        t2_p95 = float(np.nanpercentile(frame["pca_t2"].to_numpy(dtype=np.float32), 95)) if "pca_t2" in frame.columns else None
+
+        var90_n = None
+        if var_ratio is not None:
+            csum = np.cumsum(var_ratio)
+            var90_n = int(np.searchsorted(csum, 0.90) + 1)
+        df_metrics = pd.DataFrame([{
+            "RunID": run_id or "",
+            "EntryDateTime": now_utc,
+            "Var90_N": var90_n,
+            "ReconRMSE": None,
+            "P95_ReconRMSE": spe_p95,
+            "Notes": json.dumps({"SPE_P95_score": spe_p95, "T2_P95_score": t2_p95})
+        }])
+        rows_pca_metrics = output_manager.write_pca_metrics(df_metrics, run_id or "")
+    except Exception as e:
+        Console.warn(f"PCA artifacts write skipped: {e}", component="SQL",
+                     equip=equip, run_id=run_id, error=str(e)[:200])
+    
+    return rows_pca_model, rows_pca_load, rows_pca_metrics
+
+
 # =======================
 
 
@@ -4637,79 +4745,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              equip=equip, run_id=run_id, error=str(e)[:200])
 
         # 5) PCA Model / Loadings / Metrics
-        rows_pca_model = rows_pca_load = rows_pca_metrics = 0
         with T.section("sql.pca"):
-            try:
-                now_utc = pd.Timestamp.now()
-                pca_model = getattr(pca_detector, "pca", None) # type: ignore
-
-                # PCA Model row (TRAIN window used)
-                var_ratio = getattr(pca_model, "explained_variance_ratio_", None)
-                var_json = json.dumps(var_ratio.tolist()) if var_ratio is not None else "[]"
-                
-                # Use TRAIN-based thresholds computed earlier in calibration section
-                # (spe_p95_train, t2_p95_train are already available from TRAIN data)
-
-                # Capture actual scaler type from PCA detector
-                scaler_name = pca_detector.scaler.__class__.__name__ if hasattr(pca_detector, 'scaler') else "StandardScaler"
-                scaler_params = {}
-                if hasattr(pca_detector, 'scaler'):
-                    scaler_params["with_mean"] = getattr(pca_detector.scaler, 'with_mean', True)
-                    scaler_params["with_std"] = getattr(pca_detector.scaler, 'with_std', True)
-                else:
-                    scaler_params = {"with_mean": True, "with_std": True}
-                
-                scaling_spec = json.dumps({"scaler": scaler_name, **scaler_params})
-                model_row = {
-                    "RunID": run_id or "",
-                    "EquipID": int(equip_id),
-                    "EntryDateTime": now_utc,
-                    "NComponents": int(getattr(pca_model, "n_components_", getattr(pca_model, "n_components", 0))),
-                    "TargetVar": json.dumps({"SPE_P95_train": spe_p95_train, "T2_P95_train": t2_p95_train}),
-                    "VarExplainedJSON": var_json,
-                    "ScalingSpecJSON": scaling_spec,
-                    "ModelVersion": cfg.get("runtime", {}).get("version", "v5.0.0"),
-                    "TrainStartEntryDateTime": train.index.min() if len(train.index) else None,
-                    "TrainEndEntryDateTime": train.index.max() if len(train.index) else None
-                }
-                rows_pca_model = output_manager.write_pca_model(model_row)
-
-                # PCA Loadings
-                comps = getattr(pca_model, "components_", None)
-                if comps is not None and hasattr(train, "columns"):
-                    load_rows = []
-                    for k in range(comps.shape[0]):
-                        for j, sensor in enumerate(train.columns):
-                            load_rows.append({
-                                "RunID": run_id or "",
-                                "EntryDateTime": now_utc,
-                                "ComponentNo": int(k + 1),
-                                "Sensor": str(sensor),
-                                "Loading": float(comps[k, j])
-                            })
-                    df_load = pd.DataFrame(load_rows)
-                    rows_pca_load = output_manager.write_pca_loadings(df_load, run_id or "")
-
-                # PCA Metrics
-                spe_p95 = float(np.nanpercentile(frame["pca_spe"].to_numpy(dtype=np.float32), 95)) if "pca_spe" in frame.columns else None
-                t2_p95  = float(np.nanpercentile(frame["pca_t2"].to_numpy(dtype=np.float32),  95)) if "pca_t2"  in frame.columns else None
-
-                var90_n = None
-                if var_ratio is not None:
-                    csum = np.cumsum(var_ratio)
-                    var90_n = int(np.searchsorted(csum, 0.90) + 1)
-                df_metrics = pd.DataFrame([{
-                    "RunID": run_id or "",
-                    "EntryDateTime": now_utc,
-                    "Var90_N": var90_n,
-                    "ReconRMSE": None,
-                    "P95_ReconRMSE": spe_p95, # This is the score-based P95 SPE
-                    "Notes": json.dumps({"SPE_P95_score": spe_p95, "T2_P95_score": t2_p95})
-                }])
-                rows_pca_metrics = output_manager.write_pca_metrics(df_metrics, run_id or "")
-            except Exception as e:
-                Console.warn(f"PCA artifacts write skipped: {e}", component="SQL",
-                             equip=equip, run_id=run_id, error=str(e)[:200])
+            rows_pca_model, rows_pca_load, rows_pca_metrics = _write_pca_artifacts(
+                output_manager=output_manager,
+                pca_detector=pca_detector,
+                frame=frame,
+                train=train,
+                run_id=run_id,
+                equip_id=equip_id,
+                equip=equip,
+                spe_p95_train=spe_p95_train,
+                t2_p95_train=t2_p95_train,
+                cfg=cfg,
+            )
 
         # Aggregate row counts for finalize
         rows_written = int(rows_scores + rows_drift + rows_events + rows_regimes + rows_pca_model + rows_pca_load + rows_pca_metrics)
