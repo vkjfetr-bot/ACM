@@ -228,6 +228,9 @@ class ModelContext:
     models_fitted: bool = False
     refit_requested: bool = False
     detector_cache: Optional[Dict[str, Any]] = None
+    # Cached PCA train scores to eliminate double computation in calibration
+    pca_train_spe: Optional[np.ndarray] = None
+    pca_train_t2: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -893,6 +896,141 @@ def _calibrate_all_detectors(
             calibrators[name] = cal
     
     return score_frame, calibrators
+
+
+def _fit_all_detectors(
+    train: pd.DataFrame,
+    cfg: Dict[str, Any],
+    ar1_enabled: bool,
+    pca_enabled: bool,
+    iforest_enabled: bool,
+    gmm_enabled: bool,
+    omr_enabled: bool,
+    ar1_detector: Optional[Any] = None,
+    pca_detector: Optional[Any] = None,
+    iforest_detector: Optional[Any] = None,
+    gmm_detector: Optional[Any] = None,
+    omr_detector: Optional[Any] = None,
+    output_manager: Optional[Any] = None,
+    sql_client: Optional[Any] = None,
+    run_id: Optional[str] = None,
+    equip_id: int = 0,
+    equip: str = "",
+    tables_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Fit all enabled detectors that haven't been loaded from cache.
+    
+    Args:
+        train: Training data DataFrame
+        cfg: Configuration dict
+        ar1_enabled..omr_enabled: Whether each detector is enabled
+        ar1_detector..omr_detector: Existing detectors (skip fitting if not None)
+        output_manager: OutputManager for writing PCA metrics
+        sql_client: SQL client for OMR diagnostics
+        run_id, equip_id, equip: Identifiers for logging/SQL
+        tables_dir: Output directory for diagnostics
+    
+    Returns:
+        Dict with keys:
+            - ar1_detector, pca_detector, iforest_detector, gmm_detector, omr_detector
+            - pca_train_spe, pca_train_t2 (cached PCA scores)
+            - fit_time_sec (total fitting time)
+    """
+    result = {
+        "ar1_detector": ar1_detector,
+        "pca_detector": pca_detector,
+        "iforest_detector": iforest_detector,
+        "gmm_detector": gmm_detector,
+        "omr_detector": omr_detector,
+        "pca_train_spe": None,
+        "pca_train_t2": None,
+        "fit_time_sec": 0.0,
+    }
+    
+    fit_start_time = time.perf_counter()
+    
+    # AR1 Detector
+    if ar1_enabled and result["ar1_detector"] is None:
+        Console.info("Fitting AR1 detector...", component="MODEL")
+        ar1_cfg = cfg.get("models", {}).get("ar1", {}) or {}
+        result["ar1_detector"] = AR1Detector(ar1_cfg=ar1_cfg).fit(train)
+        Console.info(f"AR1 detector fitted (samples={len(train)})", component="AR1", samples=len(train))
+    
+    # PCA Subspace Detector
+    if pca_enabled and result["pca_detector"] is None:
+        Console.info("Fitting PCA detector...", component="MODEL")
+        pca_cfg = cfg.get("models", {}).get("pca", {}) or {}
+        Console.info(f"Fit start: train shape={train.shape}", component="PCA")
+        t_pca_fit = time.perf_counter()
+        result["pca_detector"] = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
+        Console.info(f"Fit complete in {time.perf_counter()-t_pca_fit:.3f}s", component="PCA")
+        Console.info(f"Subspace detector fitted with {result['pca_detector'].pca.n_components_} components.", component="PCA")
+        # Cache TRAIN raw PCA scores to eliminate double computation in calibration
+        result["pca_train_spe"], result["pca_train_t2"] = result["pca_detector"].score(train)
+        Console.info(f"Cached train scores: SPE={len(result['pca_train_spe'])} samples, T²={len(result['pca_train_t2'])} samples", component="PCA")
+        if output_manager is not None:
+            output_manager.write_pca_metrics(
+                pca_detector=result["pca_detector"],
+                tables_dir=tables_dir,
+                enable_sql=(sql_client is not None)
+            )
+    
+    # Isolation Forest Detector
+    if iforest_enabled and result["iforest_detector"] is None:
+        Console.info("Fitting IForest detector...", component="MODEL")
+        if_cfg = cfg.get("models", {}).get("iforest", {}) or {}
+        result["iforest_detector"] = outliers.IsolationForestDetector(if_cfg=if_cfg).fit(train)
+        Console.info(f"IForest detector fitted (samples={len(train)}, estimators={if_cfg.get('n_estimators', 100)})", component="IFOREST", samples=len(train))
+    
+    # GMM Detector
+    if gmm_enabled and result["gmm_detector"] is None:
+        Console.info("Fitting GMM detector (may take time with large data)...", component="MODEL")
+        gmm_cfg = cfg.get("models", {}).get("gmm", {}) or {}
+        gmm_cfg.setdefault("covariance_type", "full")
+        gmm_cfg.setdefault("reg_covar", 1e-3)
+        gmm_cfg.setdefault("n_init", 3)
+        gmm_cfg.setdefault("random_state", 42)
+        result["gmm_detector"] = outliers.GMMDetector(gmm_cfg=gmm_cfg).fit(train)
+        Console.info(f"GMM detector fitted (samples={len(train)}, components={gmm_cfg.get('n_components', 1)})", component="GMM", samples=len(train))
+    
+    # OMR Detector
+    if omr_enabled and result["omr_detector"] is None:
+        Console.info("Fitting OMR detector...", component="MODEL")
+        omr_cfg = cfg.get("models", {}).get("omr", {}) or {}
+        result["omr_detector"] = OMRDetector(cfg=omr_cfg).fit(train)
+        # OMR-UPGRADE: Capture diagnostics and write to SQL
+        if result["omr_detector"]._is_fitted and sql_client is not None:
+            try:
+                omr_diagnostics = result["omr_detector"].get_diagnostics()
+                if omr_diagnostics.get("fitted") and output_manager is not None:
+                    diag_df = pd.DataFrame([{
+                        "RunID": run_id,
+                        "EquipID": equip_id,
+                        "ModelType": omr_diagnostics["model_type"],
+                        "NComponents": omr_diagnostics["n_components"],
+                        "TrainSamples": omr_diagnostics["n_samples"],
+                        "TrainFeatures": omr_diagnostics["n_features"],
+                        "TrainResidualStd": omr_diagnostics["train_residual_std"],
+                        "CalibrationStatus": "VALID",
+                        "FitTimestamp": pd.Timestamp.now()
+                    }])
+                    output_manager.write_dataframe(
+                        diag_df,
+                        tables_dir / "omr_diagnostics.csv" if tables_dir else Path("."),
+                        sql_table="ACM_OMR_Diagnostics",
+                        add_created_at=True
+                    )
+                    Console.info(f"Diagnostics written: {omr_diagnostics['model_type'].upper()} model", component="OMR")
+            except Exception as e:
+                Console.warn(f"Failed to write diagnostics: {e}", component="OMR",
+                             equip=equip, error=str(e)[:200])
+        Console.info(f"OMR detector fitted (samples={len(train)}, features={train.shape[1]})", component="OMR", samples=len(train), features=train.shape[1])
+    
+    result["fit_time_sec"] = time.perf_counter() - fit_start_time
+    Console.info(f"All detectors fitted in {result['fit_time_sec']:.2f}s", component="MODEL")
+    
+    return result
 
 
 # =======================
@@ -2194,93 +2332,35 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             
             with T.section("train.detector_fit"):
                 Console.info("Starting detector fitting...", component="MODEL")
-                fit_start_time = time.perf_counter()
+                fit_result = _fit_all_detectors(
+                    train=train,
+                    cfg=cfg,
+                    ar1_enabled=ar1_enabled,
+                    pca_enabled=pca_enabled,
+                    iforest_enabled=iforest_enabled,
+                    gmm_enabled=gmm_enabled,
+                    omr_enabled=omr_enabled,
+                    ar1_detector=ar1_detector,
+                    pca_detector=pca_detector,
+                    iforest_detector=iforest_detector,
+                    gmm_detector=gmm_detector,
+                    omr_detector=omr_detector,
+                    output_manager=output_manager,
+                    sql_client=sql_client,
+                    run_id=run_id,
+                    equip_id=equip_id,
+                    equip=equip,
+                    tables_dir=tables_dir,
+                )
                 
-                # AR1 Detector
-                if ar1_enabled and not ar1_detector:
-                    Console.info("Fitting AR1 detector...", component="MODEL")
-                    with T.section("fit.ar1"):
-                        ar1_cfg = cfg.get("models", {}).get("ar1", {}) or {}
-                        ar1_detector = AR1Detector(ar1_cfg=ar1_cfg).fit(train)
-                        Console.info(f"AR1 detector fitted (samples={len(train)})", component="AR1", samples=len(train))
-                
-                # PCA Subspace Detector
-                if pca_enabled and not pca_detector:
-                    Console.info("Fitting PCA detector...", component="MODEL")
-                    with T.section("fit.pca"):
-                        pca_cfg = cfg.get("models", {}).get("pca", {}) or {}
-                        Console.info(f"Fit start: train shape={train.shape}", component="PCA")
-                        t_pca_fit = time.perf_counter()
-                        pca_detector = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
-                        Console.info(f"Fit complete in {time.perf_counter()-t_pca_fit:.3f}s", component="PCA")
-                        Console.info(f"Subspace detector fitted with {pca_detector.pca.n_components_} components.", component="PCA")
-                        # Cache TRAIN raw PCA scores to eliminate double computation in calibration
-                        pca_train_spe, pca_train_t2 = pca_detector.score(train)
-                        Console.info(f"Cached train scores: SPE={len(pca_train_spe)} samples, TÂ²={len(pca_train_t2)} samples", component="PCA")
-                        if output_manager:
-                            output_manager.write_pca_metrics(
-                                pca_detector=pca_detector,
-                                tables_dir=tables_dir,
-                                enable_sql=(sql_client is not None)
-                            )
-                
-                # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
-                
-                # Isolation Forest Detector
-                if iforest_enabled and not iforest_detector:
-                    Console.info("Fitting IForest detector...", component="MODEL")
-                    with T.section("fit.iforest"):
-                        if_cfg = cfg.get("models", {}).get("iforest", {}) or {}
-                        iforest_detector = outliers.IsolationForestDetector(if_cfg=if_cfg).fit(train)
-                        Console.info(f"IForest detector fitted (samples={len(train)}, estimators={if_cfg.get('n_estimators', 100)})", component="IFOREST", samples=len(train))
-                
-                # GMM Detector
-                if gmm_enabled and not gmm_detector:
-                    Console.info("Fitting GMM detector (may take time with large data)...", component="MODEL")
-                    with T.section("fit.gmm"):
-                        gmm_cfg = cfg.get("models", {}).get("gmm", {}) or {}
-                        gmm_cfg.setdefault("covariance_type", "full")
-                        gmm_cfg.setdefault("reg_covar", 1e-3)
-                        gmm_cfg.setdefault("n_init", 3)
-                        gmm_cfg.setdefault("random_state", 42)
-                        gmm_detector = outliers.GMMDetector(gmm_cfg=gmm_cfg).fit(train)
-                        Console.info(f"GMM detector fitted (samples={len(train)}, components={gmm_cfg.get('n_components', 1)})", component="GMM", samples=len(train))
-                
-                # OMR Detector
-                if omr_enabled and not omr_detector:
-                    Console.info("Fitting OMR detector...", component="MODEL")
-                    with T.section("fit.omr"):
-                        omr_cfg = cfg.get("models", {}).get("omr", {}) or {}
-                        omr_detector = OMRDetector(cfg=omr_cfg).fit(train)
-                        # OMR-UPGRADE: Capture diagnostics and write to SQL
-                        if omr_detector._is_fitted and sql_client:
-                            try:
-                                omr_diagnostics = omr_detector.get_diagnostics()
-                                if omr_diagnostics.get("fitted"):
-                                    diag_df = pd.DataFrame([{
-                                        "RunID": run_id,
-                                        "EquipID": equip_id,
-                                        "ModelType": omr_diagnostics["model_type"],
-                                        "NComponents": omr_diagnostics["n_components"],
-                                        "TrainSamples": omr_diagnostics["n_samples"],
-                                        "TrainFeatures": omr_diagnostics["n_features"],
-                                        "TrainResidualStd": omr_diagnostics["train_residual_std"],
-                                        "CalibrationStatus": "VALID",
-                                        "FitTimestamp": pd.Timestamp.now()
-                                    }])
-                                    output_manager.write_dataframe(
-                                        diag_df,
-                                        run_dir / "tables" / "omr_diagnostics.csv",
-                                        sql_table="ACM_OMR_Diagnostics",
-                                        add_created_at=True
-                                    )
-                                    Console.info(f"Diagnostics written: {omr_diagnostics['model_type'].upper()} model", component="OMR")
-                            except Exception as e:
-                                Console.warn(f"Failed to write diagnostics: {e}", component="OMR",
-                                             equip=equip, error=str(e)[:200])
-                        Console.info(f"OMR detector fitted (samples={len(train)}, features={train.shape[1]})", component="OMR", samples=len(train), features=train.shape[1])
-
-                Console.info(f"All detectors fitted in {time.perf_counter()-fit_start_time:.2f}s", component="MODEL")
+                # Extract fitted detectors
+                ar1_detector = fit_result["ar1_detector"]
+                pca_detector = fit_result["pca_detector"]
+                iforest_detector = fit_result["iforest_detector"]
+                gmm_detector = fit_result["gmm_detector"]
+                omr_detector = fit_result["omr_detector"]
+                pca_train_spe = fit_result["pca_train_spe"]
+                pca_train_t2 = fit_result["pca_train_t2"]
 
         # Validate required detectors are present (skip disabled ones) - MHAL removed v9.1.0
         required_detectors = []
@@ -2568,18 +2648,29 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         )
                         record_model_refit(equip, reason=retrain_reason, detector="all")
                         
-                        if ar1_enabled:
-                            ar1_detector = AR1Detector(ar1_cfg=(cfg.get("models", {}).get("ar1", {}) or {})).fit(train)
-                        if pca_enabled:
-                            pca_cfg = (cfg.get("models", {}).get("pca", {}) or {})
-                            pca_detector = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
-                            pca_train_spe, pca_train_t2 = pca_detector.score(train)
-                        if iforest_enabled:
-                            iforest_cfg = (cfg.get("models", {}).get("iforest", {}) or {})
-                            iforest_detector = outliers.IsolationForestDetector(iforest_cfg=iforest_cfg).fit(train)
-                        if gmm_enabled:
-                            gmm_cfg = (cfg.get("models", {}).get("gmm", {}) or {})
-                            gmm_detector = outliers.GaussianMixtureDetector(gmm_cfg=gmm_cfg).fit(train)
+                        # Use the helper function for consistent fitting
+                        retrain_result = _fit_all_detectors(
+                            train=train,
+                            cfg=cfg,
+                            ar1_enabled=ar1_enabled,
+                            pca_enabled=pca_enabled,
+                            iforest_enabled=iforest_enabled,
+                            gmm_enabled=gmm_enabled,
+                            omr_enabled=omr_enabled,
+                            output_manager=output_manager,
+                            sql_client=sql_client,
+                            run_id=run_id,
+                            equip_id=equip_id,
+                            equip=equip,
+                            tables_dir=tables_dir,
+                        )
+                        ar1_detector = retrain_result["ar1_detector"]
+                        pca_detector = retrain_result["pca_detector"]
+                        iforest_detector = retrain_result["iforest_detector"]
+                        gmm_detector = retrain_result["gmm_detector"]
+                        omr_detector = retrain_result["omr_detector"]
+                        pca_train_spe = retrain_result["pca_train_spe"]
+                        pca_train_t2 = retrain_result["pca_train_t2"]
                         
                 except Exception as e:
                     Console.warn(f"Quality assessment failed: {e}", component="MODEL",
