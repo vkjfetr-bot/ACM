@@ -845,6 +845,56 @@ def _score_all_detectors(
     return frame, omr_contributions_data
 
 
+def _calibrate_all_detectors(
+    train_frame: pd.DataFrame,
+    score_frame: pd.DataFrame,
+    cal_q: float,
+    self_tune_cfg: Dict[str, Any],
+    fit_regimes: Optional[np.ndarray],
+    transform_regimes: Optional[np.ndarray],
+    omr_enabled: bool = True,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Fit calibrators on TRAIN data and transform SCORE data.
+    
+    Args:
+        train_frame: DataFrame with raw scores from train data
+        score_frame: DataFrame with raw scores from score data (will be modified)
+        cal_q: Calibration quantile (e.g., 0.98)
+        self_tune_cfg: Self-tuning configuration dict
+        fit_regimes: Regime labels for training (or None)
+        transform_regimes: Regime labels for scoring (or None)
+        omr_enabled: Whether OMR detector is enabled
+    
+    Returns:
+        Tuple of (score_frame with z-scores added, dict of calibrators)
+    """
+    calibrators = {}
+    
+    # Define calibration mappings: (raw_col, z_col, name)
+    calibration_spec = [
+        ("ar1_raw", "ar1_z", "ar1_z"),
+        ("pca_spe", "pca_spe_z", "pca_spe_z"),
+        ("pca_t2", "pca_t2_z", "pca_t2_z"),
+        ("iforest_raw", "iforest_z", "iforest_z"),
+        ("gmm_raw", "gmm_z", "gmm_z"),
+    ]
+    if omr_enabled:
+        calibration_spec.append(("omr_raw", "omr_z", "omr_z"))
+    
+    for raw_col, z_col, name in calibration_spec:
+        if raw_col in train_frame.columns and raw_col in score_frame.columns:
+            cal = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name=name).fit(
+                train_frame[raw_col].to_numpy(copy=False), regime_labels=fit_regimes
+            )
+            score_frame[z_col] = cal.transform(
+                score_frame[raw_col].to_numpy(copy=False), regime_labels=transform_regimes
+            )
+            calibrators[name] = cal
+    
+    return score_frame, calibrators
+
+
 # =======================
 
 
@@ -2668,42 +2718,24 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             # Surface per-regime calibration activity
             frame["per_regime_active"] = 1 if quality_ok else 0
             
-            # AR1: Fit on TRAIN, transform SCORE
-            cal_ar = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name="ar1_z").fit(
-                train_frame["ar1_raw"].to_numpy(copy=False), regime_labels=fit_regimes
+            # REFACTOR v11: Use helper function for calibration
+            frame, calibrators_dict = _calibrate_all_detectors(
+                train_frame=train_frame,
+                score_frame=frame,
+                cal_q=cal_q,
+                self_tune_cfg=self_tune_cfg,
+                fit_regimes=fit_regimes,
+                transform_regimes=transform_regimes,
+                omr_enabled=omr_enabled,
             )
-            frame["ar1_z"] = cal_ar.transform(frame["ar1_raw"].to_numpy(copy=False), regime_labels=transform_regimes)
             
-            # PCA SPE: Fit on TRAIN, transform SCORE
-            cal_pca_spe = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name="pca_spe_z").fit(
-                train_frame["pca_spe"].to_numpy(copy=False), regime_labels=fit_regimes
-            )
-            frame["pca_spe_z"] = cal_pca_spe.transform(frame["pca_spe"].to_numpy(copy=False), regime_labels=transform_regimes)
-            
-            # PCA TÂ²: Fit on TRAIN, transform SCORE
-            cal_pca_t2 = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name="pca_t2_z").fit(
-                train_frame["pca_t2"].to_numpy(copy=False), regime_labels=fit_regimes
-            )
-            frame["pca_t2_z"] = cal_pca_t2.transform(frame["pca_t2"].to_numpy(copy=False), regime_labels=transform_regimes)
-            
-            # IsolationForest: Fit on TRAIN, transform SCORE
-            cal_if = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name="iforest_z").fit(
-                train_frame["iforest_raw"].to_numpy(copy=False), regime_labels=fit_regimes
-            )
-            frame["iforest_z"] = cal_if.transform(frame["iforest_raw"].to_numpy(copy=False), regime_labels=transform_regimes)
-            
-            # GMM: Fit on TRAIN, transform SCORE
-            cal_gmm = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name="gmm_z").fit(
-                train_frame["gmm_raw"].to_numpy(copy=False), regime_labels=fit_regimes
-            )
-            frame["gmm_z"] = cal_gmm.transform(frame["gmm_raw"].to_numpy(copy=False), regime_labels=transform_regimes)
-            
-            # OMR: Fit on TRAIN, transform SCORE
-            if omr_enabled and "omr_raw" in train_frame.columns and "omr_raw" in frame.columns:
-                cal_omr = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name="omr_z").fit(
-                    train_frame["omr_raw"].to_numpy(copy=False), regime_labels=fit_regimes
-                )
-                frame["omr_z"] = cal_omr.transform(frame["omr_raw"].to_numpy(copy=False), regime_labels=transform_regimes)
+            # Extract calibrators for later use
+            cal_ar = calibrators_dict.get("ar1_z")
+            cal_pca_spe = calibrators_dict.get("pca_spe_z")
+            cal_pca_t2 = calibrators_dict.get("pca_t2_z")
+            cal_if = calibrators_dict.get("iforest_z")
+            cal_gmm = calibrators_dict.get("gmm_z")
+            cal_omr = calibrators_dict.get("omr_z")
 
             # Compute TRAIN z-scores for PCA metrics (needed for SQL metadata)
             # Robust to cache reuse - uses train_frame which is always computed
