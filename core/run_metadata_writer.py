@@ -13,7 +13,7 @@ Called at the end of every ACM run (success or failure).
 from datetime import datetime, timezone
 from typing import Optional
 import pandas as pd
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 def write_run_metadata(

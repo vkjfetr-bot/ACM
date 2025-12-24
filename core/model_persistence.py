@@ -52,7 +52,7 @@ from io import BytesIO
 from dataclasses import dataclass, asdict
 import pandas as pd
 import numpy as np
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 # Import tracing support (optional)
 try:

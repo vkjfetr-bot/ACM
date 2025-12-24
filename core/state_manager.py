@@ -23,7 +23,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 import pyodbc
 
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 @dataclass

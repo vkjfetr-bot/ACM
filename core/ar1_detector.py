@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple, Literal, Optional
 import numpy as np
 import pandas as pd
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
 
 # Minimum samples required for AR(1) model coefficient estimation
 MIN_AR1_SAMPLES = 3

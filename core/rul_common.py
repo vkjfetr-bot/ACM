@@ -16,7 +16,7 @@ import pandas as pd
 
 # Import Console for logging
 try:
-    from core.observability import Console, Heartbeat
+    from core.observability import Console
 except ImportError:
     class Console:
         @staticmethod

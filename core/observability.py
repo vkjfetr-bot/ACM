@@ -9,7 +9,7 @@ COMPONENTS:
 - OpenTelemetry: Traces to Tempo, Metrics to Prometheus, Logs to Loki
 
 API:
-    from core.observability import log, Console, Span, traced, Progress, init
+    from core.observability import log, Console, Span, traced, init
 
     # Initialize at startup (optional - works without init for basic logging)
     init(equipment="FD_FAN", equip_id=1, run_id="abc-123")
@@ -22,12 +22,6 @@ API:
     # Console - backwards compatible wrapper
     Console.info("Loaded 5000 rows", component="DATA")
     Console.warn("Warning message", component="MODEL")
-
-    # Progress - uses rich.progress (replaces Heartbeat)
-    with Progress("Loading data") as p:
-        for i in range(100):
-            # work
-            p.advance()
 
     # Spans - OpenTelemetry traces
     with Span("fit.pca"):
@@ -963,42 +957,6 @@ class Console:
             >>> --- Starting coldstart ---
         """
         Console.status(f"--- {title} ---")
-
-
-# =============================================================================
-# PROGRESS / HEARTBEAT - Complete No-Op
-# =============================================================================
-
-class Progress:
-    """
-    No-op progress indicator. All methods are stubs for backward compatibility.
-    """
-    
-    def __init__(self, description: str = "", *args, **kwargs):
-        pass
-    
-    def __enter__(self) -> "Progress":
-        return self
-    
-    def __exit__(self, *args) -> None:
-        pass
-    
-    def start(self) -> "Progress":
-        return self
-    
-    def stop(self) -> None:
-        pass
-    
-    def advance(self, amount: float = 1) -> None:
-        pass
-    
-    def track(self, iterable, total: Optional[int] = None):
-        yield from iterable
-
-
-# Backwards compatibility alias
-Heartbeat = Progress
-
 
 # =============================================================================
 # SPANS - OpenTelemetry Tracing
@@ -2646,8 +2604,6 @@ __all__ = [
     "get_trace_context",  # Utility to get current trace_id/span_id
     "log",
     "Console",
-    "Progress",
-    "Heartbeat",  # Alias for Progress
     "Span",
     "traced",
     "record_batch",

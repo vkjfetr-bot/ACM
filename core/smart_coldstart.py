@@ -15,7 +15,7 @@ Date: November 13, 2025
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
 import pandas as pd
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 class ColdstartState:

@@ -21,7 +21,7 @@ from typing import Dict, Optional
 import numpy as np
 from scipy import stats
 
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 def compute_mae(actual: np.ndarray, forecast: np.ndarray) -> float:

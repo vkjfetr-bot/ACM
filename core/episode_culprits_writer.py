@@ -14,7 +14,7 @@ import re
 from typing import List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
-from core.observability import Console, Heartbeat
+from core.observability import Console
 from utils.detector_labels import get_detector_label, format_culprit_label
 
 

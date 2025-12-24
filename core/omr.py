@@ -305,7 +305,7 @@ class OMRDetector:
         Returns:
             self (fitted)
         """
-        from core.observability import Console, Heartbeat, Span
+        from core.observability import Console, Span
         
         with Span("fit.omr", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
             # Validate input
@@ -469,7 +469,7 @@ class OMRDetector:
             omr_z: OMR z-scores (n_samples,)
             contributions: Optional DataFrame of per-sensor squared residuals (n_samples, n_features)
         """
-        from core.observability import Console, Heartbeat, Span
+        from core.observability import Console, Span
         
         with Span("score.omr", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
             if not self._is_fitted or self.model is None:

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
 from utils.detector_labels import format_culprit_label
 
 import numpy as np

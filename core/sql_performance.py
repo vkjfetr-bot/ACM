@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 import pandas as pd
 import numpy as np
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 class SQLPerformanceMonitor:

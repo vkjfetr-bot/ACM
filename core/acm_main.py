@@ -29,10 +29,6 @@ try:
     # import ONLY core modules relatively
     from . import regimes, drift, fuse
     from . import correlation, outliers
-    try:
-        from . import river_models  # Optional: streaming models (requires river library)
-    except ImportError:
-        river_models = None  # Graceful fallback if river not installed
     from .ar1_detector import AR1Detector  # Extracted from forecasting.py
     from . import fast_features
     from .forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
@@ -42,10 +38,6 @@ except ImportError:
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
     from core import regimes, drift, fuse
     from core import correlation, outliers
-    try:
-        from core import river_models  # Optional: streaming models (requires river library)
-    except ImportError:
-        river_models = None  # Graceful fallback if river not installed
     from core.ar1_detector import AR1Detector
     from core.forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
     # DEPRECATED: from core import storage  # Use output_manager instead
@@ -55,8 +47,8 @@ except ImportError:
         fast_features = None  # Optional dependency
 
 # Note: models/ directory deleted - all functionality consolidated into core/
-# PCA, IForest, GMM â†’ core/outliers.py and core/correlation.py
-# OMR â†’ core/omr.py (OMRDetector class)
+# PCA, IForest, GMM core/outliers.py and core/correlation.py
+# OMR core/omr.py (OMRDetector class)
 from core.omr import OMRDetector  # OMR-02: Overall Model Residual
 
 # Import config history writer for auto-tune logging
@@ -175,17 +167,7 @@ except ImportError:
 
 # Console from observability (backwards compatible)
 # Console is now imported above from core.observability
-from core.observability import Console, Heartbeat
-
-
-
-# Heartbeat logic can be migrated to ACMLog if needed, but for now, use a no-op or keep as is if required.
-def _start_heartbeat(enabled: bool, *args, **kwargs):
-    # No-op heartbeat for now; can be extended to ACMLog progress if needed
-    class _NoOpHeartbeat:
-        def stop(self):
-            return
-    return _NoOpHeartbeat()
+from core.observability import Console
 
 
 def _apply_module_overrides(entries):
@@ -262,139 +244,6 @@ def _nearest_indexer(index: pd.Index, targets: Sequence[Any], label: str = "inde
     locs = np.asarray(locs, dtype=int)
     result[valid_mask] = locs[valid_mask]
     return result
-
-
-def _write_run_meta_json(local_vars: Dict[str, Any]) -> None:
-    """Persist run metadata to meta.json inside the current run directory."""
-    run_dir = local_vars.get("run_dir")
-    if not run_dir:
-        return
-
-    try:
-        run_dir_path = Path(run_dir)
-    except TypeError:
-        Console.warn("Skipped meta.json: invalid run_dir value", component="META",
-                     run_dir_value=str(run_dir)[:100])
-        return
-
-    run_id = local_vars.get("run_id")
-    equip = local_vars.get("equip")
-    equip_id = local_vars.get("equip_id")
-    run_start_time = local_vars.get("run_start_time")
-    run_completion_time = local_vars.get("run_completion_time")
-    if run_completion_time is None and run_start_time is not None:
-        run_completion_time = datetime.now()
-
-    if (not equip_id or equip_id == 0) and equip:
-        try:
-            equip_id = _get_equipment_id(str(equip))
-        except Exception:
-            equip_id = 0
-
-    config_signature = local_vars.get("config_signature")
-    loaded_from_cache = local_vars.get("loaded_from_cache", False)
-    cache_meta = local_vars.get("meta")
-    cache_version = getattr(cache_meta, "version", None)
-    if cache_version is None and isinstance(cache_meta, dict):
-        cache_version = cache_meta.get("version")
-
-    train_obj = local_vars.get("train")
-    score_obj = local_vars.get("score")
-    episodes_obj = local_vars.get("episodes")
-    train_df = train_obj if isinstance(train_obj, pd.DataFrame) else None
-    score_df = score_obj if isinstance(score_obj, pd.DataFrame) else None
-    episodes_df = episodes_obj if isinstance(episodes_obj, pd.DataFrame) else None
-
-    run_metadata = local_vars.get("run_metadata") or {}
-    if not hasattr(run_metadata, "get"):
-        run_metadata = {}
-
-    regime_count_val = local_vars.get("regime_count")
-    regime_count = regime_count_val if isinstance(regime_count_val, (int, np.integer)) else 0
-    silhouette = local_vars.get("silhouette")
-    per_regime_enabled = bool(local_vars.get("per_regime_enabled")) if "per_regime_enabled" in local_vars else False
-
-    data_quality_score = local_vars.get("data_quality_score")
-    refit_flag_path = local_vars.get("refit_flag_path")
-    if isinstance(refit_flag_path, str):
-        refit_flag_path = Path(refit_flag_path)
-
-    try:
-        tables_generated = sum(1 for _ in run_dir_path.glob("tables/*.csv"))
-        charts_generated = sum(1 for _ in run_dir_path.glob("charts/*.png"))
-
-        meta_payload = {
-            "run_id": run_id,
-            "equipment": equip,
-            "equip_id": int(equip_id) if isinstance(equip_id, (int, np.integer)) else equip_id,
-            "started_at": run_start_time.isoformat() if run_start_time else None,
-            "completed_at": run_completion_time.isoformat() if run_completion_time else None,
-            "duration_seconds": (run_completion_time - run_start_time).total_seconds() if run_start_time and run_completion_time else None,
-            "config_signature": config_signature,
-            "cache_status": {
-                "models_loaded_from_cache": bool(loaded_from_cache),
-                "cache_version": cache_version
-            },
-            "data_metrics": {
-                "train_rows": len(train_df) if train_df is not None else 0,
-                "score_rows": len(score_df) if score_df is not None else 0,
-                "sensors_count": len(train_df.columns) if train_df is not None else 0,
-                "kept_sensors": train_df.columns.tolist() if train_df is not None else []
-            },
-            "detection_results": {
-                "episode_count": len(episodes_df) if episodes_df is not None else 0,
-                "health_status": run_metadata.get("health_status", "UNKNOWN"),
-                "avg_health_index": run_metadata.get("avg_health_index"),
-                "min_health_index": run_metadata.get("min_health_index"),
-                "max_fused_z": run_metadata.get("max_fused_z")
-            },
-            "regime_clustering": {
-                "regime_count": regime_count,
-                "quality_score": silhouette,
-                "per_regime_thresholds_enabled": per_regime_enabled
-            },
-            "model_quality": {
-                "data_quality_score": data_quality_score,
-                "refit_requested": (
-                    False if refit_flag_path is None else (
-                        Path(refit_flag_path).exists() if isinstance(refit_flag_path, str) else (
-                            refit_flag_path.exists() if isinstance(refit_flag_path, Path) else False
-                        )
-                    )
-                )
-            },
-            "output_artifacts": {
-                "tables_generated": tables_generated,
-                "charts_generated": charts_generated
-            }
-        }
-
-        meta_path = run_dir_path / "meta.json"
-        # Respect SQL-only mode: skip filesystem metadata when SQL_MODE is true
-        if not bool(local_vars.get("SQL_MODE")):
-            meta_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(meta_path, "w", encoding="utf-8") as handle:
-                json.dump(meta_payload, handle, indent=2, default=str)
-            Console.info(f"Written run metadata to {meta_path}", component="META")
-    except Exception as meta_err:
-        Console.warn(f"Failed to write meta.json: {meta_err}", component="META",
-                     error_type=type(meta_err).__name__, error=str(meta_err)[:200])
-
-
-def _maybe_write_run_meta_json(local_vars: Dict[str, Any]) -> None:
-    """Invoke run metadata writer if it is available in the module globals."""
-    # Enforce SQL-only: do not write meta.json when running in SQL mode
-    try:
-        if bool(local_vars.get('SQL_MODE')):
-            return  # Silent skip - SQL-only mode is the standard
-    except Exception:
-        pass
-    writer = globals().get("_write_run_meta_json")
-    if callable(writer):
-        writer(local_vars)
-    else:
-        Console.warn("meta.json writer unavailable; skipping run metadata dump", component="META",
-                     writer_found=False)
 
 # ===== DRIFT-01: Multi-Feature Drift Detection Helpers =====
 def _compute_drift_trend(drift_series: np.ndarray, window: int = 20) -> float:
@@ -1030,13 +879,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     models_dir = Path(".")  # Dummy models directory for SQL-ONLY mode
     # TASK-7-FIX: Define stable_models_dir to prevent NameError in regime loading fallback
     stable_models_dir = Path("artifacts") / equip_slug / "models"  # Fallback path for legacy code
-
-    # Heartbeat gating
-    heartbeat_on = bool(cfg.get("runtime", {}).get("heartbeat", True))
-
     # SQL MODE: disable legacy joblib cache reuse (SQL-only)
     reuse_models = False  # SQL-ONLY MODE: No filesystem model caching
-    
+ 
     # SQL-ONLY MODE: These variables unused but kept for legacy code compatibility
     refit_flag_path = None
     model_cache_path = None
@@ -1215,12 +1060,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
     try:
         # ===== 1) Load data (legacy CSV path; historian SQL can be wired later) =====
-        hb = _start_heartbeat(
-            heartbeat_on,
-            "Loading data (read -> parse ts -> sort -> resample -> interpolate)",
-            next_hint="build features",
-            eta_hint=eta_load,
-        )
         with T.section("load_data"):
             # Ensure data section exists in config
             if "data" not in cfg:
@@ -1352,7 +1191,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         err_json=None
                     )
                 return
-        hb.stop()
+        
         Console.info(
             f"[DATA] timestamp={meta.timestamp_col} cadence_ok={meta.cadence_ok} "
             f"kept={len(meta.kept_cols)} drop={len(meta.dropped_cols)} "
@@ -2495,12 +2334,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         # Maintain the same ordering as `score` to prevent misalignment when
         # assigning Series by position. Episode mapping uses a nearest-indexer
         # that safely handles non-monotonic indexes, so no sort here.
-        hb = _start_heartbeat(
-            heartbeat_on,
-            "Scoring heads (AR1, Correlation, Outliers)",
-            next_hint="calibration",
-            eta_hint=eta_score,
-        )
         
         # PERF-03: Only score enabled detectors
         # CRITICAL FIX #6: Replace NaN with 0 after all detector .score() calls to prevent NaN propagation
@@ -2550,19 +2383,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         
         Console.info(f"All detectors scored in {time.perf_counter()-score_start_time:.2f}s", component="MODEL")
         
-        hb.stop()
-
-        # ===== Online Learning with River (Optional) =====
-        if cfg.get("river", {}).get("enabled", False):
-            if river_models is not None:
-                with T.section("score.river_ar"):
-                    river_cfg = cfg.get("river", {}) or {}
-                    streaming_detector = river_models.RiverTAD(cfg=river_cfg)
-                    # Note: River models are stateful and process data row-by-row.
-                    frame["river_hst_raw"] = streaming_detector.score(score)
-            else:
-                Console.warn("River streaming models disabled - library not installed (pip install river)", component="RIVER",
-                             equip=equip)
+        
 
         # ===== 4) Regimes (Run before calibration to enable regime-aware thresholds) =====
         train_regime_labels = None
@@ -2925,16 +2746,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     train_frame["omr_raw"].to_numpy(copy=False), regime_labels=fit_regimes
                 )
                 frame["omr_z"] = cal_omr.transform(frame["omr_raw"].to_numpy(copy=False), regime_labels=transform_regimes)
-            
-            # River Half-Space Trees (if enabled)
-            if "river_hst_raw" in frame.columns:
-                # River is online so doesn't have TRAIN scores; fit on SCORE data as fallback
-                cal_river = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg).fit(
-                    frame["river_hst_raw"].to_numpy(copy=False), regime_labels=transform_regimes
-                )
-                frame["river_hst_z"] = cal_river.transform(
-                    frame["river_hst_raw"].to_numpy(copy=False), regime_labels=transform_regimes
-                )
 
             # Compute TRAIN z-scores for PCA metrics (needed for SQL metadata)
             # Robust to cache reuse - uses train_frame which is always computed
@@ -2956,8 +2767,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             ]
             if omr_enabled and "omr_raw" in frame.columns:
                 calibrators.append(("omr_z", cal_omr))
-            if "river_hst_raw" in frame.columns:
-                calibrators.append(("river_hst_z", cal_river))
 
             # DET-07: Generate per-regime threshold transparency table
             if quality_ok and use_per_regime:
@@ -3036,7 +2845,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             
             missing = [k for k in weights.keys() if k not in avail]
             # Filter out permanently unimplemented detectors from warnings
-            missing_to_warn = [k for k in missing if k not in {'mhal_z', 'river_hst_z'}]
+            missing_to_warn = list(missing)  # MHAL and River removed v9.1.0
             if missing_to_warn:
                 Console.warn(f"Ignoring missing streams: {missing_to_warn}; available={sorted([c for c in avail if c.endswith('_z')])}", component="FUSE",
                              equip=equip, missing_streams=missing_to_warn)
@@ -4846,8 +4655,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             except Exception:
                 pass
 
-    # Outputs are always generated to the local run_dir (even in SQL mode).
-    _maybe_write_run_meta_json(locals())
     return
 
 

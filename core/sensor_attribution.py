@@ -42,7 +42,7 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 # =============================================================================

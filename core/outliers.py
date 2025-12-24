@@ -10,7 +10,7 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
 from typing import Any, Dict, Optional, List
 
 

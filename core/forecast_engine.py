@@ -66,7 +66,7 @@ from core.sensor_attribution import SensorAttributor
 from core.metrics import compute_comprehensive_metrics, log_metrics_summary, compute_forecast_diagnostics, log_forecast_diagnostics
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
 
 
 # ========================================================================

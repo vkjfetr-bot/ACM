@@ -28,7 +28,7 @@ except Exception:
     OutputManager = None  # type: ignore
 import matplotlib.pyplot as plt
 
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
 import hashlib
 
 try:
@@ -1197,7 +1197,7 @@ def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None,
                 return pd.DataFrame(columns=["start_ts", "end_ts"])
         except Exception as e:
             # SQL query failed, fall back to CSV
-            from core.observability import Console, Heartbeat
+            from core.observability import Console
             Console.warn(f"SQL episode read failed, falling back to CSV: {e}", component="REGIME", equip_id=equip_id, run_id=run_id, error_type=type(e).__name__)
     
     # REG-CSV-01: Fallback to CSV for file-mode/dev or if SQL unavailable
@@ -1205,7 +1205,7 @@ def _read_episodes_csv(p: Path, sql_client=None, equip_id: Optional[int] = None,
     try:
         resolved = p.resolve()
         if not resolved.is_relative_to(safe_base):
-            from core.observability import Console, Heartbeat
+            from core.observability import Console
             Console.warn(f"Episode path outside workspace: {resolved}", component="REGIME", resolved_path=str(resolved), safe_base=str(safe_base))
             return pd.DataFrame(columns=["start_ts", "end_ts"])
     except Exception:
@@ -1910,22 +1910,6 @@ def run(ctx: Any) -> Dict[str, Any]:
         return {"module":"regime","tables":[], "plots":[], "metrics":{},
                 "error":{"type":"MissingFile","message":"episodes not found in SQL or CSV"}}
     tables: List[Dict[str, Any]] = []
-    t_eps = ctx.tables_dir / "regime_episodes.csv"
-    try:
-        # REG-CSV-02: Pass sql_client to OutputManager for SQL support
-        if OutputManager is not None:
-            om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
-            om.write_dataframe(eps, t_eps)
-        else:
-            df_out = eps.copy()
-            if run_id is not None and "RunID" not in df_out.columns:
-                df_out.insert(0, "RunID", run_id)
-            if equip_id is not None and "EquipID" not in df_out.columns:
-                df_out.insert(1, "EquipID", int(equip_id))
-            df_out.to_csv(t_eps, index=False)
-    except Exception:
-        eps.to_csv(t_eps, index=False)
-    tables.append({"name":"regime_episodes","path":str(t_eps)})
 
     summary_df: Optional[pd.DataFrame] = None
     feature_importance_df: Optional[pd.DataFrame] = None
@@ -1950,8 +1934,7 @@ def run(ctx: Any) -> Dict[str, Any]:
     if regime_model is not None:
         summary_df = build_summary_dataframe(regime_model)
         if not summary_df.empty:
-            summary_path = ctx.tables_dir / "regime_summary.csv"
-            # REG-CSV-02: Write to ACM_RegimeStats SQL table
+            # Write to ACM_RegimeStats SQL table (SQL-only mode)
             if OutputManager is not None:
                 om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
                 # Convert dwell_fraction to OccupancyPct (percentage) and prepare correct columns
@@ -1968,10 +1951,7 @@ def run(ctx: Any) -> Dict[str, Any]:
                     "FusedMean": "FusedMean",
                     "FusedP90": "FusedP90"
                 }
-                om.write_dataframe(summary_df, summary_path, sql_table="ACM_RegimeStats" if sql_client else None, sql_columns=sql_cols)
-            else:
-                summary_df.to_csv(summary_path, index=False)
-            tables.append({"name":"regime_summary","path":str(summary_path)})
+                om.write_dataframe(summary_df, "regime_summary", sql_table="ACM_RegimeStats", sql_columns=sql_cols)
 
         feature_map = regime_model.meta.get("feature_importance") or {}
         if feature_map:
@@ -1982,15 +1962,11 @@ def run(ctx: Any) -> Dict[str, Any]:
                 .sort_values("importance", ascending=False)
                 .reset_index(drop=True)
             )
-            fi_path = ctx.tables_dir / "regime_feature_importance.csv"
-            # REG-CSV-02: Write to ACM_RegimeOccupancy SQL table
+            # Write to ACM_RegimeOccupancy SQL table (SQL-only mode)
             if OutputManager is not None:
                 om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
                 sql_cols = {"feature": "Feature", "importance": "Importance"}
-                om.write_dataframe(feature_importance_df, fi_path, sql_table="ACM_RegimeOccupancy" if sql_client else None, sql_columns=sql_cols)
-            else:
-                feature_importance_df.to_csv(fi_path, index=False)
-            tables.append({"name":"regime_feature_importance","path":str(fi_path)})
+                om.write_dataframe(feature_importance_df, "regime_feature_importance", sql_table="ACM_RegimeOccupancy", sql_columns=sql_cols)
 
         transitions_map = regime_model.meta.get("transition_counts") or {}
         if transitions_map:
@@ -2010,15 +1986,11 @@ def run(ctx: Any) -> Dict[str, Any]:
                     dst = dst_str
                 transition_rows.append({"from_regime": src, "to_regime": dst, "count": int(count)})
             transitions_df = pd.DataFrame(transition_rows)
-            trans_path = ctx.tables_dir / "regime_transitions.csv"
-            # REG-CSV-02: Write to ACM_RegimeTransitions SQL table
+            # Write to ACM_RegimeTransitions SQL table (SQL-only mode)
             if OutputManager is not None:
                 om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
                 sql_cols = {"from_regime": "FromRegime", "to_regime": "ToRegime", "count": "Count"}
-                om.write_dataframe(transitions_df, trans_path, sql_table="ACM_RegimeTransitions" if sql_client else None, sql_columns=sql_cols)
-            else:
-                transitions_df.to_csv(trans_path, index=False)
-            tables.append({"name":"regime_transitions","path":str(trans_path)})
+                om.write_dataframe(transitions_df, "regime_transitions", sql_table="ACM_RegimeTransitions", sql_columns=sql_cols)
 
         meta = regime_model.meta or {}
         best_k = meta.get("best_k")

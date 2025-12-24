@@ -13,7 +13,7 @@ Called whenever ConfigDict.update_param() is invoked.
 from typing import Any, Optional
 from datetime import datetime, timezone
 import json
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 def _ensure_table(sql_client) -> None:

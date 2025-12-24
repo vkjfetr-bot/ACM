@@ -26,7 +26,7 @@ from scipy import stats
 
 from core.degradation_model import BaseDegradationModel, DegradationForecast
 from core.failure_probability import compute_failure_statistics
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
 
 
 @dataclass

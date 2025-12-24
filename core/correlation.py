@@ -18,7 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
 try:
-    from core.observability import Console, Heartbeat, Span
+    from core.observability import Console, Span
 except ImportError as e:
     # If logger import fails, something is seriously wrong - fail fast
     raise SystemExit(f"FATAL: Cannot import utils.logger.Console: {e}") from e
@@ -246,7 +246,7 @@ class PCASubspaceDetector:
     def fit(self, X: pd.DataFrame) -> "PCASubspaceDetector":
         """Fit scaler + PCA on TRAIN safely."""
         with Span("fit.pca", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
-            from core.observability import Console, Heartbeat
+            from core.observability import Console
             Console.info(f"Fit start: train shape={X.shape}", component="PCA")
             df = X.copy()
             

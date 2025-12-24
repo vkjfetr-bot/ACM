@@ -29,7 +29,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, Tuple, List
 from pathlib import Path
 from datetime import datetime, timezone
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 class ModelQualityMonitor:
