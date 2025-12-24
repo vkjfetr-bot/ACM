@@ -1685,6 +1685,64 @@ def _write_fusion_metrics(
         return False
 
 
+def _log_dropped_features(
+    sql_client: Optional[Any],
+    cols_to_drop: List[str],
+    all_nan_cols: List[str],
+    col_meds: pd.Series,
+    feat_stds: pd.Series,
+    run_id: str,
+    equip_id: int,
+    equip: str = "",
+) -> bool:
+    """Log dropped features to ACM_FeatureDropLog SQL table.
+    
+    Records which features were dropped during imputation and why
+    (all_NaN or low_variance).
+    
+    Returns:
+        True if logging succeeded, False otherwise.
+    """
+    if not sql_client or not cols_to_drop:
+        return False
+        
+    try:
+        drop_records = []
+        for col in cols_to_drop:
+            reason = "all_NaN" if col in all_nan_cols else "low_variance"
+            med_val = col_meds.get(col)
+            std_val = feat_stds.get(col)
+            drop_records.append({
+                "feature": str(col),
+                "reason": reason,
+                "train_median": str(med_val) if not pd.isna(med_val) else "NaN",
+                "train_std": f"{std_val:.6f}" if not pd.isna(std_val) else "NaN",
+            })
+        
+        if drop_records:
+            timestamp_now = pd.Timestamp.now()
+            insert_records = [
+                (run_id, int(equip_id), rec["feature"], rec["reason"],
+                 rec["train_median"], rec["train_std"], timestamp_now)
+                for rec in drop_records
+            ]
+            insert_sql = """
+                INSERT INTO dbo.ACM_FeatureDropLog 
+                (RunID, EquipID, FeatureName, Reason, TrainMedian, TrainStd, Timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
+            with sql_client.cursor() as cur:
+                cur.fast_executemany = True
+                cur.executemany(insert_sql, insert_records)
+            sql_client.conn.commit()
+            Console.info(f"Logged {len(drop_records)} dropped features -> SQL:ACM_FeatureDropLog", component="FEAT")
+            return True
+    except Exception as e:
+        Console.warn(f"Feature drop logging failed: {e}", component="FEAT",
+                     equip=equip, error=str(e)[:200])
+        return False
+
+
 # =======================
 
 
@@ -2597,48 +2655,18 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         train = train.drop(columns=cols_to_drop)
                         score = score.drop(columns=cols_to_drop)
                         
-                        # ACM-CSV-02: Log feature drops (file-mode: CSV, SQL-mode: ACM_FeatureDropLog)
+                        # ACM-CSV-02: Log feature drops to SQL
                         with T.section("features.log_drops"):
-                            try:
-                                drop_records = []
-                                for col in cols_to_drop:
-                                    reason = "all_NaN" if col in all_nan_cols else "low_variance"
-                                    med_val = col_meds.get(col)
-                                    std_val = feat_stds.get(col)
-                                    drop_records.append({
-                                        "feature": str(col),
-                                        "reason": reason,
-                                        "train_median": str(med_val) if not pd.isna(med_val) else "NaN",
-                                        "train_std": f"{std_val:.6f}" if not pd.isna(std_val) else "NaN",
-                                    })
-                                
-                                if drop_records and sql_client:
-                                        timestamp_now = pd.Timestamp.now()
-                                        insert_records = [
-                                            (
-                                                run_id,
-                                                int(equip_id),
-                                                rec["feature"],
-                                                rec["reason"],
-                                                rec["train_median"],
-                                                rec["train_std"],
-                                                timestamp_now
-                                            )
-                                            for rec in drop_records
-                                        ]
-                                        insert_sql = """
-                                            INSERT INTO dbo.ACM_FeatureDropLog 
-                                            (RunID, EquipID, FeatureName, Reason, TrainMedian, TrainStd, Timestamp)
-                                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                                        """
-                                        with sql_client.cursor() as cur:
-                                            cur.fast_executemany = True
-                                            cur.executemany(insert_sql, insert_records)
-                                        sql_client.conn.commit()
-                                        Console.info(f"Logged {len(drop_records)} dropped features -> SQL:ACM_FeatureDropLog", component="FEAT")
-                            except Exception as drop_e:
-                                Console.warn(f"Feature drop logging failed: {drop_e}", component="FEAT",
-                                             equip=equip, error=str(drop_e)[:200])
+                            _log_dropped_features(
+                                sql_client=sql_client,
+                                cols_to_drop=cols_to_drop,
+                                all_nan_cols=all_nan_cols,
+                                col_meds=col_meds,
+                                feat_stds=feat_stds,
+                                run_id=run_id,
+                                equip_id=equip_id,
+                                equip=equip,
+                            )
                     
                     # NOTE: Feature decorrelation is NOT needed here because PCA-T2 detector
                     # projects to orthogonal space where covariance is diagonal, guaranteeing
