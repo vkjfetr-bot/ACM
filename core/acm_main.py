@@ -1597,6 +1597,94 @@ def _save_trained_models(
         return None
 
 
+def _write_fusion_metrics(
+    sql_client: Optional[Any],
+    output_manager: Any,
+    fusion_weights_used: Dict[str, float],
+    tuning_diagnostics: Dict[str, Any],
+    previous_weights: Optional[Dict[str, float]],
+    run_id: str,
+    equip_id: int,
+    equip: str = "",
+    SQL_MODE: bool = True,
+) -> bool:
+    """Write fusion tuning diagnostics and metrics to SQL.
+    
+    Writes fusion weight metrics, quality scores, and sample counts
+    to ACM_RunMetrics table in EAV (Entity-Attribute-Value) format.
+    
+    Returns:
+        True if metrics were written successfully, False otherwise.
+    """
+    if not tuning_diagnostics or not sql_client:
+        return False
+        
+    try:
+        # Add timestamp and metadata
+        tuning_diagnostics["timestamp"] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+        tuning_diagnostics["warm_started"] = previous_weights is not None
+        if previous_weights:
+            tuning_diagnostics["previous_weights"] = previous_weights
+        
+        # Build metrics rows
+        metrics_rows = []
+        for detector_name, weight in fusion_weights_used.items():
+            det_metrics = tuning_diagnostics.get("detector_metrics", {}).get(detector_name, {})
+            metrics_rows.append({
+                "detector_name": detector_name,
+                "weight": weight,
+                "n_samples": det_metrics.get("n_samples", 0),
+                "quality_score": det_metrics.get("quality_score", 0.0),
+                "tuning_method": tuning_diagnostics.get("method", "unknown"),
+                "timestamp": tuning_diagnostics["timestamp"]
+            })
+        
+        if not metrics_rows:
+            return False
+            
+        # Write via output_manager (unified output)
+        metrics_df = pd.DataFrame(metrics_rows)
+        output_manager.write_dataframe(metrics_df, "fusion_metrics")
+        
+        # SQL mode: ACM_RunMetrics bulk insert (EAV format)
+        if sql_client and SQL_MODE:
+            timestamp_now = pd.Timestamp.now()
+            insert_records = [
+                (run_id, int(equip_id), f"fusion.weight.{row['detector_name']}", 
+                 float(row['weight']), timestamp_now)
+                for row in metrics_rows
+            ] + [
+                (run_id, int(equip_id), f"fusion.quality.{row['detector_name']}", 
+                 float(row['quality_score']), timestamp_now)
+                for row in metrics_rows
+            ] + [
+                (run_id, int(equip_id), f"fusion.n_samples.{row['detector_name']}", 
+                 float(row['n_samples']), timestamp_now)
+                for row in metrics_rows
+            ]
+            
+            insert_sql = """
+                INSERT INTO dbo.ACM_RunMetrics 
+                (RunID, EquipID, MetricName, MetricValue, Timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            """
+            try:
+                with sql_client.cursor() as cur:
+                    cur.fast_executemany = True
+                    cur.executemany(insert_sql, insert_records)
+                sql_client.conn.commit()
+                Console.info(f"Saved fusion metrics -> SQL:ACM_RunMetrics ({len(insert_records)} records)", component="TUNE")
+                return True
+            except Exception as sql_e:
+                Console.warn(f"Failed to write fusion metrics to SQL: {sql_e}", component="TUNE",
+                             equip=equip, run_id=run_id, error=str(sql_e)[:200])
+                return False
+    except Exception as e:
+        Console.warn(f"Failed to save fusion diagnostics: {e}", component="TUNE",
+                     equip=equip, error=str(e)[:200])
+        return False
+
+
 # =======================
 
 
@@ -3375,86 +3463,17 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         Console.info("Using auto-tuned weights for final fusion", component="TUNE")
                         
                         # Save tuning diagnostics to ACM_RunMetrics
-                        if tuning_diagnostics and sql_client:
-                            try:
-                                # Add timestamp and metadata
-                                tuning_diagnostics["timestamp"] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')  # CHART-04: Standard format
-                                # ANA-01: config_weights already captured in tune_detector_weights(), don't overwrite!
-                                # tuning_diagnostics["config_weights"] is set in fuse.py and reflects the ORIGINAL config
-                                tuning_diagnostics["warm_started"] = previous_weights is not None
-                                if previous_weights:
-                                    tuning_diagnostics["previous_weights"] = previous_weights
-                                
-                                # ACM-CSV-04: Export fusion metrics (SQL-mode: ACM_RunMetrics)
-                                metrics_rows = []
-                                for detector_name, weight in fusion_weights_used.items():
-                                    det_metrics = tuning_diagnostics.get("detector_metrics", {}).get(detector_name, {})
-                                    metrics_rows.append({
-                                        "detector_name": detector_name,
-                                        "weight": weight,
-                                        "n_samples": det_metrics.get("n_samples", 0),
-                                        "quality_score": det_metrics.get("quality_score", 0.0),
-                                        "tuning_method": tuning_diagnostics.get("method", "unknown"),
-                                        "timestamp": tuning_diagnostics["timestamp"]
-                                    })
-                                
-                                if metrics_rows:
-                                    # Create DataFrame
-                                    metrics_df = pd.DataFrame(metrics_rows)
-                                    
-                                    # Unified output: Cache artifact (no file write)
-                                    # Note: SQL output is handled separately below due to EAV schema
-                                    output_manager.write_dataframe(metrics_df, "fusion_metrics")
-                                    
-                                    # SQL mode: ACM_RunMetrics bulk insert
-                                    if sql_client and SQL_MODE:
-                                        timestamp_now = pd.Timestamp.now()
-                                        insert_records = [
-                                            (
-                                                run_id,
-                                                int(equip_id),
-                                                f"fusion.weight.{row['detector_name']}",
-                                                float(row['weight']),
-                                                timestamp_now
-                                            )
-                                            for row in metrics_rows
-                                        ] + [
-                                            (
-                                                run_id,
-                                                int(equip_id),
-                                                f"fusion.quality.{row['detector_name']}",
-                                                float(row['quality_score']),
-                                                timestamp_now
-                                            )
-                                            for row in metrics_rows
-                                        ] + [
-                                            (
-                                                run_id,
-                                                int(equip_id),
-                                                f"fusion.n_samples.{row['detector_name']}",
-                                                float(row['n_samples']),
-                                                timestamp_now
-                                            )
-                                            for row in metrics_rows
-                                        ]
-                                        
-                                        insert_sql = """
-                                            INSERT INTO dbo.ACM_RunMetrics 
-                                            (RunID, EquipID, MetricName, MetricValue, Timestamp)
-                                            VALUES (?, ?, ?, ?, ?)
-                                        """
-                                        try:
-                                            with sql_client.cursor() as cur:
-                                                cur.fast_executemany = True
-                                                cur.executemany(insert_sql, insert_records)
-                                            sql_client.conn.commit()
-                                            Console.info(f"Saved fusion metrics -> SQL:ACM_RunMetrics ({len(insert_records)} records)", component="TUNE")
-                                        except Exception as sql_e:
-                                            Console.warn(f"Failed to write fusion metrics to SQL: {sql_e}", component="TUNE",
-                                                         equip=equip, run_id=run_id, error=str(sql_e)[:200])
-                            except Exception as save_e:
-                                Console.warn(f"Failed to save diagnostics: {save_e}", component="TUNE",
-                                             equip=equip, error=str(save_e)[:200])
+                        _write_fusion_metrics(
+                            sql_client=sql_client,
+                            output_manager=output_manager,
+                            fusion_weights_used=fusion_weights_used,
+                            tuning_diagnostics=tuning_diagnostics,
+                            previous_weights=previous_weights,
+                            run_id=run_id,
+                            equip_id=equip_id,
+                            equip=equip,
+                            SQL_MODE=SQL_MODE,
+                        )
                 except Exception as tune_e:
                     Console.warn(f"Weight auto-tuning failed: {tune_e}", component="TUNE",
                                  equip=equip, error_type=type(tune_e).__name__, error=str(tune_e)[:200])
