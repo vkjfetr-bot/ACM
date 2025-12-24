@@ -1380,6 +1380,55 @@ def _compute_stable_feature_hash(train: pd.DataFrame, equip: str = "") -> Option
         return None
 
 
+def _check_refit_request(sql_client: Optional[Any], equip_id: int, equip: str = "") -> bool:
+    """
+    Check for pending refit requests in ACM_RefitRequests table.
+    
+    If a pending request exists, acknowledges it so it won't be processed again
+    on the next run.
+    
+    Args:
+        sql_client: SQL client connection
+        equip_id: Equipment ID to check
+        equip: Equipment name for logging
+        
+    Returns:
+        True if a pending refit request was found and acknowledged, False otherwise
+    """
+    if not sql_client:
+        return False
+        
+    try:
+        with sql_client.cursor() as cur:
+            cur.execute(
+                """
+                IF OBJECT_ID(N'[dbo].[ACM_RefitRequests]', N'U') IS NOT NULL
+                BEGIN
+                    SELECT TOP 1 RequestID, RequestedAt, Reason
+                    FROM [dbo].[ACM_RefitRequests]
+                    WHERE EquipID = ? AND Acknowledged = 0
+                    ORDER BY RequestedAt DESC
+                END
+                """,
+                (int(equip_id),),
+            )
+            row = cur.fetchone()
+            if row:
+                Console.warn(f"SQL refit request found: id={row[0]} at {row[1]}", component="MODEL",
+                             equip=equip, refit_request_id=row[0])
+                # Acknowledge refit so it is not re-used next run
+                cur.execute(
+                    "UPDATE [dbo].[ACM_RefitRequests] SET Acknowledged = 1, AcknowledgedAt = SYSUTCDATETIME() WHERE RequestID = ?",
+                    (int(row[0]),),
+                )
+                return True
+    except Exception as rf_err:
+        Console.warn(f"Refit check failed: {rf_err}", component="MODEL",
+                     equip=equip, error_type=type(rf_err).__name__, error=str(rf_err)[:200])
+    
+    return False
+
+
 # =======================
 
 
@@ -2352,37 +2401,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             train_feature_hash = _compute_stable_feature_hash(train, equip)
 
         # Respect refit-request from SQL table entries
-        refit_requested = False
         with T.section("models.refit_flag"):
-            try:
-                # SQL-mode: check ACM_RefitRequests (Acknowledged=0)
-                if sql_client:
-                    with sql_client.cursor() as cur:
-                        cur.execute(
-                            """
-                            IF OBJECT_ID(N'[dbo].[ACM_RefitRequests]', N'U') IS NOT NULL
-                            BEGIN
-                                SELECT TOP 1 RequestID, RequestedAt, Reason
-                                FROM [dbo].[ACM_RefitRequests]
-                                WHERE EquipID = ? AND Acknowledged = 0
-                                ORDER BY RequestedAt DESC
-                            END
-                            """,
-                            (int(equip_id),),
-                        )
-                        row = cur.fetchone()
-                        if row:
-                            refit_requested = True
-                            Console.warn(f"SQL refit request found: id={row[0]} at {row[1]}", component="MODEL",
-                                         equip=equip, refit_request_id=row[0])
-                            # Acknowledge refit so it is not re-used next run
-                            cur.execute(
-                                "UPDATE [dbo].[ACM_RefitRequests] SET Acknowledged = 1, AcknowledgedAt = SYSUTCDATETIME() WHERE RequestID = ?",
-                                (int(row[0]),),
-                            )
-            except Exception as rf_err:
-                Console.warn(f"Refit check failed: {rf_err}", component="MODEL",
-                             equip=equip, error_type=type(rf_err).__name__, error=str(rf_err)[:200])
+            refit_requested = _check_refit_request(sql_client, equip_id, equip)
 
         if reuse_models and model_cache_path.exists() and not refit_requested:
             with T.section("models.cache_local"):
