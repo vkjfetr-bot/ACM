@@ -39,6 +39,8 @@
 | `_deduplicate_index()` | Remove duplicate timestamps from DataFrame index | ✅ Done (86580f7) |
 | `_rebuild_detectors_from_cache()` | Reconstruct detector objects from cached model data | ✅ Done (42ea199) |
 | `_update_baseline_buffer()` | Update ACM_BaselineBuffer with latest score data | ✅ Done (3ba69df) |
+| `_compute_stable_feature_hash()` | Compute stable hash for training features | ✅ Done (e829f35) |
+| `_check_refit_request()` | Check for pending refit requests in SQL | ✅ Done (1d591c6) |
 | `_phase_initialize_runtime()` | 840-1183 (~343 lines) | 🔲 Not Started |
 | `_phase_load_data()` | 1183-1915 (~732 lines) | 🔲 Not Started |
 | `_phase_fit_models()` | 1915-2311 (~396 lines) | 🔲 Not Started |
@@ -47,7 +49,7 @@
 | `_phase_fuse_and_episodes()` | 2769-3419 (~650 lines) | 🔲 Not Started |
 | `_phase_persist_results()` | 3771-end (~490 lines) | 🔲 Not Started |
 
-**Wave 3 Progress**: Added context dataclasses + extracted 8 helper functions:
+**Wave 3 Progress**: Added context dataclasses + extracted **10 helper functions**:
 - `_score_all_detectors()` - Score data through all detectors
 - `_calibrate_all_detectors()` - Calibrate detector outputs
 - `_fit_all_detectors()` - Fit all detectors on training data
@@ -55,6 +57,8 @@
 - `_deduplicate_index()` - Remove duplicate timestamps
 - `_rebuild_detectors_from_cache()` - Reconstruct detectors from cached models
 - `_update_baseline_buffer()` - Update baseline buffer with vectorized SQL writes
+- `_compute_stable_feature_hash()` - Stable cross-platform hash for training data
+- `_check_refit_request()` - Check and acknowledge SQL refit requests
 
 ### Wave 4: Pattern Improvements 🔲 PLANNED
 | Pattern | Status |
@@ -62,7 +66,7 @@
 | `@safe_section` decorator | 🔲 Not Started |
 | `ConfigAccessor` class | 🔲 Not Started |
 
-**Current Line Count**: 4,522 lines (original: 4,663; helpers add lines but consolidate logic)
+**Current Line Count**: 4,557 lines (original: 4,663; helpers add testable structure)
 
 ---
 
