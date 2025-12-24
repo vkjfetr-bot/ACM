@@ -1064,6 +1064,36 @@ def _get_detector_enable_flags(cfg: Dict[str, Any]) -> Dict[str, bool]:
     return flags
 
 
+def _deduplicate_index(df: pd.DataFrame, name: str, equip: str = "") -> Tuple[pd.DataFrame, int]:
+    """
+    Remove duplicate timestamps from DataFrame index, keeping the last occurrence.
+    
+    Args:
+        df: DataFrame with potentially duplicate index
+        name: Dataset name for logging (e.g., "TRAIN", "SCORE")
+        equip: Equipment name for logging context
+    
+    Returns:
+        Tuple of (deduplicated DataFrame, count of duplicates removed)
+    
+    Raises:
+        RuntimeError: If duplicates remain after deduplication (should never happen)
+    """
+    dup_count = df.index.duplicated(keep='last').sum()
+    
+    if dup_count > 0:
+        Console.warn(f"Removing {dup_count} duplicate timestamps from {name} data", component="DATA",
+                     equip=equip, duplicates=dup_count, dataset=name)
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+    
+    # Assert uniqueness after deduplication
+    if not df.index.is_unique:
+        raise RuntimeError(f"[DATA] {name} data still has duplicate timestamps after deduplication! "
+                         f"Total: {len(df)}, Unique: {df.index.nunique()}")
+    
+    return df, dup_count
+
+
 # =======================
 
 
@@ -1477,25 +1507,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             train = _ensure_local_index(train)
             score = _ensure_local_index(score)
             
-            # Deduplicate indices early to prevent O(nÂ²) performance and silent data loss
-            train_dups = train.index.duplicated(keep='last').sum()
-            score_dups = score.index.duplicated(keep='last').sum()
-            if train_dups > 0:
-                Console.warn(f"Removing {train_dups} duplicate timestamps from TRAIN data", component="DATA",
-                             equip=equip, duplicates=train_dups, dataset="TRAIN")
-                train = train[~train.index.duplicated(keep='last')].sort_index()
-            if score_dups > 0:
-                Console.warn(f"Removing {score_dups} duplicate timestamps from SCORE data", component="DATA",
-                             equip=equip, duplicates=score_dups, dataset="SCORE")
-                score = score[~score.index.duplicated(keep='last')].sort_index()
-            
-            # CRITICAL: Assert index uniqueness after deduplication to prevent downstream errors
-            if not train.index.is_unique:
-                raise RuntimeError(f"[DATA] TRAIN data still has duplicate timestamps after deduplication! "
-                                 f"Total: {len(train)}, Unique: {train.index.nunique()}")
-            if not score.index.is_unique:
-                raise RuntimeError(f"[DATA] SCORE data still has duplicate timestamps after deduplication! "
-                                 f"Total: {len(score)}, Unique: {score.index.nunique()}")
+            # Deduplicate indices early to prevent O(n²) performance and silent data loss
+            train, train_dups = _deduplicate_index(train, "TRAIN", equip)
+            score, score_dups = _deduplicate_index(score, "SCORE", equip)
             meta.dup_timestamps_removed = int(train_dups + score_dups)
             Console.info(f"Index integrity verified: BASELINE={len(train)} unique, BATCH={len(score)} unique", component="DATA")
 
