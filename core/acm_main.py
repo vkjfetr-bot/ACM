@@ -773,7 +773,7 @@ def _sql_finalize_run(cli: Any, run_id: str, outcome: str, rows_read: int, rows_
 
 
 def _score_all_detectors(
-    score: pd.DataFrame,
+    data: pd.DataFrame,
     ar1_detector: Optional[Any],
     pca_detector: Optional[Any],
     iforest_detector: Optional[Any],
@@ -784,52 +784,63 @@ def _score_all_detectors(
     iforest_enabled: bool = True,
     gmm_enabled: bool = True,
     omr_enabled: bool = True,
+    pca_cached: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    return_omr_contributions: bool = True,
 ) -> Tuple[pd.DataFrame, Optional[Any]]:
     """
     Score all enabled detectors and return raw scores frame.
     
     Args:
-        score: DataFrame with numeric features to score
+        data: DataFrame with numeric features to score
         *_detector: Detector instances (or None if not fitted)
         *_enabled: Whether each detector is enabled
+        pca_cached: Optional tuple of (pca_spe, pca_t2) cached scores
+        return_omr_contributions: Whether to return OMR contributions
     
     Returns:
         Tuple of (frame with raw scores, omr_contributions or None)
     """
-    frame = pd.DataFrame(index=score.index)
+    frame = pd.DataFrame(index=data.index)
     omr_contributions_data = None
     
     # AR1 Detector
     if ar1_enabled and ar1_detector:
-        res = ar1_detector.score(score)
+        res = ar1_detector.score(data)
         frame["ar1_raw"] = pd.Series(res, index=frame.index).fillna(0)
-        Console.info(f"AR1 detector scored (samples={len(score)})", component="AR1", samples=len(score))
+        Console.info(f"AR1 detector scored (samples={len(data)})", component="AR1", samples=len(data))
     
     # PCA Subspace Detector
     if pca_enabled and pca_detector:
-        pca_spe, pca_t2 = pca_detector.score(score)
+        if pca_cached is not None:
+            pca_spe, pca_t2 = pca_cached
+            Console.info(f"Using cached PCA scores (samples={len(data)})", component="PCA", samples=len(data))
+        else:
+            pca_spe, pca_t2 = pca_detector.score(data)
+            Console.info(f"PCA detector scored (samples={len(data)})", component="PCA", samples=len(data))
         frame["pca_spe"] = pd.Series(pca_spe, index=frame.index).fillna(0)
         frame["pca_t2"] = pd.Series(pca_t2, index=frame.index).fillna(0)
-        Console.info(f"PCA detector scored (samples={len(score)})", component="PCA", samples=len(score))
     
     # Isolation Forest Detector
     if iforest_enabled and iforest_detector:
-        res = iforest_detector.score(score)
+        res = iforest_detector.score(data)
         frame["iforest_raw"] = pd.Series(res, index=frame.index).fillna(0)
-        Console.info(f"IForest detector scored (samples={len(score)})", component="IFOREST", samples=len(score))
+        Console.info(f"IForest detector scored (samples={len(data)})", component="IFOREST", samples=len(data))
     
     # GMM Detector
     if gmm_enabled and gmm_detector:
-        res = gmm_detector.score(score)
+        res = gmm_detector.score(data)
         frame["gmm_raw"] = pd.Series(res, index=frame.index).fillna(0)
-        Console.info(f"GMM detector scored (samples={len(score)})", component="GMM", samples=len(score))
+        Console.info(f"GMM detector scored (samples={len(data)})", component="GMM", samples=len(data))
     
     # OMR Detector
     if omr_enabled and omr_detector:
-        omr_z, omr_contributions = omr_detector.score(score, return_contributions=True)
+        if return_omr_contributions:
+            omr_z, omr_contributions = omr_detector.score(data, return_contributions=True)
+            omr_contributions_data = omr_contributions
+        else:
+            omr_z = omr_detector.score(data, return_contributions=False)
         frame["omr_raw"] = pd.Series(omr_z, index=frame.index).fillna(0)
-        omr_contributions_data = omr_contributions
-        Console.info(f"OMR detector scored (samples={len(score)})", component="OMR", samples=len(score))
+        Console.info(f"OMR detector scored (samples={len(data)})", component="OMR", samples=len(data))
     
     return frame, omr_contributions_data
 
@@ -2315,7 +2326,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             score_start_time = time.perf_counter()
             
             frame, omr_contributions_data = _score_all_detectors(
-                score=score,
+                data=score,
                 ar1_detector=ar1_detector,
                 pca_detector=pca_detector,
                 iforest_detector=iforest_detector,
@@ -2600,23 +2611,25 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             use_per_regime = (cfg.get("fusion", {}) or {}).get("per_regime", False)
             quality_ok = bool(use_per_regime and regime_quality_ok and train_regime_labels is not None and score_regime_labels is not None)
             
-            # Score TRAIN data with all fitted detectors (frame contains SCORE data)
-            # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
+            # Score TRAIN data with all fitted detectors using helper function
+            # REFACTOR v11: Reuse _score_all_detectors with cached PCA scores
             Console.info("Scoring TRAIN data for calibration baseline...", component="CAL")
-            train_frame = pd.DataFrame(index=train.index)
-            train_frame["ar1_raw"] = ar1_detector.score(train)
-            # CRITICAL FIX: Reuse cached PCA train scores to avoid recomputation
-            if pca_train_spe is not None and pca_train_t2 is not None:
-                Console.info("Using cached PCA train scores (optimization)", component="CAL")
-                train_frame["pca_spe"], train_frame["pca_t2"] = pca_train_spe, pca_train_t2
-            else:
-                Console.warn("Cache miss - recomputing PCA train scores", component="CAL",
-                             equip=equip)
-                train_frame["pca_spe"], train_frame["pca_t2"] = pca_detector.score(train)
-            train_frame["iforest_raw"] = iforest_detector.score(train)
-            train_frame["gmm_raw"] = gmm_detector.score(train)
-            if omr_enabled and omr_detector:
-                train_frame["omr_raw"] = omr_detector.score(train, return_contributions=False)
+            pca_cached = (pca_train_spe, pca_train_t2) if pca_train_spe is not None else None
+            train_frame, _ = _score_all_detectors(
+                data=train,
+                ar1_detector=ar1_detector,
+                pca_detector=pca_detector,
+                iforest_detector=iforest_detector,
+                gmm_detector=gmm_detector,
+                omr_detector=omr_detector,
+                ar1_enabled=ar1_enabled,
+                pca_enabled=pca_enabled,
+                iforest_enabled=iforest_enabled,
+                gmm_enabled=gmm_enabled,
+                omr_enabled=omr_enabled,
+                pca_cached=pca_cached,
+                return_omr_contributions=False,
+            )
             
             # Compute adaptive z-clip: Fit temp calibrators to get TRAIN P99, then set adaptive clip
             default_clip = float(self_tune_cfg.get("clip_z", 8.0))
