@@ -1094,6 +1094,128 @@ def _deduplicate_index(df: pd.DataFrame, name: str, equip: str = "") -> Tuple[pd
     return df, dup_count
 
 
+def _rebuild_detectors_from_cache(
+    cached_models: Dict[str, Any],
+    cached_manifest: Optional[Dict[str, Any]],
+    cfg: Dict[str, Any],
+    equip: str = ""
+) -> Dict[str, Any]:
+    """
+    Reconstruct detector objects from cached model data.
+    
+    This helper consolidates the logic for rebuilding fitted detector objects
+    from serialized cache data (new persistence system).
+    
+    Args:
+        cached_models: Dictionary containing serialized model data
+        cached_manifest: Manifest with metadata about cached models
+        cfg: Configuration dictionary for model settings
+        equip: Equipment name for logging context
+    
+    Returns:
+        Dictionary containing:
+            - ar1_detector, pca_detector, iforest_detector, gmm_detector, omr_detector
+            - regime_model, regime_quality_ok
+            - feature_medians (col_meds)
+            - success: bool indicating if all critical models loaded
+    """
+    result = {
+        "ar1_detector": None,
+        "pca_detector": None,
+        "iforest_detector": None,
+        "gmm_detector": None,
+        "omr_detector": None,
+        "regime_model": None,
+        "regime_quality_ok": True,
+        "feature_medians": None,
+        "success": False,
+    }
+    
+    try:
+        # AR1 detector
+        if "ar1_params" in cached_models and cached_models["ar1_params"]:
+            ar1_detector = AR1Detector(ar1_cfg={})
+            ar1_detector.phimap = cached_models["ar1_params"]["phimap"]
+            ar1_detector.sdmap = cached_models["ar1_params"]["sdmap"]
+            ar1_detector._is_fitted = True
+            result["ar1_detector"] = ar1_detector
+        
+        # PCA detector
+        if "pca_model" in cached_models and cached_models["pca_model"]:
+            pca_detector = correlation.PCASubspaceDetector(pca_cfg={})
+            pca_detector.pca = cached_models["pca_model"]
+            pca_detector._is_fitted = True
+            result["pca_detector"] = pca_detector
+        
+        # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
+        
+        # IForest detector
+        if "iforest_model" in cached_models and cached_models["iforest_model"]:
+            iforest_detector = outliers.IsolationForestDetector(if_cfg={})
+            iforest_detector.model = cached_models["iforest_model"]
+            iforest_detector._is_fitted = True
+            result["iforest_detector"] = iforest_detector
+        
+        # GMM detector
+        if "gmm_model" in cached_models and cached_models["gmm_model"]:
+            gmm_detector = outliers.GMMDetector(gmm_cfg={})
+            gmm_detector.model = cached_models["gmm_model"]
+            gmm_detector._is_fitted = True
+            result["gmm_detector"] = gmm_detector
+        
+        # OMR detector
+        if "omr_model" in cached_models and cached_models["omr_model"]:
+            omr_cfg = (cfg.get("models", {}).get("omr", {}) or {})
+            result["omr_detector"] = OMRDetector.from_dict(cached_models["omr_model"], cfg=omr_cfg)
+        
+        # Regime model
+        if "regime_model" in cached_models and cached_models["regime_model"]:
+            from core.regimes import RegimeModel
+            regime_model = RegimeModel()
+            regime_model.model = cached_models["regime_model"]
+            if cached_manifest:
+                result["regime_quality_ok"] = cached_manifest.get("models", {}).get("regimes", {}).get("quality", {}).get("quality_ok", True)
+            # CRITICAL FIX: Validate regime model compatibility
+            if regime_model.model is None:
+                Console.warn("Cached regime model is None; discarding.", component="REGIME", equip=equip)
+                regime_model = None
+            result["regime_model"] = regime_model
+        
+        # Feature medians
+        if "feature_medians" in cached_models and cached_models["feature_medians"] is not None:
+            result["feature_medians"] = cached_models["feature_medians"]
+        
+        # Validate all critical models loaded (MHAL removed v9.1.0)
+        if all([result["ar1_detector"], result["pca_detector"], result["iforest_detector"]]):
+            Console.info("Successfully loaded all models from cache", component="MODEL")
+            result["success"] = True
+        else:
+            missing = []
+            if not result["ar1_detector"]: missing.append("ar1")
+            if not result["pca_detector"]: missing.append("pca")
+            if not result["iforest_detector"]: missing.append("iforest")
+            Console.warn(f"Incomplete model cache, missing: {missing}, retraining required", component="MODEL",
+                         equip=equip, missing_models=missing)
+            # Clear all on failure
+            result["ar1_detector"] = None
+            result["pca_detector"] = None
+            result["iforest_detector"] = None
+            result["gmm_detector"] = None
+            
+    except Exception as e:
+        import traceback
+        Console.warn(f"Failed to reconstruct detectors from cache: {e}", component="MODEL",
+                     equip=equip, error_type=type(e).__name__, error=str(e)[:500])
+        Console.warn(f"Traceback: {traceback.format_exc()}", component="MODEL", equip=equip)
+        # Clear all on exception
+        result["ar1_detector"] = None
+        result["pca_detector"] = None
+        result["iforest_detector"] = None
+        result["gmm_detector"] = None
+    
+    return result
+
+
 # =======================
 
 
@@ -2271,70 +2393,23 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         # Try loading from cache (either old detector_cache or new persistence system)
         if cached_models:
             with T.section("models.persistence.rebuild"):
-                # Load from new persistence system
-                try:
-                    # Reconstruct detector objects from cached models
-                    # Note: We need to pass empty configs since we're loading pre-trained models
-                    if "ar1_params" in cached_models and cached_models["ar1_params"]:
-                        ar1_detector = AR1Detector(ar1_cfg={})
-                        ar1_detector.phimap = cached_models["ar1_params"]["phimap"]
-                        ar1_detector.sdmap = cached_models["ar1_params"]["sdmap"]
-                        ar1_detector._is_fitted = True
-                    
-                    if "pca_model" in cached_models and cached_models["pca_model"]:
-                        pca_detector = correlation.PCASubspaceDetector(pca_cfg={})
-                        pca_detector.pca = cached_models["pca_model"]
-                        pca_detector._is_fitted = True
-                    
-                    # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
-                    
-                    if "iforest_model" in cached_models and cached_models["iforest_model"]:
-                        iforest_detector = outliers.IsolationForestDetector(if_cfg={})
-                        iforest_detector.model = cached_models["iforest_model"]
-                        iforest_detector._is_fitted = True
-                    
-                    if "gmm_model" in cached_models and cached_models["gmm_model"]:
-                        gmm_detector = outliers.GMMDetector(gmm_cfg={})
-                        gmm_detector.model = cached_models["gmm_model"]
-                        gmm_detector._is_fitted = True
-                    
-                    if "omr_model" in cached_models and cached_models["omr_model"]:
-                        omr_cfg = (cfg.get("models", {}).get("omr", {}) or {})
-                        omr_detector = OMRDetector.from_dict(cached_models["omr_model"], cfg=omr_cfg)
-                    
-                    if "regime_model" in cached_models and cached_models["regime_model"]:
-                        from core.regimes import RegimeModel
-                        regime_model = RegimeModel()
-                        regime_model.model = cached_models["regime_model"]
-                        regime_quality_ok = cached_manifest.get("models", {}).get("regimes", {}).get("quality", {}).get("quality_ok", True)
-                        # CRITICAL FIX: Validate regime model compatibility
-                        if regime_model.model is None:
-                            Console.warn("Cached regime model is None; discarding.", component="REGIME",
-                                         equip=equip)
-                            regime_model = None
-                    
-                    if "feature_medians" in cached_models and cached_models["feature_medians"] is not None:
-                        col_meds = cached_models["feature_medians"]
-                    
-                    # Validate all critical models loaded (MHAL removed v9.1.0)
-                    if all([ar1_detector, pca_detector, iforest_detector]):
-                        Console.info("Successfully loaded all models from cache", component="MODEL")
-                    else:
-                        missing = []
-                        if not ar1_detector: missing.append("ar1")
-                        if not pca_detector: missing.append("pca")
-                        if not iforest_detector: missing.append("iforest")
-                        Console.warn(f"Incomplete model cache, missing: {missing}, retraining required", component="MODEL",
-                                     equip=equip, missing_models=missing)
-                        ar1_detector = pca_detector = iforest_detector = gmm_detector = None
-                        
-                except Exception as e:
-                    import traceback
-                    Console.warn(f"Failed to reconstruct detectors from cache: {e}", component="MODEL",
-                                 equip=equip, error_type=type(e).__name__, error=str(e)[:500])
-                    Console.warn(f"Traceback: {traceback.format_exc()}", component="MODEL",
-                                 equip=equip)
-                    ar1_detector = pca_detector = iforest_detector = gmm_detector = None
+                # REFACTOR v11: Use helper function for cache reconstruction
+                rebuild_result = _rebuild_detectors_from_cache(
+                    cached_models=cached_models,
+                    cached_manifest=cached_manifest,
+                    cfg=cfg,
+                    equip=equip
+                )
+                ar1_detector = rebuild_result["ar1_detector"]
+                pca_detector = rebuild_result["pca_detector"]
+                iforest_detector = rebuild_result["iforest_detector"]
+                gmm_detector = rebuild_result["gmm_detector"]
+                omr_detector = rebuild_result["omr_detector"]
+                if rebuild_result["regime_model"] is not None:
+                    regime_model = rebuild_result["regime_model"]
+                    regime_quality_ok = rebuild_result["regime_quality_ok"]
+                if rebuild_result["feature_medians"] is not None:
+                    col_meds = rebuild_result["feature_medians"]
         
         elif detector_cache:
             with T.section("models.cache_local.apply"):
