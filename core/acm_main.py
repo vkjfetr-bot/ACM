@@ -1743,6 +1743,88 @@ def _log_dropped_features(
         return False
 
 
+def _write_data_quality(
+    sql_client: Optional[Any],
+    records: List[Dict[str, Any]],
+    run_id: str,
+    equip_id: int,
+    equip: str = "",
+) -> bool:
+    """Write data quality metrics to ACM_DataQuality SQL table.
+    
+    This helper writes per-sensor data quality statistics including:
+    - Row counts, null counts, null percentages for train and score windows
+    - Standard deviation (variance indicator)
+    - Longest gap (consecutive nulls) and flatline spans
+    - Time range (min/max timestamps)
+    - Interpolation method and sampling rate
+    - Notes (low variance, all nulls, flatline warnings)
+    
+    Args:
+        sql_client: SQL client with cursor() context manager
+        records: List of per-sensor data quality dictionaries
+        run_id: Current run UUID
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        
+    Returns:
+        True if write succeeded, False otherwise
+    """
+    if not sql_client or not records:
+        return False
+        
+    try:
+        insert_records = [
+            (
+                rec["sensor"],
+                rec.get("train_count", 0),
+                rec.get("train_nulls", 0),
+                rec.get("train_null_pct", 0.0),
+                rec.get("train_std", 0.0),
+                rec.get("train_longest_gap"),
+                rec.get("train_flatline_span"),
+                rec.get("train_min_ts"),
+                rec.get("train_max_ts"),
+                rec.get("score_count", 0),
+                rec.get("score_nulls", 0),
+                rec.get("score_null_pct", 0.0),
+                rec.get("score_std", 0.0),
+                rec.get("score_longest_gap"),
+                rec.get("score_flatline_span"),
+                rec.get("score_min_ts"),
+                rec.get("score_max_ts"),
+                rec.get("interp_method"),
+                rec.get("sampling_secs"),
+                rec.get("notes"),
+                run_id,
+                int(equip_id),
+                "data_quality",
+                "OK"  # CheckResult: default OK unless issues detected
+            )
+            for rec in records
+        ]
+        insert_sql = """
+            INSERT INTO dbo.ACM_DataQuality 
+            (sensor, train_count, train_nulls, train_null_pct, train_std, 
+             train_longest_gap, train_flatline_span, train_min_ts, train_max_ts,
+             score_count, score_nulls, score_null_pct, score_std,
+             score_longest_gap, score_flatline_span, score_min_ts, score_max_ts,
+             interp_method, sampling_secs, notes,
+             RunID, EquipID, CheckName, CheckResult)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with sql_client.cursor() as cur:
+            cur.fast_executemany = True
+            cur.executemany(insert_sql, insert_records)
+        sql_client.conn.commit()
+        Console.info(f"Wrote data quality summary -> SQL:ACM_DataQuality ({len(records)} sensors)", component="DATA")
+        return True
+    except Exception as e:
+        Console.warn(f"Failed to write data quality to SQL: {e}", component="DATA",
+                     equip=equip, run_id=run_id, error=str(e)[:200])
+        return False
+
+
 # =======================
 
 
@@ -2457,56 +2539,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         if records:
                             dq = pd.DataFrame(records)
                             
-                            # SQL mode: ACM_DataQuality bulk insert - DQ-01: Write all quality metrics
-                            if sql_client:
-                                insert_records = [
-                                    (
-                                        rec["sensor"],
-                                        rec.get("train_count", 0),
-                                        rec.get("train_nulls", 0),
-                                        rec.get("train_null_pct", 0.0),
-                                        rec.get("train_std", 0.0),
-                                        rec.get("train_longest_gap"),
-                                        rec.get("train_flatline_span"),
-                                        rec.get("train_min_ts"),
-                                        rec.get("train_max_ts"),
-                                        rec.get("score_count", 0),
-                                        rec.get("score_nulls", 0),
-                                        rec.get("score_null_pct", 0.0),
-                                        rec.get("score_std", 0.0),
-                                        rec.get("score_longest_gap"),
-                                        rec.get("score_flatline_span"),
-                                        rec.get("score_min_ts"),
-                                        rec.get("score_max_ts"),
-                                        rec.get("interp_method"),
-                                        rec.get("sampling_secs"),
-                                        rec.get("notes"),
-                                        run_id,
-                                        int(equip_id),
-                                        "data_quality",
-                                        "OK"  # CheckResult: default OK unless issues detected
-                                    )
-                                    for rec in records
-                                ]
-                                insert_sql = """
-                                    INSERT INTO dbo.ACM_DataQuality 
-                                    (sensor, train_count, train_nulls, train_null_pct, train_std, 
-                                     train_longest_gap, train_flatline_span, train_min_ts, train_max_ts,
-                                     score_count, score_nulls, score_null_pct, score_std,
-                                     score_longest_gap, score_flatline_span, score_min_ts, score_max_ts,
-                                     interp_method, sampling_secs, notes,
-                                     RunID, EquipID, CheckName, CheckResult)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """
-                                try:
-                                    with sql_client.cursor() as cur:
-                                        cur.fast_executemany = True
-                                        cur.executemany(insert_sql, insert_records)
-                                    sql_client.conn.commit()
-                                    Console.info(f"Wrote data quality summary -> SQL:ACM_DataQuality ({len(records)} sensors)", component="DATA")
-                                except Exception as sql_e:
-                                    Console.warn(f"Failed to write data quality to SQL: {sql_e}", component="DATA",
-                                                 equip=equip, run_id=run_id, error=str(sql_e)[:200])
+                            # DQ-01: Write all quality metrics to SQL
+                            _write_data_quality(
+                                sql_client=sql_client,
+                                records=records,
+                                run_id=run_id,
+                                equip_id=equip_id,
+                                equip=equip,
+                            )
 
                         counters_records = [
                             {"metric": "tz_stripped_total", "value": int(getattr(meta, "tz_stripped", 0))},
