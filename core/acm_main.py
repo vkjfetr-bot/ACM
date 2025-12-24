@@ -1216,6 +1216,133 @@ def _rebuild_detectors_from_cache(
     return result
 
 
+def _update_baseline_buffer(
+    score_numeric: pd.DataFrame,
+    sql_client: Any,
+    equip_id: int,
+    cfg: Dict[str, Any],
+    coldstart_complete: bool,
+    equip: str = ""
+) -> bool:
+    """
+    Update the ACM_BaselineBuffer table with latest raw score data.
+    
+    Uses smart refresh logic to avoid writing on every batch:
+    - Always write during coldstart
+    - Write periodically (every N batches) after coldstart
+    - Uses vectorized pandas melt for 100x speedup over loops
+    
+    Args:
+        score_numeric: Raw score DataFrame with sensor columns
+        sql_client: SQL client connection
+        equip_id: Equipment ID for this run
+        cfg: Configuration dictionary
+        coldstart_complete: Whether coldstart phase is complete
+        equip: Equipment name for logging
+    
+    Returns:
+        True if buffer was written, False if skipped
+    """
+    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+    window_hours = float(baseline_cfg.get("window_hours", 72))
+    max_points = int(baseline_cfg.get("max_points", 100000))
+    refresh_interval = int(baseline_cfg.get("refresh_interval_batches", 10))
+    
+    # Determine if we should write baseline buffer this run
+    should_write_buffer = False
+    write_reason = ""
+    recent_run_count = 0
+    
+    if not coldstart_complete:
+        # Coldstart in progress - always write to build baseline
+        should_write_buffer = True
+        write_reason = "coldstart"
+    else:
+        # Models exist - check periodic refresh
+        try:
+            with sql_client.cursor() as cur:
+                run_count_result = cur.execute(
+                    "SELECT COUNT(*) FROM ACM_Runs WHERE EquipID = ? AND CreatedAt > DATEADD(DAY, -7, GETDATE())",
+                    (int(equip_id),)
+                ).fetchone()
+                recent_run_count = run_count_result[0] if run_count_result else 0
+                if recent_run_count == 0 or (recent_run_count % refresh_interval == 0):
+                    should_write_buffer = True
+                    write_reason = f"periodic_refresh (batch {recent_run_count})"
+        except Exception:
+            should_write_buffer = True
+            write_reason = "fallback"
+    
+    if not should_write_buffer:
+        batches_until_refresh = refresh_interval - (recent_run_count % refresh_interval) if refresh_interval > 0 else 0
+        Console.info(f"Skipping buffer write (models exist, next refresh in {batches_until_refresh} batches)", component="BASELINE")
+        return False
+    
+    if not isinstance(score_numeric, pd.DataFrame) or len(score_numeric) == 0:
+        return False
+    
+    # Normalize index to local naive timestamps
+    to_append = score_numeric.copy()
+    try:
+        idx_local = pd.DatetimeIndex(to_append.index).tz_localize(None)
+    except Exception:
+        idx_local = pd.DatetimeIndex(to_append.index)
+    to_append.index = idx_local
+    
+    # OPTIMIZATION v10.2.1: Vectorized pandas melt (100x faster than Python loops)
+    try:
+        to_append_reset = to_append.reset_index()
+        ts_col = to_append_reset.columns[0]
+        
+        long_df = to_append_reset.melt(
+            id_vars=[ts_col],
+            var_name='SensorName',
+            value_name='SensorValue'
+        )
+        
+        long_df = long_df.dropna(subset=['SensorValue'])
+        long_df['EquipID'] = int(equip_id)
+        long_df['DataQuality'] = None
+        long_df[ts_col] = pd.to_datetime(long_df[ts_col]).dt.tz_localize(None)
+        long_df = long_df.rename(columns={ts_col: 'Timestamp'})
+        long_df = long_df[['EquipID', 'Timestamp', 'SensorName', 'SensorValue', 'DataQuality']]
+        
+        if len(long_df) > 0:
+            baseline_records = list(long_df.itertuples(index=False, name=None))
+            
+            insert_sql = """
+            INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
+            VALUES (?, ?, ?, ?, ?)
+            """
+            with sql_client.cursor() as cur:
+                cur.fast_executemany = True
+                cur.executemany(insert_sql, baseline_records)
+            sql_client.conn.commit()
+            Console.info(f"Wrote {len(baseline_records)} records to ACM_BaselineBuffer ({write_reason})", component="BASELINE")
+            
+            # Run cleanup procedure
+            try:
+                with sql_client.cursor() as cur:
+                    cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
+                              (int(equip_id), int(window_hours), max_points))
+                sql_client.conn.commit()
+            except Exception as cleanup_err:
+                Console.warn(f"Cleanup procedure failed: {cleanup_err}", component="BASELINE",
+                             equip=equip, equip_id=equip_id, error=str(cleanup_err)[:200])
+            
+            return True
+            
+    except Exception as sql_err:
+        Console.warn(f"SQL write to ACM_BaselineBuffer failed: {sql_err}", component="BASELINE",
+                     equip=equip, equip_id=equip_id, error=str(sql_err)[:200])
+        try:
+            sql_client.conn.rollback()
+        except:
+            pass
+    
+    return False
+
+
 # =======================
 
 
@@ -3855,121 +3982,21 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         episodes["regime"] = episodes["regime"].astype(str)
 
         # ===== Rolling Baseline Buffer: Update with latest raw SCORE =====
-        # ACM-CSV-01: Separate file-mode and SQL-mode baseline writes
-        # OPTIMIZATION v10.2.1: Smart skip + vectorized writes for 100x speedup
+        # REFACTOR v11: Extracted to _update_baseline_buffer() helper
         with T.section("baseline.buffer_write"):
-          try:
-            baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-            window_hours = float(baseline_cfg.get("window_hours", 72))
-            max_points = int(baseline_cfg.get("max_points", 100000))
-            # Smart refresh: only write every N batches (default 10) unless coldstart
-            refresh_interval = int(baseline_cfg.get("refresh_interval_batches", 10))
-            
-            # Determine if we should write baseline buffer this run
-            # Write if: (1) coldstart just completed, (2) periodic refresh, or (3) first run
-            should_write_buffer = False
-            write_reason = ""
-            recent_run_count = 0  # Initialize for skip message
-            if not coldstart_complete:
-                # Coldstart in progress - always write to build baseline
-                should_write_buffer = True
-                write_reason = "coldstart"
-            else:
-                # Models exist - check periodic refresh
-                # Use tick_minutes as a proxy for batch count (stored in run metadata)
-                try:
-                    with sql_client.cursor() as cur:
-                        # Count recent runs to determine batch number for this equipment
-                        run_count_result = cur.execute(
-                            "SELECT COUNT(*) FROM ACM_Runs WHERE EquipID = ? AND CreatedAt > DATEADD(DAY, -7, GETDATE())",
-                            (int(equip_id),)
-                        ).fetchone()
-                        recent_run_count = run_count_result[0] if run_count_result else 0
-                        # Write on first run or every refresh_interval batches
-                        if recent_run_count == 0 or (recent_run_count % refresh_interval == 0):
-                            should_write_buffer = True
-                            write_reason = f"periodic_refresh (batch {recent_run_count})"
-                except Exception:
-                    # On error, default to writing (safe fallback)
-                    should_write_buffer = True
-                    write_reason = "fallback"
-            
-            if not should_write_buffer:
-                batches_until_refresh = refresh_interval - (recent_run_count % refresh_interval) if refresh_interval > 0 else 0
-                Console.info(f"Skipping buffer write (models exist, next refresh in {batches_until_refresh} batches)", component="BASELINE")
-            elif isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
-                to_append = score_numeric.copy()
-                # Normalize index to local naive timestamps
-                try:
-                    idx_local = pd.DatetimeIndex(to_append.index).tz_localize(None)
-                except Exception:
-                    idx_local = pd.DatetimeIndex(to_append.index)
-                to_append.index = idx_local
-                
-                # SQL mode: write to ACM_BaselineBuffer
+            try:
                 if sql_client:
-                    # OPTIMIZATION v10.2.1: Vectorized pandas melt (100x faster than Python loops)
-                    try:
-                        # Reset index to make timestamp a column for melt
-                        to_append_reset = to_append.reset_index()
-                        ts_col = to_append_reset.columns[0]  # First column is the timestamp index
-                        
-                        # Vectorized wide-to-long transformation using pandas melt
-                        # This replaces the O(n*m) Python loop with a single vectorized operation
-                        long_df = to_append_reset.melt(
-                            id_vars=[ts_col],
-                            var_name='SensorName',
-                            value_name='SensorValue'
-                        )
-                        
-                        # Drop NaN values and add EquipID
-                        long_df = long_df.dropna(subset=['SensorValue'])
-                        long_df['EquipID'] = int(equip_id)
-                        long_df['DataQuality'] = None
-                        
-                        # Ensure timestamp is naive datetime
-                        long_df[ts_col] = pd.to_datetime(long_df[ts_col]).dt.tz_localize(None)
-                        
-                        # Rename timestamp column for consistency
-                        long_df = long_df.rename(columns={ts_col: 'Timestamp'})
-                        
-                        # Reorder columns to match INSERT statement
-                        long_df = long_df[['EquipID', 'Timestamp', 'SensorName', 'SensorValue', 'DataQuality']]
-                        
-                        if len(long_df) > 0:
-                            # Convert to list of tuples for executemany (in-memory, no temp files)
-                            baseline_records = list(long_df.itertuples(index=False, name=None))
-                            
-                            # Bulk insert with fast_executemany
-                            insert_sql = """
-                            INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
-                            VALUES (?, ?, ?, ?, ?)
-                            """
-                            with sql_client.cursor() as cur:
-                                cur.fast_executemany = True
-                                cur.executemany(insert_sql, baseline_records)
-                            sql_client.conn.commit()
-                            Console.info(f"Wrote {len(baseline_records)} records to ACM_BaselineBuffer ({write_reason})", component="BASELINE")
-                        
-                            # Run cleanup procedure to maintain retention policy
-                            try:
-                                with sql_client.cursor() as cur:
-                                    cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
-                                              (int(equip_id), int(window_hours), max_points))
-                                sql_client.conn.commit()
-                            except Exception as cleanup_err:
-                                Console.warn(f"Cleanup procedure failed: {cleanup_err}", component="BASELINE",
-                                             equip=equip, equip_id=equip_id, error=str(cleanup_err)[:200])
-                    except Exception as sql_err:
-                        Console.warn(f"SQL write to ACM_BaselineBuffer failed: {sql_err}", component="BASELINE",
-                                     equip=equip, equip_id=equip_id, error=str(sql_err)[:200])
-                        try:
-                            sql_client.conn.rollback()
-                        except:
-                            pass
-          except Exception as be:
-            Console.warn(f"Baseline buffer update failed: {be}", component="BASELINE",
-                         equip=equip, error_type=type(be).__name__, error=str(be)[:200])
+                    _update_baseline_buffer(
+                        score_numeric=score_numeric,
+                        sql_client=sql_client,
+                        equip_id=equip_id,
+                        cfg=cfg,
+                        coldstart_complete=coldstart_complete,
+                        equip=equip
+                    )
+            except Exception as be:
+                Console.warn(f"Baseline buffer update failed: {be}", component="BASELINE",
+                             equip=equip, error_type=type(be).__name__, error=str(be)[:200])
 
         sensor_context: Optional[Dict[str, Any]] = None
         with T.section("sensor.context"):
