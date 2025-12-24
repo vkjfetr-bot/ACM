@@ -1343,6 +1343,43 @@ def _update_baseline_buffer(
     return False
 
 
+def _compute_stable_feature_hash(train: pd.DataFrame, equip: str = "") -> Optional[str]:
+    """
+    Compute a stable hash for training features.
+    
+    Hash is stable across pandas versions and OS by including:
+    - Shape (rows x cols)
+    - Sorted column dtypes
+    - SHA256 of sorted column data bytes
+    
+    Args:
+        train: Training DataFrame to hash
+        equip: Equipment name for logging
+        
+    Returns:
+        16-character hex hash string, or None if computation fails
+    """
+    try:
+        # Shape + dtypes for cross-platform consistency
+        shape_str = f"{train.shape[0]}x{train.shape[1]}"
+        dtype_str = "|".join(f"{col}:{train[col].dtype}" for col in sorted(train.columns))
+        
+        # Sort columns for deterministic hashing
+        train_sorted = train[sorted(train.columns)]
+        data_bytes = train_sorted.to_numpy(dtype=np.float64, copy=False).tobytes()
+        data_hash = hashlib.sha256(data_bytes).hexdigest()
+        
+        # Combine all fingerprints
+        combined = f"{shape_str}|{dtype_str}|{data_hash}"
+        feature_hash = hashlib.sha256(combined.encode('utf-8')).hexdigest()[:16]
+        Console.info(f"Stable hash computed: {feature_hash} (shape={shape_str})", component="HASH")
+        return feature_hash
+    except Exception as e:
+        Console.warn(f"Hash computation failed: {e}", component="HASH",
+                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+        return None
+
+
 # =======================
 
 
@@ -2312,25 +2349,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         current_train_columns = list(train.columns)
         with T.section("features.hash"):
-            try:
-                # DEBT-09: Stable hash across pandas versions and OS
-                # Include shape + dtypes + data for cross-platform consistency
-                shape_str = f"{train.shape[0]}x{train.shape[1]}"
-                dtype_str = "|".join(f"{col}:{train[col].dtype}" for col in sorted(train.columns))
-                
-                # Sort columns for deterministic hashing
-                train_sorted = train[sorted(train.columns)]
-                data_bytes = train_sorted.to_numpy(dtype=np.float64, copy=False).tobytes()
-                data_hash = hashlib.sha256(data_bytes).hexdigest()
-                
-                # Combine all fingerprints
-                combined = f"{shape_str}|{dtype_str}|{data_hash}"
-                train_feature_hash = hashlib.sha256(combined.encode('utf-8')).hexdigest()[:16]
-                Console.info(f"Stable hash computed: {train_feature_hash} (shape={shape_str})", component="HASH")
-            except Exception as e:
-                Console.warn(f"Hash computation failed: {e}", component="HASH",
-                             equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-                train_feature_hash = None
+            train_feature_hash = _compute_stable_feature_hash(train, equip)
 
         # Respect refit-request from SQL table entries
         refit_requested = False
