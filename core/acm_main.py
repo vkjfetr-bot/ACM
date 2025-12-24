@@ -1506,6 +1506,97 @@ def _load_cached_models_with_validation(
         return None, None
 
 
+def _save_trained_models(
+    equip: str,
+    art_root: Path,
+    sql_client: Optional[Any],
+    equip_id: int,
+    SQL_MODE: bool,
+    dual_mode: bool,
+    cfg: Dict[str, Any],
+    train: pd.DataFrame,
+    ar1_detector: Any,
+    pca_detector: Any,
+    iforest_detector: Any,
+    gmm_detector: Any,
+    omr_detector: Any,
+    regime_model: Any,
+    col_meds: Optional[Dict[str, float]],
+    regime_quality_ok: bool,
+    T: Any,
+    run_id: str = "",
+) -> Optional[int]:
+    """Save all trained models with versioning and metadata.
+    
+    Creates a complete snapshot of trained detectors including metadata
+    like training duration, config signature, and regime quality metrics.
+    
+    Returns:
+        Model version number if successful, None on failure.
+    """
+    try:
+        from core.model_persistence import ModelVersionManager, create_model_metadata
+        
+        model_manager = ModelVersionManager(
+            equip=equip,
+            artifact_root=art_root,
+            sql_client=sql_client if SQL_MODE or dual_mode else None,
+            equip_id=equip_id if SQL_MODE or dual_mode else None
+        )
+        
+        # Collect all models (MHAL removed v9.1.0 - redundant with PCA-T2)
+        models_to_save = {
+            "ar1_params": {"phimap": ar1_detector.phimap, "sdmap": ar1_detector.sdmap} if hasattr(ar1_detector, 'phimap') else None,
+            "pca_model": pca_detector.pca if hasattr(pca_detector, 'pca') else None,
+            "iforest_model": iforest_detector.model if hasattr(iforest_detector, 'model') else None,
+            "gmm_model": gmm_detector.model if hasattr(gmm_detector, 'model') else None,
+            "omr_model": omr_detector.to_dict() if omr_detector and omr_detector._is_fitted else None,
+            "regime_model": regime_model.model if regime_model and hasattr(regime_model, 'model') else None,
+            "feature_medians": col_meds,
+        }
+        
+        # Calculate training duration from timing sections
+        training_duration_s = None
+        try:
+            fit_sections = ["fit.ar1", "fit.pca_subspace", "fit.iforest", "fit.gmm", "fit.omr", "regimes.fit"]
+            total_fit_time = sum([T.timings.get(sec, {}).get("elapsed", 0.0) for sec in fit_sections])
+            if total_fit_time > 0:
+                training_duration_s = total_fit_time
+        except Exception:
+            pass
+        
+        # Create metadata
+        regime_quality_metrics = {
+            "quality_ok": regime_quality_ok,
+            "n_regimes": regime_model.model.n_clusters if regime_model and hasattr(regime_model, 'model') else 0
+        }
+        
+        with T.section("models.persistence.metadata"):
+            metadata = create_model_metadata(
+                config_signature=cfg.get("_signature", "unknown"),
+                train_data=train,
+                models_dict=models_to_save,
+                regime_quality=regime_quality_metrics,
+                training_duration_s=training_duration_s
+            )
+        
+        # Save models
+        model_version = model_manager.save_models(
+            models=models_to_save,
+            metadata=metadata
+        )
+        
+        Console.info(f"Saved all trained models to version v{model_version}", component="MODEL")
+        return model_version
+        
+    except Exception as e:
+        import traceback
+        Console.warn(f"Failed to save models: {e}", component="MODEL",
+                     equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
+        traceback.print_exc()
+        return None
+
+
 # =======================
 
 
@@ -2994,67 +3085,27 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         models_were_trained = detectors_fitted_this_run  # Clearer: save only if fitted this run
         if models_were_trained:
             with T.section("models.persistence.save"):
-                try:
-                    from core.model_persistence import ModelVersionManager, create_model_metadata
-                    
-                    model_manager = ModelVersionManager(
-                        equip=equip, 
-                        artifact_root=Path(art_root),
-                        sql_client=sql_client if SQL_MODE or dual_mode else None,
-                        equip_id=equip_id if SQL_MODE or dual_mode else None
-                    )
-                    
-                    # Collect all models (MHAL removed v9.1.0 - redundant with PCA-T2)
-                    models_to_save = {
-                        "ar1_params": {"phimap": ar1_detector.phimap, "sdmap": ar1_detector.sdmap} if hasattr(ar1_detector, 'phimap') else None,
-                        "pca_model": pca_detector.pca if hasattr(pca_detector, 'pca') else None,
-                        "iforest_model": iforest_detector.model if hasattr(iforest_detector, 'model') else None,
-                        "gmm_model": gmm_detector.model if hasattr(gmm_detector, 'model') else None,
-                        "omr_model": omr_detector.to_dict() if omr_detector and omr_detector._is_fitted else None,
-                        "regime_model": regime_model.model if regime_model and hasattr(regime_model, 'model') else None,
-                        "feature_medians": col_meds if 'col_meds' in locals() else None
-                    }
-                    
-                    # Calculate training duration (approximate from timing sections)
-                    # Use aggregate timing from T sections for model training
-                    training_duration_s = None
-                    try:
-                        # Get timing data from the global timer (MHAL removed from fit_sections)
-                        fit_sections = ["fit.ar1", "fit.pca_subspace", "fit.iforest", "fit.gmm", "fit.omr", "regimes.fit"]
-                        total_fit_time = sum([T.timings.get(sec, {}).get("elapsed", 0.0) for sec in fit_sections])
-                        if total_fit_time > 0:
-                            training_duration_s = total_fit_time
-                    except Exception:
-                        pass
-                    
-                    # Create metadata
-                    regime_quality_metrics = {
-                        "quality_ok": regime_quality_ok,
-                        "n_regimes": regime_model.model.n_clusters if regime_model and hasattr(regime_model, 'model') else 0
-                    }
-                    
-                    with T.section("models.persistence.metadata"):
-                        metadata = create_model_metadata(
-                            config_signature=cfg.get("_signature", "unknown"),
-                            train_data=train,
-                            models_dict=models_to_save,
-                            regime_quality=regime_quality_metrics,
-                            training_duration_s=training_duration_s
-                        )
-                    
-                    # Save models
-                    model_version = model_manager.save_models(
-                        models=models_to_save,
-                        metadata=metadata
-                    )
-                    
-                    Console.info(f"Saved all trained models to version v{model_version}", component="MODEL")
-                    
-                except Exception as e:
-                    import traceback
-                    Console.warn(f"Failed to save models: {e}", component="MODEL",
-                                 equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
-                    traceback.print_exc()
+                col_meds_value = col_meds if 'col_meds' in dir() else None
+                _save_trained_models(
+                    equip=equip,
+                    art_root=Path(art_root),
+                    sql_client=sql_client,
+                    equip_id=equip_id,
+                    SQL_MODE=SQL_MODE,
+                    dual_mode=dual_mode,
+                    cfg=cfg,
+                    train=train,
+                    ar1_detector=ar1_detector,
+                    pca_detector=pca_detector,
+                    iforest_detector=iforest_detector,
+                    gmm_detector=gmm_detector,
+                    omr_detector=omr_detector,
+                    regime_model=regime_model,
+                    col_meds=col_meds_value,
+                    regime_quality_ok=regime_quality_ok,
+                    T=T,
+                    run_id=run_id,
+                )
 
         # ===== 5) Calibrate -> pca_spe_z, pca_t2_z, ar1_z, iforest_z, gmm_z, omr_z =====
         # CRITICAL FIX: Fit calibrators on TRAIN data, transform SCORE data
