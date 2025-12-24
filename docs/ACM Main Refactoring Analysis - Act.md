@@ -28,13 +28,15 @@
 
 **Wave 1+2 Results**: 4,663 → 4,328 lines (**335 lines removed, 7.2% reduction**)
 
-### Wave 3: Phase Extraction 🔄 IN PROGRESS
-| Phase Function | Target Lines | Status |
-|----------------|--------------|--------|
-| Context dataclasses | - | ✅ Done (b6fa58e) |
-| `_score_all_detectors()` | - | ✅ Done (d9401f7, 1004d8e) |
-| `_calibrate_all_detectors()` | - | ✅ Done (7d8f410) |
-| `_fit_all_detectors()` | - | ✅ Done (d16d2a8) |
+### Wave 3: Helper Function Extraction 🔄 IN PROGRESS
+| Helper Function | Purpose | Status |
+|-----------------|---------|--------|
+| Context dataclasses | RuntimeContext, DataContext, FeatureContext, ModelContext, ScoreContext, FusionContext | ✅ Done (b6fa58e) |
+| `_score_all_detectors()` | Score data with all fitted detectors | ✅ Done (d9401f7, 1004d8e) |
+| `_calibrate_all_detectors()` | Calibrate detector outputs to z-scores | ✅ Done (7d8f410) |
+| `_fit_all_detectors()` | Fit all enabled detectors on train data | ✅ Done (d16d2a8) |
+| `_get_detector_enable_flags()` | Get detector enable flags from fusion weights | ✅ Done (ab8f1d9) |
+| `_deduplicate_index()` | Remove duplicate timestamps from DataFrame index | ✅ Done (86580f7) |
 | `_phase_initialize_runtime()` | 840-1183 (~343 lines) | 🔲 Not Started |
 | `_phase_load_data()` | 1183-1915 (~732 lines) | 🔲 Not Started |
 | `_phase_fit_models()` | 1915-2311 (~396 lines) | 🔲 Not Started |
@@ -43,7 +45,12 @@
 | `_phase_fuse_and_episodes()` | 2769-3419 (~650 lines) | 🔲 Not Started |
 | `_phase_persist_results()` | 3771-end (~490 lines) | 🔲 Not Started |
 
-**Wave 3 Progress**: Added context dataclasses + extracted `_score_all_detectors()`, `_calibrate_all_detectors()`, and `_fit_all_detectors()` helpers
+**Wave 3 Progress**: Added context dataclasses + extracted 5 helper functions:
+- `_score_all_detectors()` - Score data through all detectors
+- `_calibrate_all_detectors()` - Calibrate detector outputs
+- `_fit_all_detectors()` - Fit all detectors on training data
+- `_get_detector_enable_flags()` - Get enable flags from fusion weights
+- `_deduplicate_index()` - Remove duplicate timestamps
 
 ### Wave 4: Pattern Improvements 🔲 PLANNED
 | Pattern | Status |
@@ -51,7 +58,7 @@
 | `@safe_section` decorator | 🔲 Not Started |
 | `ConfigAccessor` class | 🔲 Not Started |
 
-**Current Line Count**: 4,394 lines (original: 4,663; helpers added net +90 lines but main() simplified)
+**Current Line Count**: 4,424 lines (original: 4,663; helpers consolidated duplicate logic)
 
 ---
 
