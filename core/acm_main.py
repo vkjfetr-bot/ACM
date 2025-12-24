@@ -1429,6 +1429,83 @@ def _check_refit_request(sql_client: Optional[Any], equip_id: int, equip: str = 
     return False
 
 
+def _load_cached_models_with_validation(
+    equip: str,
+    art_root: Path,
+    sql_client: Optional[Any],
+    equip_id: int,
+    SQL_MODE: bool,
+    dual_mode: bool,
+    cfg: Dict[str, Any],
+    train_columns: List[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Load cached models from persistence and validate them.
+    
+    Args:
+        equip: Equipment name
+        art_root: Artifact root directory
+        sql_client: SQL client connection
+        equip_id: Equipment ID
+        SQL_MODE: Whether running in SQL-only mode
+        dual_mode: Whether running in dual-write mode
+        cfg: Configuration dictionary
+        train_columns: Current training column names for validation
+        
+    Returns:
+        Tuple of (cached_models dict, cached_manifest dict) or (None, None) if invalid
+    """
+    try:
+        from core.model_persistence import ModelVersionManager
+        
+        model_manager = ModelVersionManager(
+            equip=equip, 
+            artifact_root=art_root,
+            sql_client=sql_client if SQL_MODE or dual_mode else None,
+            equip_id=equip_id if SQL_MODE or dual_mode else None
+        )
+        cached_models, cached_manifest = model_manager.load_models()
+        
+        if cached_models and cached_manifest:
+            # Validate cache
+            current_config_sig = cfg.get("_signature", "unknown")
+            current_sensors = train_columns
+            
+            is_valid, invalid_reasons = model_manager.check_model_validity(
+                manifest=cached_manifest,
+                current_config_signature=current_config_sig,
+                current_sensors=current_sensors
+            )
+            
+            if is_valid:
+                # Enhanced logging for cached model acceptance
+                Console.info(f"Using cached models from v{cached_manifest['version']}", component="MODEL")
+                Console.info(f"Cache created: {cached_manifest.get('created_at', 'unknown')}", component="MODEL")
+                Console.info(f"Config signature: {current_config_sig[:16]}... (unchanged)", component="MODEL")
+                Console.info(f"Sensor count: {len(current_sensors)} (matching cached)", component="MODEL")
+                if 'created_at' in cached_manifest:
+                    from datetime import datetime
+                    try:
+                        created_at = datetime.fromisoformat(cached_manifest['created_at'])
+                        age_hours = (datetime.now() - created_at).total_seconds() / 3600
+                        Console.info(f"Model age: {age_hours:.1f}h ({age_hours/24:.1f}d)", component="MODEL")
+                    except Exception:
+                        pass
+                return cached_models, cached_manifest
+            else:
+                # Enhanced logging for retrain trigger reasons
+                Console.warn(f"Cached models invalid, retraining required:", component="MODEL",
+                             equip=equip, invalid_reason_count=len(invalid_reasons))
+                for reason in invalid_reasons:
+                    Console.warn(f"- {reason}", component="MODEL", equip=equip)
+                return None, None
+        return None, None
+    except Exception as e:
+        Console.warn(f"Failed to load cached models: {e}", component="MODEL",
+                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+        return None, None
+
+
 # =======================
 
 
@@ -2458,57 +2535,17 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         
         if use_cache and detector_cache is None:
             with T.section("models.persistence.load"):
-                try:
-                    from core.model_persistence import ModelVersionManager
-                    
-                    model_manager = ModelVersionManager(
-                        equip=equip, 
-                        artifact_root=Path(art_root),
-                        sql_client=sql_client if SQL_MODE or dual_mode else None,
-                        equip_id=equip_id if SQL_MODE or dual_mode else None
-                    )
-                    cached_models, cached_manifest = model_manager.load_models()
-                    
-                    if cached_models and cached_manifest:
-                        # Validate cache
-                        current_config_sig = cfg.get("_signature", "unknown")
-                        current_sensors = list(train.columns) if hasattr(train, 'columns') else []
-                        
-                        with T.section("models.persistence.validate"):
-                            is_valid, invalid_reasons = model_manager.check_model_validity(
-                                manifest=cached_manifest,
-                                current_config_signature=current_config_sig,
-                                current_sensors=current_sensors
-                            )
-                        
-                        if is_valid:
-                            # Task 10: Enhanced logging for cached model acceptance
-                            Console.info(f"âœ“ Using cached models from v{cached_manifest['version']}", component="MODEL")
-                            Console.info(f"Cache created: {cached_manifest.get('created_at', 'unknown')}", component="MODEL")
-                            Console.info(f"Config signature: {current_config_sig[:16]}... (unchanged)", component="MODEL")
-                            Console.info(f"Sensor count: {len(current_sensors)} (matching cached)", component="MODEL")
-                            if 'created_at' in cached_manifest:
-                                from datetime import datetime
-                                try:
-                                    created_at = datetime.fromisoformat(cached_manifest['created_at'])
-                                    age_hours = (datetime.now() - created_at).total_seconds() / 3600
-                                    Console.info(f"Model age: {age_hours:.1f}h ({age_hours/24:.1f}d)", component="MODEL")
-                                except Exception:
-                                    pass
-                        else:
-                            # Task 10: Enhanced logging for retrain trigger reasons
-                            Console.warn(f"âœ— Cached models invalid, retraining required:", component="MODEL",
-                                         equip=equip, invalid_reason_count=len(invalid_reasons))
-                            for reason in invalid_reasons:
-                                Console.warn(f"- {reason}", component="MODEL",
-                                             equip=equip)
-                            cached_models = None
-                            cached_manifest = None
-                except Exception as e:
-                    Console.warn(f"Failed to load cached models: {e}", component="MODEL",
-                                 equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-                    cached_models = None
-                    cached_manifest = None
+                current_sensors = list(train.columns) if hasattr(train, 'columns') else []
+                cached_models, cached_manifest = _load_cached_models_with_validation(
+                    equip=equip,
+                    art_root=Path(art_root),
+                    sql_client=sql_client,
+                    equip_id=equip_id,
+                    SQL_MODE=SQL_MODE,
+                    dual_mode=dual_mode,
+                    cfg=cfg,
+                    train_columns=current_sensors,
+                )
         
         # Initialize detector variables
         # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2 (both compute Mahalanobis distance)
