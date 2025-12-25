@@ -2,26 +2,22 @@
 
 **Last Updated:** 2024-12-25  
 **Version:** 11.0.0  
-**Approach:** Functionality-based, focused on ACM's core mission  
-**Status:** ✅ REFINED BASED ON CRUX ANALYSIS
+**Approach:** Functionality-based + Code Analysis  
+**Status:** ✅ COMPREHENSIVE AUDIT COMPLETE
 
 ## Summary
-**Design Principle**: Tables chosen based on **4 fundamental questions ACM must answer**:
-1. What is current health?
-2. If not healthy, what's the reason?
-3. What will future health look like?
-4. What will cause future degradation?
+**Design Principle**: Tables chosen based on **4 fundamental questions ACM must answer** + **actual code behavior analysis**
 
-**Recommended Table Set**: 29 core tables organized in 6 functional tiers  
-**Previous Version**: 25 tables  
-**Increase**: +16% (4 new tables added based on feedback)
+**Critical Discovery**: Initial analysis missed 13 actively-written tables
 
-**Key Refinements**:
-- Re-added ACM_BaselineBuffer (critical for progressive learning)
-- Re-added ACM_HistorianData (performance, caching)
-- Re-added ACM_SensorNormalized_TS (analysis, patterns)
-- Re-added ACM_ContributionTimeline (historical attribution)
-- All additions support long-term storage and operational needs
+**Complete Table Set**: 42 core tables organized in 7 functional tiers  
+**Previous Version**: 29 tables  
+**Increase**: +45% (13 tables added after comprehensive code review)
+
+**What Was Missing:**
+- 7 operational/diagnostic tables actively written by code
+- 5 V11 feature tables (new architecture)
+- 1 additional analytics table
 
 ---
 
@@ -30,22 +26,25 @@
 ACM exists to answer 4 questions:
 
 ### 1. **What is current health?**
-→ TIER 1 tables (6): HealthTimeline, Scores_Wide, Episodes, RegimeTimeline, SensorDefects, SensorHotspots
+→ TIER 1 tables (6): HealthTimeline, Scores_Wide, Episodes, RegimeTimeline, SensorDefects, SensorHotspots  
+→ **Plus:** RunMetrics (system quality tracking)
 
 ### 2. **If not healthy, what's the reason?**
-→ TIER 3 tables (4): EpisodeCulprits, EpisodeDiagnostics, DetectorCorrelation, DriftSeries
+→ TIER 3 tables (6): EpisodeCulprits, EpisodeDiagnostics, DetectorCorrelation, DriftSeries, SensorCorrelations, FeatureDropLog
 
 ### 3. **What will future health look like?**
-→ TIER 2 tables (4): RUL, HealthForecast, FailureForecast, SensorForecast
+→ TIER 2 tables (4): RUL, HealthForecast, FailureForecast, SensorForecast  
+→ **Plus:** SeasonalPatterns (improves forecasting)
 
 ### 4. **What will cause future degradation?**
-→ TIER 2 + TIER 3 tables (combined): SensorForecast, DriftSeries, EpisodeCulprits
+→ TIER 2 + TIER 3 tables (combined)  
+→ **Plus:** RefitRequests (model freshness), RegimePromotionLog (regime stability)
 
 ---
 
-## ALLOWED_TABLES (29 tables) - Crux-Focused
+## ALLOWED_TABLES (42 tables) - Comprehensive Set
 
-See `docs/ACM_OUTPUT_TABLES_REFINED.md` for complete analysis and rationale.
+See `docs/ACM_TABLES_COMPLETE_AUDIT.md` for detailed analysis of all tables.
 
 ### TIER 1: Current State (6 tables)
 **Answers:** "What is current health?"
@@ -69,84 +68,109 @@ See `docs/ACM_OUTPUT_TABLES_REFINED.md` for complete analysis and rationale.
 | **ACM_FailureForecast** | Failure probability | What's the failure risk? |
 | **ACM_SensorForecast** | Physical sensor predictions | Which sensors will degrade? |
 
-### TIER 3: Root Cause (4 tables)
+### TIER 3: Root Cause (6 tables - was 4)
 **Answers:** "Why is this happening?" (current + future)
 
-| Table | Purpose | Key Question |
-|-------|---------|--------------|
-| **ACM_EpisodeCulprits** | What caused each episode | Why did this anomaly occur? |
-| **ACM_EpisodeDiagnostics** | Episode details/severity | How bad was this episode? |
-| **ACM_DetectorCorrelation** | Inter-detector relationships | Are models working together? |
-| **ACM_DriftSeries** | Behavior changes | When did behavior change? |
+| Table | Purpose | Key Question | Status |
+|-------|---------|--------------|--------|
+| **ACM_EpisodeCulprits** | What caused each episode | Why did this anomaly occur? | ✅ |
+| **ACM_EpisodeDiagnostics** | Episode details/severity | How bad was this episode? | ✅ |
+| **ACM_DetectorCorrelation** | Inter-detector relationships | Are models working together? | ✅ |
+| **ACM_DriftSeries** | Behavior changes | When did behavior change? | ✅ |
+| **ACM_SensorCorrelations** | Multivariate relationships | How do sensors co-vary? | **NEW** |
+| **ACM_FeatureDropLog** | Why features dropped | Why was sensor excluded? | **NEW** |
 
-### TIER 4: Data & Model Management (7 tables)
+### TIER 4: Data & Model Management (10 tables - was 7)
 **Purpose:** Long-term storage, progressive learning
 
-| Table | Purpose | Why Critical |
-|-------|---------|--------------|
-| **ACM_BaselineBuffer** | Raw sensor data accumulation | Enables coldstart, progressive training |
-| **ACM_HistorianData** | Cached historian data | Performance, reduces DB load |
-| **ACM_SensorNormalized_TS** | Normalized sensor values | Analysis, pattern detection |
-| **ACM_DataQuality** | Input data health | Data reliability tracking |
-| **ACM_ForecastingState** | Forecast model state | Continuous forecast evolution |
-| **ACM_CalibrationSummary** | Model quality over time | Model performance tracking |
-| **ACM_AdaptiveConfig** | Auto-tuned configuration | Track what ACM learned |
+| Table | Purpose | Why Critical | Status |
+|-------|---------|--------------|--------|
+| **ACM_BaselineBuffer** | Raw sensor data accumulation | Coldstart, progressive training | ✅ |
+| **ACM_HistorianData** | Cached historian data | Performance, reduces DB load | ✅ |
+| **ACM_SensorNormalized_TS** | Normalized sensor values | Pattern analysis | ✅ |
+| **ACM_DataQuality** | Input data health | Data reliability | ✅ |
+| **ACM_ForecastingState** | Forecast model state | Continuous forecast evolution | ✅ |
+| **ACM_CalibrationSummary** | Model quality over time | Performance tracking | ✅ |
+| **ACM_AdaptiveConfig** | Auto-tuned configuration | Track what ACM learned | ✅ |
+| **ACM_RefitRequests** | Model retraining requests | Model freshness tracking | **NEW** |
+| **ACM_PCA_Metrics** | PCA component metrics | Model quality assessment | **NEW** |
+| **ACM_RunMetadata** | Detailed run context | Batch info, data ranges | **NEW** |
 
-### TIER 5: Operations & Audit (5 tables)
+### TIER 5: Operations & Audit (6 tables - was 5)
 **Purpose:** Is ACM working? What changed?
 
-| Table | Purpose | Key Question |
-|-------|---------|--------------|
-| **ACM_Runs** | Execution tracking | Did ACM run successfully? |
-| **ACM_RunLogs** | Detailed logs | Why did ACM fail/NOOP? |
-| **ACM_RunTimers** | Performance profiling | Where is ACM slow? |
-| **ACM_Config** | Current configuration | What's configured? |
-| **ACM_ConfigHistory** | Configuration changes | What changed and when? |
+| Table | Purpose | Key Question | Status |
+|-------|---------|--------------|--------|
+| **ACM_Runs** | Execution tracking | Did ACM run successfully? | ✅ |
+| **ACM_RunLogs** | Detailed logs | Why did ACM fail/NOOP? | ✅ |
+| **ACM_RunTimers** | Performance profiling | Where is ACM slow? | ✅ |
+| **ACM_Config** | Current configuration | What's configured? | ✅ |
+| **ACM_ConfigHistory** | Configuration changes | What changed and when? | ✅ |
+| **ACM_RunMetrics** | Fusion quality metrics | How well are detectors working together? | **NEW** |
 
-### TIER 6: Advanced Analytics (3 tables)
+### TIER 6: Advanced Analytics (5 tables - was 3)
 **Purpose:** Deep insights and patterns
 
-| Table | Purpose | Key Question |
-|-------|---------|--------------|
-| **ACM_RegimeOccupancy** | Operating mode utilization | How much time in each mode? |
-| **ACM_RegimeTransitions** | Mode switching patterns | How do modes transition? |
-| **ACM_ContributionTimeline** | Historical sensor attribution | Which sensors historically cause issues? |
+| Table | Purpose | Key Question | Status |
+|-------|---------|--------------|--------|
+| **ACM_RegimeOccupancy** | Operating mode utilization | How much time in each mode? | ✅ |
+| **ACM_RegimeTransitions** | Mode switching patterns | How do modes transition? | ✅ |
+| **ACM_ContributionTimeline** | Historical sensor attribution | Which sensors historically cause issues? | ✅ |
+| **ACM_RegimePromotionLog** | Regime maturity evolution | How stable are operating modes? | **NEW** |
+| **ACM_DriftController** | Drift detection control | How sensitive is drift detection? | **NEW** |
+
+### TIER 7: V11 NEW FEATURES (5 tables - NEW)
+**Purpose:** Advanced v11.0.0 capabilities
+
+| Table | Purpose | Key Question | Status |
+|-------|---------|--------------|--------|
+| **ACM_RegimeDefinitions** | Regime centroids and metadata | What does each operating mode represent? | **CRITICAL** |
+| **ACM_ActiveModels** | Active model versions | Which model version is active? | **NEW** |
+| **ACM_DataContractValidation** | Pipeline entry validation | Did input data pass validation? | **NEW** |
+| **ACM_SeasonalPatterns** | Seasonal pattern detection | Does equipment have seasonal behavior? | **NEW** |
+| **ACM_AssetProfiles** | Asset similarity profiles | Which equipment is similar? | **NEW** |
 
 ---
 
-## Key Changes from Previous Version
+## Critical Additions from Code Analysis
 
-### Added Back (4 tables):
-1. **ACM_BaselineBuffer** - Critical for progressive model building and coldstart
-2. **ACM_HistorianData** - Performance optimization through data caching
-3. **ACM_SensorNormalized_TS** - Processed sensor data for time-series analysis
-4. **ACM_ContributionTimeline** - Historical attribution patterns (vs current snapshot)
+### Why These Were Missing Initially:
 
-### Why These Were Re-Added:
+**ACM_RegimeDefinitions** - **CRITICAL OVERSIGHT**
+- Written by `core/regime_definitions.py`
+- Referenced by `core/regime_manager.py`, `core/regime_evaluation.py`
+- **Impact if missing:** Regime detection broken, no regime context available
+- **Status:** Now in TIER 7
 
-**ACM_BaselineBuffer**
-- **Removal reason:** "Internal operational"
-- **Why critical:** Enables progressive model building, coldstart support, data accumulation across runs
-- **User question:** "How much training data has ACM collected?"
-- **Long-term storage:** YES
+**ACM_RunMetadata, ACM_RunMetrics** - Operational Visibility
+- Written by `core/run_metadata_writer.py`, `core/acm_main.py`
+- Tracks run context and fusion quality
+- **Impact if missing:** Cannot reconstruct runs, no quality tracking
+- **Status:** Now in TIER 4 and TIER 5
 
-**ACM_HistorianData**
-- **Removal reason:** "Raw data cache"
-- **Why critical:** Reduces historian load, improves performance, enables offline analysis
-- **User question:** "Is ACM using cached or fresh data?"
-- **Long-term storage:** YES
+**ACM_RefitRequests** - Model Lifecycle
+- Written by `core/acm_main.py`, `core/config_history_writer.py`
+- Tracks when models need retraining
+- **Impact if missing:** Model freshness unknown, stale models possible
+- **Status:** Now in TIER 4
 
-**ACM_SensorNormalized_TS**
-- **Removal reason:** "Intermediate processing"
-- **Why critical:** Normalized values needed for correlations, pattern analysis, trend detection
-- **User question:** "What are the normalized sensor trends?"
-- **Long-term storage:** YES
+**ACM_SensorCorrelations** - Multivariate Analysis
+- Written by `core/multivariate_forecast.py`
+- Correlation matrix for sensor relationships
+- **Impact if missing:** Multivariate patterns unavailable
+- **Status:** Now in TIER 3
 
-**ACM_ContributionTimeline**
-- **Removal reason:** "Redundant with SensorHotspots"
-- **Why critical:** Historical patterns (timeline) vs current state (hotspots) - different purposes
-- **User question:** "Which sensors consistently cause problems over time?"
-- **Long-term storage:** YES
+**ACM_FeatureDropLog** - Data Quality
+- Written by `core/acm_main.py`
+- Logs dropped features and reasons
+- **Impact if missing:** Data quality issues hidden
+- **Status:** Now in TIER 3
+
+**V11 Feature Tables** - Architecture Support
+- Written by various v11 modules
+- Support typed contracts, maturity lifecycle, seasonality
+- **Impact if missing:** V11 features disabled
+- **Status:** All 5 now in TIER 7
 
 ---
 

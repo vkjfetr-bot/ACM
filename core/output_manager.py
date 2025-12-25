@@ -63,7 +63,7 @@ except ImportError:
 #
 # Additional tables support: data persistence, model evolution, diagnostics
 #
-# See docs/ACM_OUTPUT_REQUIREMENTS.md for complete rationale.
+# See docs/ACM_OUTPUT_TABLES_REFINED.md for complete rationale.
 #
 # TIER 1 - CURRENT STATE (What's happening NOW?)
 # TIER 2 - FUTURE STATE (What will happen?)
@@ -71,6 +71,7 @@ except ImportError:
 # TIER 4 - DATA & MODEL MANAGEMENT (Long-term storage, model building)
 # TIER 5 - OPERATIONS & AUDIT (Is ACM working? What changed?)
 # TIER 6 - ADVANCED ANALYTICS (Deep patterns and trends)
+# TIER 7 - V11 NEW FEATURES (Typed contracts, maturity lifecycle, seasonality)
 # =============================================================================
 
 ALLOWED_TABLES = {
@@ -88,13 +89,15 @@ ALLOWED_TABLES = {
     'ACM_FailureForecast',       # Failure probability over time
     'ACM_SensorForecast',        # Physical sensor value predictions
     
-    # TIER 3: ROOT CAUSE (4 tables) - Answers "Why?" (current + future)
+    # TIER 3: ROOT CAUSE (6 tables) - Answers "Why?" (current + future)
     'ACM_EpisodeCulprits',       # What caused each episode
     'ACM_EpisodeDiagnostics',    # Episode details and severity
     'ACM_DetectorCorrelation',   # How detectors relate (model quality)
     'ACM_DriftSeries',           # Behavior changes that lead to degradation
+    'ACM_SensorCorrelations',    # Multivariate sensor relationships (correlation matrix)
+    'ACM_FeatureDropLog',        # Why features were dropped (quality issues)
     
-    # TIER 4: DATA & MODEL MANAGEMENT (7 tables) - Long-term storage, enables progressive learning
+    # TIER 4: DATA & MODEL MANAGEMENT (10 tables) - Long-term storage, enables progressive learning
     'ACM_BaselineBuffer',        # Raw sensor data accumulation for training
     'ACM_HistorianData',         # Cached historian data for efficiency
     'ACM_SensorNormalized_TS',   # Normalized sensor time series
@@ -102,18 +105,31 @@ ALLOWED_TABLES = {
     'ACM_ForecastingState',      # Forecast model state persistence
     'ACM_CalibrationSummary',    # Model quality tracking over time
     'ACM_AdaptiveConfig',        # Auto-tuned configuration
+    'ACM_RefitRequests',         # Model retraining requests and acknowledgements
+    'ACM_PCA_Metrics',           # PCA component metrics and explained variance
+    'ACM_RunMetadata',           # Detailed run context (batch info, data ranges)
     
-    # TIER 5: OPERATIONS & AUDIT (5 tables) - Is ACM working? What changed?
+    # TIER 5: OPERATIONS & AUDIT (6 tables) - Is ACM working? What changed?
     'ACM_Runs',                  # Execution tracking and status
     'ACM_RunLogs',               # Detailed logs for troubleshooting
     'ACM_RunTimers',             # Performance profiling
+    'ACM_RunMetrics',            # Fusion quality metrics (EAV format)
     'ACM_Config',                # Current configuration
     'ACM_ConfigHistory',         # Configuration change audit trail
     
-    # TIER 6: ADVANCED ANALYTICS (3 tables) - Deep insights and patterns
+    # TIER 6: ADVANCED ANALYTICS (5 tables) - Deep insights and patterns
     'ACM_RegimeOccupancy',       # Operating mode utilization
     'ACM_RegimeTransitions',     # Mode switching patterns
+    'ACM_RegimePromotionLog',    # Regime maturity evolution tracking
     'ACM_ContributionTimeline',  # Historical sensor attribution for pattern analysis
+    'ACM_DriftController',       # Drift detection control and thresholds
+    
+    # TIER 7: V11 NEW FEATURES (5 tables) - Advanced capabilities from v11.0.0
+    'ACM_RegimeDefinitions',     # Regime centroids and metadata (MaturityState lifecycle)
+    'ACM_ActiveModels',          # Active model versions per equipment
+    'ACM_DataContractValidation',# Data quality validation at pipeline entry
+    'ACM_SeasonalPatterns',      # Detected seasonal patterns (diurnal, weekly)
+    'ACM_AssetProfiles',         # Asset similarity for cold-start transfer learning
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
