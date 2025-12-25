@@ -2,113 +2,151 @@
 
 **Last Updated:** 2024-12-25  
 **Version:** 11.0.0  
-**Approach:** Functionality-based (NOT dashboard-based)  
-**Status:** ✅ REQUIREMENTS DEFINED
+**Approach:** Functionality-based, focused on ACM's core mission  
+**Status:** ✅ REFINED BASED ON CRUX ANALYSIS
 
 ## Summary
-**Design Principle**: Tables chosen based on **what ACM does** and **what users need to see**, not based on existing dashboards.
+**Design Principle**: Tables chosen based on **4 fundamental questions ACM must answer**:
+1. What is current health?
+2. If not healthy, what's the reason?
+3. What will future health look like?
+4. What will cause future degradation?
 
-**Recommended Table Set**: 25 core tables organized in 6 functional tiers  
-**Current ALLOWED_TABLES**: 25 tables (expanded from 17)  
-**Increase**: +47% (8 new tables added)
+**Recommended Table Set**: 29 core tables organized in 6 functional tiers  
+**Previous Version**: 25 tables  
+**Increase**: +16% (4 new tables added based on feedback)
 
-**Key Changes from Dashboard-Based Approach**:
-- Removed redundant/derivable tables (17 tables)
-- Removed overly specific tables (5 tables)  
-- Removed internal operational tables (8 tables)
-- Focus on user-facing, actionable outputs
-- Each table serves clear, non-redundant purpose
-
----
-
-## Design Philosophy
-
-### What Changed
-**Previous Approach (Dashboard-Based)**:
-- Started with existing dashboards
-- Identified 26 tables needed by 6 dashboards
-- Expanded to 42 tables to achieve 100% coverage
-- Result: Many redundant/niche tables
-
-**New Approach (Functionality-Based)**:
-- Analyzed ACM's 8 core capabilities
-- Identified what operations/maintenance/engineering teams need
-- Designed 25 tables to provide complete visibility
-- Dashboards will be built later to visualize this data
-
-### Why This is Better
-✅ **Purpose-driven**: Every table has clear user value  
-✅ **Complete**: Covers all ACM functionality  
-✅ **Non-redundant**: No duplicate information  
-✅ **Actionable**: Enables specific decisions  
-✅ **Future-proof**: Not tied to current dashboard limitations  
+**Key Refinements**:
+- Re-added ACM_BaselineBuffer (critical for progressive learning)
+- Re-added ACM_HistorianData (performance, caching)
+- Re-added ACM_SensorNormalized_TS (analysis, patterns)
+- Re-added ACM_ContributionTimeline (historical attribution)
+- All additions support long-term storage and operational needs
 
 ---
 
-## ALLOWED_TABLES (25 tables) - Functionality-Based
+## The Crux of ACM
 
-See `docs/ACM_OUTPUT_REQUIREMENTS.md` for complete rationale and detailed specifications.
+ACM exists to answer 4 questions:
 
-### TIER 1: Real-Time State (4 tables)
-**Purpose**: Current equipment status
+### 1. **What is current health?**
+→ TIER 1 tables (6): HealthTimeline, Scores_Wide, Episodes, RegimeTimeline, SensorDefects, SensorHotspots
 
-| Table | Purpose | Updates | Key Users |
-|-------|---------|---------|-----------|
-| **ACM_HealthTimeline** | Continuous health monitoring | Every run | Operations, Maintenance |
-| **ACM_Scores_Wide** | All 6 detector scores | Every run | Engineering, Analytics |
-| **ACM_Episodes** | Anomaly event tracking | When detected | Operations |
-| **ACM_RegimeTimeline** | Operating mode context | Every run | Analytics |
+### 2. **If not healthy, what's the reason?**
+→ TIER 3 tables (4): EpisodeCulprits, EpisodeDiagnostics, DetectorCorrelation, DriftSeries
 
-### TIER 2: Predictive Intelligence (4 tables)
-**Purpose**: Future state predictions
+### 3. **What will future health look like?**
+→ TIER 2 tables (4): RUL, HealthForecast, FailureForecast, SensorForecast
 
-| Table | Purpose | Updates | Key Users |
-|-------|---------|---------|-----------|
-| **ACM_RUL** | Remaining Useful Life | Every successful run | Maintenance |
-| **ACM_HealthForecast** | Projected health trajectory | Every forecast run | Operations, Maintenance |
-| **ACM_FailureForecast** | Failure probability curves | Every forecast run | Maintenance, Management |
-| **ACM_SensorForecast** | Physical sensor predictions | Every forecast run | Process engineers |
+### 4. **What will cause future degradation?**
+→ TIER 2 + TIER 3 tables (combined): SensorForecast, DriftSeries, EpisodeCulprits
 
-### TIER 3: Root Cause & Diagnostics (5 tables)
-**Purpose**: Why problems occur
+---
 
-| Table | Purpose | Updates | Key Users |
-|-------|---------|---------|-----------|
-| **ACM_SensorDefects** | Sensor-level anomaly flags | Every run | Maintenance |
-| **ACM_SensorHotspots** | Top culprit sensors | When anomalies | Maintenance |
-| **ACM_EpisodeCulprits** | Per-episode attribution | When episodes | Analytics |
-| **ACM_EpisodeDiagnostics** | Episode details | When episodes | Engineering |
-| **ACM_DetectorCorrelation** | Inter-detector relationships | Periodic | Analytics, Engineering |
+## ALLOWED_TABLES (29 tables) - Crux-Focused
 
-### TIER 4: System Operations (5 tables)
-**Purpose**: Is ACM working correctly?
+See `docs/ACM_OUTPUT_TABLES_REFINED.md` for complete analysis and rationale.
 
-| Table | Purpose | Updates | Key Users |
-|-------|---------|---------|-----------|
-| **ACM_Runs** | Execution tracking | Every run | Engineering |
-| **ACM_DataQuality** | Input data health | Every run | Engineering |
-| **ACM_ForecastingState** | Forecast model persistence | Forecast runs | Internal |
-| **ACM_AdaptiveConfig** | Auto-tuned settings | When tuned | Engineering |
-| **ACM_RunTimers** | Performance profiling | Every run | Engineering |
+### TIER 1: Current State (6 tables)
+**Answers:** "What is current health?"
 
-### TIER 5: Configuration & Audit (3 tables)
-**Purpose**: How is ACM configured?
+| Table | Purpose | Key Question |
+|-------|---------|--------------|
+| **ACM_HealthTimeline** | Health history + current | What's the health trend? |
+| **ACM_Scores_Wide** | All 6 detector scores | Which detectors are firing? |
+| **ACM_Episodes** | Active/historical anomalies | What anomalies are active? |
+| **ACM_RegimeTimeline** | Operating mode context | What mode is equipment in? |
+| **ACM_SensorDefects** | Problematic sensors NOW | Which sensors are bad? |
+| **ACM_SensorHotspots** | Top culprit sensors | What are worst sensors? |
 
-| Table | Purpose | Updates | Key Users |
-|-------|---------|---------|-----------|
-| **ACM_Config** | Current configuration | Manual/sync | Engineering |
-| **ACM_ConfigHistory** | Configuration changes | On change | Compliance, Engineering |
-| **ACM_RunLogs** | Detailed execution logs | During run | Engineering |
+### TIER 2: Future State (4 tables)
+**Answers:** "What will future health look like?"
 
-### TIER 6: Advanced Analytics (4 tables)
-**Purpose**: Deep analytical insights
+| Table | Purpose | Key Question |
+|-------|---------|--------------|
+| **ACM_RUL** | Remaining Useful Life | When will it fail? |
+| **ACM_HealthForecast** | Projected health trajectory | How will health evolve? |
+| **ACM_FailureForecast** | Failure probability | What's the failure risk? |
+| **ACM_SensorForecast** | Physical sensor predictions | Which sensors will degrade? |
 
-| Table | Purpose | Updates | Key Users |
-|-------|---------|---------|-----------|
-| **ACM_DriftSeries** | Behavior change tracking | Every run | Analytics |
-| **ACM_RegimeOccupancy** | Operating mode stats | Periodic | Analytics |
-| **ACM_RegimeTransitions** | Mode switching patterns | Periodic | Analytics |
-| **ACM_CalibrationSummary** | Model quality metrics | After fitting | Engineering |
+### TIER 3: Root Cause (4 tables)
+**Answers:** "Why is this happening?" (current + future)
+
+| Table | Purpose | Key Question |
+|-------|---------|--------------|
+| **ACM_EpisodeCulprits** | What caused each episode | Why did this anomaly occur? |
+| **ACM_EpisodeDiagnostics** | Episode details/severity | How bad was this episode? |
+| **ACM_DetectorCorrelation** | Inter-detector relationships | Are models working together? |
+| **ACM_DriftSeries** | Behavior changes | When did behavior change? |
+
+### TIER 4: Data & Model Management (7 tables)
+**Purpose:** Long-term storage, progressive learning
+
+| Table | Purpose | Why Critical |
+|-------|---------|--------------|
+| **ACM_BaselineBuffer** | Raw sensor data accumulation | Enables coldstart, progressive training |
+| **ACM_HistorianData** | Cached historian data | Performance, reduces DB load |
+| **ACM_SensorNormalized_TS** | Normalized sensor values | Analysis, pattern detection |
+| **ACM_DataQuality** | Input data health | Data reliability tracking |
+| **ACM_ForecastingState** | Forecast model state | Continuous forecast evolution |
+| **ACM_CalibrationSummary** | Model quality over time | Model performance tracking |
+| **ACM_AdaptiveConfig** | Auto-tuned configuration | Track what ACM learned |
+
+### TIER 5: Operations & Audit (5 tables)
+**Purpose:** Is ACM working? What changed?
+
+| Table | Purpose | Key Question |
+|-------|---------|--------------|
+| **ACM_Runs** | Execution tracking | Did ACM run successfully? |
+| **ACM_RunLogs** | Detailed logs | Why did ACM fail/NOOP? |
+| **ACM_RunTimers** | Performance profiling | Where is ACM slow? |
+| **ACM_Config** | Current configuration | What's configured? |
+| **ACM_ConfigHistory** | Configuration changes | What changed and when? |
+
+### TIER 6: Advanced Analytics (3 tables)
+**Purpose:** Deep insights and patterns
+
+| Table | Purpose | Key Question |
+|-------|---------|--------------|
+| **ACM_RegimeOccupancy** | Operating mode utilization | How much time in each mode? |
+| **ACM_RegimeTransitions** | Mode switching patterns | How do modes transition? |
+| **ACM_ContributionTimeline** | Historical sensor attribution | Which sensors historically cause issues? |
+
+---
+
+## Key Changes from Previous Version
+
+### Added Back (4 tables):
+1. **ACM_BaselineBuffer** - Critical for progressive model building and coldstart
+2. **ACM_HistorianData** - Performance optimization through data caching
+3. **ACM_SensorNormalized_TS** - Processed sensor data for time-series analysis
+4. **ACM_ContributionTimeline** - Historical attribution patterns (vs current snapshot)
+
+### Why These Were Re-Added:
+
+**ACM_BaselineBuffer**
+- **Removal reason:** "Internal operational"
+- **Why critical:** Enables progressive model building, coldstart support, data accumulation across runs
+- **User question:** "How much training data has ACM collected?"
+- **Long-term storage:** YES
+
+**ACM_HistorianData**
+- **Removal reason:** "Raw data cache"
+- **Why critical:** Reduces historian load, improves performance, enables offline analysis
+- **User question:** "Is ACM using cached or fresh data?"
+- **Long-term storage:** YES
+
+**ACM_SensorNormalized_TS**
+- **Removal reason:** "Intermediate processing"
+- **Why critical:** Normalized values needed for correlations, pattern analysis, trend detection
+- **User question:** "What are the normalized sensor trends?"
+- **Long-term storage:** YES
+
+**ACM_ContributionTimeline**
+- **Removal reason:** "Redundant with SensorHotspots"
+- **Why critical:** Historical patterns (timeline) vs current state (hotspots) - different purposes
+- **User question:** "Which sensors consistently cause problems over time?"
+- **Long-term storage:** YES
 
 ---
 
@@ -243,3 +281,34 @@ Based on code analysis, these are already being written:
 5. ⏭️ Deprecate unused tables from database
 
 **Status**: Requirements defined, ready for implementation
+
+---
+
+## Proposed Database Views for Dashboarding
+
+Views provide dashboard-friendly interfaces without additional storage.
+
+**See `docs/ACM_OUTPUT_TABLES_REFINED.md` for complete view definitions and usage patterns.**
+
+Five views proposed:
+1. **ACM_CurrentHealth_View** - Latest health snapshot per equipment
+2. **ACM_ActiveAnomalies_View** - Currently active anomalies with primary sensors
+3. **ACM_LatestRUL_View** - Most recent RUL prediction per equipment  
+4. **ACM_ProblematicSensors_View** - Combines defects + quality
+5. **ACM_FleetSummary_View** - Fleet-wide health summary
+
+---
+
+## Updated Summary (Post-Feedback Refinement)
+
+**Final Table Count:** 29 tables (up from 25)
+
+**Tables Added Based on Feedback:**
+- ACM_BaselineBuffer (progressive learning, coldstart)
+- ACM_HistorianData (performance, caching)
+- ACM_SensorNormalized_TS (time-series analysis)
+- ACM_ContributionTimeline (historical attribution patterns)
+
+**Database Views:** 5 proposed for dashboarding efficiency
+
+**Status:** ✅ Refined based on crux analysis - ready for implementation

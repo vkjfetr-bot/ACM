@@ -55,57 +55,65 @@ except ImportError:
 # =============================================================================
 # ALLOWED_TABLES - v11.0.0 Functionality-Based Table Set
 # =============================================================================
-# DESIGN PRINCIPLE: Tables chosen based on ACM's core functionality and what
-# users need to see, NOT based on existing dashboards. Dashboards will be
-# designed later to visualize this data.
+# DESIGN PRINCIPLE: Tables chosen based on ACM's core mission:
+#   1. What is current health? (HealthTimeline, Scores, Episodes)
+#   2. If not healthy, what's the reason? (SensorDefects, Hotspots, Culprits)
+#   3. What will future health look like? (RUL, Forecasts)
+#   4. What will cause future degradation? (SensorForecast, Drift, Contributions)
 #
-# See docs/ACM_OUTPUT_REQUIREMENTS.md for full rationale.
+# Additional tables support: data persistence, model evolution, diagnostics
 #
-# TIER 1 - REAL-TIME STATE (Current equipment status)
-# TIER 2 - PREDICTIVE INTELLIGENCE (Future state predictions)
-# TIER 3 - ROOT CAUSE & DIAGNOSTICS (Why problems occur)
-# TIER 4 - SYSTEM OPERATIONS (Is ACM working correctly?)
-# TIER 5 - CONFIGURATION & AUDIT (How ACM is configured)
-# TIER 6 - ADVANCED ANALYTICS (Deep analytical insights)
+# See docs/ACM_OUTPUT_REQUIREMENTS.md for complete rationale.
+#
+# TIER 1 - CURRENT STATE (What's happening NOW?)
+# TIER 2 - FUTURE STATE (What will happen?)
+# TIER 3 - ROOT CAUSE (WHY is this happening/will happen?)
+# TIER 4 - DATA & MODEL MANAGEMENT (Long-term storage, model building)
+# TIER 5 - OPERATIONS & AUDIT (Is ACM working? What changed?)
+# TIER 6 - ADVANCED ANALYTICS (Deep patterns and trends)
 # =============================================================================
 
 ALLOWED_TABLES = {
-    # TIER 1: REAL-TIME STATE (Current Status) - 4 tables
-    'ACM_HealthTimeline',        # Continuous health monitoring over time
-    'ACM_Scores_Wide',           # Per-timestamp detector scores (all 6 detectors)
-    'ACM_Episodes',              # Anomaly event tracking
+    # TIER 1: CURRENT STATE (6 tables) - Answers "What is current health?"
+    'ACM_HealthTimeline',        # Health history + current state
+    'ACM_Scores_Wide',           # All 6 detector scores per timestamp
+    'ACM_Episodes',              # Active and historical anomaly events
     'ACM_RegimeTimeline',        # Operating mode context
+    'ACM_SensorDefects',         # Which sensors are problematic NOW
+    'ACM_SensorHotspots',        # Top culprit sensors ranked
     
-    # TIER 2: PREDICTIVE INTELLIGENCE (Future State) - 4 tables
-    'ACM_RUL',                   # Remaining Useful Life predictions
-    'ACM_HealthForecast',        # Projected health trajectory
+    # TIER 2: FUTURE STATE (4 tables) - Answers "What will future health look like?"
+    'ACM_RUL',                   # When will it fail? (Remaining Useful Life)
+    'ACM_HealthForecast',        # Projected health trajectory with confidence bounds
     'ACM_FailureForecast',       # Failure probability over time
     'ACM_SensorForecast',        # Physical sensor value predictions
     
-    # TIER 3: ROOT CAUSE & DIAGNOSTICS (Why?) - 5 tables
-    'ACM_SensorDefects',         # Sensor-level anomaly flagging
-    'ACM_SensorHotspots',        # Top anomalous sensors (culprit identification)
-    'ACM_EpisodeCulprits',       # Per-episode sensor attribution
-    'ACM_EpisodeDiagnostics',    # Detailed episode analysis
-    'ACM_DetectorCorrelation',   # Inter-detector relationships
+    # TIER 3: ROOT CAUSE (4 tables) - Answers "Why?" (current + future)
+    'ACM_EpisodeCulprits',       # What caused each episode
+    'ACM_EpisodeDiagnostics',    # Episode details and severity
+    'ACM_DetectorCorrelation',   # How detectors relate (model quality)
+    'ACM_DriftSeries',           # Behavior changes that lead to degradation
     
-    # TIER 4: SYSTEM OPERATIONS (Is ACM Working?) - 5 tables
-    'ACM_Runs',                  # Execution tracking
-    'ACM_DataQuality',           # Input data health
-    'ACM_ForecastingState',      # Forecast model persistence
+    # TIER 4: DATA & MODEL MANAGEMENT (7 tables) - Long-term storage, enables progressive learning
+    'ACM_BaselineBuffer',        # Raw sensor data accumulation for training
+    'ACM_HistorianData',         # Cached historian data for efficiency
+    'ACM_SensorNormalized_TS',   # Normalized sensor time series
+    'ACM_DataQuality',           # Input data health metrics
+    'ACM_ForecastingState',      # Forecast model state persistence
+    'ACM_CalibrationSummary',    # Model quality tracking over time
     'ACM_AdaptiveConfig',        # Auto-tuned configuration
+    
+    # TIER 5: OPERATIONS & AUDIT (5 tables) - Is ACM working? What changed?
+    'ACM_Runs',                  # Execution tracking and status
+    'ACM_RunLogs',               # Detailed logs for troubleshooting
     'ACM_RunTimers',             # Performance profiling
-    
-    # TIER 5: CONFIGURATION & AUDIT (How is ACM Configured?) - 3 tables
     'ACM_Config',                # Current configuration
-    'ACM_ConfigHistory',         # Configuration change audit
-    'ACM_RunLogs',               # Detailed execution logs
+    'ACM_ConfigHistory',         # Configuration change audit trail
     
-    # TIER 6: ADVANCED ANALYTICS (Deep Insights) - 4 tables
-    'ACM_DriftSeries',           # Behavior change tracking
-    'ACM_RegimeOccupancy',       # Operating mode statistics
+    # TIER 6: ADVANCED ANALYTICS (3 tables) - Deep insights and patterns
+    'ACM_RegimeOccupancy',       # Operating mode utilization
     'ACM_RegimeTransitions',     # Mode switching patterns
-    'ACM_CalibrationSummary',    # Model quality metrics
+    'ACM_ContributionTimeline',  # Historical sensor attribution for pattern analysis
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
