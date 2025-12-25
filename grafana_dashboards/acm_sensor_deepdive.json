@@ -142,7 +142,57 @@
           },
           "unit": "percent"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "palette-classic"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": []
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": []
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": []
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": []
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*"
+            },
+            "properties": []
+          }
+        ]
       },
       "gridPos": {
         "h": 9,
@@ -536,7 +586,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/Forecast|Predicted/"
+              "options": ".*Forecast.*"
             },
             "properties": [
               {
@@ -832,6 +882,1032 @@
       ],
       "title": "OMR Residual Timeline (Top 5 Sensors)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Count of sensors by severity level",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "hue",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#73BF69",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "NORMAL"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CAUTION"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FADE2A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "WARNING"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CRITICAL"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C4162A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
+      "id": 7,
+      "options": {
+        "barRadius": 0.1,
+        "barWidth": 0.8,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    CASE \n        WHEN CurrentZ >= 5 THEN 'CRITICAL'\n        WHEN CurrentZ >= 3 THEN 'WARNING'\n        WHEN CurrentZ >= 2 THEN 'CAUTION'\n        ELSE 'NORMAL'\n    END AS 'Severity',\n    COUNT(*) AS 'Count'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nGROUP BY CASE \n        WHEN CurrentZ >= 5 THEN 'CRITICAL'\n        WHEN CurrentZ >= 3 THEN 'WARNING'\n        WHEN CurrentZ >= 2 THEN 'CAUTION'\n        ELSE 'NORMAL'\n    END\nORDER BY \n    CASE Severity\n        WHEN 'CRITICAL' THEN 1\n        WHEN 'WARNING' THEN 2\n        WHEN 'CAUTION' THEN 3\n        ELSE 4\n    END",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensors by Severity",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Which detector identifies the most sensor defects",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "AR1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E02F44",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PCA-SPE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PCA-T\u00b2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FADE2A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IForest"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GMM"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OMR"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#37872D",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
+      "id": 8,
+      "options": {
+        "displayLabels": [
+          "value",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    CASE \n        WHEN DetectorLabel LIKE '%AR1%' THEN 'AR1'\n        WHEN DetectorLabel LIKE '%PCA-SPE%' THEN 'PCA-SPE'\n        WHEN DetectorLabel LIKE '%PCA-T%' THEN 'PCA-T\u00b2'\n        WHEN DetectorLabel LIKE '%IForest%' OR DetectorLabel LIKE '%Isolation%' THEN 'IForest'\n        WHEN DetectorLabel LIKE '%GMM%' OR DetectorLabel LIKE '%Gaussian%' THEN 'GMM'\n        WHEN DetectorLabel LIKE '%OMR%' OR DetectorLabel LIKE '%Overall%' THEN 'OMR'\n        ELSE 'Other'\n    END AS 'Detector',\n    COUNT(*) AS 'Sensor Count'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nGROUP BY CASE \n        WHEN DetectorLabel LIKE '%AR1%' THEN 'AR1'\n        WHEN DetectorLabel LIKE '%PCA-SPE%' THEN 'PCA-SPE'\n        WHEN DetectorLabel LIKE '%PCA-T%' THEN 'PCA-T\u00b2'\n        WHEN DetectorLabel LIKE '%IForest%' OR DetectorLabel LIKE '%Isolation%' THEN 'IForest'\n        WHEN DetectorLabel LIKE '%GMM%' OR DetectorLabel LIKE '%Gaussian%' THEN 'GMM'\n        WHEN DetectorLabel LIKE '%OMR%' OR DetectorLabel LIKE '%Overall%' THEN 'OMR'\n        ELSE 'Other'\n    END\nORDER BY 'Sensor Count' DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Defects by Detector",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Distribution of sensor Z-scores (histogram)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Frequency",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#73BF69",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "id": 9,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    CASE \n        WHEN CurrentZ < 1 THEN '0-1'\n        WHEN CurrentZ < 2 THEN '1-2'\n        WHEN CurrentZ < 3 THEN '2-3'\n        WHEN CurrentZ < 4 THEN '3-4'\n        WHEN CurrentZ < 5 THEN '4-5'\n        WHEN CurrentZ < 6 THEN '5-6'\n        WHEN CurrentZ < 7 THEN '6-7'\n        WHEN CurrentZ < 8 THEN '7-8'\n        WHEN CurrentZ < 9 THEN '8-9'\n        ELSE '9+'\n    END AS 'Z-Score Range',\n    COUNT(*) AS 'Count'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nGROUP BY CASE \n        WHEN CurrentZ < 1 THEN '0-1'\n        WHEN CurrentZ < 2 THEN '1-2'\n        WHEN CurrentZ < 3 THEN '2-3'\n        WHEN CurrentZ < 4 THEN '3-4'\n        WHEN CurrentZ < 5 THEN '4-5'\n        WHEN CurrentZ < 6 THEN '5-6'\n        WHEN CurrentZ < 7 THEN '6-7'\n        WHEN CurrentZ < 8 THEN '7-8'\n        WHEN CurrentZ < 9 THEN '8-9'\n        ELSE '9+'\n    END\nORDER BY 'Z-Score Range'",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensor Z-Score Distribution",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Individual sensor health scores (100 - normalized Z-score)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "color-background"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#C4162A",
+                "value": null
+              },
+              {
+                "color": "#FF9830",
+                "value": 50
+              },
+              {
+                "color": "#FADE2A",
+                "value": 70
+              },
+              {
+                "color": "#73BF69",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sensor"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Health Score"
+          }
+        ]
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT TOP 20\n    SensorName AS 'Sensor',\n    DetectorLabel AS 'Dominant Detector',\n    ROUND(CurrentZ, 2) AS 'Current Z',\n    ROUND(CASE \n        WHEN CurrentZ > 10 THEN 0\n        ELSE 100 - (CurrentZ * 10)\n    END, 1) AS 'Health Score',\n    LastUpdated AS 'Last Updated'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nORDER BY 'Health Score' ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensor Health Scores",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Count of sensors by severity level",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Count",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "hue",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#73BF69",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "NORMAL"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#73BF69",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CAUTION"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FADE2A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "WARNING"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CRITICAL"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C4162A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "id": 11,
+      "options": {
+        "barRadius": 0.1,
+        "barWidth": 0.8,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    CASE \n        WHEN CurrentZ >= 5 THEN 'CRITICAL'\n        WHEN CurrentZ >= 3 THEN 'WARNING'\n        WHEN CurrentZ >= 2 THEN 'CAUTION'\n        ELSE 'NORMAL'\n    END AS 'Severity',\n    COUNT(*) AS 'Count'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nGROUP BY CASE \n        WHEN CurrentZ >= 5 THEN 'CRITICAL'\n        WHEN CurrentZ >= 3 THEN 'WARNING'\n        WHEN CurrentZ >= 2 THEN 'CAUTION'\n        ELSE 'NORMAL'\n    END\nORDER BY \n    CASE Severity\n        WHEN 'CRITICAL' THEN 1\n        WHEN 'WARNING' THEN 2\n        WHEN 'CAUTION' THEN 3\n        ELSE 4\n    END",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensors by Severity",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Which detector identifies the most sensor defects",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "AR1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E02F44",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PCA-SPE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9830",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "PCA-T\u00b2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FADE2A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "IForest"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GMM"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#5794F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OMR"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#37872D",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "id": 12,
+      "options": {
+        "displayLabels": [
+          "value",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    CASE \n        WHEN DetectorLabel LIKE '%AR1%' THEN 'AR1'\n        WHEN DetectorLabel LIKE '%PCA-SPE%' THEN 'PCA-SPE'\n        WHEN DetectorLabel LIKE '%PCA-T%' THEN 'PCA-T\u00b2'\n        WHEN DetectorLabel LIKE '%IForest%' OR DetectorLabel LIKE '%Isolation%' THEN 'IForest'\n        WHEN DetectorLabel LIKE '%GMM%' OR DetectorLabel LIKE '%Gaussian%' THEN 'GMM'\n        WHEN DetectorLabel LIKE '%OMR%' OR DetectorLabel LIKE '%Overall%' THEN 'OMR'\n        ELSE 'Other'\n    END AS 'Detector',\n    COUNT(*) AS 'Sensor Count'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nGROUP BY CASE \n        WHEN DetectorLabel LIKE '%AR1%' THEN 'AR1'\n        WHEN DetectorLabel LIKE '%PCA-SPE%' THEN 'PCA-SPE'\n        WHEN DetectorLabel LIKE '%PCA-T%' THEN 'PCA-T\u00b2'\n        WHEN DetectorLabel LIKE '%IForest%' OR DetectorLabel LIKE '%Isolation%' THEN 'IForest'\n        WHEN DetectorLabel LIKE '%GMM%' OR DetectorLabel LIKE '%Gaussian%' THEN 'GMM'\n        WHEN DetectorLabel LIKE '%OMR%' OR DetectorLabel LIKE '%Overall%' THEN 'OMR'\n        ELSE 'Other'\n    END\nORDER BY 'Sensor Count' DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Defects by Detector",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Distribution of sensor Z-scores (histogram)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Frequency",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#73BF69",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "id": 13,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    CASE \n        WHEN CurrentZ < 1 THEN '0-1'\n        WHEN CurrentZ < 2 THEN '1-2'\n        WHEN CurrentZ < 3 THEN '2-3'\n        WHEN CurrentZ < 4 THEN '3-4'\n        WHEN CurrentZ < 5 THEN '4-5'\n        WHEN CurrentZ < 6 THEN '5-6'\n        WHEN CurrentZ < 7 THEN '6-7'\n        WHEN CurrentZ < 8 THEN '7-8'\n        WHEN CurrentZ < 9 THEN '8-9'\n        ELSE '9+'\n    END AS 'Z-Score Range',\n    COUNT(*) AS 'Count'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nGROUP BY CASE \n        WHEN CurrentZ < 1 THEN '0-1'\n        WHEN CurrentZ < 2 THEN '1-2'\n        WHEN CurrentZ < 3 THEN '2-3'\n        WHEN CurrentZ < 4 THEN '3-4'\n        WHEN CurrentZ < 5 THEN '4-5'\n        WHEN CurrentZ < 6 THEN '5-6'\n        WHEN CurrentZ < 7 THEN '6-7'\n        WHEN CurrentZ < 8 THEN '7-8'\n        WHEN CurrentZ < 9 THEN '8-9'\n        ELSE '9+'\n    END\nORDER BY 'Z-Score Range'",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensor Z-Score Distribution",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "mssql",
+        "uid": "${datasource}"
+      },
+      "description": "Individual sensor health scores (100 - normalized Z-score)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "color-background"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#C4162A",
+                "value": null
+              },
+              {
+                "color": "#FF9830",
+                "value": 50
+              },
+              {
+                "color": "#FADE2A",
+                "value": 70
+              },
+              {
+                "color": "#73BF69",
+                "value": 85
+              }
+            ]
+          },
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sensor"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 88
+      },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Health Score"
+          }
+        ]
+      },
+      "pluginVersion": "12.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "mssql",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT TOP 20\n    SensorName AS 'Sensor',\n    DetectorLabel AS 'Dominant Detector',\n    ROUND(CurrentZ, 2) AS 'Current Z',\n    ROUND(CASE \n        WHEN CurrentZ > 10 THEN 0\n        ELSE 100 - (CurrentZ * 10)\n    END, 1) AS 'Health Score',\n    LastUpdated AS 'Last Updated'\nFROM ACM_SensorDefects\nWHERE EquipID = $equipment\n    AND ActiveDefect = 1\nORDER BY 'Health Score' ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Sensor Health Scores",
+      "type": "table"
     }
   ],
   "refresh": "1m",
