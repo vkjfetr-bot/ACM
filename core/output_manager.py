@@ -53,42 +53,72 @@ except ImportError:
     Span = None
 
 # =============================================================================
-# ALLOWED_TABLES - v11.0.0 Consolidated Table Set
+# ALLOWED_TABLES - v11.0.0 Comprehensive Table Set (Post-Audit)
 # =============================================================================
-# DESIGN PRINCIPLE: Write only what's essential. Derivable metrics should be
-# computed at query time, not stored in separate tables.
+# AUDIT RESULT: Expanded from 17 to 42 tables to restore dashboard functionality
+# and diagnostic capabilities lost in over-aggressive cleanup.
+#
+# See: docs/ACM_TABLE_ANALYTICS_AUDIT.md for full rationale
 #
 # TIER 1 - CORE PIPELINE OUTPUT (Essential for ACM to function)
-# TIER 2 - FORECASTING (RUL, Health predictions)
-# TIER 3 - OPERATIONAL (Run tracking, state management)
-# TIER 4 - DIAGNOSTICS (Sensor-level attribution, regime model)
+# TIER 2 - FORECASTING (RUL, Health predictions, hazard analysis)
+# TIER 3 - OPERATIONAL (Run tracking, state management, performance)
+# TIER 4 - DIAGNOSTICS (Sensor-level attribution, episodes, defects)
+# TIER 5 - ANALYTICS (Drift, regime analytics, quality metrics)
 # =============================================================================
 
 ALLOWED_TABLES = {
-    # TIER 1: CORE PIPELINE OUTPUT (Essential)
+    # TIER 1: CORE PIPELINE OUTPUT (Essential) - 4 tables
     'ACM_Scores_Wide',           # Per-timestamp detector z-scores (PRIMARY OUTPUT)
     'ACM_HealthTimeline',        # Health % over time (REQUIRED for RUL forecasting)
     'ACM_Episodes',              # Detected anomaly episodes with diagnostics
     'ACM_RegimeTimeline',        # Operating regime assignments
     
-    # TIER 2: FORECASTING (Predictions)
+    # TIER 2: FORECASTING (Predictions) - 7 tables
     'ACM_RUL',                   # Remaining Useful Life with confidence bounds
-    'ACM_HealthForecast',        # Projected health trajectory
+    'ACM_HealthForecast',        # Projected health trajectory (discrete)
+    'ACM_HealthForecast_Continuous',  # Continuous health forecast (dashboards)
     'ACM_FailureForecast',       # Failure probability over time
+    'ACM_FailureHazard_TS',      # Failure hazard rate time series
     'ACM_SensorForecast',        # Physical sensor value forecasts
+    'ACM_DetectorForecast_TS',   # Per-detector forecast time series
     
-    # TIER 3: OPERATIONAL (Run tracking, state management)
+    # TIER 3: OPERATIONAL (Run tracking, state management) - 8 tables
+    'ACM_Runs',                  # Run metadata and status (CRITICAL - 5 dashboards)
+    'ACM_RunLogs',               # Pipeline logs for debugging
+    'ACM_RunTimers',             # Performance metrics per pipeline stage
     'ACM_DataQuality',           # Data quality per sensor
     'ACM_ForecastingState',      # Persistent forecasting model state
     'ACM_AdaptiveConfig',        # Dynamic per-equipment configuration
+    'ACM_ColdstartState',        # Coldstart progression tracking
+    'ACM_RefitRequests',         # Model refit request tracking
     
-    # TIER 4: DIAGNOSTICS (Sensor attribution, model metadata)
+    # TIER 4: DIAGNOSTICS (Sensor attribution, episodes, defects) - 14 tables
     'ACM_SensorDefects',         # Sensor-level anomaly flags
     'ACM_SensorHotspots',        # Top anomalous sensors (used for RUL attribution)
+    'ACM_SensorHotspotTimeline', # Sensor anomaly trends over time
     'ACM_EpisodeCulprits',       # Per-episode sensor culprits
     'ACM_EpisodeDiagnostics',    # Per-episode diagnostic details (duration_h, etc.)
+    'ACM_EpisodeMetrics',        # Episode-level aggregate metrics
+    'ACM_Anomaly_Events',        # Structured anomaly event records
+    'ACM_ContributionCurrent',   # Current sensor contribution scores
+    'ACM_ContributionTimeline',  # Historical sensor contributions
+    'ACM_DefectSummary',         # Aggregated defect statistics
+    'ACM_ThresholdCrossings',    # Threshold violation events
+    'ACM_AlertAge',              # How long alerts have been active
     'ACM_RegimeDefinitions',     # Regime centroids and metadata (v11)
     'ACM_ActiveModels',          # Active model versions per equipment (v11)
+    
+    # TIER 5: ANALYTICS (Drift, regime analytics, quality metrics) - 9 tables
+    'ACM_DriftSeries',           # Drift detection time series
+    'ACM_RegimeOccupancy',       # Time spent in each operating regime
+    'ACM_RegimeTransitions',     # Regime switching patterns
+    'ACM_RegimeDwellStats',      # Regime duration statistics
+    'ACM_RegimeStability',       # Regime stability metrics
+    'ACM_HealthZoneByPeriod',    # Aggregated health by time period
+    'ACM_DetectorCorrelation',   # Cross-detector correlation analysis
+    'ACM_CalibrationSummary',    # Detector calibration status
+    'ACM_FeatureDropLog',        # Features removed during pipeline
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
