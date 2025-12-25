@@ -2175,6 +2175,121 @@ def _compute_drift_alert_mode(
     return frame
 
 
+def _build_data_quality_records(
+    train_numeric: pd.DataFrame,
+    score_numeric: pd.DataFrame,
+    cfg: Dict[str, Any],
+    low_var_threshold: float = 1e-4,
+) -> List[Dict[str, Any]]:
+    """Build per-sensor data quality records for train and score windows.
+    
+    This helper computes quality metrics for each sensor including:
+    - Row counts, null counts, null percentages
+    - Standard deviation (variance indicator)
+    - Longest gap (consecutive nulls)
+    - Flatline spans (consecutive identical values)
+    - Time ranges (min/max timestamps)
+    - Quality notes (low variance, all nulls, flatline warnings)
+    
+    Args:
+        train_numeric: Training data DataFrame
+        score_numeric: Score data DataFrame
+        cfg: Config dictionary with data settings
+        low_var_threshold: Threshold for low-variance detection
+        
+    Returns:
+        List of per-sensor data quality dictionaries
+    """
+    interp_method = str((cfg.get("data", {}) or {}).get("interp_method", "linear"))
+    sampling_secs = (cfg.get("data", {}) or {}).get("sampling_secs", None)
+    
+    # Find common columns
+    common_cols = []
+    if hasattr(train_numeric, "columns") and hasattr(score_numeric, "columns"):
+        common_cols = [c for c in train_numeric.columns if c in score_numeric.columns]
+    
+    def calc_longest_gap(series: pd.Series) -> int:
+        """Calculate longest consecutive null run."""
+        if len(series) == 0:
+            return 0
+        is_null = series.isna()
+        if not is_null.any():
+            return 0
+        null_runs = is_null.astype(int).groupby((~is_null).cumsum()).sum()
+        return int(null_runs.max()) if len(null_runs) > 0 else 0
+    
+    def calc_flatline_span(series: pd.Series) -> int:
+        """Calculate longest consecutive identical value run."""
+        if len(series) == 0:
+            return 0
+        numeric = pd.to_numeric(series, errors='coerce').dropna()
+        if len(numeric) < 2:
+            return 0
+        is_same = (numeric == numeric.shift()).astype(int)
+        flat_runs = is_same.groupby((~is_same.astype(bool)).cumsum()).sum()
+        return int(flat_runs.max()) if len(flat_runs) > 0 else 0
+    
+    records = []
+    for col in common_cols:
+        tr_series = train_numeric[col]
+        sc_series = score_numeric[col]
+        tr_total = int(len(tr_series))
+        sc_total = int(len(sc_series))
+        tr_nulls = int(tr_series.isna().sum())
+        sc_nulls = int(sc_series.isna().sum())
+        tr_std = float(pd.to_numeric(tr_series, errors="coerce").std()) if tr_total else float("nan")
+        sc_std = float(pd.to_numeric(sc_series, errors="coerce").std()) if sc_total else float("nan")
+        
+        tr_longest_gap = calc_longest_gap(tr_series)
+        sc_longest_gap = calc_longest_gap(sc_series)
+        tr_flatline = calc_flatline_span(tr_series)
+        sc_flatline = calc_flatline_span(sc_series)
+        
+        # Format timestamps
+        tr_min_ts = pd.Timestamp(tr_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
+        tr_max_ts = pd.Timestamp(tr_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
+        sc_min_ts = pd.Timestamp(sc_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
+        sc_max_ts = pd.Timestamp(sc_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
+        
+        # Build quality notes
+        note_bits = []
+        if tr_total > 0 and tr_std < low_var_threshold:
+            note_bits.append("low_variance_train")
+        if tr_total > 0 and tr_nulls == tr_total:
+            note_bits.append("all_nulls_train")
+        if sc_total > 0 and sc_nulls == sc_total:
+            note_bits.append("all_nulls_score")
+        if tr_flatline > 100:
+            note_bits.append(f"flatline_train_{tr_flatline}pts")
+        if sc_flatline > 100:
+            note_bits.append(f"flatline_score_{sc_flatline}pts")
+        
+        records.append({
+            "sensor": str(col),
+            "train_count": tr_total,
+            "train_nulls": tr_nulls,
+            "train_null_pct": (100.0 * tr_nulls / tr_total) if tr_total else 0.0,
+            "train_std": tr_std,
+            "train_longest_gap": tr_longest_gap,
+            "train_flatline_span": tr_flatline,
+            "train_min_ts": tr_min_ts,
+            "train_max_ts": tr_max_ts,
+            "score_count": sc_total,
+            "score_nulls": sc_nulls,
+            "score_null_pct": (100.0 * sc_nulls / sc_total) if sc_total else 0.0,
+            "score_std": sc_std,
+            "score_longest_gap": sc_longest_gap,
+            "score_flatline_span": sc_flatline,
+            "score_min_ts": sc_min_ts,
+            "score_max_ts": sc_max_ts,
+            "interp_method": interp_method,
+            "sampling_secs": sampling_secs,
+            "notes": ",".join(note_bits)
+        })
+    
+    return records
+
+
 # =======================
 
 
@@ -2795,96 +2910,20 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             component="DATA"
                         )
 
-                # 3) Missing data report (per-tag null counts) â†’ tables/data_quality.csv
+                # 3) Missing data report (per-tag null counts) -> tables/data_quality.csv
+                # REFACTOR v11: Extracted to _build_data_quality_records() helper
                 with T.section("data.guardrails.data_quality"):
                     try:
                         tables_dir = (run_dir / "tables")
-                        interp_method = str((cfg.get("data", {}) or {}).get("interp_method", "linear"))
-                        sampling_secs = (cfg.get("data", {}) or {}).get("sampling_secs", None)
-                        # Build summary for intersecting columns only
-                        common_cols = []
-                        if hasattr(train_numeric, "columns") and hasattr(score_numeric, "columns"):
-                            common_cols = [c for c in train_numeric.columns if c in score_numeric.columns]
-                        records = []
-                        for col in common_cols:
-                            tr_series = train_numeric[col]
-                            sc_series = score_numeric[col]
-                            tr_total = int(len(tr_series))
-                            sc_total = int(len(sc_series))
-                            tr_nulls = int(tr_series.isna().sum())
-                            sc_nulls = int(sc_series.isna().sum())
-                            tr_std = float(pd.to_numeric(tr_series, errors="coerce").std()) if tr_total else float("nan")
-                            sc_std = float(pd.to_numeric(sc_series, errors="coerce").std()) if sc_total else float("nan")
-                            
-                            # Calculate longest gap (consecutive NaNs or missing timestamps)
-                            def calc_longest_gap(series):
-                                if len(series) == 0:
-                                    return 0
-                                is_null = series.isna()
-                                if not is_null.any():
-                                    return 0
-                                # Find consecutive null runs
-                                null_runs = is_null.astype(int).groupby((~is_null).cumsum()).sum()
-                                return int(null_runs.max()) if len(null_runs) > 0 else 0
-                            
-                            tr_longest_gap = calc_longest_gap(tr_series)
-                            sc_longest_gap = calc_longest_gap(sc_series)
-                            
-                            # Calculate flatline spans (consecutive identical values)
-                            def calc_flatline_span(series):
-                                if len(series) == 0:
-                                    return 0
-                                numeric = pd.to_numeric(series, errors='coerce').dropna()
-                                if len(numeric) < 2:
-                                    return 0
-                                # Find consecutive identical values
-                                is_same = (numeric == numeric.shift()).astype(int)
-                                flat_runs = is_same.groupby((~is_same.astype(bool)).cumsum()).sum()
-                                return int(flat_runs.max()) if len(flat_runs) > 0 else 0
-                            
-                            tr_flatline = calc_flatline_span(tr_series)
-                            sc_flatline = calc_flatline_span(sc_series)
-                            
-                            # CHART-04: Min/Max timestamps - use standard format without 'T' separator
-                            tr_min_ts = pd.Timestamp(tr_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
-                            tr_max_ts = pd.Timestamp(tr_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
-                            sc_min_ts = pd.Timestamp(sc_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
-                            sc_max_ts = pd.Timestamp(sc_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
-                            
-                            note_bits = []
-                            if tr_total > 0 and tr_std < low_var_threshold:
-                                note_bits.append("low_variance_train")
-                            if tr_total > 0 and tr_nulls == tr_total:
-                                note_bits.append("all_nulls_train")
-                            if sc_total > 0 and sc_nulls == sc_total:
-                                note_bits.append("all_nulls_score")
-                            if tr_flatline > 100:  # Arbitrary threshold for "concerning" flatline
-                                note_bits.append(f"flatline_train_{tr_flatline}pts")
-                            if sc_flatline > 100:
-                                note_bits.append(f"flatline_score_{sc_flatline}pts")
-                            
-                            records.append({
-                                "sensor": str(col),
-                                "train_count": tr_total,
-                                "train_nulls": tr_nulls,
-                                "train_null_pct": (100.0 * tr_nulls / tr_total) if tr_total else 0.0,
-                                "train_std": tr_std,
-                                "train_longest_gap": tr_longest_gap,
-                                "train_flatline_span": tr_flatline,
-                                "train_min_ts": tr_min_ts,
-                                "train_max_ts": tr_max_ts,
-                                "score_count": sc_total,
-                                "score_nulls": sc_nulls,
-                                "score_null_pct": (100.0 * sc_nulls / sc_total) if sc_total else 0.0,
-                                "score_std": sc_std,
-                                "score_longest_gap": sc_longest_gap,
-                                "score_flatline_span": sc_flatline,
-                                "score_min_ts": sc_min_ts,
-                                "score_max_ts": sc_max_ts,
-                                "interp_method": interp_method,
-                                "sampling_secs": sampling_secs,
-                                "notes": ",".join(note_bits)
-                            })
+                        
+                        # Build per-sensor data quality records
+                        records = _build_data_quality_records(
+                            train_numeric=train_numeric,
+                            score_numeric=score_numeric,
+                            cfg=cfg,
+                            low_var_threshold=low_var_threshold,
+                        )
+                        
                         # OM-CSV-03: Write data quality summary to SQL (ACM_DataQuality)
                         if records:
                             dq = pd.DataFrame(records)
@@ -3017,7 +3056,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     # Align SCORE to TRAIN columns to avoid mismatches and silent drops
                     score = score.reindex(columns=train.columns)
                     score.fillna(col_meds, inplace=True)
-                    # Any remaining NaNs (rare) â†’ fill with score column medians
+                    # Any remaining NaNs (rare)   fill with score column medians
                     nan_cols = score.columns[score.isna().any()].tolist()
                     if nan_cols:
                         for c in nan_cols:
@@ -3773,7 +3812,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # ===== 6) Fusion + episodes =====
         with T.section("fusion"): # type: ignore
-            # Active detectors: PCA-SPE, PCA-TÂ², AR1, IForest, GMM, OMR
+            # Active detectors: PCA-SPE, PCA-TSquared, AR1, IForest, GMM, OMR
             default_w = {
                 "pca_spe_z": 0.30,
                 "pca_t2_z": 0.20,
@@ -4175,7 +4214,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     # Auto-tune parameters based on specific issues
                     tuning_actions = []
                     
-                    # Issue 1: High detector saturation â†’ Increase clip_z
+                    # Issue 1: High detector saturation   Increase clip_z
                     detector_quality = quality_report.get("metrics", {}).get("detector_quality", {})
                     if detector_quality.get("max_saturation_pct", 0) > 5.0:
                         self_tune_cfg = cfg.get("thresholds", {}).get("self_tune", {})
@@ -4219,7 +4258,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             else:
                                 Console.info("Clip limit already near target, no change applied", component="AUTO-TUNE")
                     
-                    # Issue 2: High anomaly rate â†’ Increase k_sigma/h_sigma
+                    # Issue 2: High anomaly rate   Increase k_sigma/h_sigma
                     anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
                     if anomaly_metrics.get("anomaly_rate", 0) > 0.10:
                         raw_k_sigma = cfg.get("episodes", {}).get("cpd", {}).get("k_sigma", 2.0)
@@ -4234,7 +4273,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         else:
                             Console.info("k_sigma already increased recently, skipping change", component="AUTO-TUNE")
                     
-                    # Issue 3: Low regime quality â†’ Increase k_max
+                    # Issue 3: Low regime quality   Increase k_max
                     regime_metrics = quality_report.get("metrics", {}).get("regime_metrics", {})
                     if regime_metrics.get("silhouette", 1.0) < 0.15:
                         auto_k_cfg = cfg.get("regimes", {}).get("auto_k", {})
@@ -4707,12 +4746,10 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             run_completion_time = datetime.now()
             _maybe_write_run_meta_json(locals())
 
-            # Legacy enhanced_forecasting removed - ForecastEngine (v10) handles all forecasting
-
         # === SQL-SPECIFIC ARTIFACT WRITING ===
         # NOTE: ScoresTS/write_scores_ts deprecated (ACM_Scores_Long removed) - scores in ACM_Scores_Wide only
 
-        # 2) DriftTS (if drift_z exists) â€” method from config
+        # 2) DriftTS (if drift_z exists) method from config
         rows_drift = 0
         with T.section("sql.drift"):
             try:
