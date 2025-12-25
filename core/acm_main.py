@@ -3906,10 +3906,10 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         })
                 
                 if per_regime_rows:
-                    # Convert to pandas DataFrame (output_mgr expects pandas)
+                    # Convert to pandas DataFrame
                     per_regime_df = pd.DataFrame(per_regime_rows)
                     # Pass logical artifact name instead of file path
-                    output_mgr.write_dataframe(per_regime_df, "per_regime_thresholds")
+                    output_manager.write_dataframe(per_regime_df, "per_regime_thresholds")
                     Console.info(f"Wrote per-regime thresholds: {len(per_regime_rows)} regime-detector pairs", component="CAL")
 
             # ANA-09: Always write thresholds table with global fallback
@@ -3937,7 +3937,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             if threshold_rows:
                 thresholds_df = pd.DataFrame(threshold_rows)
                 # Pass logical artifact name instead of file path
-                output_mgr.write_dataframe(thresholds_df, "acm_thresholds")
+                output_manager.write_dataframe(thresholds_df, "acm_thresholds")
                 Console.info(f"Wrote thresholds table with {len(threshold_rows)} rows -> acm_thresholds", component="CAL")
 
         # ===== 6) Fusion + episodes =====
@@ -4248,8 +4248,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 summary_df = regimes.build_summary_dataframe(regime_model)
                 if not summary_df.empty:
                     # Use OutputManager for efficient writing (logical name)
-                    output_mgr = output_manager
-                    output_mgr.write_dataframe(summary_df, "regime_summary")
+                    output_manager.write_dataframe(summary_df, "regime_summary")
             except Exception as e:
                 Console.warn(f"Health labelling skipped: {e}", component="REGIME",
                              equip=equip, error_type=type(e).__name__, error=str(e)[:200])
