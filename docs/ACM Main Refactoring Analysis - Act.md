@@ -1,9 +1,11 @@
 # 🔧 ACM Main Refactoring Analysis - Actionable Guide
 
 ## Executive Summary
-**Current State**: `main()` function is **2,500+ lines** - a monolithic pipeline  
+**Current State**: `main()` function is **~2,400 lines** with 22 extracted helpers  
 **Target State**: Extract **8-10 logical phase functions** + cleanup dead code  
 **Impact**: 70% code reduction in main(), improved testability, better error isolation
+
+**Last Updated**: December 25, 2025 (Session 2)
 
 ---
 
@@ -89,7 +91,60 @@
 | `ConfigAccessor` class | 🔲 Not Started |
 
 **Current Line Count**: 4,932 lines (original: 4,663; helpers add testable structure)
+---
 
+## 📋 SESSION LOG
+
+### Session 2 (Dec 25, 2025) - Helper Extraction Continued
+**Extracted 5 new helpers** (17 → 22 total):
+
+| Helper | Commit | Lines | Purpose |
+|--------|--------|-------|--------|
+| `_write_pca_artifacts()` | 0378b43 | +120/-72 | Write PCA model, loadings, metrics to SQL |
+| `_compute_drift_alert_mode()` | b981284 | +103/-79 | Multi-feature drift detection with hysteresis |
+| `_build_data_quality_records()` | 449d6bb | +132/-95 | Per-sensor quality metrics with gap/flatline analysis |
+| `_build_health_timeline()` | cb9d690 | +94/-59 | Health index with sigmoid smoothing |
+| `_build_regime_timeline()` | 90260aa | +44/-15 | Regime timeline with health state labels |
+
+**All pushed to remote**: `d597b4d` on `feature/v11-refactor`
+
+---
+
+## 🎯 NEXT STEPS (Recommended Priority)
+
+### Option A: Continue Helper Extraction (Low Risk)
+Extract remaining inline blocks before tackling phase functions:
+
+| Block | Location | Lines | Complexity |
+|-------|----------|-------|------------|
+| `_build_features()` | 3101-3175 | ~75 | Medium - Polars/pandas branching |
+| `_impute_features()` | 3178-3240 | ~65 | Low - already uses helpers |
+| `_seed_baseline()` | 2850-2950 | ~100 | Medium - SQL + fallback logic |
+| `_build_drift_ts()` | 4816-4830 | ~15 | Low - simple DataFrame |
+| `_build_anomaly_events()` | 4835-4852 | ~18 | Low - simple DataFrame |
+| `_build_regime_episodes()` | 4857-4870 | ~14 | Low - simple DataFrame |
+
+### Option B: Start Phase Functions (Higher Impact)
+Begin extracting the 7 major phase functions:
+
+1. **`_phase_initialize_runtime()`** - Easiest starting point
+   - Config loading, SQL connection, run ID generation
+   - ~150 lines of setup code
+   
+2. **`_phase_load_data()`** - High value
+   - SmartColdstart, data validation, baseline seeding
+   - ~200 lines of data loading
+
+### Option C: Run Integration Test
+Validate all 22 helpers work correctly with a batch run:
+```powershell
+python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --max-workers 1
+```
+
+### Recommendation
+**Option C first** (5 min) → Then **Option A** (continue extracting small helpers)
+
+Small helpers are safer and build momentum. Phase functions require more careful planning.
 ---
 
 ## 🎯 PRIORITY 1: Extract Core Pipeline Phases (70% Impact)
