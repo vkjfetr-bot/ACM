@@ -2382,6 +2382,48 @@ def _build_health_timeline(
     return health_df, volatile_count, extreme_count
 
 
+def _build_regime_timeline(
+    frame: pd.DataFrame,
+    regime_model: Any,
+    run_id: Optional[str],
+    equip_id: int
+) -> Optional[pd.DataFrame]:
+    """
+    Build regime timeline DataFrame from frame's regime labels.
+    
+    Creates a timeline with regime labels and health state labels (if available
+    from the regime model). Used for ACM_RegimeTimeline SQL table.
+    
+    Args:
+        frame: Score DataFrame with 'regime_label' column
+        regime_model: Optional RegimeModel with health_labels mapping
+        run_id: Run identifier for SQL
+        equip_id: Equipment ID
+        
+    Returns:
+        DataFrame ready for ACM_RegimeTimeline (or None if no regime_label column)
+    """
+    if 'regime_label' not in frame.columns:
+        return None
+    
+    regime_df = pd.DataFrame({
+        'Timestamp': frame.index,
+        'RegimeLabel': frame['regime_label'].astype(int),
+        'EquipID': equip_id,
+        'RunID': run_id
+    })
+    
+    # Add RegimeState based on regime_model if available
+    if regime_model and hasattr(regime_model, 'health_labels'):
+        regime_df['RegimeState'] = regime_df['RegimeLabel'].map(
+            lambda x: regime_model.health_labels.get(int(x), 'unknown')
+        )
+    else:
+        regime_df['RegimeState'] = 'unknown'
+    
+    return regime_df
+
+
 # =======================
 
 
@@ -4695,21 +4737,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             table_count += 1
                         
                         # Regime timeline (if available)
-                        if 'regime_label' in frame.columns:
-                            regime_df = pd.DataFrame({
-                                'Timestamp': frame.index,
-                                'RegimeLabel': frame['regime_label'].astype(int),
-                                'EquipID': equip_id,
-                                'RunID': run_id
-                            })
-                            # Add RegimeState based on regime_model if available
-                            if regime_model and hasattr(regime_model, 'health_labels'):
-                                regime_df['RegimeState'] = regime_df['RegimeLabel'].map(
-                                    lambda x: regime_model.health_labels.get(int(x), 'unknown')
-                                )
-                            else:
-                                regime_df['RegimeState'] = 'unknown'
-                            
+                        regime_df = _build_regime_timeline(frame, regime_model, run_id, equip_id)
+                        if regime_df is not None:
                             output_manager.write_dataframe(
                                 regime_df, 
                                 "regime_timeline",
