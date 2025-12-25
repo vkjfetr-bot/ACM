@@ -623,8 +623,8 @@ class SQLBatchRunner:
                 Console.info(f"{equip_name}: Detected existing models in ModelRegistry (count={model_count})", component="COLDSTART", equipment=equip_name, model_count=model_count)
                 return True, 0, 0
             
-            # Determine required rows: prefer ColdstartState.RequiredRows, else config runtime.coldstart_min_rows (default 50)
-            min_required = self._get_config_int(equip_id, 'runtime.coldstart_min_rows', 50)
+            # Determine required rows: prefer ColdstartState.RequiredRows, else config data.min_train_samples (default 200)
+            min_required = self._get_config_int(equip_id, 'data.min_train_samples', 200)
             if row:
                 status, accum_rows, req_rows = row
                 required = req_rows or min_required
@@ -640,7 +640,7 @@ class SQLBatchRunner:
             
         except Exception as e:
             Console.warn(f"Could not check coldstart status: {e}", component="COLDSTART", equipment=equip_name, error=str(e), error_type=type(e).__name__)
-            return False, 0, 50
+            return False, 0, 200  # Default minimum when SQL check fails
     
     def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False, batch_num: int = 0) -> tuple[bool, str]:
         """Run single ACM batch for equipment.
