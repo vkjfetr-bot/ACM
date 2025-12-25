@@ -6,9 +6,21 @@ This folder contains production-ready Grafana dashboards for the ACM (Autonomous
 
 ACM provides a multi-tiered dashboard suite for different user personas and use cases:
 
-1. **Main Dashboard** - Executive overview with drill-down navigation (NEW - Primary entry point)
-2. **Asset Story Dashboard** - Detailed visual storytelling for asset health and failure prediction
-3. **Operations Monitor** - Technical performance monitoring for ACM administrators
+1. **Main Dashboard** (`acm_main_dashboard.json`) - ⭐ PRIMARY - Executive overview with comprehensive monitoring
+2. **Sensor Deep-Dive** (`acm_sensor_deepdive.json`) - ⭐ NEW - Detailed sensor-level diagnostics
+3. **Asset Story Dashboard** (`acm_asset_story.json`) - Visual storytelling for asset health
+4. **Operations Monitor** (`acm_operations_monitor.json`) - ACM system performance monitoring
+
+**Recommended Navigation Flow**:
+```
+Main Dashboard (Executive View)
+    ↓ Drill-Down for Sensor Issues
+Sensor Deep-Dive (Diagnostic View)
+    ↓ Drill-Down for Full Story
+Asset Story (Detailed Narrative)
+    ↓ Technical Performance
+Operations Monitor (System Health)
+```
 
 All legacy dashboards have been archived to `archive/` folder.
 
@@ -90,7 +102,51 @@ All legacy dashboards have been archived to `archive/` folder.
 
 ---
 
-### 2. ACM Asset Story (`acm_asset_story.json`)
+### 2. ACM Sensor Deep-Dive (`acm_sensor_deepdive.json`) ⭐ NEW - DIAGNOSTIC DASHBOARD
+
+**Purpose**: Detailed sensor-level diagnostic dashboard for deep-dive troubleshooting. Provides sensor contribution analysis, detector breakdown, OMR analysis, and sensor value forecasting.
+
+**Target Audience**: Maintenance engineers, reliability engineers, diagnostics specialists
+
+**Dashboard Sections**:
+
+| Section | Panel Types | Purpose |
+|---------|-------------|---------|
+| **📊 SENSOR CONTRIBUTION ANALYSIS** | Stacked Area Chart | Timeline showing top 5 sensors' contribution to anomaly score |
+| **🔍 DETECTOR BREAKDOWN BY SENSOR** | Heatmap Table | Matrix showing which detectors are firing for each sensor |
+| **📈 SENSOR DEFECT STATISTICS** | Table | Comprehensive sensor ranking with defect frequency, max Z-score, last occurrence |
+| **🎯 SENSOR VALUES & FORECASTS** | Time Series | Actual vs forecasted values for top 3 contributing sensors |
+| **🔗 OMR ANALYSIS** | Table + Time Series | Sensor-to-sensor prediction contributions and residual timelines |
+
+**Key Features**:
+- **Stacked Area Chart**: Shows how sensor contributions evolve over time with 100% stacking
+- **Detector Heatmap**: Color-coded matrix reveals which detectors identify issues with each sensor
+- **Sensor Ranking**: Sortable table with defect count, max/avg Z-scores, dominant detector
+- **Value Forecasting**: Overlay of actual sensor values with 7-day forecasts (dashed lines)
+- **OMR Deep-Dive**: Reveals sensor-to-sensor prediction residuals (baseline consistency detector)
+- **Smart Filtering**: Focuses on top contributing sensors for clarity
+
+**Panel Details**:
+1. **Sensor Contribution Timeline**: Stacked area showing top 5 sensors' contribution % over time
+2. **Detector Signals Heatmap**: Pivot table with sensors as rows, detectors as columns, Z-scores as values
+3. **Sensor Defect Statistics**: Full ranking with defect count, max/avg Z, dominant detector, last seen
+4. **Sensor Values & Forecasts**: Line chart with actual (solid) and forecasted (dashed) sensor values
+5. **OMR Contributions Table**: Sensor-to-sensor prediction residuals sorted by magnitude
+6. **OMR Timeline**: Time series of residuals for top 5 sensors
+
+**Variables**:
+- `$datasource`: MSSQL data source selector
+- `$equipment`: Equipment filter (EquipID from Equipment table)
+
+**Default Time Range**: Last 7 days (`now-7d` to `now`) - focused on recent diagnostics
+
+**Refresh**: 1 minute (more frequent for active troubleshooting)
+
+**Navigation**: Links to all ACM dashboards via dropdown menu
+
+---
+
+### 3. ACM Asset Story (`acm_asset_story.json`)
 
 ### 1. ACM Asset Story (`acm_asset_story.json`)
 
@@ -121,7 +177,7 @@ The dashboard translates detector signals into operator-friendly fault types:
 | GMM | Regime transition | Mode confusion, state instability |
 | OMR | Baseline consistency | Fouling, wear, misalignment |
 
-### 2. ACM Operations Monitor (`acm_operations_monitor.json`)
+### 4. ACM Operations Monitor (`acm_operations_monitor.json`)
 
 **Purpose**: Technical dashboard for monitoring ACM system performance, run statistics, and errors.
 
