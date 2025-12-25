@@ -970,11 +970,7 @@ def _fit_all_detectors(
         result["pca_train_spe"], result["pca_train_t2"] = result["pca_detector"].score(train)
         Console.info(f"Cached train scores: SPE={len(result['pca_train_spe'])} samples, T²={len(result['pca_train_t2'])} samples", component="PCA")
         if output_manager is not None:
-            output_manager.write_pca_metrics(
-                pca_detector=result["pca_detector"],
-                tables_dir=tables_dir,
-                enable_sql=(sql_client is not None)
-            )
+            output_manager.write_pca_metrics(pca_detector=result["pca_detector"])
     
     # Isolation Forest Detector
     if iforest_enabled and result["iforest_detector"] is None:
