@@ -320,6 +320,21 @@ def _nearest_indexer(index: pd.Index, targets: Sequence[Any], label: str = "inde
     result[valid_mask] = locs[valid_mask]
     return result
 
+
+def _maybe_write_run_meta_json(local_vars: Dict[str, Any]) -> None:
+    """
+    Legacy file-mode metadata writer stub.
+    
+    In SQL-only mode (v10+), metadata is written to ACM_Runs table directly.
+    This function is kept for backward compatibility but is a no-op in SQL mode.
+    """
+    # SQL-only mode: metadata goes to ACM_Runs, not meta.json
+    if bool(local_vars.get('SQL_MODE')):
+        return  # No-op in SQL mode
+    # File mode is deprecated; do nothing
+    pass
+
+
 # ===== DRIFT-01: Multi-Feature Drift Detection Helpers =====
 def _compute_drift_trend(drift_series: np.ndarray, window: int = 20) -> float:
     """
@@ -4614,7 +4629,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             # Use unified OutputManager for persistence
             with T.section("persist.write_scores"):
                 try:
-                    output_manager.write_scores(frame, run_dir, enable_sql=True)
+                    output_manager.write_scores(frame)
                     
                     # Build schema dict for metadata (not written to file in SQL-only mode)
                     try:
@@ -4665,7 +4680,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             with T.section("persist.write_episodes"):
                 try:
                     # Write episodes using OutputManager
-                    output_manager.write_episodes(episodes, run_dir, enable_sql=dual_mode)
+                    output_manager.write_episodes(episodes)
                     # Record episode count metric for Prometheus
                     episode_count = len(episodes) if episodes is not None else 0
                     if episode_count > 0:
@@ -4706,9 +4721,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         # Generate all 23+ analytical tables
                         output_manager.generate_all_analytics_tables(
                             scores_df=frame,
-                            episodes_df=episodes,
                             cfg=cfg,
-                            tables_dir=tables_dir,
                             sensor_context=sensor_context
                         )
                         Console.info("Successfully generated all comprehensive analytics tables", component="ANALYTICS")
