@@ -224,22 +224,124 @@ The dashboard translates detector signals into operator-friendly fault types:
 - `ACM_ColdstartState` - Coldstart progress tracking
 - `Equipment` - Equipment metadata
 
+### Main Dashboard & Sensor Deep-Dive
+All tables from Asset Story plus:
+- `ACM_SensorNormalized_TS` - Normalized sensor values over time
+- `ACM_SensorForecast` - Forecasted sensor values
+- `ACM_SensorRanking` - Sensor defect frequency statistics
+- `ACM_OMRContributionsLong` - Sensor-to-sensor prediction residuals
+- `ACM_OMRTimeline` - OMR residual values over time
+
+---
+
+## Documentation
+
+### For Users
+- **[Quick Reference Guide](docs/QUICK_REFERENCE.md)** - Fast lookup for common tasks, color meanings, troubleshooting
+- **[Dashboard Design Guide](docs/DASHBOARD_DESIGN_GUIDE.md)** - Comprehensive design principles, panel usage, best practices
+
+### For Developers
+- `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` - Complete database schema
+- `docs/ACM_SYSTEM_OVERVIEW.md` - ACM architecture and data flow
+
+---
+
 ## Importing Dashboards
+
+### Recommended Import Order
+
+1. **Main Dashboard** (`acm_main_dashboard.json`) - Start here for executive overview
+2. **Sensor Deep-Dive** (`acm_sensor_deepdive.json`) - For detailed diagnostics
+3. **Asset Story** (`acm_asset_story.json`) - For narrative visualization
+4. **Operations Monitor** (`acm_operations_monitor.json`) - For system monitoring
+
+### Import Steps
 
 1. In Grafana, go to **Dashboards > Import**
 2. Click **Upload dashboard JSON file**
-3. Select `acm_asset_story.json` or `acm_operations_monitor.json`
-4. Select your MSSQL data source
+3. Select dashboard file from `grafana_dashboards/` folder
+4. Select your MSSQL data source (should auto-detect)
 5. Click **Import**
+6. Repeat for each dashboard
+
+### Post-Import Configuration
+
+After importing all dashboards:
+
+1. **Set Default Dashboard**: 
+   - Star the Main Dashboard
+   - Set as home dashboard in preferences
+
+2. **Configure Variables**:
+   - Test equipment selector dropdown
+   - Verify datasource is connected
+   - Adjust default time range if needed
+
+3. **Test Navigation**:
+   - Click dashboard menu (hamburger icon)
+   - Verify all ACM dashboards appear
+   - Test drill-down links
+
+4. **Set Refresh Rate**:
+   - Recommended: 30s for Main Dashboard and Asset Story
+   - Recommended: 1m for Sensor Deep-Dive and Operations Monitor
 
 ## Variables
 
-Both dashboards use these template variables:
+All ACM dashboards use these template variables:
 
-| Variable | Description |
-|----------|-------------|
-| `datasource` | MSSQL data source selector |
-| `equipment` | Equipment filter (includes "All Equipment" option) |
+| Variable | Type | Description | Default |
+|----------|------|-------------|---------|
+| `datasource` | Datasource | MSSQL data source selector | Microsoft SQL Server |
+| `equipment` | Query | Equipment filter by EquipID | First equipment in list |
+
+### Equipment Variable Query
+```sql
+SELECT EquipID AS __value, EquipName AS __text 
+FROM Equipment 
+ORDER BY EquipName
+```
+
+## Getting Started
+
+### For First-Time Users
+
+1. **Start with Main Dashboard**
+   - Open `ACM Main Dashboard`
+   - Select your equipment from dropdown
+   - Set time range to "Last 7 days"
+   - Observe health gauge and RUL
+
+2. **Understand the Colors**
+   - Review [Quick Reference](docs/QUICK_REFERENCE.md) color guide
+   - Red = Critical, Orange = Warning, Yellow = Caution, Green = Healthy
+
+3. **Drill-Down for Details**
+   - If health is declining, click dashboard menu
+   - Go to "Sensor Deep-Dive" to see which sensors
+   - Review detector heatmap to understand fault types
+
+4. **Check Asset Story**
+   - For full narrative and fault-type mapping
+   - Understand why detectors are firing
+
+5. **Monitor System Health**
+   - Use Operations Monitor to verify ACM is running
+   - Check for errors or warnings
+
+### For Troubleshooting
+
+**Scenario: Equipment showing red health**
+1. Main Dashboard → Check which detectors are firing
+2. Sensor Deep-Dive → See which sensors are contributing
+3. Asset Story → Understand the fault type and timeline
+4. Operations Monitor → Verify ACM ran recently without errors
+
+**Scenario: No data in dashboards**
+1. Operations Monitor → Check recent runs
+2. Verify equipment selector is set correctly
+3. Adjust time range to match data availability
+4. Check ACM_HealthTimeline table for data
 
 ## Archive
 
@@ -256,6 +358,7 @@ Legacy dashboards are preserved in `archive/` for reference. These are no longer
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 11.0 | Dec 2025 | **NEW**: Main Dashboard (primary entry), Sensor Deep-Dive (diagnostics), comprehensive design guide, quick reference |
 | 10.2.0 | 2025 | Two-dashboard architecture: Asset Story + Operations Monitor |
 | 10.0.0 | 2025 | MHAL detector removed, 6-detector architecture |
 | 9.x | 2024 | Multiple dashboard iterations, schema stabilization |
