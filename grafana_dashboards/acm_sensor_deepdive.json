@@ -52,23 +52,67 @@
       }
     ]
   },
-  "description": "ACM Sensor Deep-Dive - Detailed sensor-level diagnostics, detector breakdown, and OMR analysis",
+  "description": "ACM Sensor Deep-Dive - Detailed diagnostics with drill-down navigation. Use top links to navigate between dashboards. Click panel titles for detailed views.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [
     {
+      "title": "\ud83c\udfe0 Fleet Overview",
+      "url": "/d/acm-fleet-overview",
+      "tooltip": "View all equipment health at a glance",
+      "icon": "home",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
+      "title": "\ud83d\udcca Main Dashboard",
+      "url": "/d/acm-main-dashboard",
+      "tooltip": "Equipment executive summary",
+      "icon": "dashboard",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
       "asDropdown": true,
-      "icon": "external link",
+      "icon": "apps",
       "includeVars": true,
       "keepTime": true,
-      "tags": [
-        "ACM"
-      ],
+      "tags": [],
       "targetBlank": false,
-      "title": "ACM Dashboards",
-      "type": "dashboards"
+      "title": "\ud83d\udd2c Diagnostics",
+      "type": "dashboards",
+      "url": ""
+    },
+    {
+      "title": "\ud83c\udfaf Sensor Deep-Dive",
+      "url": "/d/acm-sensor-deepdive",
+      "tooltip": "Detailed sensor diagnostics",
+      "icon": "microscope",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
+      "title": "\ud83d\udcc8 Asset Story",
+      "url": "/d/acm-asset-story",
+      "tooltip": "Visual narrative of asset health",
+      "icon": "book",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
+      "title": "\u2699\ufe0f Operations Monitor",
+      "url": "/d/acm-operations-monitor",
+      "tooltip": "System performance monitoring",
+      "icon": "cog",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
     }
   ],
   "panels": [
@@ -232,7 +276,14 @@
         }
       ],
       "title": "Sensor Contribution Timeline (Top 5)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "links": [
+        {
+          "title": "\u2192 Asset Story",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "collapsed": false,
@@ -345,7 +396,8 @@
         }
       ],
       "title": "Detector Signals Heatmap (By Sensor)",
-      "type": "table"
+      "type": "table",
+      "links": []
     },
     {
       "collapsed": false,
@@ -512,7 +564,14 @@
         }
       ],
       "title": "Sensor Defect Statistics",
-      "type": "table"
+      "type": "table",
+      "links": [
+        {
+          "title": "\u2192 Asset Story",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "collapsed": false,
@@ -655,7 +714,8 @@
         }
       ],
       "title": "Sensor Values & Forecasts (Top 3 Contributors)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "links": []
     },
     {
       "collapsed": false,
@@ -784,7 +844,14 @@
         }
       ],
       "title": "OMR Sensor-to-Sensor Contributions",
-      "type": "table"
+      "type": "table",
+      "links": [
+        {
+          "title": "\u2192 Asset Story",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -881,7 +948,14 @@
         }
       ],
       "title": "OMR Residual Timeline (Top 5 Sensors)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "links": [
+        {
+          "title": "\u2192 Main Dashboard",
+          "url": "/d/acm-main-dashboard?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -1032,7 +1106,8 @@
         }
       ],
       "title": "Sensors by Severity",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -1196,7 +1271,14 @@
         }
       ],
       "title": "Defects by Detector",
-      "type": "piechart"
+      "type": "piechart",
+      "links": [
+        {
+          "title": "\u2192 Asset Story",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -1286,7 +1368,8 @@
         }
       ],
       "title": "Sensor Z-Score Distribution",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -1394,7 +1477,8 @@
         }
       ],
       "title": "Sensor Health Scores",
-      "type": "table"
+      "type": "table",
+      "links": []
     },
     {
       "datasource": {
@@ -1545,7 +1629,8 @@
         }
       ],
       "title": "Sensors by Severity",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -1709,7 +1794,14 @@
         }
       ],
       "title": "Defects by Detector",
-      "type": "piechart"
+      "type": "piechart",
+      "links": [
+        {
+          "title": "\u2192 Asset Story",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -1799,7 +1891,8 @@
         }
       ],
       "title": "Sensor Z-Score Distribution",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -1907,7 +2000,8 @@
         }
       ],
       "title": "Sensor Health Scores",
-      "type": "table"
+      "type": "table",
+      "links": []
     }
   ],
   "refresh": "1m",
@@ -1916,7 +2010,8 @@
     "ACM",
     "Sensors",
     "Diagnostics",
-    "Deep-Dive"
+    "Deep-Dive",
+    "Navigation"
   ],
   "templating": {
     "list": [

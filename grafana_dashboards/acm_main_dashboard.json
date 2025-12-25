@@ -98,23 +98,67 @@
       }
     ]
   },
-  "description": "ACM Main Dashboard - Comprehensive predictive maintenance overview with executive summary, health trends, detector analysis, and diagnostic deep-dive",
+  "description": "ACM Main Dashboard - Executive overview with drill-down navigation. Use top links to navigate between dashboards. Click panel titles for detailed views.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [
     {
+      "title": "\ud83c\udfe0 Fleet Overview",
+      "url": "/d/acm-fleet-overview",
+      "tooltip": "View all equipment health at a glance",
+      "icon": "home",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
+      "title": "\ud83d\udcca Main Dashboard",
+      "url": "/d/acm-main-dashboard",
+      "tooltip": "Equipment executive summary",
+      "icon": "dashboard",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
       "asDropdown": true,
-      "icon": "external link",
+      "icon": "apps",
       "includeVars": true,
       "keepTime": true,
-      "tags": [
-        "ACM"
-      ],
+      "tags": [],
       "targetBlank": false,
-      "title": "ACM Dashboards",
-      "type": "dashboards"
+      "title": "\ud83d\udd2c Diagnostics",
+      "type": "dashboards",
+      "url": ""
+    },
+    {
+      "title": "\ud83c\udfaf Sensor Deep-Dive",
+      "url": "/d/acm-sensor-deepdive",
+      "tooltip": "Detailed sensor diagnostics",
+      "icon": "microscope",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
+      "title": "\ud83d\udcc8 Asset Story",
+      "url": "/d/acm-asset-story",
+      "tooltip": "Visual narrative of asset health",
+      "icon": "book",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
+    },
+    {
+      "title": "\u2699\ufe0f Operations Monitor",
+      "url": "/d/acm-operations-monitor",
+      "tooltip": "System performance monitoring",
+      "icon": "cog",
+      "tags": [],
+      "targetBlank": false,
+      "type": "link"
     }
   ],
   "panels": [
@@ -216,7 +260,14 @@
         }
       ],
       "title": "Asset Health",
-      "type": "gauge"
+      "type": "gauge",
+      "links": [
+        {
+          "title": "\u2192 Sensor Diagnostics",
+          "url": "/d/acm-sensor-deepdive?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -341,7 +392,8 @@
         }
       ],
       "title": "Remaining Useful Life",
-      "type": "stat"
+      "type": "stat",
+      "links": []
     },
     {
       "datasource": {
@@ -407,7 +459,14 @@
         }
       ],
       "title": "Predicted Failure Date",
-      "type": "stat"
+      "type": "stat",
+      "links": [
+        {
+          "title": "\u2192 Asset Story",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -488,7 +547,8 @@
         }
       ],
       "title": "Prediction Confidence",
-      "type": "stat"
+      "type": "stat",
+      "links": []
     },
     {
       "datasource": {
@@ -582,6 +642,13 @@
             "renameByName": {}
           }
         }
+      ],
+      "links": [
+        {
+          "title": "\u2192 Detector Details",
+          "url": "/d/acm-sensor-deepdive?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
       ]
     },
     {
@@ -607,7 +674,8 @@
       },
       "pluginVersion": "12.0.0",
       "title": "System Status",
-      "type": "text"
+      "type": "text",
+      "links": []
     },
     {
       "collapsed": false,
@@ -847,7 +915,8 @@
         }
       ],
       "title": "Health Trend & Forecast Horizon",
-      "type": "timeseries"
+      "type": "timeseries",
+      "links": []
     },
     {
       "datasource": {
@@ -944,7 +1013,14 @@
         }
       ],
       "title": "RUL Prediction Details",
-      "type": "table"
+      "type": "table",
+      "links": [
+        {
+          "title": "\u2192 Asset Story",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "collapsed": false,
@@ -1154,7 +1230,8 @@
         }
       ],
       "title": "Detector Signals Timeline",
-      "type": "timeseries"
+      "type": "timeseries",
+      "links": []
     },
     {
       "collapsed": false,
@@ -1273,7 +1350,14 @@
         }
       ],
       "title": "Top Sensor Contributors (Current)",
-      "type": "barchart"
+      "type": "barchart",
+      "links": [
+        {
+          "title": "\u2192 Sensor Analysis",
+          "url": "/d/acm-sensor-deepdive?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -1389,7 +1473,14 @@
         }
       ],
       "title": "Active Sensor Defects",
-      "type": "table"
+      "type": "table",
+      "links": [
+        {
+          "title": "\u2192 Sensor Analysis",
+          "url": "/d/acm-sensor-deepdive?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "collapsed": false,
@@ -1476,7 +1567,8 @@
         }
       ],
       "title": "Operating Regime Timeline",
-      "type": "state-timeline"
+      "type": "state-timeline",
+      "links": []
     },
     {
       "collapsed": false,
@@ -1609,7 +1701,14 @@
         }
       ],
       "title": "Anomaly Episodes",
-      "type": "table"
+      "type": "table",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -1688,7 +1787,14 @@
         }
       ],
       "title": "Current Anomaly Severity",
-      "type": "gauge"
+      "type": "gauge",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -1778,7 +1884,8 @@
         }
       ],
       "title": "Health Distribution",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -1941,7 +2048,8 @@
         }
       ],
       "title": "Detector Contributions",
-      "type": "piechart"
+      "type": "piechart",
+      "links": []
     },
     {
       "datasource": {
@@ -2023,7 +2131,8 @@
         }
       ],
       "title": "Health Velocity",
-      "type": "stat"
+      "type": "stat",
+      "links": []
     },
     {
       "datasource": {
@@ -2100,7 +2209,14 @@
         }
       ],
       "title": "Total Episodes",
-      "type": "stat"
+      "type": "stat",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -2213,7 +2329,8 @@
           }
         }
       ],
-      "type": "heatmap"
+      "type": "heatmap",
+      "links": []
     },
     {
       "datasource": {
@@ -2395,7 +2512,8 @@
         }
       ],
       "title": "Average Detector Z-Scores",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -2543,7 +2661,8 @@
         }
       ],
       "title": "Regime Distribution",
-      "type": "piechart"
+      "type": "piechart",
+      "links": []
     },
     {
       "datasource": {
@@ -2622,7 +2741,8 @@
         }
       ],
       "title": "Time in Critical State",
-      "type": "gauge"
+      "type": "gauge",
+      "links": []
     },
     {
       "datasource": {
@@ -2700,7 +2820,14 @@
         }
       ],
       "title": "Peak Anomaly Severity",
-      "type": "stat"
+      "type": "stat",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -2778,7 +2905,14 @@
         }
       ],
       "title": "Avg Episode Duration",
-      "type": "stat"
+      "type": "stat",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -2858,7 +2992,8 @@
         }
       ],
       "title": "Forecast Accuracy",
-      "type": "stat"
+      "type": "stat",
+      "links": []
     },
     {
       "datasource": {
@@ -2937,7 +3072,14 @@
         }
       ],
       "title": "Current Anomaly Severity",
-      "type": "gauge"
+      "type": "gauge",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -3027,7 +3169,8 @@
         }
       ],
       "title": "Health Distribution",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -3190,7 +3333,8 @@
         }
       ],
       "title": "Detector Contributions",
-      "type": "piechart"
+      "type": "piechart",
+      "links": []
     },
     {
       "datasource": {
@@ -3272,7 +3416,8 @@
         }
       ],
       "title": "Health Velocity",
-      "type": "stat"
+      "type": "stat",
+      "links": []
     },
     {
       "datasource": {
@@ -3349,7 +3494,14 @@
         }
       ],
       "title": "Total Episodes",
-      "type": "stat"
+      "type": "stat",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -3462,7 +3614,8 @@
           }
         }
       ],
-      "type": "heatmap"
+      "type": "heatmap",
+      "links": []
     },
     {
       "datasource": {
@@ -3644,7 +3797,8 @@
         }
       ],
       "title": "Average Detector Z-Scores",
-      "type": "barchart"
+      "type": "barchart",
+      "links": []
     },
     {
       "datasource": {
@@ -3792,7 +3946,8 @@
         }
       ],
       "title": "Regime Distribution",
-      "type": "piechart"
+      "type": "piechart",
+      "links": []
     },
     {
       "datasource": {
@@ -3871,7 +4026,8 @@
         }
       ],
       "title": "Time in Critical State",
-      "type": "gauge"
+      "type": "gauge",
+      "links": []
     },
     {
       "datasource": {
@@ -3949,7 +4105,14 @@
         }
       ],
       "title": "Peak Anomaly Severity",
-      "type": "stat"
+      "type": "stat",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -4027,7 +4190,14 @@
         }
       ],
       "title": "Avg Episode Duration",
-      "type": "stat"
+      "type": "stat",
+      "links": [
+        {
+          "title": "\u2192 Episode Details",
+          "url": "/d/acm-asset-story?var-equipment=${equipment}&${__url_time_range}",
+          "targetBlank": false
+        }
+      ]
     },
     {
       "datasource": {
@@ -4107,7 +4277,8 @@
         }
       ],
       "title": "Forecast Accuracy",
-      "type": "stat"
+      "type": "stat",
+      "links": []
     }
   ],
   "refresh": "30s",
@@ -4116,7 +4287,8 @@
     "ACM",
     "Predictive Maintenance",
     "Asset Health",
-    "Main Dashboard"
+    "Main Dashboard",
+    "Navigation"
   ],
   "templating": {
     "list": [
