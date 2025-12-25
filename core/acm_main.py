@@ -4820,6 +4820,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # === SQL-SPECIFIC ARTIFACT WRITING ===
         # NOTE: ScoresTS/write_scores_ts deprecated (ACM_Scores_Long removed) - scores in ACM_Scores_Wide only
+        
+        # Initialize row counters for SQL artifact tracking
+        rows_scores = 0  # ScoresTS deprecated - scores go to ACM_Scores_Wide only
 
         # 2) DriftTS (if drift_z exists) method from config
         rows_drift = 0

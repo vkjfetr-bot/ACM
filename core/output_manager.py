@@ -2258,10 +2258,10 @@ DECLARE @EquipID INT = ?;
                     sensor_hotspots_df = self._generate_sensor_hotspots_table(
                         sensor_zscores=sensor_zscores,
                         sensor_values=sensor_values,
-                        sensor_train_mean=sensor_train_mean,
-                        sensor_train_std=sensor_train_std,
-                        warn_threshold=warn_threshold,
-                        alert_threshold=alert_threshold,
+                        train_mean=sensor_train_mean,
+                        train_std=sensor_train_std,
+                        warn_z=warn_threshold,
+                        alert_z=alert_threshold,
                         top_n=top_n,
                     )
 
