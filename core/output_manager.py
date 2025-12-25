@@ -96,6 +96,7 @@ ALLOWED_TABLES = {
     'ACM_DriftSeries',           # Behavior changes that lead to degradation
     'ACM_SensorCorrelations',    # Multivariate sensor relationships (correlation matrix)
     'ACM_FeatureDropLog',        # Why features were dropped (quality issues)
+    'ACM_OMR_Diagnostics',       # OMR detector diagnostics
     
     # TIER 4: DATA & MODEL MANAGEMENT (10 tables) - Long-term storage, enables progressive learning
     'ACM_BaselineBuffer',        # Raw sensor data accumulation for training
@@ -112,17 +113,22 @@ ALLOWED_TABLES = {
     # TIER 5: OPERATIONS & AUDIT (6 tables) - Is ACM working? What changed?
     'ACM_Runs',                  # Execution tracking and status
     'ACM_RunLogs',               # Detailed logs for troubleshooting
-    'ACM_RunTimers',             # Performance profiling
+    # 'ACM_RunTimers' DEPRECATED - observability stack (Tempo/Prometheus/Loki) handles timing
     'ACM_RunMetrics',            # Fusion quality metrics (EAV format)
+    'ACM_Run_Stats',             # Run-level statistics
     'ACM_Config',                # Current configuration
     'ACM_ConfigHistory',         # Configuration change audit trail
     
     # TIER 6: ADVANCED ANALYTICS (5 tables) - Deep insights and patterns
     'ACM_RegimeOccupancy',       # Operating mode utilization
     'ACM_RegimeTransitions',     # Mode switching patterns
+    'ACM_Regime_Episodes',       # Regime episode tracking
     'ACM_RegimePromotionLog',    # Regime maturity evolution tracking
     'ACM_ContributionTimeline',  # Historical sensor attribution for pattern analysis
     'ACM_DriftController',       # Drift detection control and thresholds
+    'ACM_PCA_Models',            # PCA model metadata
+    'ACM_PCA_Loadings',          # PCA component loadings per sensor
+    'ACM_Anomaly_Events',        # Anomaly event records
     
     # TIER 7: V11 NEW FEATURES (5 tables) - Advanced capabilities from v11.0.0
     'ACM_RegimeDefinitions',     # Regime centroids and metadata (MaturityState lifecycle)
@@ -505,9 +511,9 @@ class OutputManager:
                 'AboveWarnCount': 0, 'AboveAlertCount': 0
             },
             'ACM_EpisodeDiagnostics': {
-                'episode_id': 0, 'peak_z': 0.0, 'peak_timestamp': 'ts', 'duration_h': 0.0,
-                'dominant_sensor': 'UNKNOWN', 'severity': 'UNKNOWN', 'severity_reason': 'UNKNOWN',
-                'avg_z': 0.0, 'min_health_index': 0.0
+                'EpisodeID': 0, 'StartTime': 'ts', 'EndTime': 'ts', 'PeakZ': 0.0,
+                'DurationHours': 0.0, 'TopSensor1': 'UNKNOWN', 'Severity': 'UNKNOWN',
+                'severity_reason': 'UNKNOWN', 'AvgZ': 0.0, 'min_health_index': 0.0
             },
         }
 
@@ -1606,67 +1612,167 @@ class OutputManager:
             Console.warn(f"write_pca_metrics failed: {e}", component="OUTPUT", equip_id=self.equip_id, error_type=type(e).__name__, error=str(e)[:200])
             return 0
 
-    def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
-        """Upsert PCA metrics using DELETE by full PK scope to prevent data loss.
+    def write_pca_loadings(self, df: pd.DataFrame, run_id: str = None) -> int:
+        """Write PCA loadings to ACM_PCA_Loadings table.
         
-        Primary key is (RunID, EquipID, ComponentName, MetricType).
-        CRITICAL: Delete only specific metric types being updated to prevent data loss.
-        This method may be called multiple times per run with different metric types.
+        Schema: RunID, EquipID, EntryDateTime, ComponentNo, ComponentID, 
+                Sensor, FeatureName, Loading, CreatedAt
+        
+        Args:
+            df: DataFrame with columns: RunID, EntryDateTime, ComponentNo, Sensor, Loading
+            run_id: Run ID (optional, can come from df)
+        
+        Returns:
+            Number of rows written
         """
-        if df.empty or self.sql_client is None:
+        if df is None or df.empty:
+            return 0
+        if not self._check_sql_health():
             return 0
         
-        # Validate required columns for PK matching
-        required_cols = ['RunID', 'EquipID', 'ComponentName', 'MetricType']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            Console.warn(f"_upsert_pca_metrics missing required columns: {missing_cols}", component="OUTPUT", missing_columns=missing_cols, available_columns=list(df.columns))
+        try:
+            sql_df = df.copy()
+            
+            # Ensure required columns
+            if 'EquipID' not in sql_df.columns:
+                sql_df['EquipID'] = self.equip_id or 0
+            if 'RunID' not in sql_df.columns:
+                sql_df['RunID'] = run_id or self.run_id or ''
+            if 'EntryDateTime' not in sql_df.columns:
+                sql_df['EntryDateTime'] = datetime.now()
+            if 'ComponentID' not in sql_df.columns:
+                sql_df['ComponentID'] = sql_df.get('ComponentNo', 0)
+            if 'FeatureName' not in sql_df.columns:
+                sql_df['FeatureName'] = sql_df.get('Sensor', '')
+            
+            # Select only the columns the table expects
+            keep_cols = ['RunID', 'EquipID', 'EntryDateTime', 'ComponentNo', 'ComponentID', 
+                         'Sensor', 'FeatureName', 'Loading']
+            keep_cols = [c for c in keep_cols if c in sql_df.columns]
+            sql_df = sql_df[keep_cols]
+            
+            return self._bulk_insert_sql('ACM_PCA_Loadings', sql_df)
+            
+        except Exception as e:
+            Console.warn(f"write_pca_loadings failed: {e}", component="OUTPUT",
+                        equip_id=self.equip_id, run_id=run_id, error=str(e)[:200])
+            return 0
+
+    def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
+        """Upsert PCA metrics using DELETE + INSERT pattern.
+        
+        Actual table schema:
+        - ID (identity)
+        - RunID (required)
+        - EquipID (required) 
+        - ComponentIndex (required)
+        - ExplainedVariance (nullable)
+        - CumulativeVariance (nullable)
+        - Eigenvalue (nullable)
+        - CreatedAt (default)
+        
+        Handles both:
+        - New format: ComponentIndex, ExplainedVariance, etc.
+        - Legacy format: ComponentName, MetricType, Value (convert to new format)
+        """
+        if df.empty or self.sql_client is None:
             return 0
         
         try:
             conn = self.sql_client.conn
             cursor = conn.cursor()
             
-            # Get unique RunID+EquipID pairs
-            # Get unique (RunID, EquipID, ComponentName, MetricType) tuples to delete
-            pk_tuples = df[['RunID', 'EquipID', 'ComponentName', 'MetricType']].drop_duplicates()
+            # Check if this is legacy format (ComponentName, MetricType, Value)
+            is_legacy_format = 'MetricType' in df.columns and 'ComponentName' in df.columns
             
-            # DELETE existing rows by full PK scope (prevents data loss + PK collisions)
+            if is_legacy_format:
+                # Convert legacy format to new format
+                # Pivot MetricType values into columns
+                pivot_records = {}  # (RunID, EquipID, ComponentIdx) -> {metric: value}
+                
+                for _, row in df.iterrows():
+                    run_id = row['RunID']
+                    equip_id = row['EquipID']
+                    metric_type = row.get('MetricType', '')
+                    value = row.get('Value', 0.0)
+                    
+                    # Extract component index from ComponentName (e.g., "PC1" -> 0, "PC2" -> 1)
+                    comp_name = str(row.get('ComponentName', 'PC1'))
+                    if comp_name.startswith('PC'):
+                        try:
+                            comp_idx = int(comp_name[2:]) - 1
+                        except ValueError:
+                            comp_idx = 0
+                    else:
+                        comp_idx = 0
+                    
+                    key = (run_id, equip_id, comp_idx)
+                    if key not in pivot_records:
+                        pivot_records[key] = {}
+                    
+                    # Map metric types
+                    if 'variance' in metric_type.lower() and 'cumulative' not in metric_type.lower():
+                        pivot_records[key]['ExplainedVariance'] = float(value) if value is not None else None
+                    elif 'cumulative' in metric_type.lower():
+                        pivot_records[key]['CumulativeVariance'] = float(value) if value is not None else None
+                    elif 'eigenvalue' in metric_type.lower() or metric_type.startswith('n_'):
+                        pivot_records[key]['Eigenvalue'] = float(value) if value is not None else None
+                
+                # Build new-format rows
+                new_rows = []
+                for (run_id, equip_id, comp_idx), metrics in pivot_records.items():
+                    new_rows.append({
+                        'RunID': run_id,
+                        'EquipID': equip_id,
+                        'ComponentIndex': comp_idx,
+                        **metrics
+                    })
+                
+                if not new_rows:
+                    Console.debug("No PCA metrics to write after legacy conversion", component="OUTPUT")
+                    return 0
+                    
+                df = pd.DataFrame(new_rows)
+            
+            # Validate required columns for new format
+            required_cols = ['RunID', 'EquipID', 'ComponentIndex']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                Console.warn(f"_upsert_pca_metrics missing required columns: {missing_cols}", component="OUTPUT", missing_columns=missing_cols, available_columns=list(df.columns))
+                return 0
+            
+            # DELETE existing rows for this RunID+EquipID
+            run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
             deleted_count = 0
-            for _, row in pk_tuples.iterrows():
+            for _, row in run_equip_pairs.iterrows():
                 try:
                     cursor.execute("""
                         DELETE FROM ACM_PCA_Metrics 
-                        WHERE RunID = ? AND EquipID = ? AND ComponentName = ? AND MetricType = ?
+                        WHERE RunID = ? AND EquipID = ?
                         """,
-                        (row['RunID'], row['EquipID'], row['ComponentName'], row['MetricType'])
+                        (str(row['RunID']), int(row['EquipID']))
                     )
                     deleted_count += cursor.rowcount
                 except Exception as del_err:
-                    Console.warn(f"DELETE failed for {row['ComponentName']}/{row['MetricType']}: {del_err}", component="OUTPUT", table="ACM_PCA_Metrics", component_name=row['ComponentName'], metric_type=row['MetricType'], error_type=type(del_err).__name__)
+                    Console.debug(f"DELETE failed for PCA metrics: {del_err}", component="OUTPUT")
             
-            if deleted_count > 0:
-                Console.info(f"Deleted {deleted_count} existing PCA metric rows before upsert", component="OUTPUT")
-            
-            # Prepare bulk insert data
+            # Prepare bulk insert
             insert_sql = """
-            INSERT INTO ACM_PCA_Metrics (RunID, EquipID, ComponentName, MetricType, Value, Timestamp)
+            INSERT INTO ACM_PCA_Metrics (RunID, EquipID, ComponentIndex, ExplainedVariance, CumulativeVariance, Eigenvalue)
             VALUES (?, ?, ?, ?, ?, ?)
             """
             
-            # Build list of tuples for bulk insert
             rows_to_insert = []
             for _, row in df.iterrows():
                 rows_to_insert.append((
-                    row['RunID'],
-                    row['EquipID'],
-                    row.get('ComponentName', 'PCA'),
-                    row['MetricType'],
-                    row['Value'],
-                    row.get('Timestamp', datetime.now())
+                    str(row['RunID']),
+                    int(row['EquipID']),
+                    int(row.get('ComponentIndex', 0)),
+                    float(row['ExplainedVariance']) if pd.notna(row.get('ExplainedVariance')) else None,
+                    float(row['CumulativeVariance']) if pd.notna(row.get('CumulativeVariance')) else None,
+                    float(row['Eigenvalue']) if pd.notna(row.get('Eigenvalue')) else None
                 ))
             
-            # Bulk insert all rows in one transaction
             if rows_to_insert:
                 cursor.executemany(insert_sql, rows_to_insert)
             
@@ -1889,13 +1995,15 @@ class OutputManager:
         repairs_applied = []
         
         episode_columns = {
-            'episode_id': 'episode_id',
-            'peak_fused_z': 'peak_z',
+            'episode_id': 'EpisodeID',
+            'start_ts': 'StartTime',
+            'end_ts': 'EndTime',
+            'peak_fused_z': 'PeakZ',
             'peak_timestamp': 'peak_timestamp', 
-            'duration_hours': 'duration_h',
-            'dominant_sensor': 'dominant_sensor',
-            'severity': 'severity',
-            'avg_fused_z': 'avg_z',
+            'duration_hours': 'DurationHours',
+            'dominant_sensor': 'TopSensor1',
+            'severity': 'Severity',
+            'avg_fused_z': 'AvgZ',
             'min_health_index': 'min_health_index'
         }
         
@@ -1997,6 +2105,632 @@ class OutputManager:
                 Console.warn(f"Failed to write summary to ACM_Episodes: {summary_err}", component="EPISODES", equip_id=self.equip_id, run_id=self.run_id, episode_count=len(episodes_df), error_type=type(summary_err).__name__)
         
         return result
+    
+    def write_threshold_metadata(
+        self,
+        equip_id: int,
+        threshold_type: str,
+        threshold_value: float,
+        calculation_method: str,
+        sample_count: int,
+        train_start: Optional[datetime] = None,
+        train_end: Optional[datetime] = None,
+        config_signature: Optional[str] = None,
+        notes: Optional[str] = None
+    ) -> int:
+        """Write adaptive threshold metadata to ACM_AdaptiveConfig.
+        
+        Maps to actual table schema:
+        - ConfigKey: threshold_type (e.g., 'fused_alert_z')
+        - ConfigValue: threshold_value as string
+        - MinBound/MaxBound: 0.0/infinity for thresholds
+        - IsLearned: True (since computed from data)
+        - DataVolumeAtTuning: sample_count
+        - PerformanceMetric: calculation_method
+        - Source: 'adaptive_threshold_calculator'
+        - ResearchReference: notes
+        
+        Args:
+            equip_id: Equipment ID
+            threshold_type: Type of threshold (e.g., 'fused_alert_z', 'fused_warn_z')
+            threshold_value: Calculated threshold value
+            calculation_method: Method used (e.g., 'quantile_0.997')
+            sample_count: Number of samples used in calculation
+            train_start: Start of training window (unused - table doesn't have this)
+            train_end: End of training window (unused - table doesn't have this)
+            config_signature: Hash of config used (unused - table doesn't have this)
+            notes: Optional notes about calculation
+        
+        Returns:
+            Number of rows written (1 on success, 0 on failure)
+        """
+        if not self._check_sql_health():
+            return 0
+        try:
+            # Handle dict values (per-regime thresholds) - store first value only
+            if isinstance(threshold_value, dict):
+                # Take first value for storage, or average
+                threshold_float = float(list(threshold_value.values())[0]) if threshold_value else 0.0
+            else:
+                threshold_float = float(threshold_value)
+            
+            row = {
+                'EquipID': int(equip_id),
+                'ConfigKey': threshold_type,
+                'ConfigValue': threshold_float,  # Float column
+                'MinBound': 0.0,
+                'MaxBound': 999999.0,  # Effectively no upper bound
+                'IsLearned': 1,  # BIT column
+                'DataVolumeAtTuning': int(sample_count),
+                'PerformanceMetric': 0.0,  # Float column - store 0 for now
+                'ResearchReference': f"{calculation_method}: {notes}" if notes else calculation_method,
+                'Source': 'adaptive_threshold_calculator',
+            }
+            # Use MERGE to handle existing records (UNIQUE constraint on EquipID+ConfigKey)
+            return self._upsert_adaptive_config(row)
+        except Exception as e:
+            Console.warn(f"write_threshold_metadata failed: {e}", component="THRESHOLD", error=str(e)[:200])
+            return 0
+    
+    def _upsert_adaptive_config(self, row: dict) -> int:
+        """Upsert single row into ACM_AdaptiveConfig using MERGE.
+        
+        Table has UNIQUE constraint on (EquipID, ConfigKey).
+        """
+        if self.sql_client is None:
+            return 0
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            merge_sql = """
+            MERGE INTO ACM_AdaptiveConfig AS target
+            USING (SELECT ? AS EquipID, ? AS ConfigKey) AS source (EquipID, ConfigKey)
+            ON target.EquipID = source.EquipID AND target.ConfigKey = source.ConfigKey
+            WHEN MATCHED THEN
+                UPDATE SET 
+                    ConfigValue = ?,
+                    MinBound = ?,
+                    MaxBound = ?,
+                    IsLearned = ?,
+                    DataVolumeAtTuning = ?,
+                    PerformanceMetric = ?,
+                    ResearchReference = ?,
+                    Source = ?,
+                    UpdatedAt = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (EquipID, ConfigKey, ConfigValue, MinBound, MaxBound, IsLearned, 
+                        DataVolumeAtTuning, PerformanceMetric, ResearchReference, Source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            cursor.execute(merge_sql, (
+                # Match keys
+                row['EquipID'], row['ConfigKey'],
+                # Update values
+                row['ConfigValue'], row['MinBound'], row['MaxBound'], row['IsLearned'],
+                row['DataVolumeAtTuning'], row['PerformanceMetric'], row['ResearchReference'], row['Source'],
+                # Insert values
+                row['EquipID'], row['ConfigKey'], row['ConfigValue'], row['MinBound'], row['MaxBound'],
+                row['IsLearned'], row['DataVolumeAtTuning'], row['PerformanceMetric'], 
+                row['ResearchReference'], row['Source']
+            ))
+            conn.commit()
+            return 1
+        except Exception as e:
+            Console.warn(f"_upsert_adaptive_config failed: {e}", component="OUTPUT",
+                        equip_id=row.get('EquipID'), config_key=row.get('ConfigKey'), error=str(e)[:200])
+            if self.sql_client and self.sql_client.conn:
+                try:
+                    self.sql_client.conn.rollback()
+                except:
+                    pass
+            return 0
+    
+    def load_omr_drift_context(self, equip_id: int, lookback_hours: int = 24) -> dict:
+        """Load OMR and drift context from recent data for forecasting.
+        
+        Queries ACM_Scores_Wide for recent OMR/drift values and ACM_DriftSeries for trend.
+        
+        Args:
+            equip_id: Equipment ID
+            lookback_hours: How many hours of history to consider
+            
+        Returns:
+            Dict with keys:
+                - omr_z: Most recent OMR z-score (or None)
+                - omr_trend: 'increasing', 'decreasing', 'stable', or 'unknown'
+                - top_contributors: List of top contributing sensors
+                - drift_z: Most recent drift z-score (or None)
+                - drift_trend: 'increasing', 'decreasing', 'stable', or 'unknown'
+        """
+        result = {
+            'omr_z': None,
+            'omr_trend': 'unknown',
+            'top_contributors': [],
+            'drift_z': None,
+            'drift_trend': 'unknown'
+        }
+        
+        if not self._check_sql_health():
+            return result
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            
+            # Get most recent fused score (Overall Model Residual is computed from fused scores)
+            # ACM_Scores_Wide has 'fused' column, not 'omr_z'
+            cursor.execute("""
+                SELECT TOP 1 fused
+                FROM ACM_Scores_Wide
+                WHERE EquipID = ? AND fused IS NOT NULL
+                ORDER BY Timestamp DESC
+            """, (equip_id,))
+            row = cursor.fetchone()
+            if row:
+                result['omr_z'] = float(row[0]) if row[0] is not None else None
+            
+            # Get OMR/fused trend from recent values
+            cursor.execute("""
+                SELECT fused
+                FROM (
+                    SELECT TOP 10 fused, Timestamp
+                    FROM ACM_Scores_Wide
+                    WHERE EquipID = ? AND fused IS NOT NULL
+                    ORDER BY Timestamp DESC
+                ) sub
+                ORDER BY Timestamp ASC
+            """, (equip_id,))
+            omr_values = [float(r[0]) for r in cursor.fetchall() if r[0] is not None]
+            if len(omr_values) >= 3:
+                # Simple trend: compare first half avg to second half avg
+                mid = len(omr_values) // 2
+                first_avg = sum(omr_values[:mid]) / mid
+                second_avg = sum(omr_values[mid:]) / (len(omr_values) - mid)
+                if second_avg > first_avg * 1.1:
+                    result['omr_trend'] = 'increasing'
+                elif second_avg < first_avg * 0.9:
+                    result['omr_trend'] = 'decreasing'
+                else:
+                    result['omr_trend'] = 'stable'
+            
+            # Get top contributors from SensorHotspots (most recent by max z-score)
+            cursor.execute("""
+                SELECT TOP 3 SensorName
+                FROM ACM_SensorHotspots
+                WHERE EquipID = ?
+                ORDER BY MaxAbsZ DESC
+            """, (equip_id,))
+            result['top_contributors'] = [r[0] for r in cursor.fetchall() if r[0]]
+            
+            # Get drift from DriftSeries
+            cursor.execute("""
+                SELECT TOP 1 DriftValue
+                FROM ACM_DriftSeries
+                WHERE EquipID = ?
+                ORDER BY Timestamp DESC
+            """, (equip_id,))
+            row = cursor.fetchone()
+            if row:
+                result['drift_z'] = float(row[0]) if row[0] is not None else None
+            
+            # Get drift trend
+            cursor.execute("""
+                SELECT DriftValue
+                FROM (
+                    SELECT TOP 10 DriftValue, Timestamp
+                    FROM ACM_DriftSeries
+                    WHERE EquipID = ?
+                    ORDER BY Timestamp DESC
+                ) sub
+                ORDER BY Timestamp ASC
+            """, (equip_id,))
+            drift_values = [float(r[0]) for r in cursor.fetchall() if r[0] is not None]
+            if len(drift_values) >= 3:
+                mid = len(drift_values) // 2
+                first_avg = sum(drift_values[:mid]) / mid
+                second_avg = sum(drift_values[mid:]) / (len(drift_values) - mid)
+                if second_avg > first_avg * 1.1:
+                    result['drift_trend'] = 'increasing'
+                elif second_avg < first_avg * 0.9:
+                    result['drift_trend'] = 'decreasing'
+                else:
+                    result['drift_trend'] = 'stable'
+            
+            cursor.close()
+        except Exception as e:
+            Console.debug(f"load_omr_drift_context failed: {e}", component="OUTPUT", error=str(e)[:200])
+        
+        return result
+    
+    def write_anomaly_events(self, df_events: pd.DataFrame, run_id: str) -> int:
+        """Write anomaly events to ACM_Anomaly_Events table.
+        
+        Args:
+            df_events: DataFrame with event data (EquipID, start_ts, end_ts, severity, etc.)
+            run_id: Current run ID
+        
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or df_events is None or df_events.empty:
+            return 0
+        try:
+            df = df_events.copy()
+            df['RunID'] = run_id
+            # Rename columns to match table schema
+            col_map = {
+                'start_ts': 'StartTime',
+                'end_ts': 'EndTime',
+                'severity': 'Severity',
+                'Detector': 'DetectorType',
+                'Score': 'PeakScore',
+                'ContributorsJSON': 'ContributorsJSON'
+            }
+            for old, new in col_map.items():
+                if old in df.columns and new not in df.columns:
+                    df[new] = df[old]
+            return self.write_table('ACM_Anomaly_Events', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_anomaly_events failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_episodes(self, df_reg: pd.DataFrame, run_id: str) -> int:
+        """Write regime episodes to ACM_RegimeEpisodes table.
+        
+        Args:
+            df_reg: DataFrame with regime episode data
+            run_id: Current run ID
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or df_reg is None or df_reg.empty:
+            return 0
+        try:
+            df = df_reg.copy()
+            df['RunID'] = run_id
+            return self.write_table('ACM_Regime_Episodes', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_regime_episodes failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_pca_model(self, model_row: Dict[str, Any]) -> int:
+        """Write PCA model metadata to ACM_PCA_Model table.
+        
+        Args:
+            model_row: Dict with model metadata
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or not model_row:
+            return 0
+        try:
+            row = dict(model_row)
+            row['RunID'] = self.run_id
+            row['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_PCA_Models', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_pca_model failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_run_stats(self, stats: Dict[str, Any]) -> int:
+        """Write run statistics to ACM_RunStats table.
+        
+        Args:
+            stats: Dict with run statistics
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or not stats:
+            return 0
+        try:
+            return self.write_table('ACM_Run_Stats', pd.DataFrame([stats]), delete_existing=False)
+        except Exception as e:
+            Console.warn(f"write_run_stats failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    # =========================================================================
+    # NEW TABLE WRITE METHODS (Dec 25, 2025 - v11 completion)
+    # =========================================================================
+    
+    def write_detector_correlation(self, detector_correlations: Dict[str, Dict[str, float]]) -> int:
+        """Write detector correlation matrix to ACM_DetectorCorrelation.
+        
+        Args:
+            detector_correlations: Nested dict {detector1: {detector2: correlation}}
+        """
+        if not self._check_sql_health() or not detector_correlations:
+            return 0
+        try:
+            rows = []
+            for d1, correlations in detector_correlations.items():
+                for d2, corr in correlations.items():
+                    rows.append({
+                        'RunID': self.run_id,
+                        'EquipID': self.equip_id or 0,
+                        'Detector1': d1,
+                        'Detector2': d2,
+                        'Correlation': float(corr) if not pd.isna(corr) else 0.0
+                    })
+            if not rows:
+                return 0
+            return self.write_table('ACM_DetectorCorrelation', pd.DataFrame(rows), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_detector_correlation failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_drift_series(self, drift_df: pd.DataFrame) -> int:
+        """Write drift detection time series to ACM_DriftSeries.
+        
+        Args:
+            drift_df: DataFrame with Timestamp, DriftValue, optionally DriftState
+        """
+        if not self._check_sql_health() or drift_df is None or drift_df.empty:
+            return 0
+        try:
+            df = drift_df.copy()
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_DriftSeries', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_drift_series failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_sensor_correlations(self, corr_matrix: pd.DataFrame, corr_type: str = 'pearson') -> int:
+        """Write sensor correlation matrix to ACM_SensorCorrelations.
+        
+        Args:
+            corr_matrix: Pandas correlation matrix (sensors x sensors)
+            corr_type: 'pearson' or 'spearman'
+        """
+        if not self._check_sql_health() or corr_matrix is None or corr_matrix.empty:
+            return 0
+        try:
+            rows = []
+            sensors = list(corr_matrix.columns)
+            for i, s1 in enumerate(sensors):
+                for j, s2 in enumerate(sensors):
+                    if i <= j:  # Upper triangle only to avoid duplicates
+                        corr = corr_matrix.loc[s1, s2]
+                        if not pd.isna(corr):
+                            rows.append({
+                                'RunID': self.run_id,
+                                'EquipID': self.equip_id or 0,
+                                'Sensor1': str(s1),
+                                'Sensor2': str(s2),
+                                'Correlation': float(corr),
+                                'CorrelationType': corr_type
+                            })
+            if not rows:
+                return 0
+            return self.write_table('ACM_SensorCorrelations', pd.DataFrame(rows), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_sensor_correlations failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_feature_drop_log(self, dropped_features: List[Dict[str, Any]]) -> int:
+        """Write dropped features log to ACM_FeatureDropLog.
+        
+        Args:
+            dropped_features: List of dicts with keys: FeatureName, DropReason, DropValue, Threshold
+        """
+        if not self._check_sql_health() or not dropped_features:
+            return 0
+        try:
+            df = pd.DataFrame(dropped_features)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_FeatureDropLog', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_feature_drop_log failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_calibration_summary(self, calibration_data: List[Dict[str, Any]]) -> int:
+        """Write detector calibration summary to ACM_CalibrationSummary.
+        
+        Args:
+            calibration_data: List of dicts with DetectorType, CalibrationScore, etc.
+        """
+        if not self._check_sql_health() or not calibration_data:
+            return 0
+        try:
+            df = pd.DataFrame(calibration_data)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_CalibrationSummary', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_calibration_summary failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_occupancy(self, occupancy_data: List[Dict[str, Any]]) -> int:
+        """Write regime occupancy stats to ACM_RegimeOccupancy.
+        
+        Args:
+            occupancy_data: List of dicts with RegimeLabel, DwellTimeHours, DwellFraction, etc.
+        """
+        if not self._check_sql_health() or not occupancy_data:
+            return 0
+        try:
+            df = pd.DataFrame(occupancy_data)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_RegimeOccupancy', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_regime_occupancy failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_transitions(self, transition_matrix: Dict[str, Dict[str, int]]) -> int:
+        """Write regime transition matrix to ACM_RegimeTransitions.
+        
+        Args:
+            transition_matrix: Nested dict {from_regime: {to_regime: count}}
+        """
+        if not self._check_sql_health() or not transition_matrix:
+            return 0
+        try:
+            rows = []
+            for from_r, transitions in transition_matrix.items():
+                total = sum(transitions.values())
+                for to_r, count in transitions.items():
+                    rows.append({
+                        'RunID': self.run_id,
+                        'EquipID': self.equip_id or 0,
+                        'FromRegime': str(from_r),
+                        'ToRegime': str(to_r),
+                        'TransitionCount': int(count),
+                        'TransitionProbability': float(count) / total if total > 0 else 0.0
+                    })
+            if not rows:
+                return 0
+            return self.write_table('ACM_RegimeTransitions', pd.DataFrame(rows), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_regime_transitions failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_contribution_timeline(self, contributions_df: pd.DataFrame) -> int:
+        """Write detector contribution timeline to ACM_ContributionTimeline.
+        
+        Args:
+            contributions_df: DataFrame with Timestamp, DetectorType, ContributionPct
+        """
+        if not self._check_sql_health() or contributions_df is None or contributions_df.empty:
+            return 0
+        try:
+            df = contributions_df.copy()
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_ContributionTimeline', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_contribution_timeline failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_promotion_log(self, promotions: List[Dict[str, Any]]) -> int:
+        """Write regime maturity promotions to ACM_RegimePromotionLog.
+        
+        Args:
+            promotions: List of dicts with RegimeLabel, FromState, ToState, Reason, etc.
+        """
+        if not self._check_sql_health() or not promotions:
+            return 0
+        try:
+            df = pd.DataFrame(promotions)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_RegimePromotionLog', df, delete_existing=False)  # Append, don't delete
+        except Exception as e:
+            Console.warn(f"write_regime_promotion_log failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_drift_controller(self, controller_state: Dict[str, Any]) -> int:
+        """Write drift controller state to ACM_DriftController.
+        
+        Args:
+            controller_state: Dict with ControllerState, Threshold, Sensitivity, etc.
+        """
+        if not self._check_sql_health() or not controller_state:
+            return 0
+        try:
+            row = dict(controller_state)
+            row['RunID'] = self.run_id
+            row['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_DriftController', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_drift_controller failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_definitions(self, regime_defs: List[Dict[str, Any]], version: int) -> int:
+        """Write regime definitions to ACM_RegimeDefinitions (v11).
+        
+        Args:
+            regime_defs: List of dicts with RegimeID, RegimeName, CentroidJSON, etc.
+            version: Regime model version number
+        """
+        if not self._check_sql_health() or not regime_defs:
+            return 0
+        try:
+            df = pd.DataFrame(regime_defs)
+            df['EquipID'] = self.equip_id or 0
+            df['RegimeVersion'] = version
+            df['CreatedByRunID'] = self.run_id
+            return self.write_table('ACM_RegimeDefinitions', df, delete_existing=False)  # Keep history
+        except Exception as e:
+            Console.warn(f"write_regime_definitions failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_active_models(self, model_state: Dict[str, Any]) -> int:
+        """Write/update active model versions to ACM_ActiveModels (v11).
+        
+        Args:
+            model_state: Dict with ActiveRegimeVersion, RegimeMaturityState, etc.
+        """
+        if not self._check_sql_health() or not model_state:
+            return 0
+        try:
+            row = dict(model_state)
+            row['EquipID'] = self.equip_id or 0
+            row['LastUpdatedAt'] = datetime.now()
+            row['LastUpdatedBy'] = self.run_id
+            # Upsert - delete existing for this equipment first
+            return self.write_table('ACM_ActiveModels', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_active_models failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_data_contract_validation(self, validation_result: Dict[str, Any]) -> int:
+        """Write data contract validation result to ACM_DataContractValidation (v11).
+        
+        Args:
+            validation_result: Dict with Passed, RowsValidated, ColumnsValidated, IssuesJSON, etc.
+        """
+        if not self._check_sql_health() or not validation_result:
+            return 0
+        try:
+            row = dict(validation_result)
+            row['RunID'] = self.run_id
+            row['EquipID'] = self.equip_id or 0
+            row['ValidatedAt'] = datetime.now()
+            return self.write_table('ACM_DataContractValidation', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_data_contract_validation failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_seasonal_patterns(self, patterns: List[Dict[str, Any]]) -> int:
+        """Write detected seasonal patterns to ACM_SeasonalPatterns (v11).
+        
+        Args:
+            patterns: List of dicts with SensorName, PatternType, PeriodHours, Amplitude, etc.
+        """
+        if not self._check_sql_health() or not patterns:
+            return 0
+        try:
+            df = pd.DataFrame(patterns)
+            df['EquipID'] = self.equip_id or 0
+            df['DetectedAt'] = datetime.now()
+            df['DetectedByRunID'] = self.run_id
+            return self.write_table('ACM_SeasonalPatterns', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_seasonal_patterns failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_asset_profile(self, profile: Dict[str, Any]) -> int:
+        """Write asset profile to ACM_AssetProfiles (v11).
+        
+        Args:
+            profile: Dict with EquipType, SensorNamesJSON, SensorMeansJSON, SensorStdsJSON, etc.
+        """
+        if not self._check_sql_health() or not profile:
+            return 0
+        try:
+            row = dict(profile)
+            row['EquipID'] = self.equip_id or 0
+            row['LastUpdatedAt'] = datetime.now()
+            row['LastUpdatedByRunID'] = self.run_id
+            return self.write_table('ACM_AssetProfiles', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_asset_profile failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
     
     
     def get_stats(self) -> Dict[str, Any]:

@@ -196,14 +196,23 @@ TABLE_SCHEMAS: Dict[str, TableSchema] = {
         required_columns={
             "RunID": _INT_NOT_NULL,
             "EquipID": _INT_NOT_NULL,
+            "StartTime": _DT_NOT_NULL,
         },
         optional_columns={
-            "episode_count": _INT_NULLABLE,
-            "duration_h": _FLOAT_NULLABLE,
-            "avg_severity": _FLOAT_NULLABLE,
+            "EpisodeID": _INT_NULLABLE,
+            "EndTime": _DT_NULLABLE,
+            "DurationHours": _FLOAT_NULLABLE,
+            "PeakZ": _FLOAT_NULLABLE,
+            "AvgZ": _FLOAT_NULLABLE,
+            "Severity": _STR_NULLABLE,
+            "TopSensor1": _STR_NULLABLE,
+            "TopSensor2": _STR_NULLABLE,
+            "TopSensor3": _STR_NULLABLE,
+            "RegimeAtStart": _STR_NULLABLE,
+            "AlertMode": _STR_NULLABLE,
         },
         auto_add_columns={},
-        key_columns=["RunID", "EquipID"],
+        key_columns=["RunID", "EquipID", "EpisodeID"],
     ),
     
     # =========================================================================
@@ -376,6 +385,185 @@ TABLE_SCHEMAS: Dict[str, TableSchema] = {
             "LastUpdatedByRunID": _STR_NULLABLE,
         },
         key_columns=["EquipID"],
+    ),
+    
+    # =========================================================================
+    # Root Cause Tables (Tier 3) - Added Dec 25, 2025
+    # =========================================================================
+    "ACM_DetectorCorrelation": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Detector1": _STR_NOT_NULL,
+            "Detector2": _STR_NOT_NULL,
+            "Correlation": _FLOAT_NOT_NULL,
+        },
+        optional_columns={},
+        key_columns=["RunID", "EquipID", "Detector1", "Detector2"],
+    ),
+    
+    "ACM_DriftSeries": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Timestamp": _DATETIME_NOT_NULL,
+            "DriftValue": _FLOAT_NOT_NULL,
+        },
+        optional_columns={
+            "DriftState": _STR_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "Timestamp"],
+    ),
+    
+    "ACM_SensorCorrelations": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Sensor1": _STR_NOT_NULL,
+            "Sensor2": _STR_NOT_NULL,
+            "Correlation": _FLOAT_NOT_NULL,
+        },
+        optional_columns={
+            "CorrelationType": _STR_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "Sensor1", "Sensor2"],
+    ),
+    
+    "ACM_FeatureDropLog": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "FeatureName": _STR_NOT_NULL,
+            "DropReason": _STR_NOT_NULL,
+        },
+        optional_columns={
+            "DropValue": _FLOAT_NULLABLE,
+            "Threshold": _FLOAT_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "FeatureName"],
+    ),
+    
+    # =========================================================================
+    # Model Quality Tables (Tier 4) - Added Dec 25, 2025
+    # =========================================================================
+    "ACM_SensorNormalized_TS": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Timestamp": _DATETIME_NOT_NULL,
+            "SensorName": _STR_NOT_NULL,
+        },
+        optional_columns={
+            "RawValue": _FLOAT_NULLABLE,
+            "NormalizedValue": _FLOAT_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "Timestamp", "SensorName"],
+    ),
+    
+    "ACM_CalibrationSummary": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "DetectorType": _STR_NOT_NULL,
+        },
+        optional_columns={
+            "CalibrationScore": _FLOAT_NULLABLE,
+            "TrainR2": _FLOAT_NULLABLE,
+            "MeanAbsError": _FLOAT_NULLABLE,
+            "P95Error": _FLOAT_NULLABLE,
+            "DatapointsUsed": _INT_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "DetectorType"],
+    ),
+    
+    "ACM_PCA_Metrics": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "ComponentIndex": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "ExplainedVariance": _FLOAT_NULLABLE,
+            "CumulativeVariance": _FLOAT_NULLABLE,
+            "Eigenvalue": _FLOAT_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "ComponentIndex"],
+    ),
+    
+    # =========================================================================
+    # Advanced Analytics Tables (Tier 6) - Added Dec 25, 2025
+    # =========================================================================
+    "ACM_RegimeOccupancy": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "RegimeLabel": _STR_NOT_NULL,
+            "DwellTimeHours": _FLOAT_NOT_NULL,
+            "DwellFraction": _FLOAT_NOT_NULL,
+        },
+        optional_columns={
+            "EntryCount": _INT_NULLABLE,
+            "AvgDwellMinutes": _FLOAT_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "RegimeLabel"],
+    ),
+    
+    "ACM_RegimeTransitions": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "FromRegime": _STR_NOT_NULL,
+            "ToRegime": _STR_NOT_NULL,
+            "TransitionCount": _INT_NOT_NULL,
+        },
+        optional_columns={
+            "TransitionProbability": _FLOAT_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "FromRegime", "ToRegime"],
+    ),
+    
+    "ACM_ContributionTimeline": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "Timestamp": _DATETIME_NOT_NULL,
+            "DetectorType": _STR_NOT_NULL,
+            "ContributionPct": _FLOAT_NOT_NULL,
+        },
+        optional_columns={},
+        key_columns=["RunID", "EquipID", "Timestamp", "DetectorType"],
+    ),
+    
+    "ACM_RegimePromotionLog": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "RegimeLabel": _STR_NOT_NULL,
+            "FromState": _STR_NOT_NULL,
+            "ToState": _STR_NOT_NULL,
+        },
+        optional_columns={
+            "Reason": _STR_NULLABLE,
+            "DataPointsAtPromotion": _INT_NULLABLE,
+            "PromotedAt": _DATETIME_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID", "RegimeLabel"],
+    ),
+    
+    "ACM_DriftController": TableSchema(
+        required_columns={
+            "RunID": _STR_NOT_NULL,
+            "EquipID": _INT_NOT_NULL,
+            "ControllerState": _STR_NOT_NULL,
+        },
+        optional_columns={
+            "Threshold": _FLOAT_NULLABLE,
+            "Sensitivity": _FLOAT_NULLABLE,
+            "LastDriftValue": _FLOAT_NULLABLE,
+            "LastDriftTime": _DATETIME_NULLABLE,
+            "ResetCount": _INT_NULLABLE,
+        },
+        key_columns=["RunID", "EquipID"],
     ),
 }
 

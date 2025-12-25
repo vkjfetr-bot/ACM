@@ -56,8 +56,8 @@ from core.config_history_writer import log_auto_tune_changes
 
 # Import the unified output system
 from core.output_manager import OutputManager
-# Import run metadata writer
-from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score, write_timer_stats
+# Import run metadata writer (write_timer_stats DEPRECATED - observability stack handles timing)
+from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
 from core.episode_culprits_writer import write_episode_culprits_enhanced
 
 # v11.0.0: Pipeline types for data validation
@@ -4690,6 +4690,30 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                  equip=equip, run_id=run_id, error=str(ee)[:200])
 
             # Culprits now handled via SQL in OutputManager
+            
+            # === NEW TABLE WRITES (v11 completion) ===
+            # Detector Correlation Matrix (correlation between detector z-scores)
+            with T.section("persist.detector_correlation"):
+                try:
+                    z_cols = [c for c in frame.columns if c.endswith('_z') and c not in ['drift_z']]
+                    if len(z_cols) >= 2:
+                        z_df = frame[z_cols].dropna(how='all')
+                        if len(z_df) > 10:  # Need enough data for correlation
+                            corr_matrix = z_df.corr(method='pearson')
+                            # Convert to nested dict format
+                            det_corr = {d1: {d2: corr_matrix.loc[d1, d2] for d2 in corr_matrix.columns} for d1 in corr_matrix.index}
+                            output_manager.write_detector_correlation(det_corr)
+                except Exception as e:
+                    Console.debug(f"Detector correlation write skipped: {e}", component="PERSIST")
+            
+            # Sensor Correlation Matrix (from train data)
+            with T.section("persist.sensor_correlation"):
+                try:
+                    if train is not None and hasattr(train, 'corr') and train.shape[1] >= 2:
+                        sensor_corr = train.corr(method='pearson')
+                        output_manager.write_sensor_correlations(sensor_corr, corr_type='pearson')
+                except Exception as e:
+                    Console.debug(f"Sensor correlation write skipped: {e}", component="PERSIST")
 
                 if cache_payload:
                     with T.section("persist.cache_detectors"):
@@ -4988,20 +5012,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     pct = (duration / total_time * 100) if total_time > 0 else 0
                     log_timer(section=section, duration_s=duration, pct=pct, total_s=total_time)
                 
-                # Write detailed timer stats to SQL (if available)
-                if SQL_MODE and sql_client and run_id:
-                     try:
-                         batch_num = int(cfg.get("runtime", {}).get("batch_num", 0)) if 'cfg' in locals() else 0
-                         write_timer_stats(
-                             sql_client=sql_client,
-                             run_id=run_id,
-                             equip_id=int(equip_id) if 'equip_id' in locals() else 0,
-                             batch_num=batch_num,
-                             timings=T.totals
-                         )
-                     except Exception as timer_err:
-                         Console.warn(f"Failed to write timer stats from main: {timer_err}", component="PERF",
-                                      equip=equip, run_id=run_id, error=str(timer_err)[:200])
+                # DEPRECATED: ACM_RunTimers SQL writes removed - observability stack (Tempo/Prometheus/Loki) handles timing
+                # Timings are now captured via:
+                # 1. Tempo traces (spans with durations)
+                # 2. Prometheus metrics (run_duration_seconds)
+                # 3. Loki logs (log_timer emits structured timer logs)
             except Exception:
                 pass
 
