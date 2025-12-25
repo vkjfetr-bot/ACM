@@ -49,6 +49,7 @@
 | `_normalize_episodes_schema()` | Normalize episodes DataFrame with timestamps, regimes, severity | ✅ Done (8ec4592) |
 | `_write_pca_artifacts()` | Write PCA model, loadings, metrics to SQL | ✅ Done (0378b43) |
 | `_compute_drift_alert_mode()` | Compute drift alert mode (multi-feature or simple threshold) | ✅ Done (b981284) |
+| `_build_data_quality_records()` | Build per-sensor data quality records with gap/flatline analysis | ✅ Done (449d6bb) |
 | `_phase_initialize_runtime()` | 840-1183 (~343 lines) | 🔲 Not Started |
 | `_phase_load_data()` | 1183-1915 (~732 lines) | 🔲 Not Started |
 | `_phase_fit_models()` | 1915-2311 (~396 lines) | 🔲 Not Started |
@@ -57,7 +58,7 @@
 | `_phase_fuse_and_episodes()` | 2769-3419 (~650 lines) | 🔲 Not Started |
 | `_phase_persist_results()` | 3771-end (~490 lines) | 🔲 Not Started |
 
-**Wave 3 Progress**: Added context dataclasses + extracted **19 helper functions**:
+**Wave 3 Progress**: Added context dataclasses + extracted **20 helper functions**:
 - `_score_all_detectors()` - Score data through all detectors
 - `_calibrate_all_detectors()` - Calibrate detector outputs
 - `_fit_all_detectors()` - Fit all detectors on training data
@@ -75,6 +76,7 @@
 - `_normalize_episodes_schema()` - Normalize episodes with timestamps, regimes, severity, duration
 - `_write_pca_artifacts()` - Write PCA model, loadings, metrics to ACM_PCAModel/Loadings/Metrics
 - `_compute_drift_alert_mode()` - Compute drift alert mode (multi-feature or simple threshold)
+- `_build_data_quality_records()` - Build per-sensor data quality records with gap/flatline analysis
 
 ### Wave 4: Pattern Improvements 🔲 PLANNED
 | Pattern | Status |
@@ -82,7 +84,7 @@
 | `@safe_section` decorator | 🔲 Not Started |
 | `ConfigAccessor` class | 🔲 Not Started |
 
-**Current Line Count**: 4,836 lines (original: 4,663; helpers add testable structure)
+**Current Line Count**: 4,872 lines (original: 4,663; helpers add testable structure)
 
 ---
 
