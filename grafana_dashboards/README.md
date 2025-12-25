@@ -2,18 +2,95 @@
 
 This folder contains production-ready Grafana dashboards for the ACM (Autonomous Condition Monitoring) system.
 
-## Architecture: Two Dashboard Strategy
+## Architecture: Comprehensive Dashboard Suite
 
-ACM uses a streamlined two-dashboard approach:
+ACM provides a multi-tiered dashboard suite for different user personas and use cases:
 
-1. **User-Facing Story Dashboard** - Visual storytelling for asset health and failure prediction
-2. **Operations Monitor** - Technical performance monitoring for ACM administrators
+1. **Main Dashboard** - Executive overview with drill-down navigation (NEW - Primary entry point)
+2. **Asset Story Dashboard** - Detailed visual storytelling for asset health and failure prediction
+3. **Operations Monitor** - Technical performance monitoring for ACM administrators
 
 All legacy dashboards have been archived to `archive/` folder.
 
 ---
 
 ## Available Dashboards
+
+### 1. ACM Main Dashboard (`acm_main_dashboard.json`) ⭐ NEW - PRIMARY DASHBOARD
+
+**Purpose**: Comprehensive executive dashboard serving as the main entry point to ACM. Provides at-a-glance asset health monitoring with drill-down navigation to detailed dashboards.
+
+**Target Audience**: All users - Executives, operators, reliability engineers, maintenance planners
+
+**Design Philosophy**:
+- **Minimal Cognitive Friction**: Information hierarchy from executive summary to detailed diagnostics
+- **Industry Best Practices**: Consistent color palette, proper labeling, semantic colors
+- **Drill-Down Navigation**: Links to specialized dashboards for deep-dive analysis
+- **Real-Time Monitoring**: 30-second auto-refresh with live anomaly annotations
+
+**Color Palette** (Standardized across ACM):
+
+| Purpose | Color | Hex Code | Usage |
+|---------|-------|----------|-------|
+| Critical/Failure | Red | `#C4162A` | Health < 50%, RUL < 24h, Z-score > 5 |
+| Warning | Orange | `#FF9830` | Health 50-70%, RUL 24-72h, Z-score 3-5 |
+| Caution | Yellow | `#FADE2A` | Health 70-85%, RUL 72-168h, Z-score 2-3 |
+| Healthy | Green | `#73BF69` | Health 85-95%, RUL > 168h, Z-score < 2 |
+| Excellent | Blue | `#5794F2` | Health > 95%, forecasts, info |
+
+**Detector-Specific Colors**:
+
+| Detector | Color | Hex Code | Fault Type |
+|----------|-------|----------|------------|
+| AR1 | Red-Pink | `#E02F44` | Sensor degradation |
+| PCA-SPE | Orange | `#FF9830` | Mechanical coupling loss |
+| PCA-T² | Yellow | `#FADE2A` | Process upset |
+| IForest | Purple | `#B877D9` | Novel failure modes |
+| GMM | Blue | `#5794F2` | Regime confusion |
+| OMR | Dark Green | `#37872D` | Baseline drift |
+
+**Dashboard Sections**:
+
+| Section | Panel Types | Purpose |
+|---------|-------------|---------|
+| **⚡ EXECUTIVE OVERVIEW** | Gauge, Stats, Bar Gauge | At-a-glance health, RUL, confidence, detector status |
+| **📈 HEALTH & PREDICTION TRENDS** | Time Series, Table | Historical health with forecast horizon, RUL confidence bounds (P10/P50/P90) |
+| **🔬 DETECTOR DEEP-DIVE** | Time Series | All 6 detector signals with color-coded fault types |
+| **🎯 SENSOR DIAGNOSTICS** | Bar Chart, Table | Top sensor contributors, active defects with severity |
+| **⚙️ OPERATING CONTEXT** | State Timeline | Operating regime transitions |
+| **⚠️ ANOMALY EPISODES** | Table | Recent anomaly episodes with duration, severity, dominant detector |
+
+**Key Features**:
+- **Smart Thresholds**: Color-coded health states (Critical/Warning/Caution/Healthy/Excellent)
+- **RUL Predictions**: Pessimistic (P10), Median (P50), Optimistic (P90) confidence bounds
+- **Anomaly Annotations**: Automatic markers for anomaly episodes on time series
+- **Detector Matrix**: Visual grid showing all 6 detector Z-scores with gradient backgrounds
+- **Sensor Hotspots**: Horizontal bar chart of top contributing sensors
+- **Live Updates**: 30-second refresh interval with smooth transitions
+
+**Panel Highlights**:
+1. **Asset Health Gauge**: 0-100% with 5-level color coding (red→orange→yellow→green→blue)
+2. **RUL Stat**: Hours until intervention with context-aware colors (< 24h = red, > 7 days = green)
+3. **Failure Date**: Predicted failure timestamp based on degradation trajectory
+4. **Detector Status Matrix**: Horizontal bar gauge showing all 6 detectors with gradient fill
+5. **Health Timeline**: Smooth line chart with forecast overlay and confidence bands
+6. **Detector Signals**: 6-line time series with detector-specific colors and threshold lines
+7. **Sensor Hotspots**: Bar chart sorted by contribution percentage
+8. **Regime Timeline**: State timeline showing operating mode transitions
+
+**Variables**:
+- `$datasource`: MSSQL data source selector
+- `$equipment`: Equipment filter (EquipID from Equipment table)
+
+**Default Time Range**: Last 5 years (`now-5y` to `now`) to show full historical context
+
+**Navigation**:
+- Dropdown menu linking to all ACM dashboards (Asset Story, Operations Monitor, etc.)
+- Uses `$equipment` and time range variables for consistent drill-down experience
+
+---
+
+### 2. ACM Asset Story (`acm_asset_story.json`)
 
 ### 1. ACM Asset Story (`acm_asset_story.json`)
 
