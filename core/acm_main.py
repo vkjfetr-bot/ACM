@@ -2290,6 +2290,98 @@ def _build_data_quality_records(
     return records
 
 
+def _build_health_timeline(
+    frame: pd.DataFrame,
+    cfg: Dict[str, Any],
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str
+) -> Tuple[Optional[pd.DataFrame], int, int]:
+    """
+    Build health timeline DataFrame from fused scores.
+    
+    Computes health index using softer sigmoid formula (v10.1.0), applies
+    exponential smoothing to prevent unrealistic jumps, and adds quality flags.
+    
+    Args:
+        frame: Score DataFrame with 'fused' column (required)
+        cfg: Config dictionary with health.* settings
+        run_id: Run identifier for SQL
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        
+    Returns:
+        Tuple of (health_df, volatile_count, extreme_count)
+        - health_df: DataFrame ready for ACM_HealthTimeline (or None if no fused column)
+        - volatile_count: Number of volatile transitions detected
+        - extreme_count: Number of extreme anomaly scores detected
+    """
+    if 'fused' not in frame.columns:
+        return None, 0, 0
+    
+    # v10.1.0: Calculate raw health index using softer sigmoid formula
+    # OLD: 100/(1+Z^2) was too aggressive (Z=2.5 gave 14%)
+    # NEW: Sigmoid with z_threshold=5.0, Z=2.5 gives ~50%, Z=5 gives ~15%
+    z_threshold = cfg.get('health', {}).get('z_threshold', 5.0)
+    steepness = cfg.get('health', {}).get('steepness', 1.5)
+    abs_z = np.abs(frame['fused'])
+    normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+    sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+    raw_health = np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
+    
+    # Apply exponential smoothing to prevent unrealistic jumps
+    # alpha = 0.3 means 30% new value, 70% previous (smooths over ~3 periods)
+    alpha = cfg.get('health', {}).get('smoothing_alpha', 0.3)
+    smoothed_health = pd.Series(raw_health).ewm(alpha=alpha, adjust=False).mean()
+    
+    # Data quality flags based on rate of change
+    health_change = smoothed_health.diff().abs()
+    max_change_per_period = cfg.get('health', {}).get('max_change_per_period', 20.0)
+    quality_flag = np.where(
+        health_change > max_change_per_period,
+        'VOLATILE',
+        'NORMAL'
+    )
+    quality_flag[0] = 'NORMAL'  # First point has no previous value
+    
+    # Check for extreme FusedZ values (data quality issue indicator)
+    extreme_z_threshold = cfg.get('health', {}).get('extreme_z_threshold', 10.0)
+    quality_flag = np.where(
+        np.abs(frame['fused']) > extreme_z_threshold,
+        'EXTREME_ANOMALY',
+        quality_flag
+    )
+    
+    health_df = pd.DataFrame({
+        'Timestamp': frame.index,
+        'HealthIndex': smoothed_health,
+        'RawHealthIndex': raw_health,  # Keep unsmoothed for reference
+        'HealthZone': pd.cut(
+            smoothed_health,
+            bins=[-1, 30, 50, 70, 85, 101],
+            labels=['CRITICAL', 'ALERT', 'WATCH', 'CAUTION', 'GOOD']
+        ),
+        'FusedZ': frame['fused'],
+        'QualityFlag': quality_flag,
+        'RunID': run_id,
+        'EquipID': equip_id
+    })
+    
+    # Count quality issues
+    volatile_count = int((quality_flag == 'VOLATILE').sum())
+    extreme_count = int((quality_flag == 'EXTREME_ANOMALY').sum())
+    
+    # Log quality issues
+    if volatile_count > 0:
+        Console.warn(f"{volatile_count} volatile health transitions detected (>{max_change_per_period}% change)", component="HEALTH",
+                     equip=equip, volatile_count=volatile_count, threshold=max_change_per_period)
+    if extreme_count > 0:
+        Console.warn(f"{extreme_count} extreme anomaly scores detected (|Z| > {extreme_z_threshold})", component="HEALTH",
+                     equip=equip, extreme_count=extreme_count, z_threshold=extreme_z_threshold)
+    
+    return health_df, volatile_count, extreme_count
+
+
 # =======================
 
 
@@ -4592,65 +4684,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         table_count = 0
                         
                         # Health timeline (if we have fused scores)
-                        if 'fused' in frame.columns:
-                            # v10.1.0: Calculate raw health index using softer sigmoid formula
-                            # OLD: 100/(1+Z^2) was too aggressive (Z=2.5 gave 14%)
-                            # NEW: Sigmoid with z_threshold=5.0, Z=2.5 gives ~50%, Z=5 gives ~15%
-                            z_threshold = cfg.get('health', {}).get('z_threshold', 5.0)
-                            steepness = cfg.get('health', {}).get('steepness', 1.5)
-                            abs_z = np.abs(frame['fused'])
-                            normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
-                            sigmoid = 1 / (1 + np.exp(-normalized * steepness))
-                            raw_health = np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
-                            
-                            # Apply exponential smoothing to prevent unrealistic jumps
-                            # alpha = 0.3 means 30% new value, 70% previous (smooths over ~3 periods)
-                            alpha = cfg.get('health', {}).get('smoothing_alpha', 0.3)
-                            smoothed_health = pd.Series(raw_health).ewm(alpha=alpha, adjust=False).mean()
-                            
-                            # Data quality flags based on rate of change
-                            health_change = smoothed_health.diff().abs()
-                            max_change_per_period = cfg.get('health', {}).get('max_change_per_period', 20.0)
-                            quality_flag = np.where(
-                                health_change > max_change_per_period,
-                                'VOLATILE',
-                                'NORMAL'
-                            )
-                            quality_flag[0] = 'NORMAL'  # First point has no previous value
-                            
-                            # Check for extreme FusedZ values (data quality issue indicator)
-                            extreme_z_threshold = cfg.get('health', {}).get('extreme_z_threshold', 10.0)
-                            quality_flag = np.where(
-                                np.abs(frame['fused']) > extreme_z_threshold,
-                                'EXTREME_ANOMALY',
-                                quality_flag
-                            )
-                            
-                            health_df = pd.DataFrame({
-                                'Timestamp': frame.index,
-                                'HealthIndex': smoothed_health,
-                                'RawHealthIndex': raw_health,  # Keep unsmoothed for reference
-                                'HealthZone': pd.cut(
-                                    smoothed_health,
-                                    bins=[-1, 30, 50, 70, 85, 101],
-                                    labels=['CRITICAL', 'ALERT', 'WATCH', 'CAUTION', 'GOOD']
-                                ),
-                                'FusedZ': frame['fused'],
-                                'QualityFlag': quality_flag,
-                                'RunID': run_id,
-                                'EquipID': equip_id
-                            })
-                            
-                            # Log quality issues
-                            volatile_count = (quality_flag == 'VOLATILE').sum()
-                            extreme_count = (quality_flag == 'EXTREME_ANOMALY').sum()
-                            if volatile_count > 0:
-                                Console.warn(f"{volatile_count} volatile health transitions detected (>{max_change_per_period}% change)", component="HEALTH",
-                                             equip=equip, volatile_count=volatile_count, threshold=max_change_per_period)
-                            if extreme_count > 0:
-                                Console.warn(f"{extreme_count} extreme anomaly scores detected (|Z| > {extreme_z_threshold})", component="HEALTH",
-                                             equip=equip, extreme_count=extreme_count, z_threshold=extreme_z_threshold)
-                            
+                        health_df, _, _ = _build_health_timeline(frame, cfg, run_id, equip_id, equip)
+                        if health_df is not None:
                             output_manager.write_dataframe(
                                 health_df,
                                 "health_timeline",
