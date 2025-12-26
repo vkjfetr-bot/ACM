@@ -63,6 +63,10 @@ from core.episode_culprits_writer import write_episode_culprits_enhanced
 # v11.0.0: Pipeline types for data validation
 from core.pipeline_types import DataContract, ValidationResult, PipelineMode
 
+# v11.0.0: Seasonality detection and asset similarity
+from core.seasonality import SeasonalityHandler, SeasonalPattern
+from core.asset_similarity import AssetProfile
+
 # Observability - Unified OpenTelemetry + logging (v3.0)
 try:
     from core.observability import (
@@ -3761,6 +3765,30 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              equip=equip, train_rows=len(train) if 'train' in dir() else 0,
                              error=str(be))
 
+        # ===== v11.0.0: Seasonality Detection (P5.9) =====
+        seasonal_patterns: Dict[str, List[SeasonalPattern]] = {}
+        with T.section("seasonality.detect"):
+            try:
+                if isinstance(train_numeric, pd.DataFrame) and len(train_numeric) >= 72:  # Need at least 3 days
+                    handler = SeasonalityHandler(min_periods=3, min_confidence=0.1)
+                    # Get numeric sensor columns (exclude timestamp if present)
+                    sensor_cols = [c for c in train_numeric.columns 
+                                   if train_numeric[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+                    # Detect patterns using index as timestamp
+                    if sensor_cols:
+                        # Create temp df with timestamp column from index
+                        temp_df = train_numeric.copy()
+                        temp_df['Timestamp'] = pd.to_datetime(temp_df.index)
+                        seasonal_patterns = handler.detect_patterns(temp_df, sensor_cols, 'Timestamp')
+                        if seasonal_patterns:
+                            pattern_count = sum(len(ps) for ps in seasonal_patterns.values())
+                            Console.info(f"Detected {pattern_count} seasonal patterns in {len(seasonal_patterns)} sensors",
+                                        component="SEASON", equip=equip, pattern_count=pattern_count,
+                                        sensors_with_patterns=len(seasonal_patterns))
+            except Exception as se:
+                Console.debug(f"Seasonality detection skipped: {se}", component="SEASON", 
+                             equip=equip, error=str(se)[:200])
+
         # ===== Data quality guardrails (High #4) =====
         with T.section("data.guardrails"):
             try:
@@ -5080,6 +5108,50 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              equip=equip, error_type=type(sensor_ctx_err).__name__, error=str(sensor_ctx_err)[:200])
                 sensor_context = None
 
+        # ===== v11.0.0: Asset Profile Building (P5.10) =====
+        asset_profile: Optional[AssetProfile] = None
+        with T.section("asset.profile"):
+            try:
+                if isinstance(train_numeric, pd.DataFrame) and len(train_numeric) > 0:
+                    sensor_cols = [c for c in train_numeric.columns 
+                                   if train_numeric[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+                    if sensor_cols:
+                        # Compute sensor statistics
+                        sensor_means = {c: float(train_numeric[c].mean()) for c in sensor_cols if not pd.isna(train_numeric[c].mean())}
+                        sensor_stds = {c: float(train_numeric[c].std()) for c in sensor_cols if not pd.isna(train_numeric[c].std())}
+                        # Calculate data hours from index
+                        data_hours = 0.0
+                        if hasattr(train_numeric.index, 'min') and hasattr(train_numeric.index, 'max'):
+                            try:
+                                idx_min = pd.to_datetime(train_numeric.index.min())
+                                idx_max = pd.to_datetime(train_numeric.index.max())
+                                data_hours = (idx_max - idx_min).total_seconds() / 3600.0
+                            except Exception:
+                                data_hours = len(train_numeric) / 60.0  # Assume 1-minute intervals
+                        # Get regime count from regime model if available
+                        regime_count = 0
+                        if 'regime_model' in dir() and regime_model is not None:
+                            if hasattr(regime_model, 'kmeans') and regime_model.kmeans is not None:
+                                regime_count = regime_model.kmeans.n_clusters
+                            elif hasattr(regime_model, 'model') and regime_model.model is not None:
+                                regime_count = getattr(regime_model.model, 'n_clusters', 0)
+                        # Build profile
+                        asset_profile = AssetProfile(
+                            equip_id=equip_id,
+                            equip_type=equip,
+                            sensor_names=sensor_cols,
+                            sensor_means=sensor_means,
+                            sensor_stds=sensor_stds,
+                            regime_count=regime_count,
+                            typical_health=85.0,  # Default; updated if health computed
+                            data_hours=data_hours
+                        )
+                        Console.debug(f"Built asset profile: {len(sensor_cols)} sensors, {data_hours:.1f} hours, {regime_count} regimes",
+                                     component="PROFILE", equip=equip, sensors=len(sensor_cols))
+            except Exception as pe:
+                Console.debug(f"Asset profile building skipped: {pe}", component="PROFILE",
+                             equip=equip, error=str(pe)[:200])
+
         # ===== 8) Persist artifacts / Finalize (SQL-only) =====
         rows_read = int(score.shape[0])
         anomaly_count = int(len(episodes))
@@ -5157,6 +5229,55 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                             component="PERSIST")
                 except Exception as e:
                     Console.debug(f"Sensor normalized TS write skipped: {e}", component="PERSIST",
+                                  equip=equip, run_id=run_id, error=str(e)[:200])
+
+            # === v11.0.0: Seasonal Patterns Write (P5.9) ===
+            with T.section("persist.seasonal_patterns"):
+                try:
+                    if seasonal_patterns and output_manager:
+                        # Flatten patterns dict to list of dicts for SQL write
+                        pattern_list = []
+                        for sensor_name, patterns in seasonal_patterns.items():
+                            for pattern in patterns:
+                                pattern_dict = pattern.to_dict()
+                                pattern_dict['SensorName'] = sensor_name
+                                pattern_dict['PatternType'] = pattern_dict.pop('period_type', 'DAILY')
+                                pattern_dict['PeriodHours'] = pattern_dict.pop('period_hours', 24.0)
+                                pattern_dict['Amplitude'] = pattern_dict.pop('amplitude', 0.0)
+                                pattern_dict['PhaseShift'] = pattern_dict.pop('phase_shift', 0.0)
+                                pattern_dict['Confidence'] = pattern_dict.pop('confidence', 0.5)
+                                # Remove sensor key if present (already have SensorName)
+                                pattern_dict.pop('sensor', None)
+                                pattern_list.append(pattern_dict)
+                        if pattern_list:
+                            rows = output_manager.write_seasonal_patterns(pattern_list)
+                            if rows > 0:
+                                Console.info(f"Wrote {rows} seasonal patterns to SQL", component="SEASON",
+                                            equip=equip, patterns=rows)
+                except Exception as e:
+                    Console.debug(f"Seasonal patterns write skipped: {e}", component="PERSIST",
+                                  equip=equip, run_id=run_id, error=str(e)[:200])
+
+            # === v11.0.0: Asset Profile Write (P5.10) ===
+            with T.section("persist.asset_profile"):
+                try:
+                    if asset_profile and output_manager:
+                        import json as _json
+                        profile_dict = {
+                            'EquipType': asset_profile.equip_type,
+                            'SensorNamesJSON': _json.dumps(asset_profile.sensor_names),
+                            'SensorMeansJSON': _json.dumps(asset_profile.sensor_means),
+                            'SensorStdsJSON': _json.dumps(asset_profile.sensor_stds),
+                            'RegimeCount': asset_profile.regime_count,
+                            'TypicalHealth': asset_profile.typical_health,
+                            'DataHours': asset_profile.data_hours,
+                        }
+                        rows = output_manager.write_asset_profile(profile_dict)
+                        if rows > 0:
+                            Console.info(f"Wrote asset profile to SQL", component="PROFILE",
+                                        equip=equip, sensors=len(asset_profile.sensor_names))
+                except Exception as e:
+                    Console.debug(f"Asset profile write skipped: {e}", component="PERSIST",
                                   equip=equip, run_id=run_id, error=str(e)[:200])
 
                 if cache_payload:

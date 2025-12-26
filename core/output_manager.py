@@ -2762,6 +2762,8 @@ class OutputManager:
         
         Args:
             model_state: Dict with ActiveRegimeVersion, RegimeMaturityState, etc.
+        
+        Note: ACM_ActiveModels has EquipID only (no RunID), so we delete by EquipID before insert.
         """
         if not self._check_sql_health() or not model_state:
             return 0
@@ -2770,8 +2772,18 @@ class OutputManager:
             row['EquipID'] = self.equip_id or 0
             row['LastUpdatedAt'] = datetime.now()
             row['LastUpdatedBy'] = self.run_id
-            # Upsert - delete existing for this equipment first
-            return self.write_table('ACM_ActiveModels', pd.DataFrame([row]), delete_existing=True)
+            
+            # Manual delete by EquipID (table has no RunID column)
+            try:
+                with self.sql_client.cursor() as cur:
+                    cur.execute("DELETE FROM dbo.[ACM_ActiveModels] WHERE EquipID = ?", (int(self.equip_id or 0),))
+                    if hasattr(self.sql_client, "commit"):
+                        self.sql_client.commit()
+            except Exception as del_ex:
+                Console.debug(f"ACM_ActiveModels delete skipped: {del_ex}", component="OUTPUT")
+            
+            # Insert new row (delete_existing=False since we manually deleted)
+            return self.write_table('ACM_ActiveModels', pd.DataFrame([row]), delete_existing=False)
         except Exception as e:
             Console.warn(f"write_active_models failed: {e}", component="OUTPUT", error=str(e)[:200])
             return 0
@@ -2817,6 +2829,8 @@ class OutputManager:
         
         Args:
             profile: Dict with EquipType, SensorNamesJSON, SensorMeansJSON, SensorStdsJSON, etc.
+        
+        Note: ACM_AssetProfiles has EquipID only (no RunID), so we delete by EquipID before insert.
         """
         if not self._check_sql_health() or not profile:
             return 0
@@ -2825,7 +2839,18 @@ class OutputManager:
             row['EquipID'] = self.equip_id or 0
             row['LastUpdatedAt'] = datetime.now()
             row['LastUpdatedByRunID'] = self.run_id
-            return self.write_table('ACM_AssetProfiles', pd.DataFrame([row]), delete_existing=True)
+            
+            # Manual delete by EquipID (table has no RunID column for standard delete)
+            try:
+                with self.sql_client.cursor() as cur:
+                    cur.execute("DELETE FROM dbo.[ACM_AssetProfiles] WHERE EquipID = ?", (int(self.equip_id or 0),))
+                    if hasattr(self.sql_client, "commit"):
+                        self.sql_client.commit()
+            except Exception as del_ex:
+                Console.debug(f"ACM_AssetProfiles delete skipped: {del_ex}", component="OUTPUT")
+            
+            # Insert new row (delete_existing=False since we manually deleted)
+            return self.write_table('ACM_AssetProfiles', pd.DataFrame([row]), delete_existing=False)
         except Exception as e:
             Console.warn(f"write_asset_profile failed: {e}", component="OUTPUT", error=str(e)[:200])
             return 0
