@@ -1774,26 +1774,26 @@ def _log_dropped_features(
         drop_records = []
         for col in cols_to_drop:
             reason = "all_NaN" if col in all_nan_cols else "low_variance"
-            med_val = col_meds.get(col)
-            std_val = feat_stds.get(col)
+            # Use std value as the drop_value (threshold comparison)
+            std_val = feat_stds.get(col) if col in feat_stds.index else None
+            drop_value = float(std_val) if std_val is not None and not pd.isna(std_val) else None
             drop_records.append({
                 "feature": str(col),
                 "reason": reason,
-                "train_median": str(med_val) if not pd.isna(med_val) else "NaN",
-                "train_std": f"{std_val:.6f}" if not pd.isna(std_val) else "NaN",
+                "drop_value": drop_value,
             })
         
         if drop_records:
-            timestamp_now = pd.Timestamp.now()
+            # Schema: RunID, EquipID, FeatureName, DropReason, DropValue, Threshold, CreatedAt
             insert_records = [
                 (run_id, int(equip_id), rec["feature"], rec["reason"],
-                 rec["train_median"], rec["train_std"], timestamp_now)
+                 rec["drop_value"], None)  # Threshold is NULL
                 for rec in drop_records
             ]
             insert_sql = """
                 INSERT INTO dbo.ACM_FeatureDropLog 
-                (RunID, EquipID, FeatureName, Reason, TrainMedian, TrainStd, Timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (RunID, EquipID, FeatureName, DropReason, DropValue, Threshold)
+                VALUES (?, ?, ?, ?, ?, ?)
             """
             with sql_client.cursor() as cur:
                 cur.fast_executemany = True
