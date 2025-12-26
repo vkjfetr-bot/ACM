@@ -10,25 +10,29 @@
 
 | Metric | Current | Target | Status |
 |--------|---------|--------|--------|
-| acm_main.py lines | 5,406 | <500 | ⏳ 90% reduction needed |
-| Helper functions | 44 extracted | 44 | ✅ Complete |
+| acm_main.py lines | 5,464 | <500 | ⏳ 90% reduction needed |
+| Helper functions | 45 extracted | 45 | ✅ Complete |
 | Phase functions | 2 of 7 | 7 | ⏳ In progress |
-| Error handling | safe_step() added | Consolidated | ⏳ 3 blocks converted |
+| Error handling | safe_step() consolidated | Complete | ✅ Done |
 | SQL tables with data | 35+ | 42 | ⏳ 13 empty tables |
 
 ---
 
-## Priority 0: Error Handling Consolidation (In Progress)
+## Priority 0: Error Handling Consolidation (COMPLETE)
 
-Addressing try/except sprawl before extracting phase functions.
+Consolidated try/except sprawl with standardized error handling.
 
 | Component | Description | Status |
 |-----------|-------------|--------|
 | `safe_step()` helper | Wraps operations with consistent error handling | ✅ Done |
 | `RunOutcome` enum | OK, DEGRADED, NOOP, FAIL states | ✅ Done |
+| `RunContext` dataclass | Consolidated context with degradations tracking | ✅ Done |
 | `degradations` list | Track partial failures for DEGRADED outcome | ✅ Done |
-| Persist phase blocks | 3 of 6 blocks converted to safe_step() | ⏳ |
-| Metadata consistency | Added equip/run_id to 3 debug logs | ✅ Done |
+| Persist phase blocks | 4 blocks converted to safe_step() | ✅ Done |
+| Feature phase blocks | 2 blocks converted (build, impute) | ✅ Done |
+| Regime phase blocks | 1 block converted (feature_basis) | ✅ Done |
+| DEGRADED outcome | Analytics/forecast failures marked DEGRADED | ✅ Done |
+| Metadata consistency | All debug logs have equip/run_id context | ✅ Done |
 
 ---
 
