@@ -3546,6 +3546,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     rows_read = 0
     rows_written = 0
     errors = []
+    degradations: List[str] = []  # v11: Track partial failures for DEGRADED outcome
     
     # Track run timing for ACM_Runs metadata
     from datetime import datetime
@@ -3695,6 +3696,23 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 if validation.warnings:
                     for w in validation.warnings[:3]:  # Limit warning spam
                         Console.info(f"DataContract warning: {w}", component="DATA")
+                
+                # v11: Write validation result to SQL
+                if output_manager:
+                    try:
+                        import json as _json
+                        # Call signature() method if it exists, otherwise use None
+                        sig = contract.signature() if hasattr(contract, 'signature') and callable(contract.signature) else None
+                        output_manager.write_data_contract_validation({
+                            'Passed': validation.passed,
+                            'RowsValidated': len(score),
+                            'ColumnsValidated': len(score.columns),
+                            'IssuesJSON': _json.dumps(validation.issues) if validation.issues else None,
+                            'WarningsJSON': _json.dumps(validation.warnings) if validation.warnings else None,
+                            'ContractSignature': sig,
+                        })
+                    except Exception as e:
+                        Console.warn(f"Failed to write DataContract validation: {e}", component="DATA")
 
             if len(score) == 0:
                 Console.warn("SCORE window empty after cleaning; marking run as NOOP", component="DATA",
@@ -4269,6 +4287,27 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     
                     regime_state_version = new_state.state_version
                     Console.info(f"Saved state v{regime_state_version}: K={new_state.n_clusters}, quality_ok={new_state.quality_ok}", component="REGIME_STATE")
+                    
+                    # v11: Write regime definitions to ACM_RegimeDefinitions
+                    if output_manager and hasattr(regime_model, 'kmeans') and regime_model.kmeans is not None:
+                        try:
+                            import json as _json
+                            regime_defs = []
+                            centroids = regime_model.kmeans.cluster_centers_
+                            labels = regime_model.kmeans.labels_ if hasattr(regime_model.kmeans, 'labels_') else []
+                            for i, centroid in enumerate(centroids):
+                                regime_defs.append({
+                                    'RegimeID': i,
+                                    'RegimeName': f'Regime_{i}',
+                                    'CentroidJSON': _json.dumps(centroid.tolist()),
+                                    'FeatureColumns': _json.dumps(regime_model.feature_cols if hasattr(regime_model, 'feature_cols') else []),
+                                    'DataPointCount': int(np.sum(np.array(labels) == i)) if len(labels) > 0 else 0,
+                                    'MaturityState': new_state.maturity_state if hasattr(new_state, 'maturity_state') else 'LEARNING',
+                                })
+                            output_manager.write_regime_definitions(regime_defs, version=regime_state_version)
+                            Console.info(f"Wrote {len(regime_defs)} regime definitions", component="REGIME")
+                        except Exception as e:
+                            Console.warn(f"Failed to write regime definitions: {e}", component="REGIME")
                 except Exception as e:
                     Console.warn(f"Failed to save regime state: {e}", component="REGIME_STATE",
                                  equip=equip, error_type=type(e).__name__, error=str(e)[:200])
@@ -4414,6 +4453,20 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     T=T,
                     run_id=run_id,
                 )
+                
+                # v11: Write active models state to ACM_ActiveModels
+                if output_manager:
+                    try:
+                        output_manager.write_active_models({
+                            'ActiveRegimeVersion': regime_state_version if 'regime_state_version' in dir() else None,
+                            'RegimeMaturityState': 'CONVERGED' if regime_quality_ok else 'LEARNING',
+                            'RegimePromotedAt': datetime.now() if regime_quality_ok else None,
+                            'ActiveThresholdVersion': None,  # Future: threshold versioning
+                            'ActiveForecastVersion': None,   # Future: forecast model versioning
+                        })
+                        Console.info("Updated active models state", component="MODEL")
+                    except Exception as e:
+                        Console.warn(f"Failed to write active models: {e}", component="MODEL")
 
         # ===== 5) Calibrate -> pca_spe_z, pca_t2_z, ar1_z, iforest_z, gmm_z, omr_z =====
         # CRITICAL FIX: Fit calibrators on TRAIN data, transform SCORE data
@@ -5031,8 +5084,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         rows_read = int(score.shape[0])
         anomaly_count = int(len(episodes))
         
-        # Track degradations for partial failure reporting
-        degradations: List[str] = []
+        # Note: degradations list initialized earlier in main() for use throughout pipeline
         
         # SQL-only persistence
         with T.section("persist"):
