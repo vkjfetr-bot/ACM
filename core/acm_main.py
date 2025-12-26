@@ -2540,6 +2540,132 @@ def _impute_features(
     return train, score, cols_to_drop
 
 
+def _seed_baseline(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    sql_client: Optional[Any],
+    equip_id: int,
+    cfg: Dict[str, Any],
+    equip: str = "",
+) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str]]:
+    """
+    Seed training baseline when insufficient data available (batch mode).
+    
+    In batch mode, SmartColdstart returns empty train (all data goes to score).
+    This function loads baseline from:
+    1. ACM_BaselineBuffer table (SQL) - cached baseline from previous runs
+    2. First portion of score data (fallback)
+    3. Split score in half if overlap detected
+    
+    Also handles gap bridging when baseline ends before score starts.
+    
+    Args:
+        train: Training DataFrame (may be empty in batch mode)
+        score: Scoring DataFrame
+        sql_client: SQL client for ACM_BaselineBuffer access
+        equip_id: Equipment ID
+        cfg: Config dict with runtime.baseline settings
+        equip: Equipment name for logging
+        
+    Returns:
+        Tuple of (train, score, source_used) where source_used describes origin
+    """
+    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+    min_points = int(baseline_cfg.get("min_points", 300))
+    train_rows = len(train) if isinstance(train, pd.DataFrame) else 0
+    
+    # If train already has enough rows, no seeding needed
+    if train_rows >= min_points:
+        return train, score, None
+    
+    used: Optional[str] = None
+    
+    # Try 1: Load from SQL ACM_BaselineBuffer
+    if sql_client:
+        try:
+            window_hours = float(baseline_cfg.get("window_hours", 72))
+            with sql_client.cursor() as cur:
+                cur.execute("""
+                    SELECT Timestamp, SensorName, SensorValue
+                    FROM dbo.ACM_BaselineBuffer
+                    WHERE EquipID = ? AND Timestamp >= DATEADD(HOUR, -?, GETDATE())
+                    ORDER BY Timestamp
+                """, (int(equip_id), int(window_hours)))
+                rows = cur.fetchall()
+            
+            if rows:
+                # Transform long format → wide format (pivot)
+                baseline_data = {}
+                for row in rows:
+                    ts = pd.Timestamp(row.Timestamp)
+                    sensor = str(row.SensorName)
+                    value = float(row.SensorValue)
+                    if ts not in baseline_data:
+                        baseline_data[ts] = {}
+                    baseline_data[ts][sensor] = value
+                
+                buf = pd.DataFrame.from_dict(baseline_data, orient='index').sort_index()
+                buf.index = pd.to_datetime(buf.index).tz_localize(None)
+                
+                # Align to score columns
+                if isinstance(score, pd.DataFrame) and hasattr(buf, "columns"):
+                    common_cols = [c for c in buf.columns if c in score.columns]
+                    if common_cols:
+                        buf = buf[common_cols]
+                
+                train = buf.copy()
+                used = f"ACM_BaselineBuffer ({len(train)} rows)"
+        except Exception as sql_err:
+            Console.warn(f"Failed to load from ACM_BaselineBuffer: {sql_err}", 
+                        component="BASELINE", equip=equip, error=str(sql_err)[:200])
+    
+    # Try 2: Seed from score data
+    if used is None and isinstance(score, pd.DataFrame) and len(score) > 0:
+        seed_n = min(len(score), max(min_points, int(0.2 * len(score))))
+        train = score.iloc[:seed_n].copy()
+        used = f"score head ({seed_n} rows)"
+        
+        # Check for overlap - train must end BEFORE score starts
+        tr_end_ts = pd.to_datetime(train.index.max())
+        sc_start_ts = pd.to_datetime(score.index.min())
+        
+        if tr_end_ts >= sc_start_ts:
+            # Split score in half to avoid overlap
+            split_idx = len(score) // 2
+            if split_idx >= min_points:
+                train = score.iloc[:split_idx].copy()
+                score = score.iloc[split_idx:].copy()
+                used = f"score split (train={split_idx}, no overlap)"
+                Console.info(f"Split score to avoid overlap: train={split_idx}, score={len(score)}", 
+                           component="BASELINE")
+            else:
+                Console.warn(f"Cannot split score (too few rows: {len(score)}), accepting overlap", 
+                           component="BASELINE", equip=equip)
+    
+    if used:
+        Console.info(f"Using adaptive baseline: {used}", component="BASELINE", equip=equip)
+        
+        # Gap detection: if baseline ends >1h before score starts, extend it
+        if isinstance(train, pd.DataFrame) and len(train) > 0:
+            tr_end = pd.to_datetime(train.index.max())
+            sc_start = pd.to_datetime(score.index.min()) if len(score) > 0 else None
+            
+            if sc_start and tr_end < sc_start:
+                gap_hours = (sc_start - tr_end).total_seconds() / 3600
+                if gap_hours > 1.0:
+                    Console.warn(f"Baseline gap: {gap_hours:.1f}h between baseline end and score start", 
+                               component="BASELINE", equip=equip)
+                    # Extend with first 20% of score
+                    if len(score) > 10:
+                        ext_size = max(10, int(0.2 * len(score)))
+                        extension = score.iloc[:ext_size].copy()
+                        train = pd.concat([train, extension], axis=0).drop_duplicates()
+                        Console.info(f"Extended baseline with {ext_size} score rows to bridge gap", 
+                                   component="BASELINE")
+    
+    return train, score, used
+
+
 def _build_regime_timeline(
     frame: pd.DataFrame,
     regime_model: Any,
@@ -3147,112 +3273,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         score_numeric = score.copy()
 
         # ===== Adaptive Rolling Baseline (cold-start helper) =====
-        # ACM-CSV-01: Migrate baseline buffer to SQL
         with T.section("baseline.seed"):
             try:
-                baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-                min_points = int(baseline_cfg.get("min_points", 300))
-                train_rows = len(train_numeric) if isinstance(train_numeric, pd.DataFrame) else 0
-                
-                if train_rows < min_points:
-                    used: Optional[str] = None
-                    
-                    if SQL_MODE and sql_client:
-                        # ACM-CSV-01: Load baseline from SQL ACM_BaselineBuffer
-                        try:
-                            window_hours = float(baseline_cfg.get("window_hours", 72))
-                            with sql_client.cursor() as cur:
-                                cur.execute("""
-                                    SELECT Timestamp, SensorName, SensorValue
-                                    FROM dbo.ACM_BaselineBuffer
-                                    WHERE EquipID = ? AND Timestamp >= DATEADD(HOUR, -?, GETDATE())
-                                    ORDER BY Timestamp
-                                """, (int(equip_id), int(window_hours)))
-                                rows = cur.fetchall()
-                            
-                            if rows:
-                                # Transform long format (sensor-timestamp pairs) to wide format (timestamp Ã— sensors)
-                                baseline_data = {}
-                                for row in rows:
-                                    ts = pd.Timestamp(row.Timestamp)
-                                    sensor = str(row.SensorName)
-                                    value = float(row.SensorValue)
-                                    if ts not in baseline_data:
-                                        baseline_data[ts] = {}
-                                    baseline_data[ts][sensor] = value
-                                
-                                buf = pd.DataFrame.from_dict(baseline_data, orient='index').sort_index()
-                                buf.index = pd.to_datetime(buf.index).tz_localize(None)  # Ensure naive timestamps
-                                
-                                # Align SQL baseline to current SCORE columns
-                                if isinstance(score_numeric, pd.DataFrame) and hasattr(buf, "columns"):
-                                    common_cols = [c for c in buf.columns if c in score_numeric.columns]
-                                    if len(common_cols) > 0:
-                                        buf = buf[common_cols]
-                                
-                                train = buf.copy()
-                                train_numeric = train.copy()
-                                used = f"ACM_BaselineBuffer ({len(train)} rows)"
-                        except Exception as sql_err:
-                            Console.warn(f"Failed to load from SQL ACM_BaselineBuffer: {sql_err}", component="BASELINE",
-                                         equip=equip, equip_id=equip_id, error_type=type(sql_err).__name__, error=str(sql_err)[:200])
-                    
-                    # Fallback: seed TRAIN from leading portion of SCORE
-                    # CRITICAL: Ensure no overlap with score window to prevent train=(0,N) issue
-                    if used is None:
-                        if isinstance(score_numeric, pd.DataFrame) and len(score_numeric):
-                            seed_n = min(len(score_numeric), max(min_points, int(0.2 * len(score_numeric))))
-                            train = score_numeric.iloc[:seed_n].copy()
-                            train_numeric = train.copy()
-                            used = f"score head ({seed_n} rows)"
-                            
-                            # Remove overlap: train must end BEFORE score starts
-                            # This prevents the overlap warning and empty train after filtering
-                            tr_end_ts = pd.to_datetime(train_numeric.index.max())
-                            sc_start_ts = pd.to_datetime(score_numeric.index.min())
-                            if tr_end_ts >= sc_start_ts:
-                                # All score head rows overlap with score - use HALF of score for train instead
-                                split_idx = len(score_numeric) // 2
-                                if split_idx > min_points:
-                                    train = score_numeric.iloc[:split_idx].copy()
-                                    train_numeric = train.copy()
-                                    score_numeric = score_numeric.iloc[split_idx:].copy()
-                                    score = score_numeric.copy()
-                                    used = f"score split (train={split_idx} rows, no overlap)"
-                                    Console.info(f"Split score to avoid overlap: train={split_idx}, score={len(score_numeric)}", component="BASELINE")
-                                else:
-                                    Console.warn(f"Cannot split score (too few rows: {len(score_numeric)}), accepting overlap", component="BASELINE",
-                                                 equip=equip, score_rows=len(score_numeric))
-                    
-                    if used:
-                        Console.info(f"Using adaptive baseline for TRAIN: {used}", component="BASELINE")
-                        
-                        # BATCH-CONTINUITY-01: Validate baseline coverage of score window
-                        # Prevents statistics mismatch at batch boundaries
-                        if isinstance(train_numeric, pd.DataFrame) and len(train_numeric) > 0:
-                            tr_end_check = pd.to_datetime(train_numeric.index.max())
-                            sc_start_check = pd.to_datetime(score_numeric.index.min()) if isinstance(score_numeric, pd.DataFrame) and len(score_numeric) > 0 else None
-                            
-                            if sc_start_check is not None and tr_end_check < sc_start_check:
-                                gap_seconds = (sc_start_check - tr_end_check).total_seconds()
-                                gap_hours = gap_seconds / 3600
-                                
-                                if gap_hours > 1.0:  # Gap > 1 hour is significant
-                                    Console.warn(
-                                        f"[BASELINE] Baseline gap detected: {gap_hours:.1f}h between "
-                                        f"baseline end ({tr_end_check}) and score start ({sc_start_check})"
-                                    )
-                                    
-                                    # Extend baseline with first 20% of score window for continuity
-                                    if isinstance(score_numeric, pd.DataFrame) and len(score_numeric) > 10:
-                                        extension_size = max(10, int(0.2 * len(score_numeric)))
-                                        score_extension = score_numeric.iloc[:extension_size].copy()
-                                        train = pd.concat([train, score_extension], axis=0).drop_duplicates()
-                                        train_numeric = train.copy()
-                                        Console.info(
-                                            f"[BASELINE] Extended baseline with {len(score_extension)} "
-                                            f"score rows to bridge gap"
-                                        )
+                train_numeric, score_numeric, baseline_source = _seed_baseline(
+                    train_numeric, 
+                    score_numeric, 
+                    sql_client if SQL_MODE else None,
+                    equip_id,
+                    cfg,
+                    equip=equip,
+                )
+                if baseline_source:
+                    train = train_numeric.copy()
+                    score = score_numeric.copy()
             except Exception as be:
                 Console.warn(f"Cold-start baseline setup failed: {be}", component="BASELINE",
                              equip=equip, train_rows=len(train) if 'train' in dir() else 0,
