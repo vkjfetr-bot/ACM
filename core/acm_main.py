@@ -2393,6 +2393,153 @@ def _build_health_timeline(
     return health_df, volatile_count, extreme_count
 
 
+def _build_features(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    cfg: Dict[str, Any],
+    equip: str = "",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Build engineered features from raw sensor data.
+    
+    Transforms raw sensor time series into statistical features using
+    fast_features.compute_basic_features(). Handles:
+    - Fill value computation from TRAIN only (prevents data leakage)
+    - Polars/pandas conversion (handled internally by fast_features)
+    - Index preservation
+    - Numeric type enforcement
+    
+    Args:
+        train: Training/baseline DataFrame (raw sensors)
+        score: Scoring/batch DataFrame (raw sensors)
+        cfg: Config dict with features.window setting
+        equip: Equipment name for logging
+        
+    Returns:
+        Tuple of (train_features, score_features) DataFrames
+    """
+    if fast_features is None:
+        Console.warn("fast_features not available; returning raw inputs", component="FEAT", equip=equip)
+        return train, score
+    
+    if not cfg.get("runtime", {}).get("phases", {}).get("features", True):
+        Console.info("Feature building disabled in config", component="FEAT", equip=equip)
+        return train, score
+    
+    feat_win = int((cfg.get("features", {}) or {}).get("window", 3))
+    Console.info(f"Building features with window={feat_win}", component="FEAT", equip=equip)
+    
+    # Preserve indices
+    idx_train = train.index
+    idx_score = score.index
+    
+    # Compute fill values from TRAIN only (prevents data leakage to SCORE)
+    train_fill_values = train.select_dtypes(include=[np.number]).median().to_dict()
+    Console.info(f"Computed {len(train_fill_values)} fill values from training data", component="FEAT")
+    
+    # Build features - fast_features handles Polars/pandas internally
+    train_feat = fast_features.compute_basic_features(train, window=feat_win)
+    score_feat = fast_features.compute_basic_features(score, window=feat_win, fill_values=train_fill_values)
+    
+    # Normalize to pandas, restore indices, enforce numeric
+    if not isinstance(train_feat, pd.DataFrame):
+        train_feat = train_feat.to_pandas() if hasattr(train_feat, "to_pandas") else pd.DataFrame(train_feat)
+    if not isinstance(score_feat, pd.DataFrame):
+        score_feat = score_feat.to_pandas() if hasattr(score_feat, "to_pandas") else pd.DataFrame(score_feat)
+    
+    train_feat.index = idx_train
+    score_feat.index = idx_score
+    train_feat = train_feat.apply(pd.to_numeric, errors="coerce")
+    score_feat = score_feat.apply(pd.to_numeric, errors="coerce")
+    
+    Console.info(f"Features built: train={train_feat.shape}, score={score_feat.shape}", component="FEAT")
+    return train_feat, score_feat
+
+
+def _impute_features(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    low_var_threshold: float,
+    sql_client: Optional[Any],
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str = "",
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    """
+    Impute missing values and drop unusable columns from feature DataFrames.
+    
+    Handles:
+    - Replace inf with NaN
+    - Fill NaN with train column medians
+    - Align score columns to train columns
+    - Drop all-NaN and low-variance columns
+    - Log dropped features to SQL
+    
+    Args:
+        train: Training features DataFrame
+        score: Scoring features DataFrame
+        low_var_threshold: Minimum std deviation to keep a column
+        sql_client: SQL client for logging dropped features
+        run_id: Run identifier
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        
+    Returns:
+        Tuple of (train_imputed, score_imputed, dropped_cols)
+    """
+    if not isinstance(train, pd.DataFrame):
+        return train, score, []
+    
+    # Replace inf with NaN
+    train.replace([np.inf, -np.inf], np.nan, inplace=True)
+    score.replace([np.inf, -np.inf], np.nan, inplace=True)
+    
+    Console.info("Imputing non-finite values using train medians", component="FEAT", equip=equip)
+    col_meds = train.median(numeric_only=True)
+    train.fillna(col_meds, inplace=True)
+    
+    # Align score to train columns
+    score = score.reindex(columns=train.columns)
+    score.fillna(col_meds, inplace=True)
+    
+    # Fill remaining NaNs with score medians
+    nan_cols = score.columns[score.isna().any()].tolist()
+    for c in nan_cols:
+        if score[c].dtype.kind in "if":
+            score[c].fillna(score[c].median(), inplace=True)
+    
+    # Find columns to drop: all-NaN or low-variance
+    all_nan_cols = [c for c in train.columns if pd.isna(col_meds.get(c))]
+    feat_stds = train.std(numeric_only=True)
+    low_var_cols = list(feat_stds[feat_stds < low_var_threshold].index)
+    cols_to_drop = list(set(all_nan_cols + low_var_cols))
+    
+    if cols_to_drop:
+        Console.warn(
+            f"Dropping {len(cols_to_drop)} columns ({len(all_nan_cols)} NaN, {len(low_var_cols)} low-var)",
+            component="FEAT", equip=equip, dropped=len(cols_to_drop)
+        )
+        train = train.drop(columns=cols_to_drop)
+        score = score.drop(columns=cols_to_drop)
+        
+        # Log to SQL
+        _log_dropped_features(
+            sql_client=sql_client,
+            cols_to_drop=cols_to_drop,
+            all_nan_cols=all_nan_cols,
+            col_meds=col_meds,
+            feat_stds=feat_stds,
+            run_id=run_id,
+            equip_id=equip_id,
+            equip=equip,
+        )
+    
+    if train.shape[1] == 0:
+        raise RuntimeError("[FEAT] No usable feature columns after imputation")
+    
+    return train, score, cols_to_drop
+
+
 def _build_regime_timeline(
     frame: pd.DataFrame,
     regime_model: Any,
@@ -2433,6 +2580,104 @@ def _build_regime_timeline(
         regime_df['RegimeState'] = 'unknown'
     
     return regime_df
+
+
+def _build_drift_ts(
+    frame: pd.DataFrame,
+    equip_id: int,
+    run_id: Optional[str],
+    cfg: Dict[str, Any],
+) -> Optional[pd.DataFrame]:
+    """
+    Build DriftTS DataFrame from frame's drift_z column.
+    
+    Creates a time series of drift Z-scores with method metadata.
+    Used for ACM_DriftTS SQL table.
+    
+    Args:
+        frame: Score DataFrame with 'drift_z' column
+        equip_id: Equipment ID
+        run_id: Run identifier for SQL
+        cfg: Config dict with drift.method setting
+        
+    Returns:
+        DataFrame ready for ACM_DriftTS (or None if no drift_z column)
+    """
+    if "drift_z" not in frame.columns:
+        return None
+    
+    drift_method = (cfg.get("drift", {}) or {}).get("method", "CUSUM")
+    return pd.DataFrame({
+        "EntryDateTime": pd.to_datetime(frame.index),
+        "EquipID": int(equip_id),
+        "DriftZ": frame["drift_z"].astype(np.float32),
+        "Method": drift_method,
+        "RunID": run_id or ""
+    })
+
+
+def _build_anomaly_events(
+    episodes: pd.DataFrame,
+    equip_id: int,
+    run_id: Optional[str],
+) -> Optional[pd.DataFrame]:
+    """
+    Build AnomalyEvents DataFrame from episodes.
+    
+    Transforms episode data into events format for ACM_Anomaly_Events SQL table.
+    
+    Args:
+        episodes: DataFrame with start_ts, end_ts, severity, score, culprits columns
+        equip_id: Equipment ID
+        run_id: Run identifier for SQL
+        
+    Returns:
+        DataFrame ready for ACM_Anomaly_Events (or None if no episodes)
+    """
+    if episodes is None or len(episodes) == 0:
+        return None
+    
+    return pd.DataFrame({
+        "EquipID": int(equip_id),
+        "start_ts": episodes["start_ts"],
+        "end_ts": episodes["end_ts"],
+        "severity": episodes.get("severity", pd.Series(["info"] * len(episodes))),
+        "Detector": "FUSION",
+        "Score": episodes.get("score", np.nan),
+        "ContributorsJSON": episodes.get("culprits", "{}"),
+        "RunID": run_id or ""
+    })
+
+
+def _build_regime_episodes(
+    episodes: pd.DataFrame,
+    equip_id: int,
+    run_id: Optional[str],
+) -> Optional[pd.DataFrame]:
+    """
+    Build RegimeEpisodes DataFrame from episodes.
+    
+    Transforms episode data into regime episodes format for ACM_RegimeEpisodes SQL table.
+    
+    Args:
+        episodes: DataFrame with start_ts, end_ts, regime columns
+        equip_id: Equipment ID
+        run_id: Run identifier for SQL
+        
+    Returns:
+        DataFrame ready for ACM_RegimeEpisodes (or None if no episodes)
+    """
+    if episodes is None or len(episodes) == 0:
+        return None
+    
+    return pd.DataFrame({
+        "EquipID": int(equip_id),
+        "StartEntryDateTime": episodes["start_ts"],
+        "EndEntryDateTime": episodes["end_ts"],
+        "RegimeLabel": episodes.get("regime", pd.Series([""] * len(episodes))),
+        "Confidence": np.nan,
+        "RunID": run_id or ""
+    })
 
 
 # =======================
@@ -3109,79 +3354,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 Console.warn(f"Guardrail checks skipped: {g_e}", component="DATA",
                              equip=equip, error_type=type(g_e).__name__, error=str(g_e)[:200])
 
-        # ===== Feature construction (migrate to fast_features POC) =====
-        # We intentionally replace the raw sensor matrices with a compact, robust
-        # feature space computed by `core.fast_features.compute_basic_features`.
-        # This is a deliberate migration: no runtime toggle. Features are used
-        # for downstream PCA/AR1 fitting and scoring.
+        # ===== Feature construction =====
+        # Transform raw sensor data into statistical features using fast_features module.
+        # Polars/pandas conversion is handled internally by fast_features.
         with T.section("features.build"):
             try:
-                feat_win = int((cfg.get("features", {}) or {}).get("window", 3))
-                if fast_features is not None and cfg.get("runtime", {}).get("phases", {}).get("features", True):
-                    # Preserve original indices before they are lost in the feature building process
-                    idx_train = train.index
-                    idx_score = score.index
-
-                    Console.info(f"Building features with window={feat_win} (fast_features)", component="FEAT")
-                    # --- OPTIMIZATION: Convert to Polars to use the fast path ---
-                    # The compute_basic_features function is optimized for Polars input.
-                    # By converting here, we ensure the high-performance `compute_basic_features_pl`
-                    # is called internally, avoiding the slow pandas .apply() loops.
-                    # Benchmark-gate Polars conversion to avoid overhead on small datasets
-                    # Polars overhead break-even point is typically around 10k rows
-                    total_rows = len(train) + len(score) 
-                    polars_threshold = int((cfg.get("features", {}) or {}).get("polars_threshold", 10000))
-                    use_polars = fast_features.HAS_POLARS and total_rows > polars_threshold
-                    
-                    # --- DATA-04: Compute fill values from TRAIN data to prevent leakage ---
-                    # Score data should use training-derived statistics for imputation, not its own
-                    with T.section("features.compute_fill_values"):
-                        train_fill_values = train.select_dtypes(include=[np.number]).median().to_dict()
-                        Console.info(f"Computed {len(train_fill_values)} fill values from training data (prevents leakage)", component="FEAT")
-                    
-                    if use_polars:
-                        with T.section("features.polars_convert"):
-                            import polars as pl  # type: ignore
-                            train_pl = pl.from_pandas(train)
-                            score_pl = pl.from_pandas(score)
-                        Console.info(f"Using Polars for feature computation ({total_rows:,} rows > {polars_threshold:,} threshold)", component="FEAT")
-                        with T.section("features.compute_train"):
-                            Console.info("Building train features...", component="FEAT")
-                            train = fast_features.compute_basic_features(train_pl, window=feat_win)
-                        with T.section("features.compute_score"):
-                            Console.info("Building score features (using train fill values)...", component="FEAT")
-                            score = fast_features.compute_basic_features(score_pl, window=feat_win, fill_values=train_fill_values)
-                    elif fast_features.HAS_POLARS:
-                        Console.info(f"Using pandas for feature computation ({total_rows:,} rows <= {polars_threshold:,} threshold)", component="FEAT")
-                        with T.section("features.compute_train"):
-                            train = fast_features.compute_basic_features(train, window=feat_win)
-                        with T.section("features.compute_score"):
-                            Console.info("Building score features (using train fill values)...", component="FEAT")
-                            score = fast_features.compute_basic_features(score, window=feat_win, fill_values=train_fill_values)
-                    else: # Fallback if Polars is not installed
-                        Console.warn("Polars not found, using pandas implementation.", component="FEAT",
-                                     equip=equip, total_rows=total_rows)
-                        with T.section("features.compute_train"):
-                            train = fast_features.compute_basic_features(train, window=feat_win)
-                        with T.section("features.compute_score"):
-                            Console.info("Building score features (using train fill values)...", component="FEAT")
-                            score = fast_features.compute_basic_features(score, window=feat_win, fill_values=train_fill_values)
-                    
-                    with T.section("features.normalize"):
-                        # normalize back to pandas, restore index, enforce numeric
-                        if not isinstance(train, pd.DataFrame):
-                            train = train.to_pandas() if hasattr(train, "to_pandas") else pd.DataFrame(train)
-                        if not isinstance(score, pd.DataFrame):
-                            score = score.to_pandas() if hasattr(score, "to_pandas") else pd.DataFrame(score)
-                        train.index = idx_train
-                        score.index = idx_score
-                        train = train.apply(pd.to_numeric, errors="coerce")
-                        score = score.apply(pd.to_numeric, errors="coerce")
-
-                    T.log("feature_engineering_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
-                else:
-                    Console.warn("fast_features not available; continuing with raw sensor inputs", component="FEAT",
-                                 equip=equip)
+                train, score = _build_features(train, score, cfg, equip)
+                T.log("feature_engineering_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
             except Exception as fe:
                 Console.warn(f"Feature build failed, continuing with raw inputs: {fe}", component="FEAT",
                              equip=equip, error_type=type(fe).__name__, error=str(fe)[:200])
@@ -3189,67 +3368,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         # ===== Impute missing values in feature space =====
         with T.section("features.impute"):
             try:
-                if isinstance(train, pd.DataFrame):
-                    # Replace any infs with NaNs first, then fill NaNs with column medians.
-                    # This ensures both inf and NaN are handled before modeling.
-                    train.replace([np.inf, -np.inf], np.nan, inplace=True)
-                    score.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-                    Console.info("Imputing non-finite values in features using train medians", component="FEAT")
-                    col_meds = train.median(numeric_only=True)
-                    train.fillna(col_meds, inplace=True)
-                    # Align SCORE to TRAIN columns to avoid mismatches and silent drops
-                    score = score.reindex(columns=train.columns)
-                    score.fillna(col_meds, inplace=True)
-                    # Any remaining NaNs (rare)   fill with score column medians
-                    nan_cols = score.columns[score.isna().any()].tolist()
-                    if nan_cols:
-                        for c in nan_cols:
-                            if score[c].dtype.kind in "if":
-                                score[c].fillna(score[c].median(), inplace=True)
-                    
-                    # Guard: drop all-NaN columns (train median is NaN)
-                    # This prevents propagating NaNs into detectors
-                    all_nan_cols = [c for c in train.columns if pd.isna(col_meds.get(c))]
-                    
-                    # FEAT-03: Also drop low-variance features from raw sensors
-                    # Check variance in engineered features (not just raw sensors)
-                    feat_stds = train.std(numeric_only=True)
-                    low_var_feat = feat_stds[feat_stds < low_var_threshold]
-                    low_var_feat_cols = list(low_var_feat.index) if len(low_var_feat) > 0 else []
-                    
-                    # Combine all columns to drop
-                    cols_to_drop = list(set(all_nan_cols + low_var_feat_cols))
-                    
-                    if cols_to_drop:
-                        Console.warn(f"Dropping {len(cols_to_drop)} unusable feature columns ({len(all_nan_cols)} NaN, {len(low_var_feat_cols)} low-variance)", component="FEAT",
-                                     equip=equip, dropped_count=len(cols_to_drop), nan_cols=len(all_nan_cols), low_var_cols=len(low_var_feat_cols))
-                        Console.warn(f"Dropped columns preview: {cols_to_drop[:10]}", component="FEAT",
-                                     equip=equip)
-                        train = train.drop(columns=cols_to_drop)
-                        score = score.drop(columns=cols_to_drop)
-                        
-                        # ACM-CSV-02: Log feature drops to SQL
-                        with T.section("features.log_drops"):
-                            _log_dropped_features(
-                                sql_client=sql_client,
-                                cols_to_drop=cols_to_drop,
-                                all_nan_cols=all_nan_cols,
-                                col_meds=col_meds,
-                                feat_stds=feat_stds,
-                                run_id=run_id,
-                                equip_id=equip_id,
-                                equip=equip,
-                            )
-                    
-                    # NOTE: Feature decorrelation is NOT needed here because PCA-T2 detector
-                    # projects to orthogonal space where covariance is diagonal, guaranteeing
-                    # numerical stability regardless of input feature correlations.
-                    # (MHAL removed v9.1.0 - was redundant with PCA-T2)
-                    
-                    # Final guard: ensure we have at least one usable feature
-                    if train.shape[1] == 0:
-                        raise RuntimeError("[FEAT] No usable feature columns after imputation; aborting.")
+                train, score, _ = _impute_features(
+                    train, score, low_var_threshold, sql_client, run_id, equip_id, equip
+                )
             except Exception as ie:
                 Console.warn(f"Imputation step failed or skipped: {ie}", component="FEAT",
                              equip=equip, error_type=type(ie).__name__, error=str(ie)[:200])
@@ -4874,15 +4995,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         rows_drift = 0
         with T.section("sql.drift"):
             try:
-                if "drift_z" in frame.columns:
-                    drift_method = (cfg.get("drift", {}) or {}).get("method", "CUSUM") # type: ignore
-                    df_drift = pd.DataFrame({
-                        "EntryDateTime": pd.to_datetime(frame.index),
-                        "EquipID": int(equip_id),
-                        "DriftZ": frame["drift_z"].astype(np.float32),
-                        "Method": drift_method,
-                        "RunID": run_id or ""
-                    })
+                df_drift = _build_drift_ts(frame, equip_id, run_id, cfg)
+                if df_drift is not None:
                     rows_drift = output_manager.write_drift_ts(df_drift, run_id or "")
             except Exception as e:
                 Console.warn(f"DriftTS write skipped: {e}", component="SQL",
@@ -4892,17 +5006,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         rows_events = 0
         with T.section("sql.events"):
             try:
-                if len(episodes):
-                    df_events = pd.DataFrame({
-                        "EquipID": int(equip_id),
-                        "start_ts": episodes["start_ts"],
-                        "end_ts": episodes["end_ts"],
-                        "severity": episodes.get("severity", pd.Series(["info"]*len(episodes))),
-                        "Detector": "FUSION",
-                        "Score": episodes.get("score", np.nan),
-                        "ContributorsJSON": episodes.get("culprits", "{}"),
-                        "RunID": run_id or ""
-                    })
+                df_events = _build_anomaly_events(episodes, equip_id, run_id)
+                if df_events is not None:
                     rows_events = output_manager.write_anomaly_events(df_events, run_id or "")
             except Exception as e:
                 Console.warn(f"AnomalyEvents write skipped: {e}", component="SQL",
@@ -4912,15 +5017,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         rows_regimes = 0
         with T.section("sql.regimes"):
             try:
-                if len(episodes):
-                    df_reg = pd.DataFrame({
-                        "EquipID": int(equip_id),
-                        "StartEntryDateTime": episodes["start_ts"],
-                        "EndEntryDateTime": episodes["end_ts"],
-                        "RegimeLabel": episodes.get("regime", pd.Series([""]*len(episodes))),
-                        "Confidence": np.nan,
-                        "RunID": run_id or ""
-                    })
+                df_reg = _build_regime_episodes(episodes, equip_id, run_id)
+                if df_reg is not None:
                     rows_regimes = output_manager.write_regime_episodes(df_reg, run_id or "")
             except Exception as e:
                 Console.warn(f"RegimeEpisodes write skipped: {e}", component="SQL",
