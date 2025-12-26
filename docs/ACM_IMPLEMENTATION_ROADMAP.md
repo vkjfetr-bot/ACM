@@ -8,37 +8,28 @@
 
 ## Executive Summary
 
+**Date Updated:** December 26, 2025  
 **Goal:** Ensure all 42 ACM tables are created and populated through a properly refactored `acm_main.py`
 
 | Category | Current | Target | Gap |
 |----------|---------|--------|-----|
-| **Tables in SQL** | 28 | 42 | **14 missing** |
-| **Tables with data** | 28 | 42 | 14 empty/missing |
+| **Tables in SQL** | 92 | 42 | ✅ Exceeded (many extra tables) |
+| **Core Tables with data** | 35+ | 42 | 7-10 empty tables need population |
 | **Helper functions extracted** | 22 | 30+ | 8 remaining |
 | **Phase functions** | 0 | 7 | Not started |
 | **acm_main.py lines** | ~4,900 | <300 | 93% reduction needed |
 
-### Current SQL Table Status (27 exist, 15 missing)
+### Key Progress (December 26, 2025)
+- ✅ ACM_SensorForecast: Now populating (1,512 rows) - sensor forecasting fixed
+- ✅ ACM_SensorNormalized_TS: Now populating (472,446 rows) - new table
+- ✅ ACM_EpisodeDiagnostics: Now populating (425 rows)
+- ✅ ACM_DetectorCorrelation: Now populating (3,577 rows)
+- ✅ ACM_SensorCorrelations: Now populating (191,844 rows)
+- ✅ ACM_PCA_Metrics: Now populating (17 rows)
 
-**Tables WITH Data (26):**
-- ACM_BaselineBuffer (1.1M rows), ACM_HistorianData (204K), ACM_Scores_Wide (135K)
-- ACM_RegimeTimeline (133K), ACM_RunMetrics (104K), ACM_HealthForecast (91K)
-- ACM_FailureForecast (91K), ACM_RunLogs (657K), ACM_RunTimers (203K)
-- ACM_HealthTimeline (28K), ACM_DataQuality (7K), ACM_SensorHotspots (8K)
-- ACM_ConfigHistory (3.5K), ACM_SensorDefects (2.7K), ACM_TagEquipmentMap (2K)
-- ACM_EpisodeCulprits (1.6K), ACM_Runs (716), ACM_RunMetadata (715)
-- ACM_RUL (359), ACM_Config (342), ACM_Episodes (157)
-- ACM_ColdstartState (15), ACM_AdaptiveConfig (9), ACM_ForecastingState (6)
-- ACM_RefitRequests (3), ACM_SchemaVersion (2)
-
-**Tables EMPTY (1):**
-- ACM_SensorForecast (0 rows) - needs investigation
-
-**Tables MISSING (15):**
-- TIER 3: ACM_EpisodeDiagnostics, ACM_DetectorCorrelation, ACM_DriftSeries, ACM_SensorCorrelations, ACM_FeatureDropLog
-- TIER 4: ACM_CalibrationSummary, ACM_PCA_Metrics, ACM_SensorNormalized_TS
-- TIER 6: ACM_RegimeOccupancy, ACM_RegimeTransitions, ACM_ContributionTimeline, ACM_RegimePromotionLog, ACM_DriftController
-- TIER 7: ACM_RegimeDefinitions, ACM_ActiveModels, ACM_DataContractValidation, ACM_SeasonalPatterns, ACM_AssetProfiles
+### Remaining Work
+- **Empty Tables (need population logic)**: ACM_DriftSeries, ACM_FeatureDropLog, ACM_CalibrationSummary, ACM_RegimeOccupancy, ACM_RegimeTransitions, ACM_ContributionTimeline, ACM_RegimePromotionLog, ACM_DriftController, ACM_RegimeDefinitions, ACM_ActiveModels, ACM_DataContractValidation, ACM_SeasonalPatterns, ACM_AssetProfiles
+- **Multivariate Forecast Error**: `MultivariateForecast` shape mismatch needs fix
 
 ---
 
@@ -76,14 +67,14 @@
 
 | Table | SQL Exists | Rows | Schema in table_schemas.py | Status |
 |-------|-----------|------|---------------------------|--------|
-| ACM_EpisodeCulprits | ✅ | 1,571 | ⚠️ Add | ✅ COMPLETE |
-| ACM_EpisodeDiagnostics | ❌ | - | ✅ | ❌ CREATE TABLE |
-| ACM_DetectorCorrelation | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_DriftSeries | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_SensorCorrelations | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_FeatureDropLog | ❌ | - | ❌ Add | ❌ CREATE TABLE |
+| ACM_EpisodeCulprits | ✅ | 5,108 | ⚠️ Add | ✅ COMPLETE |
+| ACM_EpisodeDiagnostics | ✅ | 425 | ✅ | ✅ COMPLETE |
+| ACM_DetectorCorrelation | ✅ | 3,577 | ⚠️ Add | ✅ COMPLETE |
+| ACM_DriftSeries | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
+| ACM_SensorCorrelations | ✅ | 191,844 | ⚠️ Add | ✅ COMPLETE |
+| ACM_FeatureDropLog | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
 
-**Status:** ❌ **ONLY 1 of 6 EXISTS - Need to create 5 tables**
+**Status:** ✅ **4 of 6 POPULATED - 2 exist but empty (DriftSeries, FeatureDropLog)**
 
 ---
 
@@ -91,18 +82,18 @@
 
 | Table | SQL Exists | Rows | Schema in table_schemas.py | Status |
 |-------|-----------|------|---------------------------|--------|
-| ACM_BaselineBuffer | ✅ | 1,153,824 | ❌ Add | ✅ COMPLETE |
-| ACM_HistorianData | ✅ | 204,067 | ❌ Add | ✅ COMPLETE |
-| ACM_SensorNormalized_TS | ✅ | 78,741 | ✅ Added | ✅ COMPLETE |
-| ACM_DataQuality | ✅ | 7,186 | ❌ Add | ✅ COMPLETE |
-| ACM_ForecastingState | ✅ | 6 | ❌ Add | ✅ COMPLETE |
-| ACM_CalibrationSummary | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_AdaptiveConfig | ✅ | 9 | ❌ Add | ✅ COMPLETE |
-| ACM_RefitRequests | ✅ | 3 | ❌ Add | ✅ COMPLETE |
-| ACM_PCA_Metrics | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_RunMetadata | ✅ | 715 | ❌ Add | ✅ COMPLETE |
+| ACM_BaselineBuffer | ✅ | 1,162,924 | ⚠️ Add | ✅ COMPLETE |
+| ACM_HistorianData | ✅ | 204,067 | ⚠️ Add | ✅ COMPLETE |
+| ACM_SensorNormalized_TS | ✅ | 472,446 | ✅ | ✅ COMPLETE |
+| ACM_DataQuality | ✅ | 7,195 | ⚠️ Add | ✅ COMPLETE |
+| ACM_ForecastingState | ✅ | 7 | ⚠️ Add | ✅ COMPLETE |
+| ACM_CalibrationSummary | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
+| ACM_AdaptiveConfig | ✅ | 11 | ⚠️ Add | ✅ COMPLETE |
+| ACM_RefitRequests | ✅ | 76 | ⚠️ Add | ✅ COMPLETE |
+| ACM_PCA_Metrics | ✅ | 17 | ⚠️ Add | ✅ COMPLETE |
+| ACM_RunMetadata | ✅ | 715 | ⚠️ Add | ✅ COMPLETE |
 
-**Status:** ⚠️ **8 of 10 EXIST - Need to create 2 tables (CalibrationSummary, PCA_Metrics)**
+**Status:** ✅ **9 of 10 POPULATED - 1 exists but empty (CalibrationSummary)**
 
 ---
 
@@ -125,13 +116,13 @@
 
 | Table | SQL Exists | Rows | Schema in table_schemas.py | Status |
 |-------|-----------|------|---------------------------|--------|
-| ACM_RegimeOccupancy | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_RegimeTransitions | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_ContributionTimeline | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_RegimePromotionLog | ❌ | - | ❌ Add | ❌ CREATE TABLE |
-| ACM_DriftController | ❌ | - | ❌ Add | ❌ CREATE TABLE |
+| ACM_RegimeOccupancy | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
+| ACM_RegimeTransitions | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
+| ACM_ContributionTimeline | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
+| ACM_RegimePromotionLog | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
+| ACM_DriftController | ✅ | 0 | ⚠️ Add | ⚠️ EXISTS (empty) |
 
-**Status:** ❌ **ALL 5 MISSING - Need to create all tables**
+**Status:** ⚠️ **ALL 5 EXIST BUT EMPTY - Need population logic**
 
 ---
 
@@ -139,13 +130,13 @@
 
 | Table | SQL Exists | Rows | Schema in table_schemas.py | Status |
 |-------|-----------|------|---------------------------|--------|
-| ACM_RegimeDefinitions | ❌ | - | ✅ | ❌ CREATE TABLE |
-| ACM_ActiveModels | ❌ | - | ✅ | ❌ CREATE TABLE |
-| ACM_DataContractValidation | ❌ | - | ✅ | ❌ CREATE TABLE |
-| ACM_SeasonalPatterns | ❌ | - | ✅ | ❌ CREATE TABLE |
-| ACM_AssetProfiles | ❌ | - | ✅ | ❌ CREATE TABLE |
+| ACM_RegimeDefinitions | ✅ | 0 | ✅ | ⚠️ EXISTS (empty) |
+| ACM_ActiveModels | ✅ | 0 | ✅ | ⚠️ EXISTS (empty) |
+| ACM_DataContractValidation | ✅ | 0 | ✅ | ⚠️ EXISTS (empty) |
+| ACM_SeasonalPatterns | ✅ | 0 | ✅ | ⚠️ EXISTS (empty) |
+| ACM_AssetProfiles | ✅ | 0 | ✅ | ⚠️ EXISTS (empty) |
 
-**Status:** ❌ **ALL 5 MISSING - Schemas exist, need SQL tables**
+**Status:** ⚠️ **ALL 5 EXIST BUT EMPTY - Need population logic**
 
 ---
 

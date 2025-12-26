@@ -140,7 +140,14 @@ class MultivariateSensorForecaster:
                 return None
             
             # Convert to long format first
-            df_long = pd.DataFrame(rows, columns=['Timestamp', 'SensorName', 'NormalizedValue'])
+            # Handle pyodbc Row objects by converting to list of tuples
+            try:
+                data = [[row[0], row[1], row[2]] for row in rows]
+                df_long = pd.DataFrame(data, columns=['Timestamp', 'SensorName', 'NormalizedValue'])
+            except (IndexError, TypeError) as e:
+                Console.warn(f"[MultivariateForecast] Row format issue: {e}, rows sample: {rows[:1] if rows else 'empty'}")
+                return None
+            
             df_long['Timestamp'] = pd.to_datetime(df_long['Timestamp'])
             df_long['NormalizedValue'] = pd.to_numeric(df_long['NormalizedValue'], errors='coerce')
             
