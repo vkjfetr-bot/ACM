@@ -1,4 +1,4 @@
-﻿# core/acm_main.py
+# core/acm_main.py
 from __future__ import annotations
 
 import hashlib
@@ -11,7 +11,7 @@ import warnings
 from datetime import datetime
 import os
 # NOTE: Parallel fitting with ThreadPoolExecutor removed v10.2.0 - causes BLAS/OpenMP deadlocks
-from typing import Any, Dict, List, Tuple, Optional, Sequence
+from typing import Any, Callable, Dict, List, Tuple, Optional, Sequence
 
 # Suppress benign numpy/pandas overflow warnings during variance calculations
 # These occur with large sensor values but produce correct results
@@ -174,6 +174,21 @@ from core.observability import Console
 # These dataclasses provide structured data flow between pipeline phases
 # =============================================================================
 from dataclasses import dataclass, field
+from enum import Enum
+
+
+class RunOutcome(Enum):
+    """Outcome states for ACM pipeline runs.
+    
+    OK: All phases completed successfully
+    DEGRADED: Some non-critical phases failed, but core scoring succeeded  
+    NOOP: No data to process (insufficient rows, no change, etc.)
+    FAIL: Critical phase failed, run cannot complete
+    """
+    OK = "OK"
+    DEGRADED = "DEGRADED"
+    NOOP = "NOOP"
+    FAIL = "FAIL"
 
 
 @dataclass
@@ -3022,6 +3037,73 @@ def _auto_tune_parameters(
                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
 
 
+def safe_step(
+    operation: Callable[[], Any],
+    step_name: str,
+    component: str,
+    equip: str,
+    run_id: Optional[str],
+    log_level: str = "warn",
+    default: Any = None,
+    critical: bool = False,
+    degradations: Optional[List[str]] = None,
+    **extra_context,
+) -> Tuple[Any, bool]:
+    """Execute an operation with standardized error handling.
+    
+    Consolidates micro try/except blocks into a single pattern that:
+    - Logs failures consistently with equip/run_id context
+    - Tracks degradations for partial failure reporting
+    - Returns (result, success) tuple for caller decisions
+    
+    Args:
+        operation: Zero-arg callable to execute
+        step_name: Human-readable step name for logging
+        component: Log component (e.g., "PERSIST", "ANALYTICS")
+        equip: Equipment name for log context
+        run_id: Run ID for log context
+        log_level: "warn", "debug", or "error"
+        default: Value to return on failure
+        critical: If True, re-raises exception after logging
+        degradations: Optional list to append step_name on failure
+        **extra_context: Additional key=value pairs for structured logging
+    
+    Returns:
+        Tuple of (result, success_bool)
+        On failure: (default, False)
+        On success: (operation_result, True)
+    """
+    try:
+        result = operation()
+        return result, True
+    except Exception as e:
+        err_msg = f"{step_name} failed: {e}"
+        log_kwargs = dict(
+            component=component,
+            equip=equip,
+            run_id=run_id,
+            step=step_name,
+            error_type=type(e).__name__,
+            error=str(e)[:300],
+            **extra_context,
+        )
+        
+        if log_level == "debug":
+            Console.debug(err_msg, **log_kwargs)
+        elif log_level == "error":
+            Console.error(err_msg, **log_kwargs)
+        else:
+            Console.warn(err_msg, **log_kwargs)
+        
+        if degradations is not None:
+            degradations.append(step_name)
+        
+        if critical:
+            raise
+        
+        return default, False
+
+
 def _write_sql_artifacts(
     output_manager: Any,
     frame: pd.DataFrame,
@@ -4940,7 +5022,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             det_corr = {d1: {d2: corr_matrix.loc[d1, d2] for d2 in corr_matrix.columns} for d1 in corr_matrix.index}
                             output_manager.write_detector_correlation(det_corr)
                 except Exception as e:
-                    Console.debug(f"Detector correlation write skipped: {e}", component="PERSIST")
+                    Console.debug(f"Detector correlation write skipped: {e}", component="PERSIST",
+                                  equip=equip, run_id=run_id, error=str(e)[:200])
             
             # Sensor Correlation Matrix (from train data)
             with T.section("persist.sensor_correlation"):
@@ -4949,7 +5032,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         sensor_corr = train.corr(method='pearson')
                         output_manager.write_sensor_correlations(sensor_corr, corr_type='pearson')
                 except Exception as e:
-                    Console.debug(f"Sensor correlation write skipped: {e}", component="PERSIST")
+                    Console.debug(f"Sensor correlation write skipped: {e}", component="PERSIST",
+                                  equip=equip, run_id=run_id, error=str(e)[:200])
 
             # Sensor Normalized Time Series (for sensor forecasting)
             # Use score_numeric which has raw sensor values (not feature-engineered)
@@ -4971,7 +5055,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 Console.debug(f"Wrote {rows_written} sensor normalized TS rows ({len(sensor_cols)} sensors)", 
                                             component="PERSIST")
                 except Exception as e:
-                    Console.debug(f"Sensor normalized TS write skipped: {e}", component="PERSIST")
+                    Console.debug(f"Sensor normalized TS write skipped: {e}", component="PERSIST",
+                                  equip=equip, run_id=run_id, error=str(e)[:200])
 
                 if cache_payload:
                     with T.section("persist.cache_detectors"):
