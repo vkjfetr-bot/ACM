@@ -4985,27 +4985,30 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         rows_read = int(score.shape[0])
         anomaly_count = int(len(episodes))
         
+        # Track degradations for partial failure reporting
+        degradations: List[str] = []
+        
         # SQL-only persistence
         with T.section("persist"):
             # Use unified OutputManager for persistence
             with T.section("persist.write_scores"):
-                try:
-                    output_manager.write_scores(frame)
-                except Exception as we:
-                    Console.warn(f"Failed to write scores via OutputManager: {we}", component="IO",
-                                 equip=equip, run_id=run_id, error=str(we)[:200])
+                safe_step(
+                    lambda: output_manager.write_scores(frame),
+                    "write_scores", "IO", equip, run_id,
+                    degradations=degradations
+                )
 
             with T.section("persist.write_episodes"):
-                try:
-                    # Write episodes using OutputManager
+                def _write_episodes():
                     output_manager.write_episodes(episodes)
-                    # Record episode count metric for Prometheus
                     episode_count = len(episodes) if episodes is not None else 0
                     if episode_count > 0:
                         record_episode(equip, count=episode_count, severity="info")
-                except Exception as ee:
-                    Console.warn(f"Failed to write episodes via OutputManager: {ee}", component="IO",
-                                 equip=equip, run_id=run_id, error=str(ee)[:200])
+                safe_step(
+                    _write_episodes,
+                    "write_episodes", "IO", equip, run_id,
+                    degradations=degradations
+                )
 
             # Culprits now handled via SQL in OutputManager
             
@@ -5060,12 +5063,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
                 if cache_payload:
                     with T.section("persist.cache_detectors"):
-                        try:
-                            joblib.dump(cache_payload, model_cache_path)
+                        _, success = safe_step(
+                            lambda: joblib.dump(cache_payload, model_cache_path),
+                            "cache_detectors", "MODEL", equip, run_id,
+                            degradations=degradations,
+                            cache_path=str(model_cache_path)
+                        )
+                        if success:
                             Console.info(f"Cached detectors to {model_cache_path}", component="MODEL")
-                        except Exception as e:
-                            Console.warn(f"Failed to cache detectors: {e}", component="MODEL",
-                                         equip=equip, cache_path=str(model_cache_path), error=str(e)[:200])
 
             # === COMPREHENSIVE ANALYTICS GENERATION ===
             # Run in ALL modes to ensure SQL tables (HealthTimeline, RegimeTimeline) are populated
