@@ -175,18 +175,18 @@
 21. Context dataclasses (RuntimeContext, DataContext, etc.)
 22. Additional utility helpers
 
-### Remaining Helper Extractions (8 more)
+### Remaining Helper Extractions (2 more) - Updated Dec 26
 
-| Helper | Location | Lines | Priority |
-|--------|----------|-------|----------|
-| `_build_features()` | 3101-3175 | ~75 | Medium |
-| `_impute_features()` | 3178-3240 | ~65 | Low |
-| `_seed_baseline()` | 2850-2950 | ~100 | Medium |
-| `_build_drift_ts()` | 4816-4830 | ~15 | Low |
-| `_build_anomaly_events()` | 4835-4852 | ~18 | Low |
-| `_build_regime_episodes()` | 4857-4870 | ~14 | Low |
-| `_write_sensor_defects()` | Various | ~50 | High (for TIER 1) |
-| `_write_regime_analytics()` | Various | ~80 | Medium (for TIER 6) |
+| Helper | Location | Lines | Priority | Status |
+|--------|----------|-------|----------|--------|
+| `_build_features()` | 2395 | ~60 | Medium | ✅ DONE |
+| `_impute_features()` | 2456 | ~55 | Low | ✅ DONE |
+| `_seed_baseline()` | 2850-2950 | ~100 | Medium | ⏳ Not Started |
+| `_build_drift_ts()` | 2510 | ~28 | Low | ✅ DONE |
+| `_build_anomaly_events()` | 2538 | ~25 | Low | ✅ DONE |
+| `_build_regime_episodes()` | 2563 | ~26 | Low | ✅ DONE |
+| `_write_sensor_defects()` | output_manager.py:3332 | N/A | High | ✅ Already exists |
+| `_write_regime_analytics()` | Various | ~80 | Medium | ⏳ Not Started |
 
 ### Phase Functions (Not Started - Wave 4)
 
