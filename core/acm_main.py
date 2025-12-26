@@ -2806,6 +2806,126 @@ def _build_regime_episodes(
     })
 
 
+def _write_sql_artifacts(
+    output_manager: Any,
+    frame: pd.DataFrame,
+    episodes: pd.DataFrame,
+    train: pd.DataFrame,
+    pca_detector: Optional[Any],
+    sql_client: Optional[Any],
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str,
+    cfg: Dict[str, Any],
+    meta: Any,
+    win_start: Optional[pd.Timestamp],
+    win_end: Optional[pd.Timestamp],
+    rows_read: int,
+    spe_p95_train: float,
+    t2_p95_train: float,
+    anomaly_count: int,
+    T: Any,
+) -> int:
+    """
+    Write SQL-specific artifacts: DriftTS, AnomalyEvents, RegimeEpisodes, PCA, RunStats, Culprits.
+    
+    Returns:
+        Total rows written across all artifact tables.
+    """
+    rows_written = 0
+    
+    # DriftTS
+    with T.section("sql.drift"):
+        try:
+            df_drift = _build_drift_ts(frame, equip_id, run_id, cfg)
+            if df_drift is not None:
+                rows_written += output_manager.write_drift_ts(df_drift, run_id or "")
+        except Exception as e:
+            Console.warn(f"DriftTS write skipped: {e}", component="SQL",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
+
+    # AnomalyEvents
+    with T.section("sql.events"):
+        try:
+            df_events = _build_anomaly_events(episodes, equip_id, run_id)
+            if df_events is not None:
+                rows_written += output_manager.write_anomaly_events(df_events, run_id or "")
+        except Exception as e:
+            Console.warn(f"AnomalyEvents write skipped: {e}", component="SQL",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
+
+    # RegimeEpisodes
+    with T.section("sql.regimes"):
+        try:
+            df_reg = _build_regime_episodes(episodes, equip_id, run_id)
+            if df_reg is not None:
+                rows_written += output_manager.write_regime_episodes(df_reg, run_id or "")
+        except Exception as e:
+            Console.warn(f"RegimeEpisodes write skipped: {e}", component="SQL",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
+
+    # PCA artifacts
+    with T.section("sql.pca"):
+        rows_pca_model, rows_pca_load, rows_pca_metrics = _write_pca_artifacts(
+            output_manager=output_manager,
+            pca_detector=pca_detector,
+            frame=frame,
+            train=train,
+            run_id=run_id,
+            equip_id=equip_id,
+            equip=equip,
+            spe_p95_train=spe_p95_train,
+            t2_p95_train=t2_p95_train,
+            cfg=cfg,
+        )
+        rows_written += int(rows_pca_model + rows_pca_load + rows_pca_metrics)
+
+    # RunStats
+    with T.section("sql.run_stats"):
+        try:
+            if sql_client and run_id and win_start is not None and win_end is not None:
+                drift_p95 = None
+                if "drift_z" in frame.columns:
+                    drift_p95 = float(np.nanpercentile(frame["drift_z"].to_numpy(dtype=np.float32), 95))
+                sensors_kept = len(getattr(meta, "kept_cols", []))
+                cadence_ok_pct = float(getattr(meta, "cadence_ok", 1.0)) * 100.0 if hasattr(meta, "cadence_ok") else None
+
+                output_manager.write_run_stats({
+                    "RunID": run_id,
+                    "EquipID": int(equip_id),
+                    "WindowStartEntryDateTime": win_start,
+                    "WindowEndEntryDateTime": win_end,
+                    "SamplesIn": rows_read,
+                    "SamplesKept": rows_read,
+                    "SensorsKept": sensors_kept,
+                    "CadenceOKPct": cadence_ok_pct,
+                    "DriftP95": drift_p95,
+                    "ReconRMSE": None,
+                    "AnomalyCount": anomaly_count
+                })
+        except Exception as e:
+            Console.warn(f"RunStats not recorded: {e}", component="RUN",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
+
+    # Episode culprits
+    with T.section("sql.culprits"):
+        try:
+            if sql_client and run_id and isinstance(episodes, pd.DataFrame) and len(episodes) > 0:
+                write_episode_culprits_enhanced(
+                    sql_client=sql_client,
+                    run_id=run_id,
+                    episodes=episodes,
+                    scores_df=frame,
+                    equip_id=equip_id
+                )
+                Console.info(f"Wrote episode culprits for RunID={run_id}", component="CULPRITS")
+        except Exception as e:
+            Console.warn(f"Failed to write ACM_EpisodeCulprits: {e}", component="CULPRITS",
+                         equip=equip, run_id=run_id, error=str(e))
+    
+    return rows_written
+
+
 # =======================
 
 
@@ -5019,111 +5139,26 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             _maybe_write_run_meta_json(locals())
 
         # === SQL-SPECIFIC ARTIFACT WRITING ===
-        # NOTE: ScoresTS/write_scores_ts deprecated (ACM_Scores_Long removed) - scores in ACM_Scores_Wide only
-        
-        # Initialize row counters for SQL artifact tracking
-        rows_scores = 0  # ScoresTS deprecated - scores go to ACM_Scores_Wide only
-
-        # 2) DriftTS (if drift_z exists) method from config
-        rows_drift = 0
-        with T.section("sql.drift"):
-            try:
-                df_drift = _build_drift_ts(frame, equip_id, run_id, cfg)
-                if df_drift is not None:
-                    rows_drift = output_manager.write_drift_ts(df_drift, run_id or "")
-            except Exception as e:
-                Console.warn(f"DriftTS write skipped: {e}", component="SQL",
-                             equip=equip, run_id=run_id, error=str(e)[:200])
-
-        # 3) AnomalyEvents (from episodes)
-        rows_events = 0
-        with T.section("sql.events"):
-            try:
-                df_events = _build_anomaly_events(episodes, equip_id, run_id)
-                if df_events is not None:
-                    rows_events = output_manager.write_anomaly_events(df_events, run_id or "")
-            except Exception as e:
-                Console.warn(f"AnomalyEvents write skipped: {e}", component="SQL",
-                             equip=equip, run_id=run_id, error=str(e)[:200])
-
-        # 4) RegimeEpisodes
-        rows_regimes = 0
-        with T.section("sql.regimes"):
-            try:
-                df_reg = _build_regime_episodes(episodes, equip_id, run_id)
-                if df_reg is not None:
-                    rows_regimes = output_manager.write_regime_episodes(df_reg, run_id or "")
-            except Exception as e:
-                Console.warn(f"RegimeEpisodes write skipped: {e}", component="SQL",
-                             equip=equip, run_id=run_id, error=str(e)[:200])
-
-        # 5) PCA Model / Loadings / Metrics
-        with T.section("sql.pca"):
-            rows_pca_model, rows_pca_load, rows_pca_metrics = _write_pca_artifacts(
-                output_manager=output_manager,
-                pca_detector=pca_detector,
-                frame=frame,
-                train=train,
-                run_id=run_id,
-                equip_id=equip_id,
-                equip=equip,
-                spe_p95_train=spe_p95_train,
-                t2_p95_train=t2_p95_train,
-                cfg=cfg,
-            )
-
-        # Aggregate row counts for finalize
-        rows_written = int(rows_scores + rows_drift + rows_events + rows_regimes + rows_pca_model + rows_pca_load + rows_pca_metrics)
-
-        # Optional compact RunStats (best-effort)
-        with T.section("sql.run_stats"):
-            try:
-                if sql_client and run_id and win_start is not None and win_end is not None:
-                    drift_p95 = None
-                    if "drift_z" in frame.columns:
-                        drift_p95 = float(np.nanpercentile(frame["drift_z"].to_numpy(dtype=np.float32), 95))
-                    # No recon stream in current pipeline
-                    recon_rmse = None
-                    sensors_kept = len(getattr(meta, "kept_cols", []))
-                    cadence_ok_pct = float(getattr(meta, "cadence_ok", 1.0)) * 100.0 if hasattr(meta, "cadence_ok") else None
-
-                    output_manager.write_run_stats({
-                        "RunID": run_id,
-                        "EquipID": int(equip_id),
-                        "WindowStartEntryDateTime": win_start,
-                        "WindowEndEntryDateTime": win_end,
-                        "SamplesIn": rows_read,
-                        "SamplesKept": rows_read,      # after cleaning; equal for now
-                        "SensorsKept": sensors_kept,
-                        "CadenceOKPct": cadence_ok_pct,
-                        "DriftP95": drift_p95,
-                        "ReconRMSE": recon_rmse,
-                        "AnomalyCount": anomaly_count
-                    })
-            except Exception as e: # type: ignore
-                Console.warn(f"RunStats not recorded: {e}", component="RUN",
-                             equip=equip, run_id=run_id, error=str(e)[:200])
-
-        # === ACM_RUNS METADATA NOW WRITTEN IN FINALLY BLOCK ===
-        # This ensures ALL runs (OK, NOOP, FAIL) are tracked in ACM_Runs
-        # The write happens in the finally block below after finalize
-
-        # === WRITE EPISODE CULPRITS TO ACM_EpisodeCulprits ===
-        with T.section("sql.culprits"):
-            try:
-                if sql_client and run_id and isinstance(episodes, pd.DataFrame) and len(episodes) > 0:
-                    # Use enhanced writer that computes detector contributions from scores
-                    write_episode_culprits_enhanced(
-                        sql_client=sql_client,
-                        run_id=run_id,
-                        episodes=episodes,
-                        scores_df=frame,
-                        equip_id=equip_id
-                    )
-                    Console.info(f"Successfully wrote episode culprits to ACM_EpisodeCulprits for RunID={run_id}", component="CULPRITS")
-            except Exception as e:
-                Console.warn(f"Failed to write ACM_EpisodeCulprits: {e}", component="CULPRITS",
-                             equip=equip, run_id=run_id, error=str(e))
+        rows_written = _write_sql_artifacts(
+            output_manager=output_manager,
+            frame=frame,
+            episodes=episodes,
+            train=train,
+            pca_detector=pca_detector,
+            sql_client=sql_client,
+            run_id=run_id,
+            equip_id=equip_id,
+            equip=equip,
+            cfg=cfg,
+            meta=meta,
+            win_start=win_start,
+            win_end=win_end,
+            rows_read=rows_read,
+            spe_p95_train=spe_p95_train,
+            t2_p95_train=t2_p95_train,
+            anomaly_count=anomaly_count,
+            T=T,
+        )
 
         if reuse_models and cache_payload:
             with T.section("sql.cache_detectors"):
