@@ -265,6 +265,40 @@ class FusionContext:
     health_stats: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class RunContext:
+    """Consolidated context for error handling and phase tracking.
+    
+    Provides consistent metadata for safe_step() calls and tracks
+    partial failures for DEGRADED outcome determination.
+    """
+    equip: str
+    equip_id: int
+    run_id: Optional[str]
+    cfg: Dict[str, Any]
+    sql_client: Optional[Any]
+    output_manager: Optional[Any]
+    degradations: List[str] = field(default_factory=list)
+    phase_status: Dict[str, str] = field(default_factory=dict)  # phase_name -> "OK"|"FAILED"|"SKIPPED"
+    
+    def mark_degraded(self, step_name: str) -> None:
+        """Record a non-critical failure for DEGRADED outcome tracking."""
+        if step_name not in self.degradations:
+            self.degradations.append(step_name)
+    
+    def get_outcome(self) -> RunOutcome:
+        """Determine run outcome based on degradations."""
+        if self.degradations:
+            return RunOutcome.DEGRADED
+        return RunOutcome.OK
+    
+    def get_error_message(self) -> Optional[str]:
+        """Generate JSON error message for ACM_Runs if degraded."""
+        if not self.degradations:
+            return None
+        return json.dumps({"degraded_steps": self.degradations[:20]}, ensure_ascii=False)
+
+
 def _configure_logging(logging_cfg, args):
     """Apply CLI/config logging overrides and return flags."""
     enable_sql_logging_cfg = (logging_cfg or {}).get("enable_sql_sink")
@@ -3809,22 +3843,28 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         # Transform raw sensor data into statistical features using fast_features module.
         # Polars/pandas conversion is handled internally by fast_features.
         with T.section("features.build"):
-            try:
+            def _do_build_features():
+                nonlocal train, score
                 train, score = _build_features(train, score, cfg, equip)
                 T.log("feature_engineering_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
-            except Exception as fe:
-                Console.warn(f"Feature build failed, continuing with raw inputs: {fe}", component="FEAT",
-                             equip=equip, error_type=type(fe).__name__, error=str(fe)[:200])
+            safe_step(
+                _do_build_features,
+                "feature_build", "FEAT", equip, run_id,
+                degradations=degradations
+            )
 
         # ===== Impute missing values in feature space =====
         with T.section("features.impute"):
-            try:
+            def _do_impute_features():
+                nonlocal train, score
                 train, score, _ = _impute_features(
                     train, score, low_var_threshold, sql_client, run_id, equip_id, equip
                 )
-            except Exception as ie:
-                Console.warn(f"Imputation step failed or skipped: {ie}", component="FEAT",
-                             equip=equip, error_type=type(ie).__name__, error=str(ie)[:200])
+            safe_step(
+                _do_impute_features,
+                "feature_impute", "FEAT", equip, run_id,
+                degradations=degradations
+            )
 
         current_train_columns = list(train.columns)
         with T.section("features.hash"):
@@ -4086,7 +4126,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         else:
             Console.info("All model parameters within healthy ranges", component="ADAPTIVE")
 
-        try:
+        # Build regime feature basis with safe_step for consistent error handling
+        regime_basis_train = None
+        regime_basis_score = None
+        regime_basis_meta = {}
+        regime_basis_hash = None
+        
+        def _do_build_regime_basis():
+            nonlocal regime_basis_train, regime_basis_score, regime_basis_meta, regime_basis_hash
             regime_basis_train, regime_basis_score, regime_basis_meta = regimes.build_feature_basis(
                 train_features=train,
                 score_features=score,
@@ -4096,13 +4143,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 cfg=cfg,
             )
             regime_basis_hash = int(pd.util.hash_pandas_object(regime_basis_train, index=True).sum())
-        except Exception as e:
-            Console.warn(f"Failed to build regime feature basis: {e}", component="REGIME",
-                         equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-            regime_basis_train = None
-            regime_basis_score = None
-            regime_basis_meta = {}
-            regime_basis_hash = None
+        
+        safe_step(
+            _do_build_regime_basis,
+            "regime_feature_basis", "REGIME", equip, run_id,
+            degradations=degradations
+        )
 
         if regime_model is not None:
             if (
@@ -5101,8 +5147,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     except Exception as e:
                         Console.error(f"Error generating comprehensive analytics: {str(e)}", component="ANALYTICS",
                                      equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
-                        # Fallback to basic tables
+                        # Fallback to basic tables - mark as DEGRADED
                         Console.info("Falling back to basic table generation...", component="ANALYTICS")
+                        degradations.append("analytics_fallback")
                         table_count = 0
                         
                         # Health timeline (if we have fused scores)
@@ -5176,15 +5223,18 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         else:
                             Console.warn(f"Forecast failed: {forecast_results.get('error', 'Unknown error')}", component="FORECAST",
                                          equip=equip, run_id=run_id, data_quality=forecast_results.get('data_quality'))
+                            degradations.append("forecast_failed")
                         
                     except Exception as e:
                         Console.error(f"Unified forecasting engine failed: {e}", component="FORECAST",
                                       equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
                         Console.error(f"RUL estimation skipped - ForecastEngine must be fixed", component="FORECAST",
                                       equip=equip, run_id=run_id)
+                        degradations.append("forecast_engine_exception")
             except Exception as e:
                 Console.warn(f"Output generation failed: {e}", component="OUTPUTS",
                              equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
+                degradations.append("output_generation_failed")
 
             # File mode path exits here (finally still runs, no SQL finalize executed).
             run_completion_time = datetime.now()
@@ -5221,8 +5271,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     Console.warn(f"Failed to cache detectors: {e}", component="MODEL",
                                  equip=equip, cache_path=str(model_cache_path), error=str(e))
 
-        # success path outcome
-        outcome = "OK"
+        # Determine outcome based on degradations
+        if degradations:
+            outcome = "DEGRADED"
+            err_json = json.dumps({"degraded_steps": degradations[:20]}, ensure_ascii=False)
+            Console.warn(f"Run completed with {len(degradations)} degraded step(s): {degradations[:5]}", 
+                        component="RUN", equip=equip, run_id=run_id)
+        else:
+            outcome = "OK"
 
     except Exception as e:
         # capture error for finalize (must be 'FAIL' not 'ERROR' to match Runs table constraint)
@@ -5320,7 +5376,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     data_quality_score=data_quality_score,
                     refit_requested=refit_requested if 'refit_requested' in locals() else False,
                     kept_columns=kept_cols_str,
-                    error_message=err_json if outcome == "FAIL" and 'err_json' in locals() else None
+                    error_message=err_json if outcome in ("FAIL", "DEGRADED") and 'err_json' in locals() else None
                 )
                 Console.info(f"Wrote run metadata to ACM_Runs for RunID={run_id} (outcome={outcome})", component="RUN_META")
             except Exception as meta_err:
