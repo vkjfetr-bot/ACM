@@ -4715,6 +4715,28 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 except Exception as e:
                     Console.debug(f"Sensor correlation write skipped: {e}", component="PERSIST")
 
+            # Sensor Normalized Time Series (for sensor forecasting)
+            # Use score_numeric which has raw sensor values (not feature-engineered)
+            with T.section("persist.sensor_normalized_ts"):
+                try:
+                    # Use score_numeric (raw sensor data) instead of frame (which has detector z-scores)
+                    raw_sensor_df = score_numeric if score_numeric is not None else score
+                    if raw_sensor_df is not None and len(raw_sensor_df) > 0:
+                        # All numeric columns in raw data are sensors
+                        sensor_cols = [c for c in raw_sensor_df.columns 
+                                      if raw_sensor_df[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+                        if sensor_cols:
+                            # Subsample if too many rows (>10k) to avoid DB bloat
+                            sample_frame = raw_sensor_df
+                            if len(raw_sensor_df) > 10000:
+                                sample_frame = raw_sensor_df.iloc[::max(1, len(raw_sensor_df) // 10000)]
+                            rows_written = output_manager.write_sensor_normalized_ts(sample_frame, sensor_cols)
+                            if rows_written > 0:
+                                Console.debug(f"Wrote {rows_written} sensor normalized TS rows ({len(sensor_cols)} sensors)", 
+                                            component="PERSIST")
+                except Exception as e:
+                    Console.debug(f"Sensor normalized TS write skipped: {e}", component="PERSIST")
+
                 if cache_payload:
                     with T.section("persist.cache_detectors"):
                         try:

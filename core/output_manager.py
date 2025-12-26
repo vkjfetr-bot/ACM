@@ -2473,9 +2473,107 @@ class OutputManager:
             df = drift_df.copy()
             df['RunID'] = self.run_id
             df['EquipID'] = self.equip_id or 0
+            # Map column names if needed
+            if 'DriftZ' in df.columns and 'DriftValue' not in df.columns:
+                df['DriftValue'] = df['DriftZ']
             return self.write_table('ACM_DriftSeries', df, delete_existing=True)
         except Exception as e:
             Console.warn(f"write_drift_series failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    # Alias for backward compatibility
+    def write_drift_ts(self, drift_df: pd.DataFrame, run_id: str = None) -> int:
+        """Alias for write_drift_series() for backward compatibility."""
+        return self.write_drift_series(drift_df)
+    
+    def write_sensor_normalized_ts(self, scores_df: pd.DataFrame, sensor_cols: List[str] = None) -> int:
+        """Write normalized sensor z-scores to ACM_SensorNormalized_TS.
+        
+        Transforms wide-format scores DataFrame (one column per sensor) to long format
+        (one row per timestamp/sensor pair) for time-series analysis.
+        
+        Schema: ID, RunID, EquipID, Timestamp, SensorName, RawValue, NormalizedValue, CreatedAt
+        
+        Args:
+            scores_df: DataFrame with Timestamp index/column and sensor z-score columns
+            sensor_cols: List of sensor column names to extract (if None, uses all float columns)
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or scores_df is None or scores_df.empty:
+            return 0
+        
+        try:
+            df = scores_df.copy()
+            
+            # Ensure Timestamp is a column, not index
+            # Check for 'Timestamp' column or index first
+            if 'Timestamp' not in df.columns:
+                # Check if index is datetime-like (common pattern: index is EntryDateTime or Timestamp)
+                if isinstance(df.index, pd.DatetimeIndex) or df.index.name in ('Timestamp', 'EntryDateTime'):
+                    df = df.reset_index()
+                    # Rename EntryDateTime to Timestamp for consistency
+                    if 'EntryDateTime' in df.columns:
+                        df['Timestamp'] = df['EntryDateTime']
+                    elif df.columns[0] != 'Timestamp' and pd.api.types.is_datetime64_any_dtype(df[df.columns[0]]):
+                        df['Timestamp'] = df.iloc[:, 0]
+                elif 'EntryDateTime' in df.columns:
+                    df['Timestamp'] = df['EntryDateTime']
+                else:
+                    # Try to find a datetime column
+                    dt_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+                    if dt_cols:
+                        df['Timestamp'] = df[dt_cols[0]]
+                    else:
+                        Console.warn("write_sensor_normalized_ts: No Timestamp column found", component="OUTPUT")
+                        return 0
+            
+            # Determine sensor columns
+            if sensor_cols is None:
+                # Use all numeric columns except known non-sensor columns
+                exclude = {'Timestamp', 'RunID', 'EquipID', 'regime_label', 'fused', 'health', 
+                          'ar1_z', 'pca_spe_z', 'pca_t2_z', 'iforest_z', 'gmm_z', 'omr_z',
+                          'mhal_z', 'cusum_z', 'drift_z', 'hst_z', 'river_hst_z'}
+                sensor_cols = [c for c in df.columns if c not in exclude 
+                              and df[c].dtype in ['float64', 'float32', 'int64', 'int32']
+                              and not c.endswith('_z')]
+            
+            if not sensor_cols:
+                Console.debug("write_sensor_normalized_ts: No sensor columns found", component="OUTPUT")
+                return 0
+            
+            # Melt to long format
+            long_rows = []
+            timestamps = df['Timestamp'].tolist()
+            
+            for col in sensor_cols:
+                if col not in df.columns:
+                    continue
+                values = df[col].tolist()
+                for i, (ts, val) in enumerate(zip(timestamps, values)):
+                    if pd.notna(val):
+                        long_rows.append({
+                            'RunID': self.run_id or '',
+                            'EquipID': self.equip_id or 0,
+                            'Timestamp': ts,
+                            'SensorName': str(col),
+                            'RawValue': None,  # Original raw value (not available in z-score frame)
+                            'NormalizedValue': float(val)
+                        })
+            
+            if not long_rows:
+                return 0
+            
+            # Batch insert - this can be large, so use chunked writes
+            long_df = pd.DataFrame(long_rows)
+            
+            # Delete existing data for this run to avoid duplicates
+            return self.write_table('ACM_SensorNormalized_TS', long_df, delete_existing=True)
+            
+        except Exception as e:
+            Console.warn(f"write_sensor_normalized_ts failed: {e}", component="OUTPUT", 
+                        error=str(e)[:200], sensor_count=len(sensor_cols) if sensor_cols else 0)
             return 0
     
     def write_sensor_correlations(self, corr_matrix: pd.DataFrame, corr_type: str = 'pearson') -> int:

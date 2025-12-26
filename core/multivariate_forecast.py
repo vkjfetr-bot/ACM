@@ -101,14 +101,29 @@ class MultivariateSensorForecaster:
             return None
         
         try:
-            cutoff_time = datetime.now() - timedelta(hours=self.lookback_hours)
+            # Use data-relative lookback to handle batch/historical runs
+            # First, get the max timestamp from the sensor data to anchor our lookback
+            try:
+                with self.sql_client.get_cursor() as cur:
+                    cur.execute("""
+                        SELECT MAX(Timestamp) FROM ACM_SensorNormalized_TS WHERE EquipID = ?
+                    """, (self.equip_id,))
+                    max_ts_row = cur.fetchone()
+                    if max_ts_row and max_ts_row[0]:
+                        data_anchor = pd.to_datetime(max_ts_row[0])
+                    else:
+                        data_anchor = datetime.now()
+            except Exception:
+                data_anchor = datetime.now()
+            
+            cutoff_time = data_anchor - timedelta(hours=self.lookback_hours)
             placeholders = ','.join(['?'] * len(sensor_names))
             
             query = f"""
             SELECT 
                 Timestamp,
                 SensorName,
-                ZScore
+                NormalizedValue
             FROM ACM_SensorNormalized_TS
             WHERE EquipID = ?
               AND Timestamp >= ?
@@ -125,15 +140,15 @@ class MultivariateSensorForecaster:
                 return None
             
             # Convert to long format first
-            df_long = pd.DataFrame(rows, columns=['Timestamp', 'SensorName', 'ZScore'])
+            df_long = pd.DataFrame(rows, columns=['Timestamp', 'SensorName', 'NormalizedValue'])
             df_long['Timestamp'] = pd.to_datetime(df_long['Timestamp'])
-            df_long['ZScore'] = pd.to_numeric(df_long['ZScore'], errors='coerce')
+            df_long['NormalizedValue'] = pd.to_numeric(df_long['NormalizedValue'], errors='coerce')
             
             # Pivot to wide format (sensors as columns)
             df_wide = df_long.pivot_table(
                 index='Timestamp',
                 columns='SensorName',
-                values='ZScore',
+                values='NormalizedValue',
                 aggfunc='mean'
             )
             

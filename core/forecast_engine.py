@@ -1009,15 +1009,31 @@ class ForecastEngine:
                              component="FORECAST", equip_id=self.equip_id)
                 return None
             
-            # Load recent sensor data from ACM_SensorNormalized_TS (contains SensorName, NormValue, ZScore)
+            # Load recent sensor data from ACM_SensorNormalized_TS (contains SensorName, NormalizedValue)
+            # Use data-relative lookback to handle batch/historical runs (not just datetime.now())
             lookback_hours = 720  # 30 days of history
-            cutoff_time = datetime.now() - timedelta(hours=lookback_hours)
+            
+            # First, get the max timestamp from the sensor data to anchor our lookback
+            try:
+                with self.sql_client.get_cursor() as cur:
+                    cur.execute("""
+                        SELECT MAX(Timestamp) FROM ACM_SensorNormalized_TS WHERE EquipID = ?
+                    """, (self.equip_id,))
+                    max_ts_row = cur.fetchone()
+                    if max_ts_row and max_ts_row[0]:
+                        data_anchor = pd.to_datetime(max_ts_row[0])
+                    else:
+                        data_anchor = datetime.now()
+            except Exception:
+                data_anchor = datetime.now()
+            
+            cutoff_time = data_anchor - timedelta(hours=lookback_hours)
             
             query = """
             SELECT 
                 sn.Timestamp,
                 sn.SensorName,
-                sn.ZScore
+                sn.NormalizedValue
             FROM ACM_SensorNormalized_TS sn
             WHERE sn.EquipID = ?
               AND sn.Timestamp >= ?
@@ -1027,16 +1043,25 @@ class ForecastEngine:
             
             sensor_names = [s.sensor_name for s in top_sensors]
             
+            # Debug: Log query parameters
+            Console.debug(f"Sensor forecast query: equip={self.equip_id}, cutoff={cutoff_time}, sensors={sensor_names[:3]}...",
+                         component="FORECAST")
+            
             cursor = self.sql_client.cursor()
             cursor.execute(query, [self.equip_id, cutoff_time] + sensor_names)
             rows = cursor.fetchall()
             cursor.close()
             
+            Console.debug(f"Sensor forecast query returned {len(rows)} rows",
+                         component="FORECAST")
+            
             if not rows:
-                # Silent return - early check at function start should prevent this path
+                # Debug: Log why we're returning None
+                Console.warn(f"No sensor history found for forecasting (cutoff={cutoff_time}, sensors={len(sensor_names)})",
+                            component="FORECAST", equip_id=self.equip_id)
                 return None
             
-            # Convert to DataFrame - use ZScore as the value to forecast
+            # Convert to DataFrame - use NormalizedValue (stored as 'Score') for forecasting
             sensor_history = pd.DataFrame(
                 [{'Timestamp': r[0], 'SensorName': r[1], 'Score': r[2]} for r in rows]
             )
@@ -1170,6 +1195,56 @@ class ForecastEngine:
                           component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
                           error_type=type(e).__name__, error_msg=str(e)[:500])
             return None
+
+    def _mann_kendall_trend(
+        self,
+        y: np.ndarray,
+        threshold_tau: float = 0.1,
+        alpha: float = 0.05
+    ) -> str:
+        """
+        Detect monotonic trend using Mann-Kendall test.
+        
+        Mann-Kendall is non-parametric and robust to:
+        - Non-normal distributions
+        - Outliers  
+        - Missing values
+        - Serial correlation (with variance correction)
+        
+        The test computes Kendall's tau correlation between data and time.
+        
+        Reference:
+        - Mann (1945): Nonparametric tests against trend
+        - Kendall (1975): Rank Correlation Methods
+        
+        Args:
+            y: Time series values (chronological order)
+            threshold_tau: Minimum |tau| for practical significance (default 0.1)
+            alpha: Significance level (default 0.05)
+        
+        Returns:
+            'Increasing', 'Decreasing', 'Stable', or 'Unknown'
+        """
+        n = len(y)
+        if n < 8:
+            return 'Unknown'
+        
+        try:
+            from scipy.stats import kendalltau
+            
+            x = np.arange(n)
+            result = kendalltau(x, y)
+            tau = float(result.statistic) if hasattr(result, 'statistic') else float(result[0])
+            p_value = float(result.pvalue) if hasattr(result, 'pvalue') else float(result[1])
+            
+            # Check both statistical AND practical significance
+            if p_value < alpha and abs(tau) > threshold_tau:
+                return 'Increasing' if tau > 0 else 'Decreasing'
+            else:
+                return 'Stable'
+                
+        except Exception:
+            return 'Unknown'
 
 
 # ========================================================================
@@ -1740,51 +1815,19 @@ class RegimeConditionedForecaster:
         threshold_tau: float = 0.1,
         alpha: float = 0.05
     ) -> str:
-        """
-        Detect monotonic trend using Mann-Kendall test.
-        
-        Mann-Kendall is non-parametric and robust to:
-        - Non-normal distributions
-        - Outliers  
-        - Missing values
-        - Serial correlation (with variance correction)
-        
-        The test computes Kendall's tau correlation between data and time.
-        
-        Reference:
-        - Mann (1945): Nonparametric tests against trend
-        - Kendall (1975): Rank Correlation Methods
-        
-        Args:
-            y: Time series values (chronological order)
-            threshold_tau: Minimum |tau| for practical significance (default 0.1)
-            alpha: Significance level (default 0.05)
-        
-        Returns:
-            'Increasing', 'Decreasing', 'Stable', or 'Unknown'
-        """
+        """Detect monotonic trend using Mann-Kendall test (see ForecastEngine for full docs)."""
         n = len(y)
         if n < 8:
             return 'Unknown'
-        
         try:
             from scipy.stats import kendalltau
-            
             x = np.arange(n)
             result = kendalltau(x, y)
             tau = float(result.statistic) if hasattr(result, 'statistic') else float(result[0])
             p_value = float(result.pvalue) if hasattr(result, 'pvalue') else float(result[1])
-            
-            # Check both statistical AND practical significance
-            # This addresses the issue of tiny slopes being "statistically significant"
             if p_value < alpha and abs(tau) > threshold_tau:
-                if tau > 0:
-                    return 'Increasing' if 'health' not in str(type(self)).lower() else 'improving'
-                else:
-                    return 'Decreasing' if 'health' not in str(type(self)).lower() else 'degrading'
-            else:
-                return 'Stable'
-                
+                return 'improving' if tau > 0 else 'degrading'
+            return 'Stable'
         except Exception:
             return 'Unknown'
     

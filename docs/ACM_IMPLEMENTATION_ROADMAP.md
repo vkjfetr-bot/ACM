@@ -12,8 +12,8 @@
 
 | Category | Current | Target | Gap |
 |----------|---------|--------|-----|
-| **Tables in SQL** | 27 | 42 | **15 missing** |
-| **Tables with data** | 26 | 42 | 16 empty/missing |
+| **Tables in SQL** | 28 | 42 | **14 missing** |
+| **Tables with data** | 28 | 42 | 14 empty/missing |
 | **Helper functions extracted** | 22 | 30+ | 8 remaining |
 | **Phase functions** | 0 | 7 | Not started |
 | **acm_main.py lines** | ~4,900 | <300 | 93% reduction needed |
@@ -66,9 +66,9 @@
 | ACM_RUL | ✅ | 359 | ✅ | ✅ COMPLETE |
 | ACM_HealthForecast | ✅ | 91,056 | ✅ | ✅ COMPLETE |
 | ACM_FailureForecast | ✅ | 91,056 | ✅ | ✅ COMPLETE |
-| ACM_SensorForecast | ✅ | 0 | ✅ | ⚠️ Empty - investigate |
+| ACM_SensorForecast | ✅ | 1512 | ✅ | ✅ COMPLETE |
 
-**Status:** ⚠️ **3 of 4 COMPLETE, ACM_SensorForecast needs population**
+**Status:** ✅ **ALL 4 TABLES COMPLETE**
 
 ---
 
@@ -93,7 +93,7 @@
 |-------|-----------|------|---------------------------|--------|
 | ACM_BaselineBuffer | ✅ | 1,153,824 | ❌ Add | ✅ COMPLETE |
 | ACM_HistorianData | ✅ | 204,067 | ❌ Add | ✅ COMPLETE |
-| ACM_SensorNormalized_TS | ❌ | - | ❌ Add | ❌ CREATE TABLE |
+| ACM_SensorNormalized_TS | ✅ | 78,741 | ✅ Added | ✅ COMPLETE |
 | ACM_DataQuality | ✅ | 7,186 | ❌ Add | ✅ COMPLETE |
 | ACM_ForecastingState | ✅ | 6 | ❌ Add | ✅ COMPLETE |
 | ACM_CalibrationSummary | ❌ | - | ❌ Add | ❌ CREATE TABLE |
@@ -102,7 +102,7 @@
 | ACM_PCA_Metrics | ❌ | - | ❌ Add | ❌ CREATE TABLE |
 | ACM_RunMetadata | ✅ | 715 | ❌ Add | ✅ COMPLETE |
 
-**Status:** ⚠️ **7 of 10 EXIST - Need to create 3 tables**
+**Status:** ⚠️ **8 of 10 EXIST - Need to create 2 tables (CalibrationSummary, PCA_Metrics)**
 
 ---
 
@@ -253,7 +253,7 @@ CREATE TABLE dbo.ACM_EpisodeDiagnostics (
 ### Priority 2: TIER 4 Model Quality Tables (3 tables) - MEDIUM IMPACT
 
 **Tasks:**
-1. [ ] Create `ACM_SensorNormalized_TS` - For time-series analysis
+1. [x] Create `ACM_SensorNormalized_TS` - ✅ COMPLETE (78,741 rows)
 2. [ ] Create `ACM_CalibrationSummary` - Model quality over time
 3. [ ] Create `ACM_PCA_Metrics` - PCA component metrics (write_pca_metrics() exists but table missing)
 
@@ -372,7 +372,7 @@ WHERE Level IN ('ERROR','WARN') ORDER BY LoggedAt DESC"
 | 7 | V11 Features | 5 | 0 | ❌ 5 |
 | **TOTAL** | | **42** | **27** | **15** |
 
-### 15 Missing Tables (Sorted by Priority)
+### 14 Missing Tables (Sorted by Priority)
 
 **P1 - Root Cause (5):**
 1. ACM_EpisodeDiagnostics
@@ -381,10 +381,10 @@ WHERE Level IN ('ERROR','WARN') ORDER BY LoggedAt DESC"
 4. ACM_SensorCorrelations
 5. ACM_FeatureDropLog
 
-**P2 - Model Quality (3):**
-6. ACM_SensorNormalized_TS
-7. ACM_CalibrationSummary
-8. ACM_PCA_Metrics
+**P2 - Model Quality (2):**
+~~6. ACM_SensorNormalized_TS~~ ✅ COMPLETE
+6. ACM_CalibrationSummary
+7. ACM_PCA_Metrics
 
 **P3 - Advanced Analytics (5):**
 9. ACM_RegimeOccupancy
