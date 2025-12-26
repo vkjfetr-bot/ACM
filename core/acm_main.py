@@ -2806,6 +2806,222 @@ def _build_regime_episodes(
     })
 
 
+def _auto_tune_parameters(
+    frame: pd.DataFrame,
+    episodes: pd.DataFrame,
+    score_out: Dict[str, Any],
+    regime_quality_ok: bool,
+    cfg: Dict[str, Any],
+    sql_client: Any,
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str,
+    cached_manifest: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Perform autonomous parameter tuning based on model quality assessment.
+    
+    Evaluates model quality metrics (anomaly rate, drift score, regime quality) and
+    proposes parameter adjustments. Records tuning actions to ACM_ConfigHistory and
+    creates refit requests in ACM_RefitRequests when quality degrades.
+    
+    Args:
+        frame: Scored DataFrame with detector z-scores and fused output
+        episodes: Detected anomaly episodes
+        score_out: Score output dict with silhouette score etc.
+        regime_quality_ok: Whether regime clustering met quality threshold
+        cfg: Configuration dictionary
+        sql_client: SQL client for database writes
+        run_id: Current run identifier
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        cached_manifest: Optional cached model manifest for age checks
+    """
+    if not cfg.get("models", {}).get("auto_tune", True):
+        return
+    
+    try:
+        from core.model_evaluation import assess_model_quality
+        
+        # Build regime quality metrics
+        regime_quality_metrics = {
+            "silhouette": score_out.get("silhouette", 0.0),
+            "quality_ok": regime_quality_ok
+        }
+        
+        # Perform full quality assessment
+        should_retrain, reasons, quality_report = assess_model_quality(
+            scores=frame,
+            episodes=episodes,
+            regime_quality=regime_quality_metrics,
+            cfg=cfg,
+            cached_manifest=cached_manifest
+        )
+        
+        # Extract metrics for additional retrain triggers
+        auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+        if isinstance(auto_retrain_cfg, bool):
+            auto_retrain_cfg = {}
+        
+        # Check anomaly rate trigger
+        anomaly_rate_trigger = False
+        anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
+        current_anomaly_rate = anomaly_metrics.get("anomaly_rate", 0.0)
+        max_anomaly_rate = auto_retrain_cfg.get("max_anomaly_rate", 0.25)
+        if current_anomaly_rate > max_anomaly_rate:
+            anomaly_rate_trigger = True
+            if not should_retrain:
+                reasons = []
+            reasons.append(f"anomaly_rate={current_anomaly_rate:.2%} > {max_anomaly_rate:.2%}")
+            Console.warn(f"Anomaly rate {current_anomaly_rate:.2%} exceeds threshold {max_anomaly_rate:.2%}", 
+                        component="RETRAIN-TRIGGER", equip=equip, 
+                        anomaly_rate=round(current_anomaly_rate, 4), threshold=max_anomaly_rate)
+        
+        # Check drift score trigger
+        drift_score_trigger = False
+        drift_score = quality_report.get("metrics", {}).get("drift_score", 0.0)
+        max_drift_score = auto_retrain_cfg.get("max_drift_score", 2.0)
+        if drift_score > max_drift_score:
+            drift_score_trigger = True
+            if not should_retrain and not anomaly_rate_trigger:
+                reasons = []
+            reasons.append(f"drift_score={drift_score:.2f} > {max_drift_score:.2f}")
+            Console.warn(f"Drift score {drift_score:.2f} exceeds threshold {max_drift_score:.2f}", 
+                        component="RETRAIN-TRIGGER", equip=equip, 
+                        drift_score=round(drift_score, 2), threshold=max_drift_score)
+        
+        # Aggregate all retrain triggers
+        needs_retraining = should_retrain or anomaly_rate_trigger or drift_score_trigger
+        
+        if not needs_retraining:
+            Console.info(f"Model quality acceptable, no tuning needed", component="AUTO-TUNE")
+            return
+        
+        Console.warn(f"Quality degradation detected: {', '.join(reasons)}", component="AUTO-TUNE",
+                    equip=equip, reason_count=len(reasons))
+        
+        # Auto-tune parameters based on specific issues
+        tuning_actions = []
+        
+        # Issue 1: High detector saturation - Increase clip_z
+        detector_quality = quality_report.get("metrics", {}).get("detector_quality", {})
+        if detector_quality.get("max_saturation_pct", 0) > 5.0:
+            self_tune_cfg = cfg.get("thresholds", {}).get("self_tune", {})
+            raw_clip_z = self_tune_cfg.get("clip_z", 12.0)
+            try:
+                current_clip_z = float(raw_clip_z)
+            except (TypeError, ValueError):
+                current_clip_z = 12.0
+            
+            clip_caps = [
+                self_tune_cfg.get("max_clip_z"),
+                cfg.get("model_quality", {}).get("max_clip_z"),
+                50.0,
+            ]
+            clip_cap = max((float(c) for c in clip_caps if c is not None), default=50.0)
+            clip_cap = max(clip_cap, current_clip_z, 20.0)
+            
+            proposed_clip = round(current_clip_z * 1.2, 2)
+            if proposed_clip <= current_clip_z + 0.05:
+                proposed_clip = current_clip_z + 2.0
+            new_clip_z = min(proposed_clip, clip_cap)
+            
+            if new_clip_z > current_clip_z + 0.05:
+                tuning_actions.append(f"thresholds.self_tune.clip_z: {current_clip_z:.2f}->{new_clip_z:.2f}")
+            elif current_clip_z >= clip_cap - 0.05:
+                Console.warn(f"[AUTO-TUNE] Clip_z already at ceiling {clip_cap:.2f}")
+        
+        # Issue 2: High anomaly rate - Increase k_sigma
+        if anomaly_metrics.get("anomaly_rate", 0) > 0.10:
+            raw_k_sigma = cfg.get("episodes", {}).get("cpd", {}).get("k_sigma", 2.0)
+            try:
+                current_k = float(raw_k_sigma)
+            except (TypeError, ValueError):
+                current_k = 2.0
+            new_k = min(round(current_k * 1.1, 3), 4.0)
+            if new_k > current_k + 0.05:
+                tuning_actions.append(f"episodes.cpd.k_sigma: {current_k:.3f}->{new_k:.3f}")
+        
+        # Issue 3: Low regime quality - Increase k_max
+        regime_metrics = quality_report.get("metrics", {}).get("regime_metrics", {})
+        if regime_metrics.get("silhouette", 1.0) < 0.15:
+            auto_k_cfg = cfg.get("regimes", {}).get("auto_k", {})
+            raw_k_max = auto_k_cfg.get("k_max", cfg.get("regimes", {}).get("k_max", 8))
+            try:
+                current_k_max = int(raw_k_max)
+            except (TypeError, ValueError):
+                current_k_max = 8
+            new_k_max = min(current_k_max + 2, 12)
+            if new_k_max > current_k_max:
+                tuning_actions.append(f"regimes.auto_k.k_max: {current_k_max}->{int(new_k_max)}")
+        
+        if tuning_actions:
+            Console.info(f"Applied {len(tuning_actions)} parameter adjustments: {', '.join(tuning_actions)}", 
+                        component="AUTO-TUNE")
+            Console.info(f"Retraining required on next run to apply changes", component="AUTO-TUNE")
+            
+            # Log config changes to ACM_ConfigHistory
+            try:
+                if sql_client and run_id:
+                    trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False)
+                    log_auto_tune_changes(
+                        sql_client=sql_client,
+                        equip_id=int(equip_id),
+                        tuning_actions=tuning_actions,
+                        run_id=run_id,
+                        trigger_refit=trigger_refit_on_tune
+                    )
+                    if trigger_refit_on_tune:
+                        Console.info("on_tuning_change=True: refit request created", component="AUTO-TUNE")
+            except Exception as log_err:
+                Console.warn(f"Failed to log auto-tune changes: {log_err}", component="CONFIG_HIST",
+                            equip=equip, error=str(log_err)[:200])
+        else:
+            Console.info(f"No automatic parameter adjustments available", component="AUTO-TUNE")
+        
+        # Persist refit request for next run - SQL mode only
+        try:
+            if sql_client:
+                with sql_client.cursor() as cur:
+                    cur.execute("""
+                        IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
+                        BEGIN
+                            CREATE TABLE [dbo].[ACM_RefitRequests] (
+                                [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                                [EquipID] INT NOT NULL,
+                                [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                                [Reason] NVARCHAR(MAX) NULL,
+                                [AnomalyRate] FLOAT NULL,
+                                [DriftScore] FLOAT NULL,
+                                [ModelAgeHours] FLOAT NULL,
+                                [RegimeQuality] FLOAT NULL,
+                                [Acknowledged] BIT NOT NULL DEFAULT 0,
+                                [AcknowledgedAt] DATETIME2 NULL
+                            );
+                            CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
+                        END
+                    """)
+                    cur.execute("""
+                        INSERT INTO [dbo].[ACM_RefitRequests]
+                            (EquipID, Reason, AnomalyRate, DriftScore, RegimeQuality)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (
+                        int(equip_id),
+                        "; ".join(reasons),
+                        float(current_anomaly_rate) if anomaly_rate_trigger else None,
+                        float(drift_score) if drift_score_trigger else None,
+                        float(regime_metrics.get("silhouette", 0.0)),
+                    ))
+                Console.info("SQL refit request recorded in ACM_RefitRequests", component="MODEL")
+        except Exception as re:
+            Console.warn(f"Failed to write refit request: {re}", component="MODEL",
+                        equip=equip, error=str(re)[:200])
+    
+    except Exception as e:
+        Console.warn(f"Autonomous tuning failed: {e}", component="AUTO-TUNE",
+                    equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+
+
 def _write_sql_artifacts(
     output_manager: Any,
     frame: pd.DataFrame,
@@ -4571,227 +4787,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                          equip=equip)
 
         # ===== Autonomous Parameter Tuning: Update config based on quality =====
-        # Task 2: Wire assess_model_quality results into retrain decisions
-        # Now supports SQL mode with proper retrain triggering
-        if cfg.get("models", {}).get("auto_tune", True):
-            try:
-                from core.model_evaluation import assess_model_quality
-                
-                # Build regime quality metrics
-                regime_quality_metrics = {
-                    "silhouette": score_out.get("silhouette", 0.0),
-                    "quality_ok": regime_quality_ok
-                }
-                
-                # Perform full quality assessment now that we have scores and episodes
-                should_retrain, reasons, quality_report = assess_model_quality(
-                    scores=frame,
-                    episodes=episodes,
-                    regime_quality=regime_quality_metrics,
-                    cfg=cfg,
-                    cached_manifest=cached_manifest if 'cached_manifest' in locals() else None
-                )
-                
-                # Task 1: Extract metrics for additional retrain triggers
-                auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
-                if isinstance(auto_retrain_cfg, bool):
-                    auto_retrain_cfg = {}
-                
-                # Check anomaly rate trigger
-                anomaly_rate_trigger = False
-                anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
-                current_anomaly_rate = anomaly_metrics.get("anomaly_rate", 0.0)
-                max_anomaly_rate = auto_retrain_cfg.get("max_anomaly_rate", 0.25)
-                if current_anomaly_rate > max_anomaly_rate:
-                    anomaly_rate_trigger = True
-                    if not should_retrain:
-                        reasons = []
-                    reasons.append(f"anomaly_rate={current_anomaly_rate:.2%} > {max_anomaly_rate:.2%}")
-                    Console.warn(f"Anomaly rate {current_anomaly_rate:.2%} exceeds threshold {max_anomaly_rate:.2%}", component="RETRAIN-TRIGGER",
-                                 equip=equip, anomaly_rate=round(current_anomaly_rate, 4), threshold=max_anomaly_rate)
-                
-                # Check drift score trigger
-                drift_score_trigger = False
-                drift_score = quality_report.get("metrics", {}).get("drift_score", 0.0)
-                max_drift_score = auto_retrain_cfg.get("max_drift_score", 2.0)
-                if drift_score > max_drift_score:
-                    drift_score_trigger = True
-                    if not should_retrain and not anomaly_rate_trigger:
-                        reasons = []
-                    reasons.append(f"drift_score={drift_score:.2f} > {max_drift_score:.2f}")
-                    Console.warn(f"Drift score {drift_score:.2f} exceeds threshold {max_drift_score:.2f}", component="RETRAIN-TRIGGER",
-                                 equip=equip, drift_score=round(drift_score, 2), threshold=max_drift_score)
-                
-                # Aggregate all retrain triggers
-                needs_retraining = should_retrain or anomaly_rate_trigger or drift_score_trigger
-                
-                if needs_retraining:
-                    Console.warn(f"Quality degradation detected: {', '.join(reasons)}", component="AUTO-TUNE",
-                                 equip=equip, reason_count=len(reasons))
-                    
-                    # Auto-tune parameters based on specific issues
-                    tuning_actions = []
-                    
-                    # Issue 1: High detector saturation   Increase clip_z
-                    detector_quality = quality_report.get("metrics", {}).get("detector_quality", {})
-                    if detector_quality.get("max_saturation_pct", 0) > 5.0:
-                        self_tune_cfg = cfg.get("thresholds", {}).get("self_tune", {})
-                        raw_clip_z = self_tune_cfg.get("clip_z", 12.0)
-                        try:
-                            current_clip_z = float(raw_clip_z)
-                        except (TypeError, ValueError):
-                            current_clip_z = 12.0
-
-                        # Allow auto-tune to climb toward the same ceiling used during calibration (50 by default)
-                        clip_caps = [
-                            self_tune_cfg.get("max_clip_z"),
-                            cfg.get("model_quality", {}).get("max_clip_z"),
-                            50.0,
-                        ]
-                        clip_cap = 0.0
-                        for candidate in clip_caps:
-                            if candidate is None:
-                                continue
-                            try:
-                                clip_cap = max(clip_cap, float(candidate))
-                            except (TypeError, ValueError):
-                                continue
-                        clip_cap = max(clip_cap, current_clip_z, 20.0)
-
-                        proposed_clip = round(current_clip_z * 1.2, 2)
-                        if proposed_clip <= current_clip_z + 0.05:
-                            # Guard against stagnation when current clip already large
-                            proposed_clip = current_clip_z + 2.0
-
-                        new_clip_z = min(proposed_clip, clip_cap)
-
-                        if new_clip_z > current_clip_z + 0.05:
-                            # Config immutability: record proposed change only; do not mutate cfg in-run
-                            tuning_actions.append(f"thresholds.self_tune.clip_z: {current_clip_z:.2f}->{new_clip_z:.2f}")
-                        else:
-                            if current_clip_z >= clip_cap - 0.05:
-                                Console.warn(
-                                    f"[AUTO-TUNE] Clip_z already at ceiling {clip_cap:.2f} while saturation is {detector_quality.get('max_saturation_pct'):.1f}%"
-                                )
-                            else:
-                                Console.info("Clip limit already near target, no change applied", component="AUTO-TUNE")
-                    
-                    # Issue 2: High anomaly rate   Increase k_sigma/h_sigma
-                    anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
-                    if anomaly_metrics.get("anomaly_rate", 0) > 0.10:
-                        raw_k_sigma = cfg.get("episodes", {}).get("cpd", {}).get("k_sigma", 2.0)
-                        try:
-                            current_k = float(raw_k_sigma)
-                        except (TypeError, ValueError):
-                            current_k = 2.0
-                        new_k = min(round(current_k * 1.1, 3), 4.0)  # Increase by 10%, cap at 4.0
-                        if new_k > current_k + 0.05:
-                            # Config immutability: record proposed change only; do not mutate cfg in-run
-                            tuning_actions.append(f"episodes.cpd.k_sigma: {current_k:.3f}->{new_k:.3f}")
-                        else:
-                            Console.info("k_sigma already increased recently, skipping change", component="AUTO-TUNE")
-                    
-                    # Issue 3: Low regime quality   Increase k_max
-                    regime_metrics = quality_report.get("metrics", {}).get("regime_metrics", {})
-                    if regime_metrics.get("silhouette", 1.0) < 0.15:
-                        auto_k_cfg = cfg.get("regimes", {}).get("auto_k", {})
-                        raw_k_max = auto_k_cfg.get("k_max", cfg.get("regimes", {}).get("k_max", 8))
-                        try:
-                            current_k_max = int(raw_k_max)
-                        except (TypeError, ValueError):
-                            try:
-                                current_k_max = int(float(raw_k_max))
-                            except Exception:
-                                current_k_max = 8
-                        new_k_max = min(current_k_max + 2, 12)  # Increase by 2, cap at 12
-                        if new_k_max > current_k_max:
-                            # Config immutability: record proposed change only; do not mutate cfg in-run
-                            tuning_actions.append(f"regimes.auto_k.k_max: {current_k_max}->{int(new_k_max)}")
-                        else:
-                            Console.info("k_max already at configured ceiling, no change applied", component="AUTO-TUNE")
-                    
-                    if tuning_actions:
-                        Console.info(f"Applied {len(tuning_actions)} parameter adjustments: {', '.join(tuning_actions)}", component="AUTO-TUNE")
-                        Console.info(f"Retraining required on next run to apply changes", component="AUTO-TUNE")
-                        
-                        # Log config changes to ACM_ConfigHistory
-                        # Task 9: Check if auto_retrain.on_tuning_change is enabled to trigger refit
-                        try:
-                            if sql_client and run_id:
-                                auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
-                                trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False)
-                                
-                                log_auto_tune_changes(
-                                    sql_client=sql_client,
-                                    equip_id=int(equip_id),
-                                    tuning_actions=tuning_actions,
-                                    run_id=run_id,
-                                    trigger_refit=trigger_refit_on_tune
-                                )
-                                
-                                if trigger_refit_on_tune:
-                                    Console.info("on_tuning_change=True: refit request created to apply config changes", component="AUTO-TUNE")
-                        except Exception as log_err:
-                            Console.warn(f"Failed to log auto-tune changes: {log_err}", component="CONFIG_HIST",
-                                         equip=equip, error=str(log_err)[:200])
-                    else:
-                        Console.info(f"No automatic parameter adjustments available", component="AUTO-TUNE")
-
-                    # Persist refit marker/request for next run - SQL mode only
-                    try:
-                        # SQL mode: write to ACM_RefitRequests
-                        if sql_client:
-                            with sql_client.cursor() as cur:
-                                cur.execute(
-                                    """
-                                    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
-                                    BEGIN
-                                        CREATE TABLE [dbo].[ACM_RefitRequests] (
-                                            [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                                            [EquipID] INT NOT NULL,
-                                            [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-                                            [Reason] NVARCHAR(MAX) NULL,
-                                            [AnomalyRate] FLOAT NULL,
-                                            [DriftScore] FLOAT NULL,
-                                            [ModelAgeHours] FLOAT NULL,
-                                            [RegimeQuality] FLOAT NULL,
-                                            [Acknowledged] BIT NOT NULL DEFAULT 0,
-                                            [AcknowledgedAt] DATETIME2 NULL
-                                        );
-                                        CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
-                                    END
-                                    """
-                                )
-                                cur.execute(
-                                    """
-                                    INSERT INTO [dbo].[ACM_RefitRequests]
-                                        (EquipID, Reason, AnomalyRate, DriftScore, ModelAgeHours, RegimeQuality)
-                                    VALUES
-                                        (?, ?, ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        int(equip_id),
-                                        "; ".join(reasons),
-                                        float(current_anomaly_rate) if anomaly_rate_trigger else None,
-                                        float(drift_score) if drift_score_trigger else None,
-                                        float(model_age_hours) if 'model_age_hours' in locals() else None,
-                                        float(regime_metrics.get("silhouette", 0.0)) if 'regime_metrics' in locals() else None,
-                                    ),
-                                )
-                            Console.info("SQL refit request recorded in ACM_RefitRequests", component="MODEL")
-                        else:
-                            Console.warn("SQL client unavailable; cannot write refit request", component="MODEL",
-                                         equip=equip)
-                    except Exception as re:
-                        Console.warn(f"Failed to write refit request: {re}", component="MODEL",
-                                     equip=equip, error=str(re)[:200])
-                
-                else:
-                    Console.info(f"Model quality acceptable, no tuning needed", component="AUTO-TUNE")
-                    
-            except Exception as e:
-                Console.warn(f"Autonomous tuning failed: {e}", component="AUTO-TUNE",
-                             equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+        # REFACTOR v11: Extracted to _auto_tune_parameters() helper
+        _auto_tune_parameters(
+            frame=frame,
+            episodes=episodes,
+            score_out=score_out,
+            regime_quality_ok=regime_quality_ok,
+            cfg=cfg,
+            sql_client=sql_client,
+            run_id=run_id,
+            equip_id=equip_id,
+            equip=equip,
+            cached_manifest=cached_manifest if 'cached_manifest' in locals() else None,
+        )
 
         if reuse_models:
                 # MHAL removed from cache_payload v9.1.0
