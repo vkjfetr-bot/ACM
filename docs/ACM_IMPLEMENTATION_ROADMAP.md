@@ -175,18 +175,23 @@
 21. Context dataclasses (RuntimeContext, DataContext, etc.)
 22. Additional utility helpers
 
-### Remaining Helper Extractions (2 more) - Updated Dec 26
+### Remaining Helper Extractions - COMPLETE (Dec 26)
 
 | Helper | Location | Lines | Priority | Status |
 |--------|----------|-------|----------|--------|
 | `_build_features()` | 2395 | ~60 | Medium | ✅ DONE |
 | `_impute_features()` | 2456 | ~55 | Low | ✅ DONE |
-| `_seed_baseline()` | 2850-2950 | ~100 | Medium | ⏳ Not Started |
-| `_build_drift_ts()` | 2510 | ~28 | Low | ✅ DONE |
-| `_build_anomaly_events()` | 2538 | ~25 | Low | ✅ DONE |
-| `_build_regime_episodes()` | 2563 | ~26 | Low | ✅ DONE |
+| `_seed_baseline()` | 2543 | ~120 | Medium | ✅ DONE |
+| `_build_drift_ts()` | 2665 | ~28 | Low | ✅ DONE |
+| `_build_anomaly_events()` | 2693 | ~25 | Low | ✅ DONE |
+| `_build_regime_episodes()` | 2718 | ~26 | Low | ✅ DONE |
 | `_write_sensor_defects()` | output_manager.py:3332 | N/A | High | ✅ Already exists |
-| `_write_regime_analytics()` | Various | ~80 | Medium | ⏳ Not Started |
+| `_write_regime_analytics()` | N/A | N/A | Medium | ✅ Already factored (uses existing helpers) |
+
+**Note**: `_write_regime_analytics()` was conceptual - regime writes already use factored helpers:
+- `_build_regime_timeline()` for ACM_RegimeTimeline
+- `output_manager.write_regime_episodes()` for ACM_RegimeEpisodes  
+- `regimes.build_summary_dataframe()` for regime_summary
 
 ### Phase Functions (Not Started - Wave 4)
 
