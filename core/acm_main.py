@@ -4895,58 +4895,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         rows_read = int(score.shape[0])
         anomaly_count = int(len(episodes))
         
-        # Check if dual-write mode is enabled (write to both file and SQL)
-        dual_mode = cfg.get("output", {}).get("dual_mode", False)
-        
         # SQL-only persistence
         with T.section("persist"):
             # Use unified OutputManager for persistence
             with T.section("persist.write_scores"):
                 try:
                     output_manager.write_scores(frame)
-                    
-                    # Build schema dict for metadata (not written to file in SQL-only mode)
-                    try:
-                        schema_dict = {
-                            "file": "scores.csv",
-                            "description": "ACM anomaly scores with detector outputs and fusion results",
-                            "timestamp_column": "index" if frame.index.name is None else frame.index.name,
-                            "columns": []
-                        }
-                        
-                        # Document each column with name, dtype, and description
-                        for col in frame.columns:
-                            col_info = {
-                                "name": str(col),
-                                "dtype": str(frame[col].dtype),
-                                "nullable": bool(frame[col].isnull().any())
-                            }
-                            
-                            # Add semantic descriptions based on column name patterns
-                            if col.endswith("_raw"):
-                                col_info["description"] = f"Raw anomaly score from {col.replace('_raw', '')} detector"
-                            elif col.endswith("_z"):
-                                col_info["description"] = f"Calibrated z-score from {col.replace('_z', '')} detector"
-                            elif col == "fused":
-                                col_info["description"] = "Weighted fusion of all detector z-scores"
-                            elif col == "alert_level":
-                                col_info["description"] = "Alert severity: NORMAL, CAUTION, or FAULT"
-                            elif col == "alert_mode":
-                                col_info["description"] = "Alert mode based on threshold exceedance"
-                            elif col == "regime_label":
-                                col_info["description"] = "Operating regime cluster label (0-based)"
-                            elif col == "regime_state":
-                                col_info["description"] = "Regime health state: healthy, suspect, or critical"
-                            elif col == "episode_id":
-                                col_info["description"] = "Episode identifier for anomaly periods (NaN outside episodes)"
-                            else:
-                                col_info["description"] = f"Column {col}"
-                            
-                            schema_dict["columns"].append(col_info)
-                    except Exception as se:
-                        Console.warn(f"Failed to build schema dict: {se}", component="IO",
-                                     equip=equip, error=str(se)[:200])
-                        
                 except Exception as we:
                     Console.warn(f"Failed to write scores via OutputManager: {we}", component="IO",
                                  equip=equip, run_id=run_id, error=str(we)[:200])
