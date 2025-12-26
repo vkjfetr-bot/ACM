@@ -10,9 +10,9 @@
 
 | Metric | Current | Target | Status |
 |--------|---------|--------|--------|
-| acm_main.py lines | 5,321 | <500 | ⏳ 90% reduction needed |
-| Helper functions | 30 extracted | 30 | ✅ Complete |
-| Phase functions | 0 | 7 | ⏳ Not started |
+| acm_main.py lines | 5,099 | <500 | ⏳ 90% reduction needed |
+| Helper functions | 43 extracted | 43 | ✅ Complete |
+| Phase functions | 2 of 7 | 7 | ⏳ In progress |
 | SQL tables with data | 35+ | 42 | ⏳ 13 empty tables |
 
 ---
@@ -29,7 +29,8 @@ Extract 7 phase functions to transform `run_acm_pipeline()` from ~3,000 lines to
 | 4 | `_phase_label_regimes()` | ~262 | Operating regime detection | ⏳ |
 | 5 | `_phase_calibrate()` | ~174 | Calibrate detector outputs | ⏳ |
 | 6 | `_phase_fuse_and_episodes()` | ~650 | Multi-detector fusion, episodes | ⏳ |
-| 7 | `_phase_persist_results()` | ~490 | Write all outputs to SQL | ⏳ |
+| 7 | `_write_sql_artifacts()` | ~120 | SQL artifact writes | ✅ Done |
+| - | `_auto_tune_parameters()` | ~210 | Autonomous parameter tuning | ✅ Done |
 
 **Target Structure:**
 ```python
