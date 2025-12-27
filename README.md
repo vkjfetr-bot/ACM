@@ -1,12 +1,21 @@
-# ACM V10 - Autonomous Asset Condition Monitoring
+# ACM V11 - Autonomous Asset Condition Monitoring
 
-ACM V10 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, predictive forecasting, and flexible outputs so that engineers can understand what is changing, when it started, which sensors or regimes are responsible, and what will happen next.
+ACM V11 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, predictive forecasting, and flexible outputs so that engineers can understand what is changing, when it started, which sensors or regimes are responsible, and what will happen next.
 
-**Current Version:** v10.3.0 - Consolidated Observability Stack (OpenTelemetry + structlog + Pyroscope)
+**Current Version:** v11.0.0 - Production Release with Typed Contracts & Maturity Lifecycle
 
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
 ### Recent Updates (Dec 2025)
+- **v11.0.0**: Major architecture refactor with typed contracts and lifecycle management:
+  - **DataContract Validation**: Entry-point validation ensures data quality before processing
+  - **Seasonality Detection**: Diurnal/weekly pattern detection (7 daily patterns detected)
+  - **Asset Similarity**: Cold-start transfer learning using similar equipment profiles
+  - **SQL Performance**: Deprecated ACM_Scores_Long, batched DELETEs for 44K+ row savings
+  - **New SQL Tables**: ACM_ActiveModels, ACM_RegimeDefinitions, ACM_DataContractValidation, ACM_SeasonalPatterns, ACM_AssetProfiles, ACM_FeatureDropLog
+  - **Grafana Dashboards**: 9 production dashboards with comprehensive equipment health monitoring
+  - **Refactoring Complete**: 43 helper functions extracted, V11 features verified with 5-day batch test
+
 - **v10.3.0**: Consolidated observability stack with unified `core/observability.py` module:
   - **OpenTelemetry Traces**: Distributed tracing to Tempo via OTLP (localhost:4318)
   - **OpenTelemetry Metrics**: Prometheus metrics (counters, histograms, gauges) scraped at localhost:8000
@@ -14,12 +23,15 @@ For a complete, implementation-level walkthrough (architecture, modules, configs
   - **Profiling**: Grafana Pyroscope continuous profiling (localhost:4040)
   - **Grafana Dashboards**: `acm_observability.json` for traces/logs/metrics visualization
   - **Console API**: Unified `Console.info/warn/error/ok/status/header` replacing legacy loggers
-  - **Timer Integration**: `utils/timer.py` emits spans + Prometheus histograms
-  - See `docs/OBSERVABILITY.md` and `install/observability/README.md` for setup
-- **v10.2.0**: Mahalanobis detector deprecated - was mathematically redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable. Simplified to 6 active detectors.
-- Forecast/RUL work is in `core/forecast_engine.py` and the new degradation/RUL stack.
-- SQL historian sample for FD_FAN is time-shifted (2023-10-15 → 2025-09-14). Set Grafana ranges accordingly.
-- **Scripts cleanup**: Single-purpose analysis/check/debug scripts archived to `scripts/archive/`. Schema updater script remains: `scripts/sql/export_comprehensive_schema.py`.
+- **v10.2.0**: Mahalanobis detector deprecated - was mathematically redundant with PCA-T² (both compute Mahalanobis distance). Simplified to 6 active detectors.
+
+### v11.0.0 Release Highlights
+- **📋 DataContract Validation**: Input data validated at pipeline entry (timestamps, duplicates, cadence) via `core/pipeline_types.py`
+- **🌡️ Seasonality Detection**: Diurnal/weekly patterns detected and adjusted - 7 daily patterns found in 5-day batch test
+- **🔗 Asset Similarity**: Cold-start transfer learning using similar equipment profiles in `core/asset_similarity.py`
+- **📊 6 New V11 SQL Tables**: ACM_DataContractValidation, ACM_RegimeDefinitions, ACM_ActiveModels, ACM_AssetProfiles, ACM_SeasonalPatterns, ACM_FeatureDropLog
+- **🎨 9 Grafana Dashboards**: Comprehensive equipment health, forecasting, fleet overview, operations, behavior, observability
+- **🔧 43 Helper Functions Extracted**: Improved code organization with context dataclasses
 
 ### v10.0.0 Release Highlights
 - **🚀 Continuous Forecasting with Exponential Blending**: Health forecasts now evolve smoothly across batch runs using exponential temporal blending (tau=12h), eliminating per-batch duplication in Grafana dashboards. Single continuous forecast line per equipment with automatic state persistence and version tracking (v807→v813 validated).

@@ -18,7 +18,7 @@ Release Management:
 """
 
 __version__ = "11.0.0"
-__version_date__ = "2025-12-22"  # v11.0.0: Major Refactor - ONLINE/OFFLINE split, Regime versioning, Detector protocols
+__version_date__ = "2025-12-27"  # v11.0.0: Production release - V11 features complete (DataContract, Seasonality, AssetProfile)
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))

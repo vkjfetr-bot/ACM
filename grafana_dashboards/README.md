@@ -2,18 +2,25 @@
 
 This folder contains production-ready Grafana dashboards for the ACM (Autonomous Condition Monitoring) system.
 
-## Architecture: Two Dashboard Strategy
+## Dashboard Inventory (v11.0.0)
 
-ACM uses a streamlined two-dashboard approach:
+ACM includes 9 production dashboards organized by purpose:
 
-1. **User-Facing Story Dashboard** - Visual storytelling for asset health and failure prediction
-2. **Operations Monitor** - Technical performance monitoring for ACM administrators
-
-All legacy dashboards have been archived to `archive/` folder.
+| Dashboard | Lines | Purpose | Audience |
+|-----------|-------|---------|----------|
+| `acm_comprehensive_equipment_health.json` | 606 | All-in-one health monitoring | Operators, Reliability Engineers |
+| `acm_asset_story.json` | 889 | Visual storytelling for asset health | Plant Operators, Asset Managers |
+| `acm_behavior.json` | 986 | Detector behavior analysis | Data Scientists, Analysts |
+| `acm_fleet_overview.json` | 656 | Multi-asset fleet summary | Fleet Managers |
+| `acm_forecasting.json` | 837 | RUL and health predictions | Reliability Engineers |
+| `acm_observability.json` | 2,932 | Traces, logs, metrics | DevOps, System Admins |
+| `acm_operations_monitor.json` | 845 | System performance | ACM Administrators |
+| `acm_performance_monitor.json` | 925 | Execution timing details | Performance Engineers |
+| `import_payload.json` | 2,892 | Dashboard import utility | Administrators |
 
 ---
 
-## Available Dashboards
+## Primary Dashboards
 
 ### 1. ACM Asset Story (`acm_asset_story.json`)
 
@@ -123,6 +130,8 @@ Legacy dashboards are preserved in `archive/` for reference. These are no longer
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 11.0.0 | Dec 2025 | 9 dashboards, comprehensive equipment health added |
+| 10.3.0 | Dec 2025 | Observability dashboard with OTEL integration |
 | 10.2.0 | 2025 | Two-dashboard architecture: Asset Story + Operations Monitor |
 | 10.0.0 | 2025 | MHAL detector removed, 6-detector architecture |
 | 9.x | 2024 | Multiple dashboard iterations, schema stabilization |
