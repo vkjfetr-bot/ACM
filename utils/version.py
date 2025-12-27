@@ -18,7 +18,7 @@ Release Management:
 """
 
 __version__ = "11.0.0"
-__version_date__ = "2025-12-27"  # v11.0.0: Production release - V11 features complete (DataContract, Seasonality, AssetProfile)
+__version_date__ = "2025-12-27"  # v11.0.0: Code cleanup (21% dead code removed), DataContract fail-fast validation
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))
@@ -88,66 +88,53 @@ def format_version_for_output(context=""):
     return get_version_string()
 
 
-# v11.0.0 Release Notes (from v10.x)
+# v11.0.0 Release Notes (from v10.x) - UPDATED 2025-12-27
 RELEASE_NOTES_V11 = """
-ACM v11.0.0 - MAJOR RELEASE: Pipeline Architecture Overhaul (2025-12-22)
+ACM v11.0.0 - MAJOR RELEASE: Code Cleanup & DataContract Validation (2025-12-27)
 
 BREAKING CHANGES:
-  ⚠ Pipeline split into ONLINE (assignment-only) and OFFLINE (discovery) modes
-  ⚠ Regime system refactored with versioning and maturity states
-  ⚠ Detector API standardized with DetectorProtocol ABC
-  ⚠ Episodes become the sole alerting primitive (point anomalies deprecated)
-  ⚠ SQL schema additions for 19 new tables
-  ⚠ No backward compatibility with v10.x regime data without migration
+  ⚠ 23 unused modules deleted (21% codebase reduction)
+  ⚠ DataContract validation now FAILS FAST on errors (previously just warned)
+  ⚠ Seasonality detection runs but adjustment NOT INTEGRATED
+  ⚠ Asset similarity profiles built but NOT USED for transfer learning
 
-ARCHITECTURE OVERHAUL (50 Execution Items):
-  Phase 1 - Core Architecture:
-    ✓ PipelineMode enum (ONLINE, OFFLINE) with stage gating
-    ✓ DataContract class for input validation (timestamps, duplicates, cadence)
-    ✓ FeatureMatrix standardized schema across all detectors
-    ✓ Hardened OutputManager with strict schema guards
-    ✓ Idempotent SQL writes via MERGE statements
+DEAD CODE REMOVAL (23 modules, ~8,900 lines deleted):
+  Tier 5 - Orphaned modules with ZERO imports (14 modules, ~5,469 lines):
+    ✗ baseline_normalizer.py, baseline_policy.py, calibrated_fusion.py
+    ✗ confidence_model.py, decision_policy.py, drift_controller.py
+    ✗ episode_manager.py, health_state.py, maintenance_events.py
+    ✗ forecast_diagnostics.py, rul_common.py, rul_reliability.py
+    ✗ sql_performance.py, sql_protocol.py
 
-  Phase 2 - Regime System:
-    ✓ ACM_ActiveModels pointer table for production model tracking
-    ✓ ACM_RegimeDefinitions with immutable versioned storage
-    ✓ MaturityState gating (INITIALIZING → LEARNING → CONVERGED → DEPRECATED)
-    ✓ UNKNOWN (-1) and EMERGING (-2) regime labels
-    ✓ Confidence-gated normalization and thresholds
-    ✓ Offline historical replay for regime discovery
-    ✓ Promotion procedure with acceptance criteria
+  Tier 4 - v11 modules never integrated (8 modules, ~3,420 lines):
+    ✗ feature_matrix.py, detector_protocol.py, regime_manager.py
+    ✗ regime_definitions.py, regime_evaluation.py, regime_promotion.py
+    ✗ table_schemas.py, pipeline_instrumentation.py
+    ✗ scripts/offline_replay.py (depended on deleted modules)
 
-  Phase 3 - Detector/Fusion:
-    ✓ DetectorProtocol ABC with fit_baseline/score contract
-    ✓ Train-score separation (batch cannot influence own score)
-    ✓ Calibrated fusion with detector disagreement handling
-    ✓ Per-run fusion quality diagnostics
+DATA QUALITY (IMPROVED):
+  ✓ DataContract validation at pipeline entry
+  ✓ FAIL FAST on validation errors (raises ValueError instead of warning)
+  ✓ Validation results written to ACM_DataContractValidation table
+  ✓ Warnings logged for non-critical issues
 
-  Phase 4 - Health/Episode/RUL:
-    ✓ Episodes as sole alerting primitive
-    ✓ Time-evolving health state with HealthConfidence
-    ✓ RUL reliability gate (RUL_NOT_RELIABLE outcome)
-    ✓ Unified confidence model across all outputs
+WHAT WORKS (from v10.x, unchanged):
+  ✓ Multi-detector anomaly detection (AR1, PCA-SPE, PCA-T², IForest, GMM, OMR)
+  ✓ Per-regime calibrated thresholds
+  ✓ Episode detection and diagnostics
+  ✓ Health scoring (0-100% index)
+  ✓ RUL forecasting with Monte Carlo (P10/P50/P90 confidence bounds)
+  ✓ Physical sensor forecasting (top 10 sensors, 7-day horizon)
+  ✓ Full observability stack (OTEL traces, Prometheus metrics, Loki logs, Pyroscope profiling)
 
-  Phase 5 - Operational:
-    ✓ Drift/novelty control plane with triggers (fully automated)
-    ✓ Alert fatigue controls (rate limits, escalation ladders)
-    ✓ Episode clustering for pattern mining
-    ✓ Experiment tracking and configuration versioning
+PARTIAL INTEGRATIONS (detect but don't use):
+  ⚠ seasonality.py: Detects diurnal/weekly patterns but DOES NOT adjust data
+  ⚠ asset_similarity.py: Builds profiles but DOES NOT query for cold-start transfer
 
-NEW SQL TABLES (19):
-  - ACM_SensorValidity, ACM_MaintenanceEvents, ACM_PipelineMetrics
-  - ACM_FeatureMatrix, ACM_ActiveModels, ACM_RegimeDefinitions
-  - ACM_RegimeMetrics, ACM_RegimePromotionLog, ACM_FusionQuality
-  - ACM_DetectorCorrelation, ACM_ForecastDiagnostics, ACM_NoveltyPressure
-  - ACM_DriftEvents, ACM_BaselinePolicy, ACM_DecisionOutput
-  - ACM_EpisodeFamilies, ACM_ExperimentLog
-  - ACM_ModelDeprecationLog
-
-MIGRATION REQUIRED:
-  - Run scripts/sql/migrations/v11_schema.sql before first v11 run
-  - Regime data requires reprocessing with offline_replay.py
-  - Model registry compatible with forward migration only
+CODEBASE HEALTH:
+  Before cleanup: 42,307 lines (74.7% active)
+  After cleanup:  33,418 lines (94.7% active)
+  Improvement: 21% dead code removed
 """
 
 # v10.0.0 Release Notes (from v9.0.0)

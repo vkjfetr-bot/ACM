@@ -3695,8 +3695,25 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 )
                 validation = contract.validate(score)
                 if not validation.passed:
-                    Console.warn(f"DataContract validation issues: {validation.issues}", component="DATA",
-                                equip=equip, run_id=run_id, issues=validation.issues)
+                    # v11.0.0: Fail fast on DataContract validation errors
+                    error_msg = f"DataContract validation FAILED: {validation.issues}"
+                    Console.error(error_msg, component="DATA", equip=equip, run_id=run_id, issues=validation.issues)
+                    # Write validation result before failing
+                    if output_manager:
+                        try:
+                            import json as _json_early
+                            sig = contract.signature() if hasattr(contract, 'signature') and callable(contract.signature) else None
+                            output_manager.write_data_contract_validation({
+                                'Passed': False,
+                                'RowsValidated': len(score),
+                                'ColumnsValidated': len(score.columns),
+                                'IssuesJSON': _json_early.dumps(validation.issues) if validation.issues else None,
+                                'WarningsJSON': _json_early.dumps(validation.warnings) if validation.warnings else None,
+                                'ContractSignature': sig,
+                            })
+                        except Exception:
+                            pass  # Best effort - don't mask the real error
+                    raise ValueError(error_msg)
                 if validation.warnings:
                     for w in validation.warnings[:3]:  # Limit warning spam
                         Console.info(f"DataContract warning: {w}", component="DATA")
@@ -3766,6 +3783,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              error=str(be))
 
         # ===== v11.0.0: Seasonality Detection (P5.9) =====
+        # NOTE: This detects seasonal patterns and writes them to ACM_SeasonalPatterns table,
+        # but the patterns are NOT USED for adjustment. Future work: subtract seasonal component
+        # from sensor data before anomaly detection to reduce false positives.
         seasonal_patterns: Dict[str, List[SeasonalPattern]] = {}
         with T.section("seasonality.detect"):
             try:
@@ -3782,7 +3802,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         seasonal_patterns = handler.detect_patterns(temp_df, sensor_cols, 'Timestamp')
                         if seasonal_patterns:
                             pattern_count = sum(len(ps) for ps in seasonal_patterns.values())
-                            Console.info(f"Detected {pattern_count} seasonal patterns in {len(seasonal_patterns)} sensors",
+                            Console.info(f"Detected {pattern_count} seasonal patterns in {len(seasonal_patterns)} sensors (detection only, not adjusted)",
                                         component="SEASON", equip=equip, pattern_count=pattern_count,
                                         sensors_with_patterns=len(seasonal_patterns))
             except Exception as se:
@@ -5109,6 +5129,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 sensor_context = None
 
         # ===== v11.0.0: Asset Profile Building (P5.10) =====
+        # NOTE: This builds asset profiles and writes them to ACM_AssetProfiles table,
+        # but profiles are NOT QUERIED for cold-start transfer learning. Future work:
+        # find similar equipment profiles and use their models to seed new equipment.
         asset_profile: Optional[AssetProfile] = None
         with T.section("asset.profile"):
             try:
@@ -5146,7 +5169,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             typical_health=85.0,  # Default; updated if health computed
                             data_hours=data_hours
                         )
-                        Console.debug(f"Built asset profile: {len(sensor_cols)} sensors, {data_hours:.1f} hours, {regime_count} regimes",
+                        Console.debug(f"Built asset profile: {len(sensor_cols)} sensors, {data_hours:.1f} hours, {regime_count} regimes (profile stored, not used for transfer learning)",
                                      component="PROFILE", equip=equip, sensors=len(sensor_cols))
             except Exception as pe:
                 Console.debug(f"Asset profile building skipped: {pe}", component="PROFILE",
