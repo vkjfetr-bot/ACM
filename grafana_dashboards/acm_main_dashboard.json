@@ -508,7 +508,7 @@
           "datasource": { "type": "mssql", "uid": "${datasource}" },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n    Timestamp AS time,\n    RegimeID AS 'Regime',\n    'metric' AS metric\nFROM ACM_RegimeTimeline\nWHERE EquipID = $equipment\n  AND Timestamp BETWEEN $__timeFrom() AND $__timeTo()\nORDER BY time ASC",
+          "rawSql": "SELECT \n    Timestamp AS time,\n    RegimeLabel AS 'Regime',\n    'metric' AS metric\nFROM ACM_RegimeTimeline\nWHERE EquipID = $equipment\n  AND Timestamp BETWEEN $__timeFrom() AND $__timeTo()\nORDER BY time ASC",
           "refId": "A"
         }
       ],
