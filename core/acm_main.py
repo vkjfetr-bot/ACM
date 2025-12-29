@@ -173,6 +173,19 @@ except ImportError:
 # Console is now imported above from core.observability
 from core.observability import Console
 
+# V11: Model lifecycle management
+from core.model_lifecycle import (
+    MaturityState,
+    ModelState,
+    PromotionCriteria,
+    check_promotion_eligibility,
+    promote_model,
+    create_new_model_state,
+    update_model_state_from_run,
+    get_active_model_dict,
+    load_model_state_from_sql,
+)
+
 # =============================================================================
 # Pipeline Context Classes (v11.0.0)
 # These dataclasses provide structured data flow between pipeline phases
@@ -4532,19 +4545,65 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     run_id=run_id,
                 )
                 
-                # v11: Write active models state to ACM_ActiveModels
-                if output_manager:
+                # v11: Model lifecycle management - track maturity and check promotion
+                if output_manager and sql_client:
                     try:
-                        output_manager.write_active_models({
-                            'ActiveRegimeVersion': regime_state_version if 'regime_state_version' in dir() else None,
-                            'RegimeMaturityState': 'CONVERGED' if regime_quality_ok else 'LEARNING',
-                            'RegimePromotedAt': datetime.now() if regime_quality_ok else None,
-                            'ActiveThresholdVersion': None,  # Future: threshold versioning
-                            'ActiveForecastVersion': None,   # Future: forecast model versioning
-                        })
-                        Console.info("Updated active models state", component="MODEL")
+                        # Get training window from data for lifecycle tracking
+                        train_start = train.index.min() if hasattr(train.index, 'min') else datetime.now()
+                        train_end = train.index.max() if hasattr(train.index, 'max') else datetime.now()
+                        
+                        # Get silhouette score from regime model if available
+                        silhouette = None
+                        if regime_model is not None and hasattr(regime_model, 'meta'):
+                            silhouette = regime_model.meta.get('fit_score')
+                        
+                        # Load existing state or create new
+                        model_state = load_model_state_from_sql(sql_client, equip_id)
+                        
+                        if model_state is None:
+                            # First time - create new state in LEARNING
+                            version = regime_state_version if 'regime_state_version' in dir() else 1
+                            model_state = create_new_model_state(
+                                equip_id=int(equip_id),
+                                version=version,
+                                training_rows=len(train),
+                                training_start=train_start,
+                                training_end=train_end,
+                                silhouette_score=silhouette,
+                                run_id=run_id,
+                            )
+                        else:
+                            # Update existing state
+                            training_days = (train_end - train_start).total_seconds() / 86400.0
+                            model_state = update_model_state_from_run(
+                                state=model_state,
+                                run_id=run_id,
+                                run_success=True,
+                                silhouette_score=silhouette,
+                                stability_ratio=1.0 if regime_quality_ok else 0.5,  # Simplified for now
+                                additional_rows=len(train),
+                                additional_days=training_days,
+                            )
+                            
+                            # Check promotion eligibility if still LEARNING
+                            if model_state.maturity == MaturityState.LEARNING:
+                                eligible, unmet = check_promotion_eligibility(model_state)
+                                if eligible:
+                                    model_state = promote_model(model_state)
+                                    Console.ok(f"Model promoted to CONVERGED", component="LIFECYCLE")
+                                else:
+                                    Console.info(f"Model not yet eligible for promotion: {unmet}", component="LIFECYCLE")
+                        
+                        # Write updated state
+                        output_manager.write_active_models(get_active_model_dict(
+                            model_state,
+                            regime_version=regime_state_version if 'regime_state_version' in dir() else None,
+                        ))
+                        Console.info(f"Model state: {model_state.maturity.value}", component="LIFECYCLE",
+                                     version=model_state.version, consecutive_runs=model_state.consecutive_runs)
                     except Exception as e:
-                        Console.warn(f"Failed to write active models: {e}", component="MODEL")
+                        Console.warn(f"Failed to update model lifecycle: {e}", component="LIFECYCLE",
+                                     error=str(e)[:200])
 
         # ===== 5) Calibrate -> pca_spe_z, pca_t2_z, ar1_z, iforest_z, gmm_z, omr_z =====
         # CRITICAL FIX: Fit calibrators on TRAIN data, transform SCORE data
