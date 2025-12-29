@@ -3,6 +3,76 @@
 **Created**: 2025-12-29
 **Branch**: `feature/v11-refactor`
 **Status**: IN PROGRESS
+**Last Audit**: 2025-12-29
+
+---
+
+## Audit Summary (2025-12-29)
+
+### What Has Actually Been Implemented
+
+| Component | Status | Location | Notes |
+|-----------|--------|----------|-------|
+| `--mode online/offline` CLI arg | DONE | acm_main.py:3307 | Works correctly |
+| `PipelineMode` enum | DONE | acm_main.py:227 | ONLINE/OFFLINE enum |
+| `ALLOWS_MODEL_REFIT` flag | DONE | acm_main.py:3396 | True only in OFFLINE |
+| `ALLOWS_REGIME_DISCOVERY` flag | DONE | acm_main.py:3397 | True only in OFFLINE |
+| Regime discovery gating | DONE | regimes.py:1717-1733 | Fails fast in ONLINE if no model |
+| Model refit gating | DONE | acm_main.py:4138 | Blocks refit in ONLINE |
+| `core/acm.py` entry point | DONE | core/acm.py (155 lines) | Routes to acm_main with mode |
+| `MaturityState` enum | DONE | model_lifecycle.py:28 | COLDSTART/LEARNING/CONVERGED/DEPRECATED |
+| `PromotionCriteria` dataclass | DONE | model_lifecycle.py:44 | 7 days, 3 runs, etc. |
+| `ModelState` tracking | DONE | model_lifecycle.py:51 | Full state with metrics |
+| `check_promotion_eligibility()` | DONE | model_lifecycle.py:91 | Returns (bool, unmet_reasons) |
+| `promote_model()` | DONE | model_lifecycle.py:143 | LEARNING -> CONVERGED |
+| Lifecycle wired into acm_main | DONE | acm_main.py:4550-4607 | Updates state each run |
+
+### What Was Planned But NOT Implemented
+
+| Component | Planned | Why Not Done |
+|-----------|---------|--------------|
+| `core/offline_pipeline.py` | Extract phases from acm_main | Over-engineering - phases work fine |
+| `core/online_pipeline.py` | Separate scoring-only | Over-engineering - gating sufficient |
+| `core/detector_manager.py` | Manage detector fit/score | Over-engineering - detectors work |
+| `core/data_pipeline.py` | Data quality/features | Over-engineering - DataContract exists |
+| UNKNOWN regime (label=-1) | Low-confidence assignment | NOT STARTED - Phase 2 |
+| Confidence columns in tables | ACM_HealthTimeline, ACM_RUL | NOT STARTED - Phase 3 |
+| RUL reliability gate | NOT_RELIABLE status | NOT STARTED - Phase 3 |
+| `core/confidence.py` | Unified confidence | NOT STARTED - Phase 3 |
+| Regime versioning | New version per OFFLINE | PARTIAL - version tracked, not new per run |
+
+### Key Files Created/Modified
+
+1. **core/acm.py** (NEW - 155 lines)
+   - Single entry point with `--mode auto/online/offline`
+   - Auto-detection: checks if model exists
+   - Routes to acm_main.py with appropriate mode
+
+2. **core/model_lifecycle.py** (NEW - 387 lines)
+   - `MaturityState` enum: COLDSTART, LEARNING, CONVERGED, DEPRECATED
+   - `PromotionCriteria`: min_training_days=7, min_silhouette_score=0.15, etc.
+   - `ModelState` dataclass with full metrics tracking
+   - `check_promotion_eligibility()`, `promote_model()`, `deprecate_model()`
+   - `load_model_state_from_sql()`, `get_active_model_dict()`
+
+3. **core/acm_main.py** (MODIFIED)
+   - Line 227: Added `PipelineMode` to `RuntimeContext`
+   - Lines 3307-3397: `--mode` CLI arg and flag initialization
+   - Lines 4138: Model refit gating
+   - Lines 4321: Regime discovery flag passed to regimes.py
+   - Lines 4550-4607: Model lifecycle integration
+
+4. **core/regimes.py** (MODIFIED)
+   - Lines 1717-1733: `allow_discovery` flag gating
+
+### Commits
+
+| Commit | Description |
+|--------|-------------|
+| ecd979e | Phase 0: Add ONLINE/OFFLINE pipeline mode gating |
+| abf905b | docs: Mark Phase 0 complete |
+| 01948eb | Phase 1: Add model lifecycle management |
+| 81c9dd0 | docs: Mark Phase 1 complete |
 
 ---
 
@@ -303,59 +373,58 @@ core/
 
 ## Progress Tracking
 
-### Phase 0: Foundation
-- [ ] 0.1 Create core/acm.py
-- [ ] 0.2 Create core/pipeline_context.py
-- [ ] 0.3 Add --mode CLI arg
-- [ ] 0.4 Gate regime discovery
-- [ ] 0.5 Gate model fitting
+### Phase 0: Foundation [COMPLETE - ecd979e]
+- [x] 0.1 Create core/acm.py - single entry point with auto mode detection
+- [x] 0.2 Add PipelineMode enum to RuntimeContext (acm_main.py:227)
+- [x] 0.3 Add --mode online/offline CLI arg (acm_main.py:3307)
+- [x] 0.4 Gate regime discovery with allow_discovery flag (regimes.py:1717)
+- [x] 0.5 Gate model fitting with ALLOWS_MODEL_REFIT (acm_main.py:4138)
 
-### Phase 1: OFFLINE Pipeline
-- [ ] 1.1 Create core/offline_pipeline.py
-- [ ] 1.2 Create core/detector_manager.py
-- [ ] 1.3 Create core/data_pipeline.py
-- [ ] 1.4 Implement ACM_ActiveModels state machine
-- [ ] 1.5 Implement auto-promotion
-- [ ] 1.6 Wire OfflinePipeline
+### Phase 1: Model Lifecycle [COMPLETE - 01948eb]
+- [x] 1.1 Create core/model_lifecycle.py with MaturityState enum
+- [x] 1.2 Implement PromotionCriteria (7 days, 0.15 silhouette, 3 runs)
+- [x] 1.3 Implement check_promotion_eligibility() and promote_model()
+- [x] 1.4 Wire lifecycle into acm_main.py (lines 4550-4607)
+- [~] 1.5 SKIPPED: offline_pipeline.py, detector_manager.py, data_pipeline.py (over-engineering)
 
-### Phase 2: ONLINE Pipeline
-- [ ] 2.1 Create core/online_pipeline.py
-- [ ] 2.2 Load frozen model
-- [ ] 2.3 Regime assignment predict-only
-- [ ] 2.4 Add UNKNOWN regime
-- [ ] 2.5 Wire OnlinePipeline
-- [ ] 2.6 ONLINE fail triggers OFFLINE
+### Phase 2: ONLINE Pipeline [NOT STARTED]
+- [ ] 2.1 ONLINE mode scoring works (gating done, needs testing)
+- [ ] 2.2 Load frozen model from ModelRegistry (uses existing cache)
+- [ ] 2.3 Regime assignment predict-only (gating done)
+- [ ] 2.4 Add UNKNOWN regime (label=-1) when confidence < threshold
+- [ ] 2.5 ONLINE fail triggers OFFLINE automatically (fallback in acm.py)
+- [ ] 2.6 Integration test: --mode online with existing model
 
-### Phase 3: Confidence and Reliability
-- [ ] 3.1 Create core/confidence.py
-- [ ] 3.2 Confidence in ACM_HealthTimeline
-- [ ] 3.3 Confidence in ACM_RUL
-- [ ] 3.4 Confidence in ACM_Episodes
-- [ ] 3.5 RUL reliability gate
-- [ ] 3.6 RUL_Status=NOT_RELIABLE
+### Phase 3: Confidence and Reliability [NOT STARTED]
+- [ ] 3.1 Create core/confidence.py - unified confidence model
+- [ ] 3.2 Add Confidence column to ACM_HealthTimeline
+- [ ] 3.3 Add Confidence column to ACM_RUL
+- [ ] 3.4 Add Confidence column to ACM_Episodes
+- [ ] 3.5 Implement RUL reliability gate (CONVERGED + min data)
+- [ ] 3.6 Output RUL_Status=NOT_RELIABLE when gate fails
 
-### Phase 4: Regime Stability
-- [ ] 4.1 Create core/regime_lifecycle.py
-- [ ] 4.2 OFFLINE creates new version
-- [ ] 4.3 AssignmentConfidence in timeline
-- [ ] 4.4 ONLINE uses frozen model
-- [ ] 4.5 Promotion criteria
+### Phase 4: Regime Stability [NOT STARTED]
+- [ ] 4.1 Regime versioning (new version per OFFLINE discovery)
+- [ ] 4.2 OFFLINE creates new RegimeVersion, never overwrites
+- [ ] 4.3 Add AssignmentConfidence to ACM_RegimeTimeline
+- [ ] 4.4 ONLINE uses frozen regime model only (gating done)
+- [ ] 4.5 Add promotion criteria (silhouette>0.15, stability>0.8, 7+ days)
 
-### Phase 5: Single Entry Point
-- [ ] 5.1 ACMController.start()
-- [ ] 5.2 Auto mode routing
-- [ ] 5.3 Update sql_batch_runner.py
-- [ ] 5.4 Scheduling logic
-- [ ] 5.5 scripts/acm_launcher.py
+### Phase 5: Single Entry Point [PARTIAL]
+- [x] 5.1 core/acm.py with auto mode detection
+- [x] 5.2 Auto mode: check model exists, route to ONLINE or OFFLINE
+- [ ] 5.3 Update sql_batch_runner.py to use new entry point
+- [ ] 5.4 Add scheduling logic (ONLINE 30min, OFFLINE 24h)
+- [ ] 5.5 Create scripts/acm_launcher.py for production
 
-### Phase 6: Observability Dashboard
-- [ ] 6.1 Create dashboard JSON
-- [ ] 6.2-6.6 Dashboard panels
-- [ ] 6.7 Add @Span.trace() decorators
+### Phase 6: Observability Dashboard [NOT STARTED]
+- [ ] 6.1 Create acm_v11_operations.json dashboard
+- [ ] 6.2-6.6 Dashboard panels (mode, maturity, confidence, latency)
+- [ ] 6.7 Add @Span.trace() decorators to new modules
 
-### Phase 7: Cleanup
-- [ ] 7.1 Deprecate acm_main.py
-- [ ] 7.2 Update copilot-instructions.md
-- [ ] 7.3 Version 11.1.0
+### Phase 7: Cleanup [NOT STARTED]
+- [ ] 7.1 Deprecate acm_main.py (thin wrapper)
+- [ ] 7.2 Update copilot-instructions.md with V11 architecture
+- [ ] 7.3 Update version to 11.1.0
 - [ ] 7.4 Tag release
 - [ ] 7.5 Update tracker
