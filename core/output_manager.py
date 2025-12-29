@@ -54,11 +54,12 @@ except ImportError:
 
 # V11: Model lifecycle for maturity state
 try:
-    from core.model_lifecycle import ModelLifecycle
+    from core.model_lifecycle import load_model_state_from_sql, MaturityState
     _LIFECYCLE_AVAILABLE = True
 except ImportError:
     _LIFECYCLE_AVAILABLE = False
-    ModelLifecycle = None
+    load_model_state_from_sql = None
+    MaturityState = None
 
 # Optional observability integration (P0 SQL ops tracking)
 try:
@@ -2394,11 +2395,11 @@ class OutputManager:
                 try:
                     # Get current maturity state from model lifecycle
                     maturity_state = 'COLDSTART'  # Default
-                    if hasattr(self, 'sql_client') and self.sql_client is not None:
+                    if hasattr(self, 'sql_client') and self.sql_client is not None and load_model_state_from_sql is not None:
                         try:
-                            lifecycle = ModelLifecycle(self.sql_client, self.equip_id)
-                            state_info = lifecycle.get_state()
-                            maturity_state = state_info.get('maturity_state', 'COLDSTART')
+                            model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
+                            if model_state is not None:
+                                maturity_state = str(model_state.maturity)
                         except Exception:
                             pass  # Use default COLDSTART
                     
@@ -3403,11 +3404,11 @@ DECLARE @EquipID INT = ?;
             try:
                 # Get current maturity state from model lifecycle
                 maturity_state = 'COLDSTART'  # Default
-                if hasattr(self, 'sql_client') and self.sql_client is not None:
+                if hasattr(self, 'sql_client') and self.sql_client is not None and load_model_state_from_sql is not None:
                     try:
-                        lifecycle = ModelLifecycle(self.sql_client, self.equip_id)
-                        state_info = lifecycle.get_state()
-                        maturity_state = state_info.get('maturity_state', 'COLDSTART')
+                        model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
+                        if model_state is not None:
+                            maturity_state = str(model_state.maturity)
                     except Exception:
                         pass  # Use default COLDSTART
                 

@@ -18,7 +18,7 @@ Release Management:
 """
 
 __version__ = "11.0.0"
-__version_date__ = "2025-12-27"  # v11.0.0: Code cleanup (21% dead code removed), DataContract fail-fast validation
+__version_date__ = "2025-12-29"  # v11.0.0: Complete V11 implementation (Phases 0-5)
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))
@@ -88,53 +88,61 @@ def format_version_for_output(context=""):
     return get_version_string()
 
 
-# v11.0.0 Release Notes (from v10.x) - UPDATED 2025-12-27
+# v11.0.0 Release Notes (from v10.x) - UPDATED 2025-12-29
 RELEASE_NOTES_V11 = """
-ACM v11.0.0 - MAJOR RELEASE: Code Cleanup & DataContract Validation (2025-12-27)
+ACM v11.0.0 - MAJOR RELEASE: Pipeline Mode Separation & Confidence Model (2025-12-29)
 
-BREAKING CHANGES:
-  ⚠ 23 unused modules deleted (21% codebase reduction)
-  ⚠ DataContract validation now FAILS FAST on errors (previously just warned)
-  ⚠ Seasonality detection runs but adjustment NOT INTEGRATED
-  ⚠ Asset similarity profiles built but NOT USED for transfer learning
+V11 PHILOSOPHY IMPLEMENTED:
+  - ONLINE/OFFLINE pipeline mode separation
+  - Model lifecycle with maturity states (COLDSTART -> LEARNING -> CONVERGED)
+  - Unified confidence model for all outputs
+  - RUL reliability gating (V11 Rule #10)
+  - UNKNOWN regime support for low-confidence assignments
 
-DEAD CODE REMOVAL (23 modules, ~8,900 lines deleted):
-  Tier 5 - Orphaned modules with ZERO imports (14 modules, ~5,469 lines):
-    ✗ baseline_normalizer.py, baseline_policy.py, calibrated_fusion.py
-    ✗ confidence_model.py, decision_policy.py, drift_controller.py
-    ✗ episode_manager.py, health_state.py, maintenance_events.py
-    ✗ forecast_diagnostics.py, rul_common.py, rul_reliability.py
-    ✗ sql_performance.py, sql_protocol.py
+PHASE IMPLEMENTATIONS:
 
-  Tier 4 - v11 modules never integrated (8 modules, ~3,420 lines):
-    ✗ feature_matrix.py, detector_protocol.py, regime_manager.py
-    ✗ regime_definitions.py, regime_evaluation.py, regime_promotion.py
-    ✗ table_schemas.py, pipeline_instrumentation.py
-    ✗ scripts/offline_replay.py (depended on deleted modules)
+Phase 0 - Foundation (ecd979e):
+  - Added --mode CLI argument (online/offline/auto)
+  - ALLOWS_MODEL_REFIT and ALLOWS_REGIME_DISCOVERY gating flags
+  - core/acm.py single entry point with auto-detect
 
-DATA QUALITY (IMPROVED):
-  ✓ DataContract validation at pipeline entry
-  ✓ FAIL FAST on validation errors (raises ValueError instead of warning)
-  ✓ Validation results written to ACM_DataContractValidation table
-  ✓ Warnings logged for non-critical issues
+Phase 1 - Model Lifecycle (01948eb):
+  - core/model_lifecycle.py: MaturityState enum, PromotionCriteria
+  - ACM_ActiveModels table for versioned model tracking
+  - Auto-promotion from LEARNING to CONVERGED when quality passes
 
-WHAT WORKS (from v10.x, unchanged):
-  ✓ Multi-detector anomaly detection (AR1, PCA-SPE, PCA-T², IForest, GMM, OMR)
-  ✓ Per-regime calibrated thresholds
-  ✓ Episode detection and diagnostics
-  ✓ Health scoring (0-100% index)
-  ✓ RUL forecasting with Monte Carlo (P10/P50/P90 confidence bounds)
-  ✓ Physical sensor forecasting (top 10 sensors, 7-day horizon)
-  ✓ Full observability stack (OTEL traces, Prometheus metrics, Loki logs, Pyroscope profiling)
+Phase 2 - ONLINE Pipeline (7111143):
+  - UNKNOWN_REGIME_LABEL = -1 for low-confidence regime assignments
+  - predict_regime_with_confidence() with distance-based thresholding
+  - regime_confidence and regime_unknown_count in output
 
-PARTIAL INTEGRATIONS (detect but don't use):
-  ⚠ seasonality.py: Detects diurnal/weekly patterns but DOES NOT adjust data
-  ⚠ asset_similarity.py: Builds profiles but DOES NOT query for cold-start transfer
+Phase 3 - Confidence and Reliability (8624597):
+  - NEW: core/confidence.py (~280 lines)
+    - ReliabilityStatus enum: RELIABLE, NOT_RELIABLE, LEARNING, INSUFFICIENT_DATA
+    - ConfidenceFactors dataclass with geometric mean computation
+    - compute_rul_confidence(), compute_health_confidence(), compute_episode_confidence()
+  - RUL_Status and MaturityState columns added to ACM_RUL
+  - Confidence column added to ACM_HealthTimeline and ACM_Anomaly_Events
 
-CODEBASE HEALTH:
-  Before cleanup: 42,307 lines (74.7% active)
-  After cleanup:  33,418 lines (94.7% active)
-  Improvement: 21% dead code removed
+Phase 4 - Regime Stability (existing infrastructure):
+  - AssignmentConfidence added to ACM_RegimeTimeline output
+  - Regime versioning via model_persistence.py StateVersion
+  - ONLINE mode frozen regime models (ALLOWS_REGIME_DISCOVERY=False)
+
+Phase 5 - Single Entry Point (existing infrastructure):
+  - python -m core.acm --equip FD_FAN --mode auto
+  - Auto-detect mode routes to ONLINE if model exists, else OFFLINE
+
+CODE CLEANUP (from earlier v11 work):
+  - 23 unused modules deleted (21% codebase reduction)
+  - DataContract validation FAIL FAST on errors
+  - Validation results written to ACM_DataContractValidation table
+
+V11 RULES IMPLEMENTED:
+  #10: RUL gated/suppressed when model not CONVERGED
+  #14: UNKNOWN is valid regime label for low confidence
+  #17: Confidence always exposed (0-1 scale)
+  #20: NOT_RELIABLE status when prerequisites fail
 """
 
 # v10.0.0 Release Notes (from v9.0.0)
