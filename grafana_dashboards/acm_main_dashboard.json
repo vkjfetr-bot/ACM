@@ -1524,7 +1524,7 @@
         "type": "mssql",
         "uid": "${datasource}"
       },
-      "description": "Operating regime classification over time",
+      "description": "Operating regime classification over time. UNKNOWN (-1) shows when confidence is low.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1536,12 +1536,28 @@
             "lineWidth": 0,
             "spanNulls": false
           },
+          "mappings": [
+            {
+              "options": {
+                "-1": {
+                  "color": "dark-purple",
+                  "index": 0,
+                  "text": "UNKNOWN"
+                }
+              },
+              "type": "value"
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "dark-purple",
                 "value": null
+              },
+              {
+                "color": "blue",
+                "value": 0
               },
               {
                 "color": "green",
@@ -1711,6 +1727,94 @@
                 "value": 1
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "RUL_Status"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "RELIABLE": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "RELIABLE"
+                      },
+                      "NOT_RELIABLE": {
+                        "color": "red",
+                        "index": 1,
+                        "text": "NOT RELIABLE"
+                      },
+                      "LEARNING": {
+                        "color": "yellow",
+                        "index": 2,
+                        "text": "LEARNING"
+                      },
+                      "INSUFFICIENT_DATA": {
+                        "color": "orange",
+                        "index": 3,
+                        "text": "INSUFFICIENT DATA"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MaturityState"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "CONVERGED": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "CONVERGED"
+                      },
+                      "LEARNING": {
+                        "color": "yellow",
+                        "index": 1,
+                        "text": "LEARNING"
+                      },
+                      "COLDSTART": {
+                        "color": "blue",
+                        "index": 2,
+                        "text": "COLDSTART"
+                      },
+                      "DEPRECATED": {
+                        "color": "dark-red",
+                        "index": 3,
+                        "text": "DEPRECATED"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
           }
         ]
       },
@@ -1741,7 +1845,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 1\n    ROUND(RUL_Hours, 1) AS RUL_Hours,\n    ROUND(P10_LowerBound, 1) AS P10,\n    ROUND(P50_Median, 1) AS P50,\n    ROUND(P90_UpperBound, 1) AS P90,\n    ROUND(Confidence, 3) AS Confidence,\n    Method,\n    TopSensor1,\n    TopSensor2,\n    TopSensor3\nFROM ACM_RUL\nWHERE EquipID = $equipment\n  AND (P10_LowerBound IS NOT NULL OR P50_Median IS NOT NULL)\nORDER BY CreatedAt DESC",
+          "rawSql": "SELECT TOP 1\n    RUL_Status,\n    MaturityState,\n    ROUND(RUL_Hours, 1) AS RUL_Hours,\n    ROUND(P10_LowerBound, 1) AS P10,\n    ROUND(P50_Median, 1) AS P50,\n    ROUND(P90_UpperBound, 1) AS P90,\n    ROUND(Confidence, 3) AS Confidence,\n    Method,\n    TopSensor1,\n    TopSensor2,\n    TopSensor3\nFROM ACM_RUL\nWHERE EquipID = $equipment\n  AND (P10_LowerBound IS NOT NULL OR P50_Median IS NOT NULL)\nORDER BY CreatedAt DESC",
           "refId": "A"
         }
       ],

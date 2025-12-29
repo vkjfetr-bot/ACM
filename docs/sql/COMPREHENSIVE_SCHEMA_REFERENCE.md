@@ -1,6 +1,6 @@
 # ACM Comprehensive Database Schema Reference
 
-_Generated automatically on 2025-12-29 11:23:01_
+_Generated automatically on 2025-12-29 13:53:56_
 
 This document provides detailed information about all tables in the ACM database:
 - Schema (columns, data types, nullability, defaults)
@@ -149,7 +149,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | dbo.ACM_ActiveModels | 11 | 4 | ID |
 | dbo.ACM_AdaptiveConfig | 13 | 17 | ConfigID |
 | dbo.ACM_AlertAge | 6 | 0 | — |
-| dbo.ACM_Anomaly_Events | 6 | 6 | Id |
+| dbo.ACM_Anomaly_Events | 7 | 6 | Id |
 | dbo.ACM_AssetProfiles | 11 | 4 | ID |
 | dbo.ACM_BaselineBuffer | 7 | 246,950 | Id |
 | dbo.ACM_CalibrationSummary | 10 | 0 | ID |
@@ -188,7 +188,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | dbo.ACM_HealthForecast_Continuous | 8 | 0 | EquipID, Timestamp, SourceRunID |
 | dbo.ACM_HealthForecast_TS | 9 | 0 | RunID, EquipID, Timestamp |
 | dbo.ACM_HealthHistogram | 5 | 0 | — |
-| dbo.ACM_HealthTimeline | 8 | 3,639 | — |
+| dbo.ACM_HealthTimeline | 10 | 3,639 | — |
 | dbo.ACM_HealthZoneByPeriod | 9 | 0 | — |
 | dbo.ACM_HistorianData | 7 | 0 | DataID |
 | dbo.ACM_MaintenanceRecommendation | 8 | 0 | RunID, EquipID |
@@ -198,7 +198,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | dbo.ACM_PCA_Loadings | 10 | 15,765 | RecordID |
 | dbo.ACM_PCA_Metrics | 8 | 4 | ID |
 | dbo.ACM_PCA_Models | 12 | 4 | RecordID |
-| dbo.ACM_RUL | 18 | 21 | EquipID, RunID |
+| dbo.ACM_RUL | 32 | 21 | EquipID, RunID |
 | dbo.ACM_RUL_Attribution | 9 | 0 | RunID, EquipID, FailureTime, SensorName |
 | dbo.ACM_RUL_LearningState | 19 | 0 | EquipID |
 | dbo.ACM_RUL_Summary | 15 | 0 | RunID, EquipID |
@@ -212,7 +212,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | dbo.ACM_RegimeStability | 4 | 0 | — |
 | dbo.ACM_RegimeState | 15 | 5 | EquipID, StateVersion |
 | dbo.ACM_RegimeStats | 8 | 0 | — |
-| dbo.ACM_RegimeTimeline | 5 | 3,639 | — |
+| dbo.ACM_RegimeTimeline | 7 | 3,639 | — |
 | dbo.ACM_RegimeTransitions | 8 | 0 | ID |
 | dbo.ACM_Regime_Episodes | 6 | 6 | Id |
 | dbo.ACM_RunLogs | 25 | 31,438 | LogID |
@@ -403,17 +403,18 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | StartTime | datetime2 | YES | — | — |
 | EndTime | datetime2 | YES | — | — |
 | Severity | nvarchar | YES | 32 | — |
+| Confidence | float | YES | 53 | — |
 
 ### Top 10 Records
 
-| Id | RunID | EquipID | StartTime | EndTime | Severity |
-| --- | --- | --- | --- | --- | --- |
-| 381 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2022-05-05 19:20:00 | 2022-05-06 01:50:00 | info |
-| 382 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2022-05-06 21:50:00 | 2022-05-07 03:50:00 | info |
-| 383 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | 2022-05-03 13:30:00 | 2022-05-03 17:00:00 | info |
-| 384 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2022-08-09 01:10:00 | 2022-08-09 02:10:00 | info |
-| 385 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2022-08-09 21:40:00 | 2022-08-10 14:10:00 | info |
-| 386 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2022-10-13 13:00:00 | 2022-10-13 20:00:00 | info |
+| Id | RunID | EquipID | StartTime | EndTime | Severity | Confidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| 381 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2022-05-05 19:20:00 | 2022-05-06 01:50:00 | info | NULL |
+| 382 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2022-05-06 21:50:00 | 2022-05-07 03:50:00 | info | NULL |
+| 383 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | 2022-05-03 13:30:00 | 2022-05-03 17:00:00 | info | NULL |
+| 384 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2022-08-09 01:10:00 | 2022-08-09 02:10:00 | info | NULL |
+| 385 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2022-08-09 21:40:00 | 2022-08-10 14:10:00 | info | NULL |
+| 386 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2022-10-13 13:00:00 | 2022-10-13 20:00:00 | info | NULL |
 
 ---
 
@@ -1702,36 +1703,38 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | EquipID | int | NO | 10 | — |
 | RawHealthIndex | float | YES | 53 | — |
 | QualityFlag | nvarchar | YES | 50 | — |
+| Confidence | float | YES | 53 | — |
+| ConfidenceFactors | nvarchar | YES | 200 | — |
 
 ### Top 10 Records
 
-| Timestamp | HealthIndex | HealthZone | FusedZ | RunID | EquipID | RawHealthIndex | QualityFlag |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 2022-04-04 02:30:00 | 93.42 | GOOD | -0.2888999879360199 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 93.41999816894531 | NORMAL |
-| 2022-04-04 02:40:00 | 93.09 | GOOD | 0.42899999022483826 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 92.30999755859375 | NORMAL |
-| 2022-04-04 02:50:00 | 92.76 | GOOD | 0.4652000069618225 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 92.0 | NORMAL |
-| 2022-04-04 03:00:00 | 92.29 | GOOD | 0.5508000254631042 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 91.20999908447266 | NORMAL |
-| 2022-04-04 03:10:00 | 88.28 | GOOD | 1.4005000591278076 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 78.91000366210938 | NORMAL |
-| 2022-04-04 03:20:00 | 87.49 | GOOD | 1.0123000144958496 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 85.62999725341797 | NORMAL |
-| 2022-04-04 03:30:00 | 88.58 | GOOD | 0.5569000244140625 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 91.1500015258789 | NORMAL |
-| 2022-04-04 03:40:00 | 86.91 | GOOD | 1.1777000427246094 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 83.0199966430664 | NORMAL |
-| 2022-04-04 03:50:00 | 88.04 | GOOD | 0.6047999858856201 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 90.66999816894531 | NORMAL |
-| 2022-04-04 04:00:00 | 88.53 | GOOD | 0.6998999714851379 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 89.66000366210938 | NORMAL |
+| Timestamp | HealthIndex | HealthZone | FusedZ | RunID | EquipID | RawHealthIndex | QualityFlag | Confidence | ConfidenceFactors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2022-04-04 02:30:00 | 93.42 | GOOD | -0.2888999879360199 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 93.41999816894531 | NORMAL | NULL | NULL |
+| 2022-04-04 02:40:00 | 93.09 | GOOD | 0.42899999022483826 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 92.30999755859375 | NORMAL | NULL | NULL |
+| 2022-04-04 02:50:00 | 92.76 | GOOD | 0.4652000069618225 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 92.0 | NORMAL | NULL | NULL |
+| 2022-04-04 03:00:00 | 92.29 | GOOD | 0.5508000254631042 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 91.20999908447266 | NORMAL | NULL | NULL |
+| 2022-04-04 03:10:00 | 88.28 | GOOD | 1.4005000591278076 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 78.91000366210938 | NORMAL | NULL | NULL |
+| 2022-04-04 03:20:00 | 87.49 | GOOD | 1.0123000144958496 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 85.62999725341797 | NORMAL | NULL | NULL |
+| 2022-04-04 03:30:00 | 88.58 | GOOD | 0.5569000244140625 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 91.1500015258789 | NORMAL | NULL | NULL |
+| 2022-04-04 03:40:00 | 86.91 | GOOD | 1.1777000427246094 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 83.0199966430664 | NORMAL | NULL | NULL |
+| 2022-04-04 03:50:00 | 88.04 | GOOD | 0.6047999858856201 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 90.66999816894531 | NORMAL | NULL | NULL |
+| 2022-04-04 04:00:00 | 88.53 | GOOD | 0.6998999714851379 | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 89.66000366210938 | NORMAL | NULL | NULL |
 
 ### Bottom 10 Records
 
-| Timestamp | HealthIndex | HealthZone | FusedZ | RunID | EquipID | RawHealthIndex | QualityFlag |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 2022-10-16 00:30:00 | 92.27 | GOOD | 0.37470000982284546 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.76000213623047 | NORMAL |
-| 2022-10-16 00:00:00 | 92.06 | GOOD | 0.4458000063896179 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.16999816894531 | NORMAL |
-| 2022-10-15 23:30:00 | 92.01 | GOOD | 0.40119999647140503 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.54000091552734 | NORMAL |
-| 2022-10-15 23:00:00 | 91.78 | GOOD | 0.44600000977516174 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.16000366210938 | NORMAL |
-| 2022-10-15 22:30:00 | 91.62 | GOOD | 0.44339999556541443 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.19000244140625 | NORMAL |
-| 2022-10-15 22:00:00 | 91.37 | GOOD | 0.4178999960422516 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.4000015258789 | NORMAL |
-| 2022-10-15 21:30:00 | 90.93 | GOOD | 0.4593000113964081 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.05000305175781 | NORMAL |
-| 2022-10-15 21:00:00 | 90.45 | GOOD | 0.4422000050544739 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.19999694824219 | NORMAL |
-| 2022-10-15 20:30:00 | 89.7 | GOOD | 0.6851999759674072 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 89.81999969482422 | NORMAL |
-| 2022-10-15 20:00:00 | 89.64 | GOOD | 1.0436999797821045 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 85.16000366210938 | NORMAL |
+| Timestamp | HealthIndex | HealthZone | FusedZ | RunID | EquipID | RawHealthIndex | QualityFlag | Confidence | ConfidenceFactors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2022-10-16 00:30:00 | 92.27 | GOOD | 0.37470000982284546 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.76000213623047 | NORMAL | NULL | NULL |
+| 2022-10-16 00:00:00 | 92.06 | GOOD | 0.4458000063896179 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.16999816894531 | NORMAL | NULL | NULL |
+| 2022-10-15 23:30:00 | 92.01 | GOOD | 0.40119999647140503 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.54000091552734 | NORMAL | NULL | NULL |
+| 2022-10-15 23:00:00 | 91.78 | GOOD | 0.44600000977516174 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.16000366210938 | NORMAL | NULL | NULL |
+| 2022-10-15 22:30:00 | 91.62 | GOOD | 0.44339999556541443 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.19000244140625 | NORMAL | NULL | NULL |
+| 2022-10-15 22:00:00 | 91.37 | GOOD | 0.4178999960422516 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.4000015258789 | NORMAL | NULL | NULL |
+| 2022-10-15 21:30:00 | 90.93 | GOOD | 0.4593000113964081 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.05000305175781 | NORMAL | NULL | NULL |
+| 2022-10-15 21:00:00 | 90.45 | GOOD | 0.4422000050544739 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.19999694824219 | NORMAL | NULL | NULL |
+| 2022-10-15 20:30:00 | 89.7 | GOOD | 0.6851999759674072 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 89.81999969482422 | NORMAL | NULL | NULL |
+| 2022-10-15 20:00:00 | 89.64 | GOOD | 1.0436999797821045 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 85.16000366210938 | NORMAL | NULL | NULL |
 
 ---
 
@@ -2024,6 +2027,20 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | CurrentRegime | int | YES | 10 | — |
 | RegimeState | nvarchar | YES | 32 | — |
 | OMR_Z | float | YES | 53 | — |
+| RUL_Status | nvarchar | YES | 50 | — |
+| MaturityState | nvarchar | YES | 50 | — |
+| MeanRUL | float | YES | 53 | — |
+| StdRUL | float | YES | 53 | — |
+| MTTF_Hours | float | YES | 53 | — |
+| FailureProbability | float | YES | 53 | — |
+| CurrentHealth | float | YES | 53 | — |
+| HealthLevel | nvarchar | YES | 50 | — |
+| TrendSlope | float | YES | 53 | — |
+| DataQuality | nvarchar | YES | 50 | — |
+| ForecastStd | float | YES | 53 | — |
+| TopSensor1Contribution | float | YES | 53 | — |
+| TopSensor2Contribution | float | YES | 53 | — |
+| TopSensor3Contribution | float | YES | 53 | — |
 
 ### Top 10 Records
 
@@ -2427,36 +2444,38 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | RegimeState | nvarchar | NO | 50 | — |
 | RunID | uniqueidentifier | NO | — | — |
 | EquipID | int | NO | 10 | — |
+| AssignmentConfidence | float | YES | 53 | — |
+| RegimeVersion | int | YES | 10 | — |
 
 ### Top 10 Records
 
-| Timestamp | RegimeLabel | RegimeState | RunID | EquipID |
-| --- | --- | --- | --- | --- |
-| 2022-04-04 02:30:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 02:40:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 02:50:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 03:00:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 03:10:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 03:20:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 03:30:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 03:40:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 03:50:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
-| 2022-04-04 04:00:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 |
+| Timestamp | RegimeLabel | RegimeState | RunID | EquipID | AssignmentConfidence | RegimeVersion |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2022-04-04 02:30:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 02:40:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 02:50:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 03:00:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 03:10:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 03:20:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 03:30:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 03:40:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 03:50:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
+| 2022-04-04 04:00:00 | 1 | unknown | D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | NULL | NULL |
 
 ### Bottom 10 Records
 
-| Timestamp | RegimeLabel | RegimeState | RunID | EquipID |
-| --- | --- | --- | --- | --- |
-| 2022-10-16 00:30:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-16 00:00:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 23:30:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 23:00:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 22:30:00 | 0 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 22:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 21:30:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 21:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 20:30:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
-| 2022-10-15 20:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| Timestamp | RegimeLabel | RegimeState | RunID | EquipID | AssignmentConfidence | RegimeVersion |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2022-10-16 00:30:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-16 00:00:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 23:30:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 23:00:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 22:30:00 | 0 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 22:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 21:30:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 21:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 20:30:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
+| 2022-10-15 20:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL |
 
 ---
 
