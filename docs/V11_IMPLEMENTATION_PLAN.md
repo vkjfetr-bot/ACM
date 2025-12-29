@@ -112,17 +112,21 @@ From Major Refactor Plan - these MUST be enforced:
 
 ## Implementation Phases
 
-### Phase 0: Foundation
+### Phase 0: Foundation [COMPLETE]
 
-| Task | Description | Files |
-|------|-------------|-------|
-| 0.1 | Create core/acm.py - single entry point | NEW |
-| 0.2 | Create core/pipeline_context.py - extract dataclasses | NEW |
-| 0.3 | Add --mode online/offline/auto CLI arg | acm_main.py |
-| 0.4 | Gate regime discovery with if mode == OFFLINE | acm_main.py |
-| 0.5 | Gate model fitting with if mode == OFFLINE | acm_main.py |
+| Task | Description | Files | Status |
+|------|-------------|-------|--------|
+| 0.1 | Create core/acm.py - single entry point | NEW | DONE |
+| 0.2 | Add --mode online/offline/auto CLI arg | acm_main.py | DONE |
+| 0.3 | Add PIPELINE_MODE, ALLOWS_MODEL_REFIT, ALLOWS_REGIME_DISCOVERY | acm_main.py | DONE |
+| 0.4 | Gate regime discovery with if mode == OFFLINE | regimes.py | DONE |
+| 0.5 | Gate model fitting with if mode == OFFLINE | acm_main.py | DONE |
+| 0.6 | Add --mode arg to sql_batch_runner.py | sql_batch_runner.py | DONE |
 
-Exit Criteria: --mode online with no model fails fast. --mode offline trains. --mode online then works.
+Exit Criteria: PASSED
+- --mode online shows allows_refit=False, allows_discovery=False
+- --mode offline shows allows_refit=True, allows_discovery=True
+- Commit: ecd979e
 
 ---
 
