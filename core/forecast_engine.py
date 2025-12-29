@@ -67,6 +67,13 @@ from core.metrics import compute_comprehensive_metrics, log_metrics_summary, com
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
 from core.observability import Console, Span
+# V11: Reliability gating for RUL predictions
+from core.confidence import (
+    ReliabilityStatus,
+    compute_rul_confidence,
+    check_rul_reliability,
+)
+from core.model_lifecycle import load_model_state_from_sql, MaturityState
 
 
 # ========================================================================
@@ -539,6 +546,29 @@ class ForecastEngine:
             'failure_prob_horizon': rul_estimate.failure_probability
         }
     
+    def _get_model_maturity_state(self) -> Tuple[str, int, float]:
+        """
+        Get model maturity state for RUL reliability gating.
+        
+        V11 Rule #10: RUL must be gated or suppressed when model not CONVERGED.
+        
+        Returns:
+            Tuple of (maturity_state, training_rows, training_days)
+        """
+        try:
+            model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
+            if model_state is None:
+                return 'COLDSTART', 0, 0.0
+            return (
+                str(model_state.maturity.value),
+                model_state.training_rows,
+                model_state.training_days,
+            )
+        except Exception as e:
+            Console.warn(f"Could not load model maturity: {e}",
+                         component="FORECAST", equip_id=self.equip_id)
+            return 'LEARNING', 0, 0.0  # Conservative default
+    
     def _load_sensor_attributions(self) -> list:
         """Load sensor attributions from ACM_SensorHotspots"""
         attributor = SensorAttributor(sql_client=self.sql_client)
@@ -690,13 +720,24 @@ class ForecastEngine:
             rul_hours = forecast_results['rul_p50']
             predicted_failure_time = current_time + timedelta(hours=float(rul_hours))
             
-            # Calculate confidence based on data quality and variance
-            # Higher confidence with more data and lower variance
-            confidence = 0.8 if forecast_results.get('data_points', 0) > 1000 else 0.6
-            if forecast_results.get('rul_std', 0) > 0:
-                # Reduce confidence if variance is high relative to mean
-                cv = forecast_results['rul_std'] / max(forecast_results['rul_mean'], 1.0)
-                confidence = confidence * (1.0 - min(cv * 0.5, 0.4))
+            # V11: Get model maturity state for reliability gating
+            maturity_state, training_rows, training_days = self._get_model_maturity_state()
+            
+            # V11: Compute RUL confidence with reliability gate
+            confidence, reliability_status, reliability_reason = compute_rul_confidence(
+                p10=forecast_results['rul_p10'],
+                p50=forecast_results['rul_p50'],
+                p90=forecast_results['rul_p90'],
+                maturity_state=maturity_state,
+                training_rows=training_rows,
+                training_days=training_days,
+            )
+            
+            # Log reliability status
+            if reliability_status != ReliabilityStatus.RELIABLE:
+                Console.warn(f"RUL reliability: {reliability_status.value} - {reliability_reason}",
+                             component="FORECAST", equip_id=self.equip_id,
+                             status=reliability_status.value, maturity=maturity_state)
             
             # M13: Derive operator context fields
             current_health = forecast_results['current_health']
@@ -748,7 +789,8 @@ class ForecastEngine:
                 'MTTF_Hours': [forecast_results['mttf_hours']],
                 'FailureProbability': [forecast_results['failure_prob_horizon']],
                 'CurrentHealth': [current_health],
-                'Confidence': [float(confidence)],  # FIX: Add confidence score
+                'Confidence': [float(confidence)],  # V11: Proper confidence from reliability gate
+                'RUL_Status': [reliability_status.value],  # V11: RELIABLE, NOT_RELIABLE, LEARNING, INSUFFICIENT_DATA
                 'FailureTime': [predicted_failure_time],  # FIX: Add predicted failure timestamp
                 'NumSimulations': [1000],  # FIX: Monte Carlo simulation count
                 'Method': ['Multipath'],  # FIX: Add forecasting method
@@ -757,6 +799,8 @@ class ForecastEngine:
                 'TrendSlope': [float(trend_slope)],
                 'DataQuality': [data_quality],
                 'ForecastStd': [float(forecast_std) if not np.isnan(forecast_std) else 0.0],
+                # V11: Model maturity context
+                'MaturityState': [maturity_state],
                 # Sensor attributions
                 'TopSensor1': [top3_sensors[0].sensor_name if len(top3_sensors) > 0 else None],
                 'TopSensor1Contribution': [top3_sensors[0].failure_contribution if len(top3_sensors) > 0 else None],

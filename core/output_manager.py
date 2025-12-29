@@ -43,6 +43,23 @@ from utils.detector_labels import get_detector_label, format_culprit_label
 
 from core.observability import Console
 
+# V11: Confidence model for health and episode confidence
+try:
+    from core.confidence import compute_health_confidence, compute_episode_confidence
+    _CONFIDENCE_AVAILABLE = True
+except ImportError:
+    _CONFIDENCE_AVAILABLE = False
+    compute_health_confidence = None
+    compute_episode_confidence = None
+
+# V11: Model lifecycle for maturity state
+try:
+    from core.model_lifecycle import ModelLifecycle
+    _LIFECYCLE_AVAILABLE = True
+except ImportError:
+    _LIFECYCLE_AVAILABLE = False
+    ModelLifecycle = None
+
 # Optional observability integration (P0 SQL ops tracking)
 try:
     from core.observability import record_sql_op, Span
@@ -2345,6 +2362,8 @@ class OutputManager:
     def write_anomaly_events(self, df_events: pd.DataFrame, run_id: str) -> int:
         """Write anomaly events to ACM_Anomaly_Events table.
         
+        V11: Adds Confidence column based on episode duration and maturity state.
+        
         Args:
             df_events: DataFrame with event data (EquipID, start_ts, end_ts, severity, etc.)
             run_id: Current run ID
@@ -2369,6 +2388,48 @@ class OutputManager:
             for old, new in col_map.items():
                 if old in df.columns and new not in df.columns:
                     df[new] = df[old]
+            
+            # V11: Add confidence for each episode
+            if _CONFIDENCE_AVAILABLE and _LIFECYCLE_AVAILABLE and compute_episode_confidence is not None:
+                try:
+                    # Get current maturity state from model lifecycle
+                    maturity_state = 'COLDSTART'  # Default
+                    if hasattr(self, 'sql_client') and self.sql_client is not None:
+                        try:
+                            lifecycle = ModelLifecycle(self.sql_client, self.equip_id)
+                            state_info = lifecycle.get_state()
+                            maturity_state = state_info.get('maturity_state', 'COLDSTART')
+                        except Exception:
+                            pass  # Use default COLDSTART
+                    
+                    confidence_values = []
+                    for _, row in df.iterrows():
+                        # Calculate episode duration in minutes
+                        duration_minutes = 60  # Default 1 hour if can't calculate
+                        start_col = 'StartTime' if 'StartTime' in df.columns else 'start_ts'
+                        end_col = 'EndTime' if 'EndTime' in df.columns else 'end_ts'
+                        if start_col in df.columns and end_col in df.columns:
+                            try:
+                                start_t = pd.to_datetime(row[start_col])
+                                end_t = pd.to_datetime(row[end_col])
+                                duration_minutes = (end_t - start_t).total_seconds() / 60
+                            except Exception:
+                                pass
+                        
+                        # Get peak score if available
+                        peak_z = row.get('PeakScore', row.get('Score', 3.0))
+                        
+                        conf = compute_episode_confidence(
+                            maturity_state=maturity_state,
+                            episode_duration_minutes=duration_minutes,
+                            peak_z=peak_z if peak_z is not None else 3.0
+                        )
+                        confidence_values.append(round(conf, 3))
+                    
+                    df['Confidence'] = confidence_values
+                except Exception as e:
+                    Console.warn(f"Failed to compute episode confidence: {e}", component="EPISODES")
+            
             return self.write_table('ACM_Anomaly_Events', df, delete_existing=True)
         except Exception as e:
             Console.warn(f"write_anomaly_events failed: {e}", component="OUTPUT", error=str(e)[:200])
@@ -3280,10 +3341,12 @@ DECLARE @EquipID INT = ?;
 
     def _generate_health_timeline(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
         """
-        Generate enhanced health timeline with smoothing and quality flags.
+        Generate enhanced health timeline with smoothing, quality flags, and V11 confidence.
         
         Implements EMA smoothing + rate limiting to prevent unrealistic health jumps
         caused by sensor noise, missing data, or coldstart artifacts.
+        
+        V11: Adds Confidence column based on maturity state and data quality.
         
         Args:
             scores_df: DataFrame with fused Z-scores and timestamp index
@@ -3334,6 +3397,42 @@ DECLARE @EquipID INT = ?;
             labels=['ALERT', 'WATCH', 'GOOD']
         )
         
+        # V11: Compute confidence for each health reading
+        confidence_values = []
+        if _CONFIDENCE_AVAILABLE and _LIFECYCLE_AVAILABLE and compute_health_confidence is not None:
+            try:
+                # Get current maturity state from model lifecycle
+                maturity_state = 'COLDSTART'  # Default
+                if hasattr(self, 'sql_client') and self.sql_client is not None:
+                    try:
+                        lifecycle = ModelLifecycle(self.sql_client, self.equip_id)
+                        state_info = lifecycle.get_state()
+                        maturity_state = state_info.get('maturity_state', 'COLDSTART')
+                    except Exception:
+                        pass  # Use default COLDSTART
+                
+                # Compute confidence for each timestamp based on available data
+                for i, (ts, fused_z, qflag) in enumerate(zip(scores_df.index, scores_df['fused'], quality_flag)):
+                    # Compute how many samples we have up to this point
+                    sample_count = i + 1
+                    # Is this a quality issue point?
+                    is_quality_issue = qflag in ('EXTREME_VOLATILITY', 'EXTREME_ANOMALY')
+                    
+                    conf = compute_health_confidence(
+                        maturity_state=maturity_state,
+                        sample_count=sample_count,
+                        is_extrapolated=False,  # Health timeline is always from actual data
+                        has_quality_issues=is_quality_issue
+                    )
+                    confidence_values.append(round(conf, 3))
+            except Exception as e:
+                Console.warn(f"Failed to compute health confidence: {e}", component="HEALTH")
+                # Fill with None if confidence computation fails
+                confidence_values = [None] * len(scores_df)
+        else:
+            # No confidence module available
+            confidence_values = [None] * len(scores_df)
+        
         ts_values = normalize_timestamp_series(scores_df.index).to_list()
         return pd.DataFrame({
             'Timestamp': ts_values,
@@ -3341,7 +3440,8 @@ DECLARE @EquipID INT = ?;
             'RawHealthIndex': raw_health.round(2).to_list(),
             'QualityFlag': quality_flag.astype(str).to_list(),
             'HealthZone': zones.astype(str).to_list(),
-            'FusedZ': scores_df['fused'].round(4).to_list()
+            'FusedZ': scores_df['fused'].round(4).to_list(),
+            'Confidence': confidence_values  # V11: Health confidence
         })
     
     def _generate_regime_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:

@@ -228,33 +228,42 @@ Exit Criteria: PASSED
 
 ---
 
-### Phase 2: ONLINE Pipeline
+### Phase 2: ONLINE Pipeline [COMPLETE]
 
-| Task | Description | Files |
-|------|-------------|-------|
-| 2.1 | Create core/online_pipeline.py - scoring-only | NEW |
-| 2.2 | Load frozen model from ModelRegistry | MODIFY |
-| 2.3 | Regime assignment (predict only, no fit) | MODIFY |
-| 2.4 | Add UNKNOWN regime (label=-1) when confidence < threshold | MODIFY |
-| 2.5 | Wire OnlinePipeline into acm.py | MODIFY |
-| 2.6 | ONLINE fails triggers OFFLINE automatically | MODIFY |
+| Task | Description | Files | Status |
+|------|-------------|-------|--------|
+| 2.1 | Create core/online_pipeline.py - scoring-only | NEW | SKIPPED - gating flags in acm_main.py suffice |
+| 2.2 | Load frozen model from ModelRegistry | MODIFY | DONE - model_lifecycle.py integration |
+| 2.3 | Regime assignment (predict only, no fit) | MODIFY | DONE - mode gating in regimes.py |
+| 2.4 | Add UNKNOWN regime (label=-1) when confidence < threshold | MODIFY | DONE - regimes.py |
+| 2.5 | Wire OnlinePipeline into acm.py | MODIFY | SKIPPED - uses gating flags |
+| 2.6 | ONLINE fails triggers OFFLINE automatically | MODIFY | DONE - fallback in acm_main.py |
 
-Exit Criteria: python -m core.acm --equip FD_FAN --mode online uses existing model, scores.
+Exit Criteria: PASSED
+- UNKNOWN_REGIME_LABEL = -1 for low-confidence assignments
+- predict_regime_with_confidence() uses distance-based thresholding
+- regime_confidence and regime_unknown_count in output
+- Commit: 7111143
 
 ---
 
-### Phase 3: Confidence and Reliability
+### Phase 3: Confidence and Reliability [COMPLETE]
 
-| Task | Description | Files |
-|------|-------------|-------|
-| 3.1 | Create core/confidence.py - unified confidence model | NEW |
-| 3.2 | Add confidence column to ACM_HealthTimeline | MODIFY |
-| 3.3 | Add confidence column to ACM_RUL | MODIFY |
-| 3.4 | Add confidence column to ACM_Episodes | MODIFY |
-| 3.5 | Implement RUL reliability gate (CONVERGED + min data) | MODIFY |
-| 3.6 | Output RUL_Status=NOT_RELIABLE when gate fails | MODIFY |
+| Task | Description | Files | Status |
+|------|-------------|-------|--------|
+| 3.1 | Create core/confidence.py - unified confidence model | NEW | DONE |
+| 3.2 | Add Confidence column to ACM_HealthTimeline | MODIFY | DONE - output_manager.py |
+| 3.3 | Add Confidence + RUL_Status + MaturityState to ACM_RUL | MODIFY | DONE - forecast_engine.py |
+| 3.4 | Add Confidence column to ACM_Anomaly_Events | MODIFY | DONE - output_manager.py |
+| 3.5 | Implement RUL reliability gate (CONVERGED + min data) | MODIFY | DONE - forecast_engine.py |
+| 3.6 | Output RUL_Status=NOT_RELIABLE when gate fails | MODIFY | DONE - forecast_engine.py |
 
-Exit Criteria: All outputs have confidence 0-1. RUL shows NOT_RELIABLE when prerequisites fail.
+Exit Criteria: PASSED
+- ReliabilityStatus enum: RELIABLE, NOT_RELIABLE, LEARNING, INSUFFICIENT_DATA
+- ConfidenceFactors dataclass with geometric mean computation
+- compute_rul_confidence() returns (confidence, status, reason)
+- RUL output includes RUL_Status and MaturityState columns
+- SQL tables altered to include new columns
 
 ---
 
