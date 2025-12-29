@@ -62,7 +62,8 @@ class SQLBatchRunner:
                  tick_minutes: int = 240,
                  max_coldstart_attempts: int = 10,
                  max_batches: Optional[int] = None,
-                 start_from_beginning: bool = False):
+                 start_from_beginning: bool = False,
+                 mode: Optional[str] = None):
         """Initialize batch runner.
         
         Args:
@@ -70,6 +71,7 @@ class SQLBatchRunner:
             artifact_root: Root directory for artifacts
             tick_minutes: Window size in minutes (default: 30)
             max_coldstart_attempts: Max attempts to complete coldstart (default: 10)
+            mode: Pipeline mode: 'online', 'offline', or None for auto-detect
         """
         self.sql_conn_string = sql_conn_string
         self.artifact_root = artifact_root
@@ -78,6 +80,7 @@ class SQLBatchRunner:
         self.progress_file = artifact_root / ".sql_batch_progress.json"
         self.max_batches = max_batches
         self.start_from_beginning = start_from_beginning
+        self.mode = mode  # V11: Pipeline mode (online/offline/None)
 
     def _log_historian_overview(self, equip_name: str) -> bool:
         """Preflight: Log historian table coverage and return True when data exists.
@@ -665,6 +668,10 @@ class SQLBatchRunner:
         if end_time:
             cmd.extend(["--end-time", end_time.isoformat()])
         
+        # V11: Pass pipeline mode if specified
+        if self.mode is not None:
+            cmd.extend(["--mode", self.mode])
+        
         printable = " ".join(cmd)
         if dry_run:
             Console.info(f"{printable}", mode="dry-run", component="DRY")
@@ -1112,6 +1119,9 @@ def main() -> int:
                         help="Resume from last successful batch")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without running")
+    parser.add_argument("--mode", choices=["online", "offline"], default=None,
+                        help="Pipeline mode: online (scoring only), offline (full training). "
+                             "Default: auto-detect based on cached model availability")
 
     args = parser.parse_args()
 
@@ -1155,7 +1165,8 @@ def main() -> int:
         tick_minutes=args.tick_minutes,
         max_coldstart_attempts=args.max_coldstart_attempts,
         max_batches=args.max_batches,
-        start_from_beginning=args.start_from_beginning
+        start_from_beginning=args.start_from_beginning,
+        mode=args.mode,  # V11: Pipeline mode (online/offline/None)
     )
 
     max_workers = max(1, args.max_workers)
@@ -1168,6 +1179,7 @@ def main() -> int:
     Console.info(f"Max Workers: {max_workers}", component="MAIN", max_workers=max_workers)
     Console.info(f"Resume: {args.resume}", component="MAIN", resume=args.resume)
     Console.info(f"Dry Run: {args.dry_run}", component="MAIN", dry_run=args.dry_run)
+    Console.info(f"Pipeline Mode: {args.mode or 'auto'}", component="MAIN", mode=args.mode or "auto")
     Console.status("="*60)
 
     import time

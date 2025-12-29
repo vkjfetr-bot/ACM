@@ -1714,16 +1714,26 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
     basis_meta: Dict[str, Any] = ctx.get("basis_meta") or {}
     regime_model: Optional[RegimeModel] = ctx.get("regime_model")
     basis_hash: Optional[int] = ctx.get("regime_basis_hash")
+    allow_discovery: bool = ctx.get("allow_discovery", True)  # V11: ONLINE mode sets False
 
     out = dict(score_out or {})
     frame = out.get("frame")
 
     if basis_train is not None and basis_score is not None:
-        if (
+        needs_fit = (
             regime_model is None
             or regime_model.feature_columns != list(basis_train.columns)
             or (basis_hash is not None and regime_model.train_hash != basis_hash)
-        ):
+        )
+        
+        # V11 ONLINE mode gate: fail fast if model missing and discovery not allowed
+        if needs_fit and not allow_discovery:
+            raise RuntimeError(
+                "[ONLINE MODE] Regime model not found or invalidated. "
+                "ONLINE mode requires pre-trained regime model. Run in OFFLINE mode first to discover regimes."
+            )
+        
+        if needs_fit:
             regime_model = fit_regime_model(basis_train, basis_meta, cfg, basis_hash)
         elif regime_model.train_hash is None and basis_hash is not None:
             regime_model.train_hash = basis_hash

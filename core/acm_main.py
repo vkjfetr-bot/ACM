@@ -211,8 +211,19 @@ class RuntimeContext:
     batch_num: int
     config_signature: str
     run_start_time: datetime
+    pipeline_mode: PipelineMode = PipelineMode.OFFLINE  # v11: online/offline mode
     tracer: Optional[Any] = None
     root_span: Optional[Any] = None
+    
+    @property
+    def allows_model_refit(self) -> bool:
+        """Whether current mode allows model fitting/retraining."""
+        return self.pipeline_mode == PipelineMode.OFFLINE
+    
+    @property
+    def allows_regime_discovery(self) -> bool:
+        """Whether current mode allows new regime discovery."""
+        return self.pipeline_mode == PipelineMode.OFFLINE
 
 
 @dataclass
@@ -3280,6 +3291,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--equip", required=True, help="Equipment name (e.g., FD_FAN, GAS_TURBINE)")
+    ap.add_argument("--mode", choices=["online", "offline"], default="offline",
+                    help="Pipeline mode: online (scoring only, requires model), offline (full discovery)")
     ap.add_argument("--config", default=None, help="Config file path (auto-discovers configs/ directory if not specified)")
     ap.add_argument("--train-csv", help="Path to baseline CSV (historical normal data), overrides config.")
     ap.add_argument("--baseline-csv", dest="train_csv", help="Alias for --train-csv (baseline data)")
@@ -3364,6 +3377,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     # Detect batch mode (running under sql_batch_runner)
     BATCH_MODE = os.getenv("ACM_BATCH_MODE", "0") == "1"
     
+    # v11: Pipeline mode from CLI (online = scoring only, offline = full discovery)
+    pipeline_mode_str = getattr(args, "mode", "offline")
+    PIPELINE_MODE = PipelineMode.ONLINE if pipeline_mode_str == "online" else PipelineMode.OFFLINE
+    ALLOWS_MODEL_REFIT = PIPELINE_MODE == PipelineMode.OFFLINE
+    ALLOWS_REGIME_DISCOVERY = PIPELINE_MODE == PipelineMode.OFFLINE
+    
     # Check if continuous learning is enabled
     CONTINUOUS_LEARNING = _continuous_learning_enabled(cfg, BATCH_MODE)
     
@@ -3411,6 +3430,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     batch_display = f"{batch_num + 1}/{batch_total}" if batch_total else str(batch_num + 1)
     Console.info(f"Batch {batch_display} | Equipment: {equip}", component="RUN")
     Console.info(f"storage_backend=SQL_ONLY | batch_mode={BATCH_MODE} | continuous_learning={CONTINUOUS_LEARNING}", component="CFG")
+    Console.info(f"pipeline_mode={pipeline_mode_str.upper()} | allows_refit={ALLOWS_MODEL_REFIT} | allows_discovery={ALLOWS_REGIME_DISCOVERY}", component="CFG")
     if CONTINUOUS_LEARNING:
         Console.info(f"model_update_interval={model_update_interval}  |  threshold_update_interval={threshold_update_interval}", component="CFG")
     sql_log_sink = None
@@ -4097,10 +4117,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # Fit models if not loaded from cache (MHAL removed v9.1.0)
         # NOTE: Sequential fitting to avoid BLAS/OpenMP thread deadlocks with ThreadPoolExecutor
-        if not all([ar1_detector or not ar1_enabled, 
-                    pca_detector or not pca_enabled, 
-                    iforest_detector or not iforest_enabled]):
-            
+        detectors_missing = not all([ar1_detector or not ar1_enabled, 
+                                      pca_detector or not pca_enabled, 
+                                      iforest_detector or not iforest_enabled])
+        
+        # V11 ONLINE mode gate: fail fast if models missing and fitting not allowed
+        if detectors_missing and not ALLOWS_MODEL_REFIT:
+            raise RuntimeError(
+                f"[ONLINE MODE] Required detector models not found in cache for {equip}. "
+                "ONLINE mode requires pre-trained models. Run in OFFLINE mode first to train models, "
+                "or check ModelRegistry for cached models."
+            )
+        
+        if detectors_missing:
             with T.section("train.detector_fit"):
                 Console.info("Starting detector fitting...", component="MODEL")
                 fit_result = _fit_all_detectors(
@@ -4276,6 +4305,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 "regime_model": regime_model if regime_model != "STATE_LOADED" else None,
                 "regime_basis_hash": regime_basis_hash,
                 "X_train": train,
+                "allow_discovery": ALLOWS_REGIME_DISCOVERY,  # V11: ONLINE mode sets False
             }
             regime_out = regimes.label(score, regime_ctx, {"frame": frame}, cfg)
             frame = regime_out.get("frame", frame)
