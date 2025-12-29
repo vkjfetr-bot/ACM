@@ -4545,26 +4545,30 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             )
             
             # Compute adaptive z-clip: Fit temp calibrators to get TRAIN P99, then set adaptive clip
+            # Compute adaptive z-clip directly from TRAIN raw scores (no temp calibrators needed)
+            # OPTIMIZATION: Eliminated redundant temp calibrator fits - compute P99 z-scores inline
             default_clip = float(self_tune_cfg.get("clip_z", 8.0))
-            temp_cfg = dict(self_tune_cfg)  # Don't modify original yet
             train_z_p99 = {}
             
-            # MHAL removed from det_list v9.1.0
-            det_list = [("ar1", "ar1_raw"), ("pca_spe", "pca_spe"), ("pca_t2", "pca_t2"),
-                       ("iforest", "iforest_raw"), ("gmm", "gmm_raw")]
+            # Detector raw columns to analyze
+            det_raw_cols = [("ar1", "ar1_raw"), ("pca_spe", "pca_spe"), ("pca_t2", "pca_t2"),
+                           ("iforest", "iforest_raw"), ("gmm", "gmm_raw")]
             if omr_enabled:
-                det_list.append(("omr", "omr_raw"))
+                det_raw_cols.append(("omr", "omr_raw"))
             
-            for det_name, raw_col in det_list:
+            for det_name, raw_col in det_raw_cols:
                 if raw_col in train_frame.columns:
-                    # Fit temp calibrator with default clip
-                    temp_cal = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=temp_cfg).fit(
-                        train_frame[raw_col].to_numpy(copy=False), regime_labels=None
-                    )
-                    temp_z = temp_cal.transform(train_frame[raw_col].to_numpy(copy=False), regime_labels=None)
-                    finite_z = temp_z[np.isfinite(temp_z)]
-                    if len(finite_z) > 10:
-                        p99 = float(np.percentile(finite_z, 99))
+                    raw_vals = train_frame[raw_col].to_numpy(copy=False)
+                    finite_vals = raw_vals[np.isfinite(raw_vals)]
+                    if len(finite_vals) > 10:
+                        # Compute median/MAD/scale inline (same formula as ScoreCalibrator.fit)
+                        med = float(np.median(finite_vals))
+                        mad = float(np.median(np.abs(finite_vals - med)))
+                        scale = mad * 1.4826 if mad > 1e-9 else float(np.nanstd(finite_vals))
+                        scale = max(scale, 1e-3)  # Minimum scale
+                        # Compute z-scores and P99
+                        z_vals = (finite_vals - med) / scale
+                        p99 = float(np.percentile(z_vals, 99))
                         if 0 < p99 < 100:  # Sanity check
                             train_z_p99[det_name] = p99
             
