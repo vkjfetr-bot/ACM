@@ -1,6 +1,6 @@
 # ACM Comprehensive Database Schema Reference
 
-_Generated automatically on 2025-12-26 16:14:32_
+_Generated automatically on 2025-12-29 11:23:01_
 
 This document provides detailed information about all tables in the ACM database:
 - Schema (columns, data types, nullability, defaults)
@@ -146,93 +146,93 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | Table | Columns | Rows | Primary Key |
 | --- | ---: | ---: | --- |
-| dbo.ACM_ActiveModels | 11 | 0 | ID |
-| dbo.ACM_AdaptiveConfig | 13 | 11 | ConfigID |
+| dbo.ACM_ActiveModels | 11 | 4 | ID |
+| dbo.ACM_AdaptiveConfig | 13 | 17 | ConfigID |
 | dbo.ACM_AlertAge | 6 | 0 | — |
-| dbo.ACM_Anomaly_Events | 6 | 375 | Id |
-| dbo.ACM_AssetProfiles | 11 | 0 | ID |
-| dbo.ACM_BaselineBuffer | 7 | 1,162,924 | Id |
+| dbo.ACM_Anomaly_Events | 6 | 6 | Id |
+| dbo.ACM_AssetProfiles | 11 | 4 | ID |
+| dbo.ACM_BaselineBuffer | 7 | 246,950 | Id |
 | dbo.ACM_CalibrationSummary | 10 | 0 | ID |
 | dbo.ACM_ColdstartState | 17 | 15 | EquipID, Stage |
-| dbo.ACM_Config | 7 | 342 | ConfigID |
-| dbo.ACM_ConfigHistory | 9 | 3,495 | ID |
+| dbo.ACM_Config | 7 | 292 | ConfigID |
+| dbo.ACM_ConfigHistory | 9 | 19 | ID |
 | dbo.ACM_ContributionCurrent | 5 | 0 | — |
 | dbo.ACM_ContributionTimeline | 7 | 0 | ID |
 | dbo.ACM_DailyFusedProfile | 9 | 0 | ID |
-| dbo.ACM_DataContractValidation | 10 | 0 | ID |
-| dbo.ACM_DataQuality | 24 | 7,195 | — |
+| dbo.ACM_DataContractValidation | 10 | 24 | ID |
+| dbo.ACM_DataQuality | 24 | 1,880 | — |
 | dbo.ACM_DefectSummary | 12 | 0 | — |
 | dbo.ACM_DefectTimeline | 10 | 0 | — |
-| dbo.ACM_DetectorCorrelation | 7 | 3,577 | ID |
+| dbo.ACM_DetectorCorrelation | 7 | 196 | ID |
 | dbo.ACM_DetectorForecast_TS | 10 | 0 | RunID, EquipID, DetectorName, Timestamp |
 | dbo.ACM_DriftController | 10 | 0 | ID |
 | dbo.ACM_DriftEvents | 2 | 0 | — |
 | dbo.ACM_DriftSeries | 7 | 0 | ID |
 | dbo.ACM_EnhancedFailureProbability_TS | 11 | 0 | RunID, EquipID, Timestamp, ForecastHorizon_Hours |
 | dbo.ACM_EnhancedMaintenanceRecommendation | 13 | 0 | RunID, EquipID |
-| dbo.ACM_EpisodeCulprits | 9 | 5,108 | ID |
-| dbo.ACM_EpisodeDiagnostics | 16 | 425 | ID |
+| dbo.ACM_EpisodeCulprits | 9 | 31 | ID |
+| dbo.ACM_EpisodeDiagnostics | 16 | 6 | ID |
 | dbo.ACM_EpisodeMetrics | 10 | 0 | — |
-| dbo.ACM_Episodes | 8 | 174 | — |
+| dbo.ACM_Episodes | 8 | 26 | — |
 | dbo.ACM_EpisodesQC | 10 | 0 | RecordID |
 | dbo.ACM_FailureCausation | 12 | 0 | RunID, EquipID, Detector |
-| dbo.ACM_FailureForecast | 9 | 113,064 | EquipID, RunID, Timestamp |
+| dbo.ACM_FailureForecast | 9 | 21,168 | EquipID, RunID, Timestamp |
 | dbo.ACM_FailureForecast_TS | 7 | 0 | RunID, EquipID, Timestamp |
 | dbo.ACM_FailureHazard_TS | 8 | 0 | EquipID, RunID, Timestamp |
-| dbo.ACM_FeatureDropLog | 8 | 0 | ID |
+| dbo.ACM_FeatureDropLog | 8 | 411 | ID |
 | dbo.ACM_ForecastState | 12 | 0 | EquipID, StateVersion |
-| dbo.ACM_ForecastingState | 13 | 7 | EquipID, StateVersion |
+| dbo.ACM_ForecastingState | 13 | 1 | EquipID, StateVersion |
 | dbo.ACM_FusionQualityReport | 9 | 0 | — |
 | dbo.ACM_HealthDistributionOverTime | 12 | 0 | — |
-| dbo.ACM_HealthForecast | 10 | 113,064 | EquipID, RunID, Timestamp |
+| dbo.ACM_HealthForecast | 10 | 21,168 | EquipID, RunID, Timestamp |
 | dbo.ACM_HealthForecast_Continuous | 8 | 0 | EquipID, Timestamp, SourceRunID |
 | dbo.ACM_HealthForecast_TS | 9 | 0 | RunID, EquipID, Timestamp |
 | dbo.ACM_HealthHistogram | 5 | 0 | — |
-| dbo.ACM_HealthTimeline | 8 | 190,982 | — |
+| dbo.ACM_HealthTimeline | 8 | 3,639 | — |
 | dbo.ACM_HealthZoneByPeriod | 9 | 0 | — |
-| dbo.ACM_HistorianData | 7 | 204,067 | DataID |
+| dbo.ACM_HistorianData | 7 | 0 | DataID |
 | dbo.ACM_MaintenanceRecommendation | 8 | 0 | RunID, EquipID |
 | dbo.ACM_OMRContributionsLong | 8 | 0 | — |
 | dbo.ACM_OMRTimeline | 6 | 0 | — |
-| dbo.ACM_OMR_Diagnostics | 15 | 13 | DiagnosticID |
-| dbo.ACM_PCA_Loadings | 10 | 5,040 | RecordID |
-| dbo.ACM_PCA_Metrics | 8 | 17 | ID |
-| dbo.ACM_PCA_Models | 12 | 15 | RecordID |
-| dbo.ACM_RUL | 18 | 430 | EquipID, RunID |
+| dbo.ACM_OMR_Diagnostics | 15 | 4 | DiagnosticID |
+| dbo.ACM_PCA_Loadings | 10 | 15,765 | RecordID |
+| dbo.ACM_PCA_Metrics | 8 | 4 | ID |
+| dbo.ACM_PCA_Models | 12 | 4 | RecordID |
+| dbo.ACM_RUL | 18 | 21 | EquipID, RunID |
 | dbo.ACM_RUL_Attribution | 9 | 0 | RunID, EquipID, FailureTime, SensorName |
 | dbo.ACM_RUL_LearningState | 19 | 0 | EquipID |
 | dbo.ACM_RUL_Summary | 15 | 0 | RunID, EquipID |
 | dbo.ACM_RUL_TS | 9 | 0 | RunID, EquipID, Timestamp |
 | dbo.ACM_RecommendedActions | 6 | 0 | RunID, EquipID, Action |
-| dbo.ACM_RefitRequests | 10 | 76 | RequestID |
-| dbo.ACM_RegimeDefinitions | 12 | 0 | ID |
+| dbo.ACM_RefitRequests | 10 | 4 | RequestID |
+| dbo.ACM_RegimeDefinitions | 12 | 12 | ID |
 | dbo.ACM_RegimeDwellStats | 8 | 0 | — |
 | dbo.ACM_RegimeOccupancy | 9 | 0 | ID |
 | dbo.ACM_RegimePromotionLog | 9 | 0 | ID |
 | dbo.ACM_RegimeStability | 4 | 0 | — |
-| dbo.ACM_RegimeState | 15 | 1 | EquipID, StateVersion |
+| dbo.ACM_RegimeState | 15 | 5 | EquipID, StateVersion |
 | dbo.ACM_RegimeStats | 8 | 0 | — |
-| dbo.ACM_RegimeTimeline | 5 | 296,615 | — |
+| dbo.ACM_RegimeTimeline | 5 | 3,639 | — |
 | dbo.ACM_RegimeTransitions | 8 | 0 | ID |
-| dbo.ACM_Regime_Episodes | 6 | 375 | Id |
-| dbo.ACM_RunLogs | 25 | 656,958 | LogID |
-| dbo.ACM_RunMetadata | 12 | 715 | RunMetadataID |
-| dbo.ACM_RunMetrics | 5 | 105,396 | RunID, EquipID, MetricName |
+| dbo.ACM_Regime_Episodes | 6 | 6 | Id |
+| dbo.ACM_RunLogs | 25 | 31,438 | LogID |
+| dbo.ACM_RunMetadata | 12 | 0 | RunMetadataID |
+| dbo.ACM_RunMetrics | 5 | 1,311 | RunID, EquipID, MetricName |
 | dbo.ACM_RunTimers | 7 | 205,327 | TimerID |
-| dbo.ACM_Run_Stats | 13 | 15 | RecordID |
-| dbo.ACM_Runs | 19 | 802 | RunID |
+| dbo.ACM_Run_Stats | 13 | 4 | RecordID |
+| dbo.ACM_Runs | 19 | 57 | RunID |
 | dbo.ACM_SchemaVersion | 5 | 2 | VersionID |
 | dbo.ACM_Scores_Long | 9 | 0 | Id |
-| dbo.ACM_Scores_Wide | 15 | 298,298 | — |
+| dbo.ACM_Scores_Wide | 15 | 3,639 | — |
 | dbo.ACM_SeasonalPatterns | 10 | 0 | ID |
 | dbo.ACM_SensorAnomalyByPeriod | 11 | 0 | — |
-| dbo.ACM_SensorCorrelations | 8 | 191,844 | ID |
-| dbo.ACM_SensorDefects | 11 | 3,165 | — |
-| dbo.ACM_SensorForecast | 11 | 1,512 | RunID, EquipID, Timestamp, SensorName |
+| dbo.ACM_SensorCorrelations | 8 | 1,244,271 | ID |
+| dbo.ACM_SensorDefects | 11 | 204 | — |
+| dbo.ACM_SensorForecast | 11 | 0 | RunID, EquipID, Timestamp, SensorName |
 | dbo.ACM_SensorForecast_TS | 10 | 0 | RunID, EquipID, SensorName, Timestamp |
 | dbo.ACM_SensorHotspotTimeline | 9 | 0 | — |
-| dbo.ACM_SensorHotspots | 18 | 8,465 | — |
-| dbo.ACM_SensorNormalized_TS | 8 | 472,446 | ID |
+| dbo.ACM_SensorHotspots | 18 | 650 | — |
+| dbo.ACM_SensorNormalized_TS | 8 | 41,958 | ID |
 | dbo.ACM_SensorRanking | 6 | 0 | — |
 | dbo.ACM_SinceWhen | 6 | 0 | — |
 | dbo.ACM_TagEquipmentMap | 10 | 1,986 | TagID |
@@ -243,7 +243,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | dbo.Equipment | 8 | 29 | EquipID |
 | dbo.FD_FAN_Data | 11 | 17,499 | EntryDateTime |
 | dbo.GAS_TURBINE_Data | 18 | 2,911 | EntryDateTime |
-| dbo.ModelRegistry | 8 | 3,820 | ModelType, EquipID, Version |
+| dbo.ModelRegistry | 8 | 174 | ModelType, EquipID, Version |
 | dbo.WFA_TURBINE_0_Data | 87 | 54,986 | EntryDateTime |
 | dbo.WFA_TURBINE_10_Data | 87 | 53,592 | EntryDateTime |
 | dbo.WFA_TURBINE_11_Data | 87 | 0 | EntryDateTime |
@@ -281,7 +281,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_ActiveModels
 
 **Primary Key:** ID  
-**Row Count:** 0  
+**Row Count:** 4  
 
 ### Schema
 
@@ -299,14 +299,23 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | LastUpdatedAt | datetime2 | NO | — | (getutcdate()) |
 | LastUpdatedBy | nvarchar | YES | 100 | — |
 
+### Top 10 Records
+
+| ID | EquipID | ActiveRegimeVersion | RegimeMaturityState | RegimePromotedAt | ActiveThresholdVersion | ThresholdPromotedAt | ActiveForecastVersion | ForecastPromotedAt | LastUpdatedAt |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 | 5000 | 1 | LEARNING | NULL | NULL | NULL | NULL | NULL | 2025-12-27 11:56:23 |
+| 5 | 5003 | 1 | LEARNING | NULL | NULL | NULL | NULL | NULL | 2025-12-27 11:56:23 |
+| 6 | 5013 | 1 | LEARNING | NULL | NULL | NULL | NULL | NULL | 2025-12-27 11:56:26 |
+| 7 | 5010 | 1 | LEARNING | NULL | NULL | NULL | NULL | NULL | 2025-12-27 11:56:52 |
+
 ---
 
 
 ## dbo.ACM_AdaptiveConfig
 
 **Primary Key:** ConfigID  
-**Row Count:** 11  
-**Date Range:** 2025-12-04 10:46:47 to 2025-12-25 17:52:16  
+**Row Count:** 17  
+**Date Range:** 2025-12-04 10:46:47 to 2025-12-27 11:57:52  
 
 ### Schema
 
@@ -339,22 +348,22 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | 7 | NULL | monte_carlo_simulations | 1000.0 | 500.0 | 5000.0 | False | NULL | NULL | Saxena et al. (2008) - RUL simulation count |
 | 8 | NULL | blend_tau_hours | 12.0 | 6.0 | 48.0 | False | NULL | NULL | Expert tuning - Warm-start alpha blending |
 | 9 | NULL | auto_tune_data_threshold | 10000.0 | 5000.0 | 50000.0 | False | NULL | NULL | Expert tuning - Auto-tuning trigger |
-| 12 | 1 | fused_alert_z | 1.7893608808517456 | 0.0 | 999999.0 | True | 8749 | 0.0 | quantile_0.997: Auto-calculated from 8749 accumulated samples |
+| 16 | 5000 | fused_alert_z | 1.4745798110961914 | 0.0 | 999999.0 | True | 129 | 0.0 | quantile_0.997: Auto-calculated from 129 accumulated samples |
 
 ### Bottom 10 Records
 
 | ConfigID | EquipID | ConfigKey | ConfigValue | MinBound | MaxBound | IsLearned | DataVolumeAtTuning | PerformanceMetric | ResearchReference |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 13 | 1 | fused_warn_z | 0.8946804404258728 | 0.0 | 999999.0 | True | 8749 | 0.0 | quantile_0.997: Auto-calculated warning threshold (50% of alert) |
-| 12 | 1 | fused_alert_z | 1.7893608808517456 | 0.0 | 999999.0 | True | 8749 | 0.0 | quantile_0.997: Auto-calculated from 8749 accumulated samples |
+| 23 | 5010 | fused_warn_z | 0.7621059417724609 | 0.0 | 999999.0 | True | 131 | 0.0 | quantile_0.997: Auto-calculated warning threshold (50% of alert) |
+| 22 | 5010 | fused_alert_z | 1.5242118835449219 | 0.0 | 999999.0 | True | 131 | 0.0 | quantile_0.997: Auto-calculated from 131 accumulated samples |
+| 21 | 5013 | fused_warn_z | 0.5874592661857605 | 0.0 | 999999.0 | True | 129 | 0.0 | quantile_0.997: Auto-calculated warning threshold (50% of alert) |
+| 20 | 5013 | fused_alert_z | 1.174918532371521 | 0.0 | 999999.0 | True | 129 | 0.0 | quantile_0.997: Auto-calculated from 129 accumulated samples |
+| 19 | 5003 | fused_warn_z | 0.7344083189964294 | 0.0 | 999999.0 | True | 129 | 0.0 | quantile_0.997: Auto-calculated warning threshold (50% of alert) |
+| 18 | 5003 | fused_alert_z | 1.4688166379928589 | 0.0 | 999999.0 | True | 129 | 0.0 | quantile_0.997: Auto-calculated from 129 accumulated samples |
+| 17 | 5000 | fused_warn_z | 0.7372899055480957 | 0.0 | 999999.0 | True | 129 | 0.0 | quantile_0.997: Auto-calculated warning threshold (50% of alert) |
+| 16 | 5000 | fused_alert_z | 1.4745798110961914 | 0.0 | 999999.0 | True | 129 | 0.0 | quantile_0.997: Auto-calculated from 129 accumulated samples |
 | 9 | NULL | auto_tune_data_threshold | 10000.0 | 5000.0 | 50000.0 | False | NULL | NULL | Expert tuning - Auto-tuning trigger |
 | 8 | NULL | blend_tau_hours | 12.0 | 6.0 | 48.0 | False | NULL | NULL | Expert tuning - Warm-start alpha blending |
-| 7 | NULL | monte_carlo_simulations | 1000.0 | 500.0 | 5000.0 | False | NULL | NULL | Saxena et al. (2008) - RUL simulation count |
-| 6 | NULL | max_forecast_hours | 168.0 | 168.0 | 720.0 | False | NULL | NULL | Industry standard - 7-30 day horizon |
-| 5 | NULL | confidence_min | 0.8 | 0.5 | 0.95 | False | NULL | NULL | Agresti & Coull (1998) - Statistical confidence |
-| 4 | NULL | failure_threshold | 70.0 | 40.0 | 80.0 | False | NULL | NULL | ISO 13381-1:2015 - Health index threshold |
-| 3 | NULL | training_window_hours | 168.0 | 72.0 | 720.0 | False | NULL | NULL | NIST SP 1225 - 3-30 day training window |
-| 2 | NULL | beta | 0.1 | 0.01 | 0.3 | False | NULL | NULL | Hyndman & Athanasopoulos (2018) - Exponential smoothing trend |
 
 ---
 
@@ -381,8 +390,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_Anomaly_Events
 
 **Primary Key:** Id  
-**Row Count:** 375  
-**Date Range:** 2024-10-03 19:00:00 to 2025-09-11 00:00:00  
+**Row Count:** 6  
+**Date Range:** 2022-05-03 13:30:00 to 2022-10-13 13:00:00  
 
 ### Schema
 
@@ -399,31 +408,12 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | Id | RunID | EquipID | StartTime | EndTime | Severity |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-03 19:00:00 | 2024-10-04 01:30:00 | info |
-| 2 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-04 06:30:00 | 2024-10-04 08:00:00 | info |
-| 3 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-05 09:30:00 | 2024-10-06 00:00:00 | info |
-| 4 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-07 00:00:00 | 2024-10-07 02:30:00 | info |
-| 5 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-07 09:30:00 | 2024-10-07 12:00:00 | info |
-| 6 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-08 11:30:00 | 2024-10-08 14:00:00 | info |
-| 7 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-09 22:30:00 | 2024-10-10 03:00:00 | info |
-| 8 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-10-10 12:30:00 | 2024-10-13 06:30:00 | info |
-| 9 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-11-01 07:00:00 | 2024-11-13 07:30:00 | info |
-| 10 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2024-11-23 00:00:00 | 2024-12-04 12:30:00 | info |
-
-### Bottom 10 Records
-
-| Id | RunID | EquipID | StartTime | EndTime | Severity |
-| --- | --- | --- | --- | --- | --- |
-| 375 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-11 00:00:00 | 2025-09-12 07:00:00 | info |
-| 374 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-08-12 00:00:00 | 2025-08-13 07:00:00 | info |
-| 373 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-07-12 00:00:00 | 2025-07-13 10:00:00 | info |
-| 372 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-06-12 00:00:00 | 2025-06-13 07:00:00 | info |
-| 371 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-05-12 00:00:00 | 2025-05-13 07:30:00 | info |
-| 370 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-04-11 00:00:00 | 2025-04-12 06:30:00 | info |
-| 369 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-03-15 00:00:00 | 2025-03-15 04:00:00 | info |
-| 368 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-03-14 03:00:00 | 2025-03-14 10:00:00 | info |
-| 367 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-03-12 00:00:00 | 2025-03-13 06:30:00 | info |
-| 366 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-02-23 22:00:00 | 2025-02-24 02:30:00 | info |
+| 381 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2022-05-05 19:20:00 | 2022-05-06 01:50:00 | info |
+| 382 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2022-05-06 21:50:00 | 2022-05-07 03:50:00 | info |
+| 383 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | 2022-05-03 13:30:00 | 2022-05-03 17:00:00 | info |
+| 384 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2022-08-09 01:10:00 | 2022-08-09 02:10:00 | info |
+| 385 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2022-08-09 21:40:00 | 2022-08-10 14:10:00 | info |
+| 386 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2022-10-13 13:00:00 | 2022-10-13 20:00:00 | info |
 
 ---
 
@@ -431,7 +421,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_AssetProfiles
 
 **Primary Key:** ID  
-**Row Count:** 0  
+**Row Count:** 4  
+**Date Range:** 2025-12-27 12:24:04 to 2025-12-27 12:24:55  
 
 ### Schema
 
@@ -449,14 +440,23 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | LastUpdatedAt | datetime2 | NO | — | (getutcdate()) |
 | LastUpdatedByRunID | nvarchar | YES | 50 | — |
 
+### Top 10 Records
+
+| ID | EquipID | EquipType | SensorNamesJSON | SensorMeansJSON | SensorStdsJSON | RegimeCount | TypicalHealth | DataHours | LastUpdatedAt |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 3 | 5013 | WFA_TURBINE_13 | ["power_29_avg", "power_29_max", "power_29_min", "power_29_std", "power_30_avg", "power_30_max", ... | {"power_29_avg": 0.39128342270851135, "power_29_max": 0.539457380771637, "power_29_min": 0.235427... | {"power_29_avg": 0.34754589200019836, "power_29_max": 0.3684498071670532, "power_29_min": 0.28379... | 5 | 85.0 | 64.0 | 2025-12-27 12:24:04 |
+| 4 | 5003 | WFA_TURBINE_3 | ["power_29_avg", "power_29_max", "power_29_min", "power_29_std", "power_30_avg", "power_30_max", ... | {"power_29_avg": 0.7298295497894287, "power_29_max": 0.8526586890220642, "power_29_min": 0.441692... | {"power_29_avg": 0.27196452021598816, "power_29_max": 0.24192680418491364, "power_29_min": 0.2381... | 2 | 85.0 | 64.0 | 2025-12-27 12:24:27 |
+| 5 | 5000 | WFA_TURBINE_0 | ["power_29_avg", "power_29_max", "power_29_min", "power_29_std", "power_30_avg", "power_30_max", ... | {"power_29_avg": 0.6802162528038025, "power_29_max": 0.7749495506286621, "power_29_min": 0.477090... | {"power_29_avg": 0.34482336044311523, "power_29_max": 0.34186238050460815, "power_29_min": 0.3117... | 2 | 85.0 | 64.0 | 2025-12-27 12:24:28 |
+| 6 | 5010 | WFA_TURBINE_10 | ["power_29_avg", "power_29_max", "power_29_min", "power_29_std", "power_30_avg", "power_30_max", ... | {"power_29_avg": 0.069669708609581, "power_29_max": 0.13419324159622192, "power_29_min": 0.023929... | {"power_29_avg": 0.10068515688180923, "power_29_max": 0.16620099544525146, "power_29_min": 0.0436... | 3 | 85.0 | 65.0 | 2025-12-27 12:24:55 |
+
 ---
 
 
 ## dbo.ACM_BaselineBuffer
 
 **Primary Key:** Id  
-**Row Count:** 1,162,924  
-**Date Range:** 2018-01-05 00:00:00 to 2025-09-14 23:00:00  
+**Row Count:** 246,950  
+**Date Range:** 2018-01-05 00:00:00 to 2024-10-19 18:50:00  
 
 ### Schema
 
@@ -489,16 +489,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | Id | EquipID | Timestamp | SensorName | SensorValue | DataQuality | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- |
-| 42448640 | 1 | 2025-09-14 23:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 397.95001220703125 | NULL | 2025-12-26 10:14:28 |
-| 42448639 | 1 | 2025-09-14 22:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 393.2699890136719 | NULL | 2025-12-26 10:14:28 |
-| 42448638 | 1 | 2025-09-14 22:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 396.79998779296875 | NULL | 2025-12-26 10:14:28 |
-| 42448637 | 1 | 2025-09-14 21:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 359.95001220703125 | NULL | 2025-12-26 10:14:28 |
-| 42448636 | 1 | 2025-09-14 21:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 378.3500061035156 | NULL | 2025-12-26 10:14:28 |
-| 42448635 | 1 | 2025-09-14 20:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 418.4100036621094 | NULL | 2025-12-26 10:14:28 |
-| 42448634 | 1 | 2025-09-14 20:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 395.4700012207031 | NULL | 2025-12-26 10:14:28 |
-| 42448633 | 1 | 2025-09-14 19:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 373.6099853515625 | NULL | 2025-12-26 10:14:28 |
-| 42448632 | 1 | 2025-09-14 19:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 390.54998779296875 | NULL | 2025-12-26 10:14:28 |
-| 42448631 | 1 | 2025-09-14 18:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 367.2799987792969 | NULL | 2025-12-26 10:14:28 |
+| 14017520 | 5092 | 2022-05-14 00:00:00 | wind_speed_4_avg | 4.300000190734863 | NULL | 2025-12-13 11:27:58 |
+| 14017519 | 5092 | 2022-05-14 00:00:00 | wind_speed_3_std | 0.6000000238418579 | NULL | 2025-12-13 11:27:58 |
+| 14017518 | 5092 | 2022-05-14 00:00:00 | wind_speed_3_min | 1.2999999523162842 | NULL | 2025-12-13 11:27:58 |
+| 14017517 | 5092 | 2022-05-14 00:00:00 | wind_speed_3_max | 7.5 | NULL | 2025-12-13 11:27:58 |
+| 14017516 | 5092 | 2022-05-14 00:00:00 | wind_speed_3_avg | 4.699999809265137 | NULL | 2025-12-13 11:27:58 |
+| 14017515 | 5092 | 2022-05-14 00:00:00 | sensor_9_avg | 42.0 | NULL | 2025-12-13 11:27:58 |
+| 14017514 | 5092 | 2022-05-14 00:00:00 | sensor_8_avg | 97.0 | NULL | 2025-12-13 11:27:58 |
+| 14017513 | 5092 | 2022-05-14 00:00:00 | sensor_7_avg | 40.0 | NULL | 2025-12-13 11:27:58 |
+| 14017512 | 5092 | 2022-05-14 00:00:00 | sensor_6_avg | 26.0 | NULL | 2025-12-13 11:27:58 |
+| 14017511 | 5092 | 2022-05-14 00:00:00 | sensor_5_std | 0.10000000149011612 | NULL | 2025-12-13 11:27:58 |
 
 ---
 
@@ -530,7 +530,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 **Primary Key:** EquipID, Stage  
 **Row Count:** 15  
-**Date Range:** 2025-12-13 06:00:34 to 2025-12-25 05:36:52  
+**Date Range:** 2025-12-13 06:00:34 to 2025-12-29 05:27:03  
 
 ### Schema
 
@@ -558,16 +558,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | EquipID | Stage | Status | AttemptCount | FirstAttemptAt | LastAttemptAt | CompletedAt | AccumulatedRows | RequiredRows | DataStartTime |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | score | COMPLETE | 1 | 2025-12-25 05:36:52 | 2025-12-25 05:36:53 | 2025-12-25 05:36:53 | 241 | 200 | 2023-10-15 00:00:00 |
-| 2621 | score | COMPLETE | 1 | 2025-12-22 16:02:23 | 2025-12-22 16:02:24 | 2025-12-22 16:02:24 | 241 | 200 | 2023-10-15 00:00:00 |
-| 5000 | score | COMPLETE | 1 | 2025-12-22 08:43:38 | 2025-12-22 08:43:40 | 2025-12-22 08:43:40 | 241 | 200 | 2022-08-04 06:10:00 |
-| 5003 | score | COMPLETE | 1 | 2025-12-22 08:43:38 | 2025-12-22 08:43:39 | 2025-12-22 08:43:39 | 241 | 200 | 2022-04-27 03:00:00 |
-| 5010 | score | COMPLETE | 1 | 2025-12-22 08:43:39 | 2025-12-22 08:43:41 | 2025-12-22 08:43:41 | 240 | 200 | 2022-10-09 08:40:00 |
-| 5013 | score | COMPLETE | 1 | 2025-12-22 08:43:34 | 2025-12-22 08:43:36 | 2025-12-22 08:43:36 | 241 | 200 | 2022-04-30 13:20:00 |
-| 5014 | score | COMPLETE | 1 | 2025-12-20 05:11:39 | 2025-12-20 05:11:40 | 2025-12-20 05:11:40 | 238 | 200 | 2022-03-03 14:00:00 |
-| 5017 | score | COMPLETE | 1 | 2025-12-20 05:11:39 | 2025-12-20 05:11:40 | 2025-12-20 05:11:40 | 241 | 200 | 2022-10-31 15:20:00 |
-| 5022 | score | COMPLETE | 1 | 2025-12-20 06:26:08 | 2025-12-20 06:26:08 | 2025-12-20 06:26:08 | 241 | 200 | 2022-08-12 09:50:00 |
-| 5024 | score | COMPLETE | 1 | 2025-12-20 06:26:49 | 2025-12-20 06:26:49 | 2025-12-20 06:26:49 | 241 | 200 | 2022-04-24 15:00:00 |
+| 1 | score | COMPLETE | 2 | 2025-12-29 05:27:03 | 2025-12-29 05:27:59 | 2025-12-29 05:27:59 | 482 | 200 | 2023-10-15 00:00:00 |
+| 2621 | score | COMPLETE | 2 | 2025-12-27 06:58:20 | 2025-12-27 06:58:45 | 2025-12-27 06:58:45 | 482 | 200 | 2023-10-15 00:00:00 |
+| 5000 | score | COMPLETE | 3 | 2025-12-27 05:49:00 | 2025-12-27 05:49:09 | 2025-12-27 05:49:09 | 563 | 200 | 2022-08-04 06:10:00 |
+| 5003 | score | COMPLETE | 3 | 2025-12-27 05:49:00 | 2025-12-27 05:49:09 | 2025-12-27 05:49:09 | 563 | 200 | 2022-04-27 03:00:00 |
+| 5010 | score | COMPLETE | 3 | 2025-12-27 05:49:00 | 2025-12-27 05:49:12 | 2025-12-27 05:49:12 | 563 | 200 | 2022-10-09 08:40:00 |
+| 5013 | score | COMPLETE | 3 | 2025-12-27 05:49:00 | 2025-12-27 05:49:09 | 2025-12-27 05:49:09 | 563 | 200 | 2022-04-30 13:20:00 |
+| 5014 | score | COMPLETE | 6 | 2025-12-27 06:56:20 | 2025-12-27 06:57:11 | 2025-12-27 06:57:11 | 1126 | 200 | 2022-03-03 14:00:00 |
+| 5017 | score | COMPLETE | 6 | 2025-12-27 06:56:37 | 2025-12-27 06:57:24 | 2025-12-27 06:57:24 | 1126 | 200 | 2022-10-31 15:20:00 |
+| 5022 | score | COMPLETE | 6 | 2025-12-27 06:56:40 | 2025-12-27 06:57:23 | 2025-12-27 06:57:23 | 1126 | 200 | 2022-08-12 09:50:00 |
+| 5024 | score | COMPLETE | 6 | 2025-12-27 06:57:06 | 2025-12-27 06:57:49 | 2025-12-27 06:57:49 | 1126 | 200 | 2022-04-24 15:00:00 |
 
 ### Bottom 10 Records
 
@@ -576,13 +576,13 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | 8634 | score | FAILED | 13 | 2025-12-20 04:25:53 | 2025-12-20 04:26:24 | 2025-12-20 04:25:53 | 241 | 200 | 2024-01-01 00:00:00 |
 | 8632 | score | IN_PROGRESS | 15 | 2025-12-20 04:25:52 | 2025-12-20 04:26:22 | 2025-12-20 04:25:52 | 1719 | 200 | 2024-01-01 00:00:00 |
 | 5092 | score | COMPLETE | 1 | 2025-12-13 06:00:34 | 2025-12-13 06:00:34 | 2025-12-13 06:00:34 | 241 | 200 | 2022-04-04 02:30:00 |
-| 5026 | score | COMPLETE | 1 | 2025-12-20 07:58:45 | 2025-12-20 07:58:46 | 2025-12-20 07:58:46 | 230 | 200 | 2022-10-12 10:20:00 |
-| 5025 | score | COMPLETE | 1 | 2025-12-20 07:41:35 | 2025-12-20 07:41:37 | 2025-12-20 07:41:37 | 241 | 200 | 2022-05-23 06:50:00 |
-| 5024 | score | COMPLETE | 1 | 2025-12-20 06:26:49 | 2025-12-20 06:26:49 | 2025-12-20 06:26:49 | 241 | 200 | 2022-04-24 15:00:00 |
-| 5022 | score | COMPLETE | 1 | 2025-12-20 06:26:08 | 2025-12-20 06:26:08 | 2025-12-20 06:26:08 | 241 | 200 | 2022-08-12 09:50:00 |
-| 5017 | score | COMPLETE | 1 | 2025-12-20 05:11:39 | 2025-12-20 05:11:40 | 2025-12-20 05:11:40 | 241 | 200 | 2022-10-31 15:20:00 |
-| 5014 | score | COMPLETE | 1 | 2025-12-20 05:11:39 | 2025-12-20 05:11:40 | 2025-12-20 05:11:40 | 238 | 200 | 2022-03-03 14:00:00 |
-| 5013 | score | COMPLETE | 1 | 2025-12-22 08:43:34 | 2025-12-22 08:43:36 | 2025-12-22 08:43:36 | 241 | 200 | 2022-04-30 13:20:00 |
+| 5026 | score | COMPLETE | 6 | 2025-12-27 06:57:52 | 2025-12-27 06:58:39 | 2025-12-27 06:58:39 | 1126 | 200 | 2022-10-12 10:20:00 |
+| 5025 | score | COMPLETE | 6 | 2025-12-27 06:57:36 | 2025-12-27 06:58:24 | 2025-12-27 06:58:24 | 1126 | 200 | 2022-05-23 06:50:00 |
+| 5024 | score | COMPLETE | 6 | 2025-12-27 06:57:06 | 2025-12-27 06:57:49 | 2025-12-27 06:57:49 | 1126 | 200 | 2022-04-24 15:00:00 |
+| 5022 | score | COMPLETE | 6 | 2025-12-27 06:56:40 | 2025-12-27 06:57:23 | 2025-12-27 06:57:23 | 1126 | 200 | 2022-08-12 09:50:00 |
+| 5017 | score | COMPLETE | 6 | 2025-12-27 06:56:37 | 2025-12-27 06:57:24 | 2025-12-27 06:57:24 | 1126 | 200 | 2022-10-31 15:20:00 |
+| 5014 | score | COMPLETE | 6 | 2025-12-27 06:56:20 | 2025-12-27 06:57:11 | 2025-12-27 06:57:11 | 1126 | 200 | 2022-03-03 14:00:00 |
+| 5013 | score | COMPLETE | 3 | 2025-12-27 05:49:00 | 2025-12-27 05:49:09 | 2025-12-27 05:49:09 | 563 | 200 | 2022-04-30 13:20:00 |
 
 ---
 
@@ -590,8 +590,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_Config
 
 **Primary Key:** ConfigID  
-**Row Count:** 342  
-**Date Range:** 2025-12-09 12:47:06 to 2025-12-26 06:07:09  
+**Row Count:** 292  
+**Date Range:** 2025-12-09 12:47:06 to 2025-12-29 05:26:56  
 
 ### Schema
 
@@ -624,14 +624,14 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ConfigID | EquipID | ParamPath | ParamValue | ValueType | UpdatedAt | UpdatedBy |
 | --- | --- | --- | --- | --- | --- | --- |
-| 847 | 5026 | runtime.tick_minutes | 5400 | int | 2025-12-20 07:58:37 | sql_batch_runner |
-| 846 | 5025 | runtime.tick_minutes | 5499 | int | 2025-12-20 07:41:28 | sql_batch_runner |
-| 845 | 5024 | runtime.tick_minutes | 1440 | int | 2025-12-22 11:18:44 | sql_batch_runner |
-| 844 | 5022 | runtime.tick_minutes | 1440 | int | 2025-12-22 11:18:40 | sql_batch_runner |
-| 843 | 5017 | runtime.tick_minutes | 1440 | int | 2025-12-22 11:18:40 | sql_batch_runner |
-| 842 | 5014 | runtime.tick_minutes | 1440 | int | 2025-12-22 11:18:40 | sql_batch_runner |
-| 841 | 5003 | runtime.tick_minutes | 1440 | int | 2025-12-22 08:43:17 | sql_batch_runner |
-| 840 | 5013 | runtime.tick_minutes | 5615 | int | 2025-12-22 08:43:28 | sql_batch_runner |
+| 856 | 1 | runtime.tick_minutes | 1009410 | int | 2025-12-29 05:26:56 | sql_batch_runner |
+| 854 | 5026 | runtime.tick_minutes | 21600 | int | 2025-12-27 06:57:44 | sql_batch_runner |
+| 853 | 5025 | runtime.tick_minutes | 21993 | int | 2025-12-27 06:57:30 | sql_batch_runner |
+| 852 | 5024 | runtime.tick_minutes | 22110 | int | 2025-12-27 06:57:00 | sql_batch_runner |
+| 851 | 5017 | runtime.tick_minutes | 22141 | int | 2025-12-27 06:56:31 | sql_batch_runner |
+| 850 | 5014 | runtime.tick_minutes | 21784 | int | 2025-12-27 06:56:14 | sql_batch_runner |
+| 849 | 5003 | runtime.tick_minutes | 22345 | int | 2025-12-27 05:48:40 | sql_batch_runner |
+| 848 | 5013 | runtime.tick_minutes | 22457 | int | 2025-12-27 05:48:40 | sql_batch_runner |
 | 839 | 0 | runtime.baseline.refresh_interval_batches | 10 | int | 2025-12-17 04:35:47 | B19cl3pc\bhadk |
 | 838 | 0 | runtime.baseline.max_points | 100000 | int | 2025-12-17 04:35:47 | B19cl3pc\bhadk |
 
@@ -641,8 +641,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_ConfigHistory
 
 **Primary Key:** ID  
-**Row Count:** 3,495  
-**Date Range:** 2025-12-03 14:40:59 to 2025-12-22 16:46:54  
+**Row Count:** 19  
+**Date Range:** 2025-12-11 17:29:31 to 2025-12-27 12:01:16  
 
 ### Schema
 
@@ -662,31 +662,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ID | Timestamp | EquipID | ParameterPath | OldValue | NewValue | ChangedBy | ChangeReason | RunID |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 2025-12-03 14:40:59 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.96e+35 exceeds 1e28 (critical instability) | 9FE7E697-6F6E-48A7-BFCB-B08797B61D1C |
-| 2 | 2025-12-03 14:45:24 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.96e+35 exceeds 1e28 (critical instability) | 03DAA545-ECB9-406A-AE1D-928C823A63C8 |
-| 3 | 2025-12-03 14:55:40 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.96e+35 exceeds 1e28 (critical instability) | E940356F-81F3-4EF8-BF88-C553AA86AE3D |
-| 4 | 2025-12-03 15:20:30 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 2.01e+34 exceeds 1e28 (critical instability) | AFB8AE5E-847B-4407-BBFF-393251387EA3 |
-| 5 | 2025-12-03 16:16:53 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 2.01e+34 exceeds 1e28 (critical instability) | F40EF3EA-BEFF-4AC8-BBE2-9D553F98982F |
-| 6 | 2025-12-03 16:20:51 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 2.01e+34 exceeds 1e28 (critical instability) | DEF498BA-F846-4093-BD45-9D770CE5380B |
-| 7 | 2025-12-03 16:43:12 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 2.01e+34 exceeds 1e28 (critical instability) | 1DB9295F-6A17-42CF-8B9D-8D65C01662A0 |
-| 8 | 2025-12-04 11:11:02 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 4.28e+33 exceeds 1e28 (critical instability) | DB338AC8-ADA2-41E7-A72D-D70BC84DAC0E |
-| 9 | 2025-12-04 15:09:29 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 4.28e+33 exceeds 1e28 (critical instability) | c7de5f9b-a612-4a10-a853-58545790dadb |
-| 10 | 2025-12-08 15:37:35 | 1 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.28e+36 exceeds 1e28 (critical instability) | e56a239d-c9df-4348-b396-d82b47af9ecc |
+| 11 | 2025-12-11 17:29:31 | 8632 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 3.04e+38 exceeds 1e28 (critical instability) | 979ae5c4-a559-4f23-bda9-04d800d60ac0 |
+| 12 | 2025-12-13 10:48:49 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.05e+30 exceeds 1e28 (critical instability) | c296502f-7b4f-453d-8d54-042f53be1c48 |
+| 13 | 2025-12-13 10:49:15 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 4.24e+42 exceeds 1e28 (critical instability) | 0b511082-7139-4f9a-a0b9-f02ea7e86848 |
+| 14 | 2025-12-13 11:07:00 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.05e+30 exceeds 1e28 (critical instability) | 89a2af2a-7231-445e-95ff-21240b4014e2 |
+| 15 | 2025-12-13 11:07:22 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 3.63e+42 exceeds 1e28 (critical instability) | 690134bf-21fa-4890-b397-0870707812ac |
+| 16 | 2025-12-13 11:27:45 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 2.40e+44 exceeds 1e28 (critical instability) | 452e6b7c-eb60-4714-8280-2ff1d920d350 |
+| 17 | 2025-12-13 11:30:49 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.05e+30 exceeds 1e28 (critical instability) | c51c247d-6b86-4cf4-93c4-9547cd9e4069 |
+| 18 | 2025-12-13 11:31:19 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 4.42e+28 exceeds 1e28 (critical instability) | d51fe222-b378-420b-8a64-854d5a0f645b |
+| 19 | 2025-12-13 11:31:57 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.27e+29 exceeds 1e28 (critical instability) | 88401cdd-1bc5-4ecb-a340-bc98624cdc94 |
+| 20 | 2025-12-13 11:34:57 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 2.01e+29 exceeds 1e28 (critical instability) | 0b61b75e-e221-49b0-8b08-bc26c0acc3d9 |
 
 ### Bottom 10 Records
 
 | ID | Timestamp | EquipID | ParameterPath | OldValue | NewValue | ChangedBy | ChangeReason | RunID |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 13491 | 2025-12-22 16:46:54 | 5003 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | 8742e7f7-41c9-42a0-ba93-b57fa7bc1d3c |
-| 13490 | 2025-12-22 16:46:08 | 5000 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | fe7e5408-7ae9-46c9-b161-7f5af7366f38 |
-| 13489 | 2025-12-22 16:46:07 | 5010 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | 4da18918-f7ad-4be1-9322-9f5a1517bab0 |
-| 13488 | 2025-12-22 16:43:52 | 5013 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | f1cfb725-ae18-4367-bb47-78140905a6b7 |
-| 13487 | 2025-12-22 16:29:48 | 5010 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | fd4a83e2-5e8d-43af-9d02-fd1912bc4233 |
-| 13486 | 2025-12-22 16:28:11 | 5003 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | afce4a51-d757-483c-82d8-2bedf83ca937 |
-| 13485 | 2025-12-22 16:27:16 | 5000 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | 40f66cb6-5298-4f23-8698-2225104c0e15 |
-| 13484 | 2025-12-22 16:26:27 | 5013 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | ea5be767-e70a-454b-b0ed-e23bfb923915 |
-| 13483 | 2025-12-22 16:12:10 | 5003 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | 16ecdf24-6dc2-49c0-9c0a-8bae11e77646 |
-| 13482 | 2025-12-22 16:10:16 | 5000 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | 2c1094ef-2e24-4a10-83b0-3f14dad1c90c |
+| 13495 | 2025-12-27 12:01:16 | 5010 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | d648127b-adde-4248-8a81-75034636efe8 |
+| 13494 | 2025-12-27 12:00:49 | 5013 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | b1795ae8-0a34-4097-ac71-0c3cbff9592d |
+| 13493 | 2025-12-27 12:00:48 | 5003 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | 61a6978e-47c5-494f-a88a-e4e71e9989a1 |
+| 13492 | 2025-12-27 12:00:48 | 5000 | regimes.auto_k.k_max | 6.0 | 8.0 | AUTO_TUNE | Auto-tuning based on quality assessment | 03097745-09ca-4250-b0c2-1d64c948247f |
+| 25 | 2025-12-13 11:42:37 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.69e+28 exceeds 1e28 (critical instability) | a16676b4-828e-44e2-9fe9-ccb5dc264d42 |
+| 24 | 2025-12-13 11:41:50 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.62e+29 exceeds 1e28 (critical instability) | e17435c3-d5f4-437e-b2f9-01365fe163d1 |
+| 23 | 2025-12-13 11:40:38 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 3.28e+28 exceeds 1e28 (critical instability) | ceeaecf9-6414-4ed6-a467-5199b491715c |
+| 22 | 2025-12-13 11:36:13 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 3.79e+29 exceeds 1e28 (critical instability) | ae60c5f3-e31d-4d61-a4d5-d9e6bfdcc217 |
+| 21 | 2025-12-13 11:35:35 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 1.58e+28 exceeds 1e28 (critical instability) | d38f2d50-db9e-4a2d-a7d8-b630b8e3174f |
+| 20 | 2025-12-13 11:34:57 | 5092 | models.mahl.regularization | 1.0 | 10.0 | ADAPTIVE_TUNING | Condition number 2.01e+29 exceeds 1e28 (critical instability) | 0b61b75e-e221-49b0-8b08-bc26c0acc3d9 |
 
 ---
 
@@ -754,7 +754,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_DataContractValidation
 
 **Primary Key:** ID  
-**Row Count:** 0  
+**Row Count:** 24  
+**Date Range:** 2025-12-27 11:19:09 to 2025-12-29 10:57:59  
 
 ### Schema
 
@@ -771,14 +772,44 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | ContractSignature | nvarchar | YES | 100 | — |
 | ValidatedAt | datetime2 | NO | — | (getutcdate()) |
 
+### Top 10 Records
+
+| ID | RunID | EquipID | Passed | RowsValidated | ColumnsValidated | IssuesJSON | WarningsJSON | ContractSignature | ValidatedAt |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 71d074cc5cf1 | 2025-12-27 11:19:09 |
+| 5 | 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 2abf45df7787 | 2025-12-27 11:19:09 |
+| 6 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | f74e3d03db67 | 2025-12-27 11:19:10 |
+| 7 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | False | 131 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | d5dda024e44d | 2025-12-27 11:19:12 |
+| 8 | 211fc759-412b-4d44-9feb-7685e19039e2 | 5013 | False | 749 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 71d074cc5cf1 | 2025-12-27 12:25:48 |
+| 9 | c5f3cca9-adfa-41f8-aa2f-45aa569d80ce | 5003 | False | 749 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | f74e3d03db67 | 2025-12-27 12:26:08 |
+| 10 | e8008d4a-b739-4894-aa3a-f62215ae4135 | 5000 | False | 749 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 2abf45df7787 | 2025-12-27 12:26:11 |
+| 11 | a7156ce9-07eb-40f4-8158-2cb83f0d0db0 | 5014 | False | 128 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 22d389599bb4 | 2025-12-27 12:26:31 |
+| 12 | cf404cbc-d3df-4178-b5e9-6dbd10d0d1a5 | 5010 | False | 727 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | d5dda024e44d | 2025-12-27 12:26:34 |
+| 13 | c8ea4c4a-0b58-40c8-b284-01b64d26d884 | 5017 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 432f58c3355a | 2025-12-27 12:26:46 |
+
+### Bottom 10 Records
+
+| ID | RunID | EquipID | Passed | RowsValidated | ColumnsValidated | IssuesJSON | WarningsJSON | ContractSignature | ValidatedAt |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 33 | cf9794af-bad7-4af5-9051-6a363540ef56 | 1 | False | 97 | 9 | ["Missing timestamp column: EntryDateTime", "Insufficient rows: 97 < 100"] | NULL | b44d1ef97088 | 2025-12-29 10:57:59 |
+| 32 | 4b84eb86-d803-46ce-9303-0f6fd65b78ca | 1 | False | 97 | 9 | ["Missing timestamp column: EntryDateTime", "Insufficient rows: 97 < 100"] | NULL | b44d1ef97088 | 2025-12-29 10:57:05 |
+| 26 | 5e01e5d5-bb0a-42fa-97c6-14041794e22e | 2621 | False | 97 | 16 | ["Missing timestamp column: EntryDateTime", "Insufficient rows: 97 < 100"] | NULL | 7a211a9e7e50 | 2025-12-27 12:28:45 |
+| 25 | dc5383bf-4484-4982-8f3a-e127ba879a11 | 5026 | False | 127 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | f4e463b52b45 | 2025-12-27 12:28:39 |
+| 23 | 7842171d-f59a-4e6d-84fa-b506b12b32fa | 5025 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 3c776b413cc5 | 2025-12-27 12:28:24 |
+| 22 | e8f29a1a-ab7d-489a-ac58-eab2613a56c8 | 2621 | False | 97 | 16 | ["Missing timestamp column: EntryDateTime", "Insufficient rows: 97 < 100"] | NULL | 7a211a9e7e50 | 2025-12-27 12:28:22 |
+| 21 | 2e79c7a6-8dab-4567-b187-e0d9ab4c54d2 | 5026 | False | 127 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | f4e463b52b45 | 2025-12-27 12:28:03 |
+| 20 | c6f10086-6226-4886-8877-a412b38f79d9 | 5024 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 814cdbd30915 | 2025-12-27 12:27:49 |
+| 19 | 3e488317-aa29-4081-a473-fbe267a091ed | 5025 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 3c776b413cc5 | 2025-12-27 12:27:45 |
+| 18 | 3689924b-18e4-4e03-9284-43d874372c74 | 5017 | False | 129 | 81 | ["Missing timestamp column: EntryDateTime"] | NULL | 432f58c3355a | 2025-12-27 12:27:25 |
+
 ---
 
 
 ## dbo.ACM_DataQuality
 
 **Primary Key:** No primary key  
-**Row Count:** 7,195  
-**Date Range:** 2022-04-04 02:30:00 to 2024-06-14 12:59:00  
+**Row Count:** 1,880  
+**Date Range:** 2022-04-04 02:30:00 to 2024-01-05 00:00:00  
 
 ### Schema
 
@@ -813,31 +844,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | sensor | train_count | train_nulls | train_null_pct | train_std | train_longest_gap | train_flatline_span | train_min_ts | train_max_ts | score_count |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ACTTBTEMP1 | 47 | 0 | 0.0 | 1.6677963733673096 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B1RADVIBX | 47 | 0 | 0.0 | 0.0767005905508995 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B1RADVIBY | 47 | 0 | 0.0 | 0.0793059840798378 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B1TEMP1 | 47 | 0 | 0.0 | 2.9028818607330322 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B1VIB1 | 47 | 0 | 0.0 | 0.00032087290310300887 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B1VIB2 | 47 | 0 | 0.0 | 0.00036095670657232404 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B2RADVIBX | 47 | 0 | 0.0 | 0.12735570967197418 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B2RADVIBY | 47 | 0 | 0.0 | 0.08861265331506729 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B2TEMP1 | 47 | 0 | 0.0 | 2.840440273284912 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
-| B2VIB1 | 47 | 0 | 0.0 | 0.000871750176884234 | 0 | 0 | 2023-10-17 01:00:00 | 2023-10-18 00:00:00 | 47 |
+| power_29_avg | 144 | 0 | 0.0 | 0.40405070781707764 | 0 | 1 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| power_29_max | 144 | 0 | 0.0 | 0.441830575466156 | 0 | 56 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| power_29_min | 144 | 0 | 0.0 | 0.2658897638320923 | 0 | 20 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| power_29_std | 144 | 0 | 0.0 | 0.0576351173222065 | 0 | 1 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| power_30_avg | 144 | 0 | 0.0 | 0.41087841987609863 | 0 | 1 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| power_30_max | 144 | 0 | 0.0 | 0.47445425391197205 | 0 | 2 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| power_30_min | 144 | 0 | 0.0 | 0.28014156222343445 | 0 | 1 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| power_30_std | 144 | 0 | 0.0 | 0.059888921678066254 | 0 | 1 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| reactive_power_27_avg | 144 | 0 | 0.0 | 0.15484461188316345 | 0 | 3 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
+| reactive_power_27_max | 144 | 0 | 0.0 | 0.1821976751089096 | 0 | 30 | 2022-04-19 02:30:00 | 2022-04-20 02:20:00 | 144 |
 
 ### Bottom 10 Records
 
 | sensor | train_count | train_nulls | train_null_pct | train_std | train_longest_gap | train_flatline_span | train_min_ts | train_max_ts | score_count |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| power_29_avg | 300 | 0 | 0.0 | 0.28070151805877686 | 0 | 39 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| power_29_max | 300 | 0 | 0.0 | 0.3581143915653229 | 0 | 32 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| power_29_min | 300 | 0 | 0.0 | 0.15604470670223236 | 0 | 62 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| power_29_std | 300 | 0 | 0.0 | 0.054747290909290314 | 0 | 32 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| power_30_avg | 300 | 0 | 0.0 | 0.28275102376937866 | 0 | 7 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| power_30_max | 300 | 0 | 0.0 | 0.3741777539253235 | 0 | 19 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| power_30_min | 300 | 0 | 0.0 | 0.1649143099784851 | 0 | 2 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| power_30_std | 300 | 0 | 0.0 | 0.05534970760345459 | 0 | 2 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| reactive_power_27_avg | 300 | 0 | 0.0 | 0.21538427472114563 | 0 | 55 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
-| reactive_power_27_max | 300 | 0 | 0.0 | 0.23632940649986267 | 0 | 55 | 2022-05-27 02:30:00 | 2022-05-29 04:20:00 | 550 |
+| ambient | 97 | 0 | 0.0 | 0.4284217655658722 | 0 | 0 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| coolant | 97 | 0 | 0.0 | 0.4119116961956024 | 0 | 0 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| i_d | 97 | 0 | 0.0 | 0.6761859655380249 | 0 | 0 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| i_q | 97 | 0 | 0.0 | 0.01414421759545803 | 0 | 0 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| motor_speed | 97 | 0 | 0.0 | 0.0009838500991463661 | 0 | 12 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| pm | 97 | 0 | 0.0 | 3.802807092666626 | 0 | 0 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| profile_id | 97 | 0 | 0.0 | 0.0 | 0 | 96 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| stator_tooth | 97 | 0 | 0.0 | 2.375089645385742 | 0 | 1 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| stator_winding | 97 | 0 | 0.0 | 3.0065267086029053 | 0 | 0 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
+| stator_yoke | 97 | 0 | 0.0 | 1.4982963800430298 | 0 | 0 | 2024-01-01 02:24:00 | 2024-01-01 04:00:00 | 97 |
 
 ---
 
@@ -893,8 +924,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_DetectorCorrelation
 
 **Primary Key:** ID  
-**Row Count:** 3,577  
-**Date Range:** 2025-12-25 06:56:18 to 2025-12-26 06:12:03  
+**Row Count:** 196  
+**Date Range:** 2025-12-27 06:31:05 to 2025-12-27 06:31:31  
 
 ### Schema
 
@@ -912,31 +943,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ID | RunID | EquipID | Detector1 | Detector2 | Correlation | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | ar1_z | ar1_z | 1.0 | 2025-12-25 06:56:18 |
-| 2 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | ar1_z | pca_spe_z | 0.46192756595472817 | 2025-12-25 06:56:18 |
-| 3 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | ar1_z | pca_t2_z | 0.6678743160683138 | 2025-12-25 06:56:18 |
-| 4 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | ar1_z | iforest_z | 0.6526334232682297 | 2025-12-25 06:56:18 |
-| 5 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | ar1_z | gmm_z | 0.5525943985960821 | 2025-12-25 06:56:18 |
-| 6 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | ar1_z | omr_z | 0.4625937053180276 | 2025-12-25 06:56:18 |
-| 7 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | ar1_z | cusum_z | 0.07756488312734423 | 2025-12-25 06:56:18 |
-| 8 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | pca_spe_z | ar1_z | 0.46192756595472817 | 2025-12-25 06:56:18 |
-| 9 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | pca_spe_z | pca_spe_z | 1.0 | 2025-12-25 06:56:18 |
-| 10 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | pca_spe_z | pca_t2_z | 0.46977194322346805 | 2025-12-25 06:56:18 |
+| 3725 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | ar1_z | ar1_z | 1.0 | 2025-12-27 06:31:05 |
+| 3726 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | ar1_z | pca_spe_z | -0.24868604227785962 | 2025-12-27 06:31:05 |
+| 3727 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | ar1_z | pca_t2_z | -0.2852374977110462 | 2025-12-27 06:31:05 |
+| 3728 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | ar1_z | iforest_z | 0.7868171705039417 | 2025-12-27 06:31:05 |
+| 3729 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | ar1_z | gmm_z | 0.61193463789505 | 2025-12-27 06:31:05 |
+| 3730 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | ar1_z | omr_z | 0.582251203022299 | 2025-12-27 06:31:05 |
+| 3731 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | ar1_z | cusum_z | 0.40394543757007867 | 2025-12-27 06:31:05 |
+| 3732 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | pca_spe_z | ar1_z | -0.24868604227785962 | 2025-12-27 06:31:05 |
+| 3733 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | pca_spe_z | pca_spe_z | 1.0 | 2025-12-27 06:31:05 |
+| 3734 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | pca_spe_z | pca_t2_z | 0.9922914105928333 | 2025-12-27 06:31:05 |
 
 ### Bottom 10 Records
 
 | ID | RunID | EquipID | Detector1 | Detector2 | Correlation | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- |
-| 3577 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | cusum_z | cusum_z | 1.0 | 2025-12-26 06:12:03 |
-| 3576 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | cusum_z | omr_z | 0.14527505049431036 | 2025-12-26 06:12:03 |
-| 3575 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | cusum_z | gmm_z | 0.08986819686214732 | 2025-12-26 06:12:03 |
-| 3574 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | cusum_z | iforest_z | 0.08644924274712142 | 2025-12-26 06:12:03 |
-| 3573 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | cusum_z | pca_t2_z | 0.052878279625317895 | 2025-12-26 06:12:03 |
-| 3572 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | cusum_z | pca_spe_z | 0.12413327692833613 | 2025-12-26 06:12:03 |
-| 3571 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | cusum_z | ar1_z | 0.07116125066304928 | 2025-12-26 06:12:03 |
-| 3570 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | omr_z | cusum_z | 0.14527505049431036 | 2025-12-26 06:12:03 |
-| 3569 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | omr_z | omr_z | 1.0 | 2025-12-26 06:12:03 |
-| 3568 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | omr_z | gmm_z | 0.9034896743694014 | 2025-12-26 06:12:03 |
+| 3920 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | cusum_z | cusum_z | 1.0 | 2025-12-27 06:31:31 |
+| 3919 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | cusum_z | omr_z | -0.3490801951489417 | 2025-12-27 06:31:31 |
+| 3918 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | cusum_z | gmm_z | 0.13054986011106023 | 2025-12-27 06:31:31 |
+| 3917 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | cusum_z | iforest_z | -0.23040830646312513 | 2025-12-27 06:31:31 |
+| 3916 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | cusum_z | pca_t2_z | 0.08062480516794114 | 2025-12-27 06:31:31 |
+| 3915 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | cusum_z | pca_spe_z | 0.31891721903755055 | 2025-12-27 06:31:31 |
+| 3914 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | cusum_z | ar1_z | -0.19298157914631084 | 2025-12-27 06:31:31 |
+| 3913 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | omr_z | cusum_z | -0.3490801951489417 | 2025-12-27 06:31:31 |
+| 3912 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | omr_z | omr_z | 1.0 | 2025-12-27 06:31:31 |
+| 3911 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | omr_z | gmm_z | 0.13961614599906466 | 2025-12-27 06:31:31 |
 
 ---
 
@@ -1075,8 +1106,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_EpisodeCulprits
 
 **Primary Key:** ID  
-**Row Count:** 5,108  
-**Date Range:** 2025-12-20 07:51:55 to 2025-12-26 06:16:15  
+**Row Count:** 31  
+**Date Range:** 2025-12-27 06:54:38 to 2025-12-27 06:55:29  
 
 ### Schema
 
@@ -1096,31 +1127,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ID | RunID | EpisodeID | DetectorType | SensorName | ContributionPct | Rank | CreatedAt | EquipID |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 141818 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 1 | Time-Series Anomaly (AR1) | NULL | 23.085338592529297 | 1 | 2025-12-20 07:51:55 | 5025 |
-| 141819 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 1 | Correlation Break (PCA-SPE) | NULL | 22.35803985595703 | 2 | 2025-12-20 07:51:55 | 5025 |
-| 141820 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 1 | Density Anomaly (GMM) | NULL | 19.251317977905273 | 3 | 2025-12-20 07:51:55 | 5025 |
-| 141821 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 1 | Baseline Consistency (OMR) | NULL | 18.43108367919922 | 4 | 2025-12-20 07:51:55 | 5025 |
-| 141822 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 1 | cusum_z | NULL | 6.5168867111206055 | 5 | 2025-12-20 07:51:55 | 5025 |
-| 141823 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 1 | Rare State (IsolationForest) | NULL | 6.237335681915283 | 6 | 2025-12-20 07:51:55 | 5025 |
-| 141824 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 1 | Multivariate Outlier (PCA-T2) | NULL | 4.119987964630127 | 7 | 2025-12-20 07:51:55 | 5025 |
-| 141825 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 2 | Correlation Break (PCA-SPE) | NULL | 40.368324279785156 | 1 | 2025-12-20 07:51:55 | 5025 |
-| 141826 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 2 | Multivariate Outlier (PCA-T2) | NULL | 40.368324279785156 | 2 | 2025-12-20 07:51:55 | 5025 |
-| 141827 | 76FEF25C-88A8-4FE2-85EC-E15BE10FF09B | 2 | cusum_z | NULL | 7.585345268249512 | 3 | 2025-12-20 07:51:55 | 5025 |
+| 150564 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 1 | Density Anomaly (GMM) | NULL | 31.398883819580078 | 1 | 2025-12-27 06:54:38 | 5013 |
+| 150565 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 1 | Time-Series Anomaly (AR1) | NULL | 25.082210540771484 | 2 | 2025-12-27 06:54:38 | 5013 |
+| 150566 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 1 | Rare State (IsolationForest) | NULL | 18.64297866821289 | 3 | 2025-12-27 06:54:38 | 5013 |
+| 150567 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 1 | Baseline Consistency (OMR) | NULL | 18.352582931518555 | 4 | 2025-12-27 06:54:38 | 5013 |
+| 150568 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 1 | cusum_z | NULL | 6.523347854614258 | 5 | 2025-12-27 06:54:38 | 5013 |
+| 150569 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 2 | Rare State (IsolationForest) | NULL | 34.761024475097656 | 1 | 2025-12-27 06:54:38 | 5013 |
+| 150570 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 2 | Time-Series Anomaly (AR1) | NULL | 31.293701171875 | 2 | 2025-12-27 06:54:38 | 5013 |
+| 150571 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 2 | cusum_z | NULL | 15.905296325683594 | 3 | 2025-12-27 06:54:38 | 5013 |
+| 150572 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 2 | Density Anomaly (GMM) | NULL | 9.13425350189209 | 4 | 2025-12-27 06:54:38 | 5013 |
+| 150573 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 2 | Baseline Consistency (OMR) | NULL | 8.905723571777344 | 5 | 2025-12-27 06:54:38 | 5013 |
 
 ### Bottom 10 Records
 
 | ID | RunID | EpisodeID | DetectorType | SensorName | ContributionPct | Rank | CreatedAt | EquipID |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 150530 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 25 | Baseline Consistency (OMR) | NULL | 11.331165313720703 | 6 | 2025-12-26 06:16:15 | 1 |
-| 150529 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 25 | Rare State (IsolationForest) | NULL | 15.979448318481445 | 5 | 2025-12-26 06:16:15 | 1 |
-| 150528 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 25 | Time-Series Anomaly (AR1) | NULL | 16.207496643066406 | 4 | 2025-12-26 06:16:15 | 1 |
-| 150527 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 25 | Density Anomaly (GMM) | NULL | 18.53544044494629 | 3 | 2025-12-26 06:16:15 | 1 |
-| 150526 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 25 | Multivariate Outlier (PCA-T2) | NULL | 18.53544044494629 | 2 | 2025-12-26 06:16:15 | 1 |
-| 150525 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 25 | Correlation Break (PCA-SPE) | NULL | 18.53544044494629 | 1 | 2025-12-26 06:16:15 | 1 |
-| 150524 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 24 | cusum_z | NULL | 1.0491502285003662 | 7 | 2025-12-26 06:16:15 | 1 |
-| 150523 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 24 | Baseline Consistency (OMR) | NULL | 11.070684432983398 | 6 | 2025-12-26 06:16:15 | 1 |
-| 150522 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 24 | Rare State (IsolationForest) | NULL | 15.853971481323242 | 5 | 2025-12-26 06:16:15 | 1 |
-| 150521 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 24 | Time-Series Anomaly (AR1) | NULL | 17.698152542114258 | 4 | 2025-12-26 06:16:15 | 1 |
+| 150594 | D648127B-ADDE-4248-8A81-75034636EFE8 | 1 | Multivariate Outlier (PCA-T2) | NULL | 1.2696409225463867 | 6 | 2025-12-27 06:55:29 | 5010 |
+| 150593 | D648127B-ADDE-4248-8A81-75034636EFE8 | 1 | Baseline Consistency (OMR) | NULL | 11.446576118469238 | 5 | 2025-12-27 06:55:29 | 5010 |
+| 150592 | D648127B-ADDE-4248-8A81-75034636EFE8 | 1 | Time-Series Anomaly (AR1) | NULL | 19.971088409423828 | 4 | 2025-12-27 06:55:29 | 5010 |
+| 150591 | D648127B-ADDE-4248-8A81-75034636EFE8 | 1 | cusum_z | NULL | 22.111421585083008 | 3 | 2025-12-27 06:55:29 | 5010 |
+| 150590 | D648127B-ADDE-4248-8A81-75034636EFE8 | 1 | Rare State (IsolationForest) | NULL | 22.269657135009766 | 2 | 2025-12-27 06:55:29 | 5010 |
+| 150589 | D648127B-ADDE-4248-8A81-75034636EFE8 | 1 | Density Anomaly (GMM) | NULL | 22.931621551513672 | 1 | 2025-12-27 06:55:29 | 5010 |
+| 150588 | 03097745-09CA-4250-B0C2-1D64C948247F | 2 | Baseline Consistency (OMR) | NULL | 10.163461685180664 | 5 | 2025-12-27 06:55:03 | 5000 |
+| 150587 | 03097745-09CA-4250-B0C2-1D64C948247F | 2 | Time-Series Anomaly (AR1) | NULL | 18.30774688720703 | 4 | 2025-12-27 06:55:03 | 5000 |
+| 150586 | 03097745-09CA-4250-B0C2-1D64C948247F | 2 | Rare State (IsolationForest) | NULL | 20.13909149169922 | 3 | 2025-12-27 06:55:03 | 5000 |
+| 150585 | 03097745-09CA-4250-B0C2-1D64C948247F | 2 | cusum_z | NULL | 24.558935165405273 | 2 | 2025-12-27 06:55:03 | 5000 |
 
 ---
 
@@ -1128,8 +1159,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_EpisodeDiagnostics
 
 **Primary Key:** ID  
-**Row Count:** 425  
-**Date Range:** 2024-10-03 19:00:00 to 2025-09-11 00:00:00  
+**Row Count:** 6  
+**Date Range:** 2022-05-03 13:30:00 to 2022-10-13 13:00:00  
 
 ### Schema
 
@@ -1156,31 +1187,12 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ID | RunID | EquipID | EpisodeID | StartTime | EndTime | DurationHours | PeakZ | AvgZ | Severity |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 145 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 1 | 2024-10-03 19:00:00 | 2024-10-04 01:30:00 | 6.5 | 1.5907792385206019 | 1.4495876546087534 | LOW |
-| 146 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 2 | 2024-10-04 06:30:00 | 2024-10-04 08:00:00 | 1.5 | 1.5887340159306884 | 1.3582928523405462 | LOW |
-| 147 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 3 | 2024-10-05 09:30:00 | 2024-10-06 00:00:00 | 14.5 | 1.566529533573589 | 1.5256429323628322 | LOW |
-| 148 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 4 | 2024-10-07 00:00:00 | 2024-10-07 02:30:00 | 2.5 | 1.5724494641057625 | 1.5484483946261693 | LOW |
-| 149 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 5 | 2024-10-07 09:30:00 | 2024-10-07 12:00:00 | 2.5 | 1.3123133995571967 | 1.1146128498824421 | LOW |
-| 150 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 6 | 2024-10-08 11:30:00 | 2024-10-08 14:00:00 | 2.5 | 1.5658636622087676 | 1.550270296996495 | LOW |
-| 151 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 7 | 2024-10-09 22:30:00 | 2024-10-10 03:00:00 | 4.5 | 1.7384634776280046 | 1.5052473641151547 | LOW |
-| 152 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 8 | 2024-10-10 12:30:00 | 2024-10-13 06:30:00 | 66.0 | 1.7893609166449744 | 1.6001595073687644 | LOW |
-| 153 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 9 | 2024-11-01 07:00:00 | 2024-11-13 07:30:00 | 288.5 | 1.7893609166449744 | 1.3844467670631948 | LOW |
-| 154 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 10 | 2024-11-23 00:00:00 | 2024-12-04 12:30:00 | 276.5 | 1.7893609166449744 | 1.550449453888558 | LOW |
-
-### Bottom 10 Records
-
-| ID | RunID | EquipID | EpisodeID | StartTime | EndTime | DurationHours | PeakZ | AvgZ | Severity |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 569 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 25 | 2025-09-11 00:00:00 | 2025-09-12 07:00:00 | 31.0 | 1.7893609166449744 | 1.6569926293136485 | LOW |
-| 568 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 24 | 2025-08-12 00:00:00 | 2025-08-13 07:00:00 | 31.0 | 1.7893609166449744 | 1.7153269468726637 | LOW |
-| 567 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 23 | 2025-07-12 00:00:00 | 2025-07-13 10:00:00 | 34.0 | 1.7893609166449744 | 1.6787804454862407 | LOW |
-| 566 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 22 | 2025-06-12 00:00:00 | 2025-06-13 07:00:00 | 31.0 | 1.7893609166449744 | 1.7121320047349415 | LOW |
-| 565 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 21 | 2025-05-12 00:00:00 | 2025-05-13 07:30:00 | 31.5 | 1.7893609166449744 | 1.6830956134444195 | LOW |
-| 564 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 20 | 2025-04-11 00:00:00 | 2025-04-12 06:30:00 | 30.5 | 1.7893609166449744 | 1.6624835209110491 | LOW |
-| 563 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 19 | 2025-03-15 00:00:00 | 2025-03-15 04:00:00 | 4.0 | 1.502840949988757 | 1.289215237184902 | LOW |
-| 562 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 18 | 2025-03-14 03:00:00 | 2025-03-14 10:00:00 | 7.0 | 1.5843207038607716 | 1.0835809471090847 | LOW |
-| 561 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 17 | 2025-03-12 00:00:00 | 2025-03-13 06:30:00 | 30.5 | 1.7893609166449744 | 1.5739801434271905 | LOW |
-| 560 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 16 | 2025-02-23 22:00:00 | 2025-02-24 02:30:00 | 4.5 | 1.3695584829504464 | 0.9716414932999035 | LOW |
+| 575 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | 1 | 2022-05-03 13:30:00 | 2022-05-03 17:00:00 | 3.5 | 1.3405905304603716 | 0.7888532335090899 | LOW |
+| 576 | 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | 1 | 2022-08-09 01:10:00 | 2022-08-09 02:10:00 | 1.0 | 1.1679315361915623 | 0.6428725300299372 | LOW |
+| 577 | 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | 2 | 2022-08-09 21:40:00 | 2022-08-10 14:10:00 | 16.5 | 0.8849055986861347 | 0.5153642647715159 | LOW |
+| 578 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 1 | 2022-05-05 19:20:00 | 2022-05-06 01:50:00 | 6.5 | 1.1149577005805225 | 0.6497194487681559 | LOW |
+| 579 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2 | 2022-05-06 21:50:00 | 2022-05-07 03:50:00 | 6.0 | 0.7903578147671737 | 0.5064891643713243 | LOW |
+| 580 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 1 | 2022-10-13 13:00:00 | 2022-10-13 20:00:00 | 7.0 | 1.5744499986548597 | 1.0450690668091742 | LOW |
 
 ---
 
@@ -1211,7 +1223,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_Episodes
 
 **Primary Key:** No primary key  
-**Row Count:** 174  
+**Row Count:** 26  
 
 ### Schema
 
@@ -1231,30 +1243,30 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | RunID | EquipID | EpisodeCount | MedianDurationMinutes | CoveragePct | TimeInAlertPct | MaxFusedZ | AvgFusedZ |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 5092 | 2 | 175.0 | NULL | NULL | 2.1463578292035006 | 0.7573724334687362 |
-| 01434C28-7E92-4F95-921C-03AB03F5169B | 2621 | 1 | 150.0 | NULL | NULL | 0.860022160478252 | 0.5727634360701214 |
-| 9FCD79AB-B6BD-479A-B248-08310A5EA8BF | 2621 | 1 | 210.0 | NULL | NULL | 1.333583709690176 | 0.5429477777430093 |
-| 97F1E50A-C859-4497-A6F8-0898A7CBDAD9 | 5010 | 7 | 90.0 | NULL | NULL | 1.2009846449762915 | 0.7725041408682278 |
-| D33BC3BB-2918-493E-9D83-08D4AF44CDB0 | 2621 | 2 | 60.0 | NULL | NULL | 1.859461901724742 | 1.0487426178069652 |
-| 7777B310-0063-41C4-B5F4-0953ABC2D450 | 2621 | 2 | 165.0 | NULL | NULL | 2.0795061759810296 | 0.9279856553113313 |
-| E2E92EB7-FEC0-466A-A792-0955C714592F | 5013 | 5 | 250.0 | NULL | NULL | 0.9754589677032719 | 0.4974348366870015 |
-| 119A0E03-7732-4BA4-A344-0D27EBA12FDF | 1 | 25 | 1830.0 | NULL | NULL | 1.7893609166449744 | 1.4524301320859399 |
-| 6084CDE3-D2C8-4107-BF43-0F91EBC48DE5 | 2621 | 1 | 240.0 | NULL | NULL | 2.413417968782031 | 1.3645043677281243 |
-| 42EF9AC2-0934-464F-A546-126C13073D71 | 2621 | 1 | 180.0 | NULL | NULL | 1.2780286494437278 | 0.8250214785791739 |
+| B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2 | 375.0 | NULL | NULL | 1.1149577005805225 | 0.5781043065697401 |
+| E1596C1E-4B19-4E7A-A7EF-168EB50EC183 | 5092 | 2 | 195.0 | NULL | NULL | 1.5868823434631993 | 0.9781944567732942 |
+| 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2 | 525.0 | NULL | NULL | 1.1679315361915623 | 0.5791183974007266 |
+| B425F409-811B-4B39-B026-3198F34D5336 | 5092 | 1 | 340.0 | NULL | NULL | 1.7627930715382036 | 0.689486096200057 |
+| 601EDF93-FC4D-448C-9E2C-374ED1582373 | 5092 | 3 | 120.0 | NULL | NULL | 1.739453144252883 | 0.9867868016616163 |
+| B938DABA-38C1-4680-AF86-3B31F85FF50F | 5092 | 2 | 210.0 | NULL | NULL | 1.5995743038010275 | 0.7721095755236788 |
+| CEEAECF9-6414-4ED6-A467-5199B491715C | 5092 | 2 | 75.0 | NULL | NULL | 1.5428271673589493 | 0.8318848460286552 |
+| 19AD36A7-7882-4538-AE66-5CEC6E8C069B | 5092 | 4 | 25.0 | NULL | NULL | 1.5849892125448568 | 0.9274378191447452 |
+| B3B39E65-B546-413C-A1FF-67EC80C7AF7D | 5092 | 1 | 560.0 | NULL | NULL | 1.6615149047239914 | 1.0041955327730945 |
 
 ### Bottom 10 Records
 
 | RunID | EquipID | EpisodeCount | MedianDurationMinutes | CoveragePct | TimeInAlertPct | MaxFusedZ | AvgFusedZ |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| F8F21D38-676D-497F-B9C9-FEF2CAE2B0E7 | 5000 | 6 | 175.0 | NULL | NULL | 1.1061586061484665 | 0.6945518471096924 |
-| FD4A83E2-5E8D-43AF-9D02-FD1912BC4233 | 5010 | 9 | 60.0 | NULL | NULL | 1.015234384477372 | 0.6685333788472316 |
-| 952ED5C7-71D9-472A-8C40-FD0A3D3967EA | 5010 | 5 | 550.0 | NULL | NULL | 0.9685877385701352 | 0.5815487172809679 |
-| C550A327-2035-436D-89E3-FC73503BCFF9 | 2621 | 2 | 75.0 | NULL | NULL | 1.660910998530984 | 0.8943816759125716 |
-| C8605AC2-4416-4FA2-A551-FA89B8A0FECB | 1 | 25 | 1830.0 | NULL | NULL | 1.7893609166449744 | 1.4524301320859399 |
-| C0F2873D-E05B-475B-80B3-FA4DF917FFC6 | 1 | 25 | 1830.0 | NULL | NULL | 1.7893609166449744 | 1.4524301320859399 |
-| 4D6E3870-9B7A-44ED-A5FB-F9CC475B3DBB | 2621 | 1 | 60.0 | NULL | NULL | 1.5479631583900786 | 0.7802746526835082 |
-| 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 25 | 1830.0 | NULL | NULL | 1.7893609166449744 | 1.4524301320859399 |
-| 28037F72-019C-4E3C-8FE4-F88DC498A9D1 | 2621 | 2 | 90.0 | NULL | NULL | 1.1213726360081764 | 0.8341633593702674 |
-| 5A7CF713-C390-4883-AB54-F768C96C2BB2 | 5003 | 3 | 640.0 | NULL | NULL | 1.1938944009963324 | 0.8693554059645727 |
+| F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E | 5092 | 1 | 260.0 | NULL | NULL | 1.7012475804898572 | 1.080207519428952 |
+| 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | 1 | 210.0 | NULL | NULL | 1.3405905304603716 | 0.7888532335090899 |
+| AE60C5F3-E31D-4D61-A4D5-D9E6BFDCC217 | 5092 | 1 | 160.0 | NULL | NULL | 0.9261133335180507 | 0.5401970212940471 |
+| 1C3C911D-2883-459C-845E-D43A1AEE5724 | 5092 | 1 | 20.0 | NULL | NULL | 1.7665934918317086 | 1.3682368878795295 |
+| A16676B4-828E-44E2-9FE9-CCB5DC264D42 | 5092 | 2 | 70.0 | NULL | NULL | 1.1063869301636333 | 0.7670993925435602 |
+| 88401CDD-1BC5-4ECB-A340-BC98624CDC94 | 5092 | 2 | 65.0 | NULL | NULL | 1.8423836028067593 | 0.872676615538867 |
+| 0B61B75E-E221-49B0-8B08-BC26C0ACC3D9 | 5092 | 5 | 20.0 | NULL | NULL | 1.935941871856427 | 0.886069710139758 |
+| D38F2D50-DB9E-4A2D-A7D8-B630B8E3174F | 5092 | 2 | 150.0 | NULL | NULL | 1.7619586331919688 | 0.7826185980282756 |
+| C51C247D-6B86-4CF4-93C4-9547CD9E4069 | 5092 | 1 | 280.0 | NULL | NULL | 1.3736364944286321 | 0.4684065646851135 |
+| D51FE222-B378-420B-8A64-854D5A0F645B | 5092 | 2 | 160.0 | NULL | NULL | 2.1491588758222804 | 0.8090813724990242 |
 
 ---
 
@@ -1310,8 +1322,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_FailureForecast
 
 **Primary Key:** EquipID, RunID, Timestamp  
-**Row Count:** 113,064  
-**Date Range:** 2022-04-05 18:40:00 to 2025-09-21 23:00:00  
+**Row Count:** 21,168  
+**Date Range:** 2022-04-05 18:40:00 to 2022-05-02 02:20:00  
 
 ### Schema
 
@@ -1331,16 +1343,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | EquipID | RunID | Timestamp | FailureProb | SurvivalProb | HazardRate | ThresholdUsed | Method | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 00:00:00 | 4.6194817205810365e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 00:30:00 | 4.562407810126338e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 01:00:00 | 4.506019627119422e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 01:30:00 | 4.450309179246367e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 02:00:00 | 4.3952685642919516e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 02:30:00 | 4.340889969160759e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 03:00:00 | 4.287165668908412e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 03:30:00 | 4.234088025783484e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 04:00:00 | 4.181649488278369e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 04:30:00 | 4.129842590191048e-09 | 0.9999999953805183 | 0.0 | 50.0 | GaussianTail | 2025-12-25 15:45:05 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 02:30:00 | 5.66556203717848e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 02:40:00 | 5.486203156935715e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 02:50:00 | 5.312384840675239e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:00:00 | 5.143940400263454e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:10:00 | 4.980708020513876e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:20:00 | 4.822530621138808e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:30:00 | 4.669255722476889e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:40:00 | 4.5207353149000626e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:50:00 | 4.376825731799679e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 04:00:00 | 4.237387526061357e-10 | 0.9999999994334438 | 0.0 | 50.0 | GaussianTail | 2025-12-13 11:42:13 |
 
 ### Bottom 10 Records
 
@@ -1404,7 +1416,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_FeatureDropLog
 
 **Primary Key:** ID  
-**Row Count:** 0  
+**Row Count:** 411  
+**Date Range:** 2025-12-27 06:21:53 to 2025-12-27 06:22:20  
 
 ### Schema
 
@@ -1418,6 +1431,36 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | DropValue | float | YES | 53 | — |
 | Threshold | float | YES | 53 | — |
 | CreatedAt | datetime2 | NO | — | (getutcdate()) |
+
+### Top 10 Records
+
+| ID | RunID | EquipID | FeatureName | DropReason | DropValue | Threshold | CreatedAt |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 10 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_7_avg_energy_0 | low_variance | 1.1455798979978607e-27 | NULL | 2025-12-27 06:21:53 |
+| 11 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_49_energy_2 | low_variance | 0.0 | NULL | 2025-12-27 06:21:53 |
+| 12 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_41_avg_energy_0 | low_variance | 1.9084039671002483e-28 | NULL | 2025-12-27 06:21:53 |
+| 13 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_46_std | low_variance | 0.0 | NULL | 2025-12-27 06:21:53 |
+| 14 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_49_energy_1 | low_variance | 0.0 | NULL | 2025-12-27 06:21:53 |
+| 15 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_43_avg_energy_0 | low_variance | 3.760478588369181e-29 | NULL | 2025-12-27 06:21:53 |
+| 16 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_46_med | low_variance | 0.0 | NULL | 2025-12-27 06:21:53 |
+| 17 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_17_avg_energy_0 | low_variance | 1.2323868146266205e-27 | NULL | 2025-12-27 06:21:53 |
+| 18 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_51_energy_0 | low_variance | 1.6704663340960258e-21 | NULL | 2025-12-27 06:21:53 |
+| 19 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | sensor_50_energy_0 | low_variance | 1.104756364502596e-19 | NULL | 2025-12-27 06:21:53 |
+
+### Bottom 10 Records
+
+| ID | RunID | EquipID | FeatureName | DropReason | DropValue | Threshold | CreatedAt |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 420 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_12_avg_energy_0 | low_variance | 4.085587598093954e-28 | NULL | 2025-12-27 06:22:20 |
+| 419 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_49_energy_2 | low_variance | 0.0 | NULL | 2025-12-27 06:22:20 |
+| 418 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_31_std_energy_0 | low_variance | 1.9568969367435736e-26 | NULL | 2025-12-27 06:22:20 |
+| 417 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_15_avg_energy_0 | low_variance | 2.7726905013302353e-27 | NULL | 2025-12-27 06:22:20 |
+| 416 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_51_energy_0 | low_variance | 1.2510750933511437e-21 | NULL | 2025-12-27 06:22:20 |
+| 415 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_31_max_energy_0 | low_variance | 2.0790867458829796e-26 | NULL | 2025-12-27 06:22:20 |
+| 414 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | power_30_avg_energy_0 | low_variance | 1.7230729878270477e-32 | NULL | 2025-12-27 06:22:20 |
+| 413 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_50_energy_0 | low_variance | 4.873275977121772e-21 | NULL | 2025-12-27 06:22:20 |
+| 412 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_5_std_energy_0 | low_variance | 2.773522285126173e-27 | NULL | 2025-12-27 06:22:20 |
+| 411 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | sensor_5_avg_energy_0 | low_variance | 8.351192996132956e-27 | NULL | 2025-12-27 06:22:20 |
 
 ---
 
@@ -1450,7 +1493,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_ForecastingState
 
 **Primary Key:** EquipID, StateVersion  
-**Row Count:** 7  
+**Row Count:** 1  
 
 ### Schema
 
@@ -1474,12 +1517,6 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | EquipID | StateVersion | ModelCoefficientsJson | LastForecastJson | LastRetrainTime | TrainingDataHash | DataVolumeAnalyzed | RecentMAE | RecentRMSE | RetriggerReason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | {"alpha": 0.95, "beta": 0.01, "level": 92.02134109523143, "trend": 0.03166752238887965, "std_erro... | {"forecast_mean": 97.02045737492202, "forecast_std": 2.634267518827345, "forecast_range": 7.94699... | NULL |  | 219466 | 2.634267518827345 | NULL | NULL |
-| 2621 | 1 | {"alpha": 0.4, "beta": 0.01, "level": 88.5946945323379, "trend": -0.023843931001453628, "std_erro... | {"forecast_mean": 84.57699215859296, "forecast_std": 2.3127281542089166, "forecast_range": 7.9877... | NULL |  | 218581 | 2.3127281542089166 | NULL | NULL |
-| 5000 | 1 | {"alpha": 0.95, "beta": 0.15, "level": 91.91003625934573, "trend": 0.22183455193897195, "std_erro... | {"forecast_mean": 99.85764198107917, "forecast_std": 0.8583952949455335, "forecast_range": 7.8681... | NULL |  | 20571 | 0.8583952949455335 | NULL | NULL |
-| 5003 | 1 | {"alpha": 0.95, "beta": 0.01, "level": 94.33245174585916, "trend": 0.04066454624832299, "std_erro... | {"forecast_mean": 99.61098891633989, "forecast_std": 1.1459518614576236, "forecast_range": 5.6268... | NULL |  | 20811 | 1.1459518614576236 | NULL | NULL |
-| 5010 | 1 | {"alpha": 0.05, "beta": 0.01, "level": 89.75279124465042, "trend": 0.0013834515872053412, "std_er... | {"forecast_mean": 90.45074257039552, "forecast_std": 0.40256281962775325, "forecast_range": 1.393... | NULL |  | 20876 | 0.40256281962775325 | NULL | NULL |
-| 5013 | 1 | {"alpha": 0.2, "beta": 0.03, "level": 93.34754564032983, "trend": 0.06747191223493719, "std_error... | {"forecast_mean": 99.6779421815516, "forecast_std": 1.1477441244609181, "forecast_range": 6.58498... | NULL |  | 20887 | 1.1477441244609181 | NULL | NULL |
 | 5092 | 1 | {"alpha": 0.05, "beta": 0.01, "level": 92.64558701073078, "trend": 0.03150434016807175, "std_erro... | {"forecast_mean": 99.15204522899016, "forecast_std": 1.8518969071118483, "forecast_range": 7.3229... | NULL |  | 35301 | 1.8518969071118483 | NULL | NULL |
 
 ---
@@ -1535,8 +1572,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_HealthForecast
 
 **Primary Key:** EquipID, RunID, Timestamp  
-**Row Count:** 113,064  
-**Date Range:** 2022-04-05 18:40:00 to 2025-09-21 23:00:00  
+**Row Count:** 21,168  
+**Date Range:** 2022-04-05 18:40:00 to 2022-05-02 02:20:00  
 
 ### Schema
 
@@ -1557,16 +1594,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | EquipID | RunID | Timestamp | ForecastHealth | CiLower | CiUpper | ForecastStd | Method | CreatedAt | RegimeLabel |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 00:00:00 | 91.99776992025515 | 88.77469526117261 | 95.2208445793377 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 00:30:00 | 92.00582566839746 | 88.77864380317348 | 95.23300753362145 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 01:00:00 | 92.01388141653977 | 88.78251598902904 | 95.24524684405051 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 01:30:00 | 92.02193716468209 | 88.78631131227446 | 95.25756301708971 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 02:00:00 | 92.0299929128244 | 88.79002927455525 | 95.26995655109354 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 02:30:00 | 92.03804866096671 | 88.79366938569234 | 95.28242793624108 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 03:00:00 | 92.04610440910903 | 88.79723116374463 | 95.29497765447344 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 03:30:00 | 92.05416015725135 | 88.80071413506876 | 95.30760617943393 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 04:00:00 | 92.06221590539366 | 88.80411783437614 | 95.32031397641117 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 2024-10-06 04:30:00 | 92.07027165353597 | 88.80744180478705 | 95.33310150228489 | 1.611537329541271 | ExponentialSmoothing | 2025-12-25 15:45:03 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 02:30:00 | 92.55784776674905 | 89.44012506187434 | 95.67557047162376 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 02:40:00 | 92.57692014330884 | 89.45522448366415 | 95.69861580295353 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 02:50:00 | 92.59599251986864 | 89.47025004514572 | 95.72173499459157 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:00:00 | 92.61506489642844 | 89.4852012564089 | 95.74492853644797 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:10:00 | 92.63413727298824 | 89.5000776353888 | 95.76819691058768 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:20:00 | 92.65320964954803 | 89.51487870792872 | 95.79154059116735 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:30:00 | 92.67228202610784 | 89.52960400784069 | 95.81496004437498 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:40:00 | 92.69135440266763 | 89.54425307696323 | 95.83845572837203 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 03:50:00 | 92.71042677922743 | 89.55882546521653 | 95.86202809323834 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 2022-04-20 04:00:00 | 92.72949915578722 | 89.57332073065477 | 95.88567758091968 | 1.5588613524373542 | ExponentialSmoothing | 2025-12-13 11:42:13 | NULL |
 
 ### Bottom 10 Records
 
@@ -1650,8 +1687,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_HealthTimeline
 
 **Primary Key:** No primary key  
-**Row Count:** 190,982  
-**Date Range:** 2022-04-04 02:30:00 to 2025-09-14 23:00:00  
+**Row Count:** 3,639  
+**Date Range:** 2022-04-04 02:30:00 to 2022-10-16 00:30:00  
 
 ### Schema
 
@@ -1685,16 +1722,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | Timestamp | HealthIndex | HealthZone | FusedZ | RunID | EquipID | RawHealthIndex | QualityFlag |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | C8605AC2-4416-4FA2-A551-FA89B8A0FECB | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | 93F076B5-577F-4036-8AAC-7E6653AFD094 | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | 375CF0E4-D46E-486D-AF42-811C0A5580F1 | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | F2170C61-A77C-49BC-98B0-71AA76951952 | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | 119A0E03-7732-4BA4-A344-0D27EBA12FDF | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | 9BB8853B-A058-4772-B52E-C943EC04E277 | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | D18C67FB-DFCA-41B0-B309-9A5F86B8FBCD | 1 | 92.02999877929688 | NORMAL |
-| 2025-09-14 23:00:00 | 92.02 | GOOD | -0.4618000090122223 | E210DE1F-F6FB-44C9-A3F9-A50D0B7FA1AA | 1 | 92.02999877929688 | NORMAL |
+| 2022-10-16 00:30:00 | 92.27 | GOOD | 0.37470000982284546 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.76000213623047 | NORMAL |
+| 2022-10-16 00:00:00 | 92.06 | GOOD | 0.4458000063896179 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.16999816894531 | NORMAL |
+| 2022-10-15 23:30:00 | 92.01 | GOOD | 0.40119999647140503 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.54000091552734 | NORMAL |
+| 2022-10-15 23:00:00 | 91.78 | GOOD | 0.44600000977516174 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.16000366210938 | NORMAL |
+| 2022-10-15 22:30:00 | 91.62 | GOOD | 0.44339999556541443 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.19000244140625 | NORMAL |
+| 2022-10-15 22:00:00 | 91.37 | GOOD | 0.4178999960422516 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.4000015258789 | NORMAL |
+| 2022-10-15 21:30:00 | 90.93 | GOOD | 0.4593000113964081 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.05000305175781 | NORMAL |
+| 2022-10-15 21:00:00 | 90.45 | GOOD | 0.4422000050544739 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 92.19999694824219 | NORMAL |
+| 2022-10-15 20:30:00 | 89.7 | GOOD | 0.6851999759674072 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 89.81999969482422 | NORMAL |
+| 2022-10-15 20:00:00 | 89.64 | GOOD | 1.0436999797821045 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 85.16000366210938 | NORMAL |
 
 ---
 
@@ -1724,8 +1761,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_HistorianData
 
 **Primary Key:** DataID  
-**Row Count:** 204,067  
-**Date Range:** 2012-01-06 00:00:00 to 2020-12-01 23:59:00  
+**Row Count:** 0  
 
 ### Schema
 
@@ -1738,36 +1774,6 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | Value | float | NO | 53 | — |
 | Quality | tinyint | YES | 3 | ((192)) |
 | CreatedAt | datetime2 | YES | — | (getutcdate()) |
-
-### Top 10 Records
-
-| DataID | EquipID | TagName | Timestamp | Value | Quality | CreatedAt |
-| --- | --- | --- | --- | --- | --- | --- |
-| 204176 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 14:00:00 | 33.0 | 192 | 2025-12-01 06:22:21 |
-| 204177 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 14:30:00 | 32.48 | 192 | 2025-12-01 06:22:21 |
-| 204178 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 15:00:00 | 33.22 | 192 | 2025-12-01 06:22:21 |
-| 204179 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 15:30:00 | 31.44 | 192 | 2025-12-01 06:22:21 |
-| 204180 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 16:00:00 | 34.92 | 192 | 2025-12-01 06:22:21 |
-| 204181 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 16:30:00 | 31.86 | 192 | 2025-12-01 06:22:21 |
-| 204182 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 17:00:00 | 36.75 | 192 | 2025-12-01 06:22:21 |
-| 204183 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 17:30:00 | 34.7 | 192 | 2025-12-01 06:22:21 |
-| 204184 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 18:00:00 | 34.0 | 192 | 2025-12-01 06:22:21 |
-| 204185 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position | 2012-05-21 18:30:00 | 31.72 | 192 | 2025-12-01 06:22:21 |
-
-### Bottom 10 Records
-
-| DataID | EquipID | TagName | Timestamp | Value | Quality | CreatedAt |
-| --- | --- | --- | --- | --- | --- | --- |
-| 408350 | 2621 | LOTEMP1 | 2020-01-31 01:59:00 | 98.53143311 | 192 | 2025-12-01 06:22:44 |
-| 408349 | 2621 | LOTEMP1 | 2020-01-31 00:59:00 | 98.5369339 | 192 | 2025-12-01 06:22:44 |
-| 408348 | 2621 | LOTEMP1 | 2020-01-30 23:59:00 | 98.68974304 | 192 | 2025-12-01 06:22:44 |
-| 408347 | 2621 | LOTEMP1 | 2020-01-30 22:59:00 | 98.48343658 | 192 | 2025-12-01 06:22:44 |
-| 408346 | 2621 | LOTEMP1 | 2020-01-30 21:59:00 | 94.38490295 | 192 | 2025-12-01 06:22:44 |
-| 408345 | 2621 | LOTEMP1 | 2020-01-30 20:59:00 | 128.8777618 | 192 | 2025-12-01 06:22:44 |
-| 408344 | 2621 | LOTEMP1 | 2020-01-30 19:59:00 | 128.6075897 | 192 | 2025-12-01 06:22:44 |
-| 408343 | 2621 | LOTEMP1 | 2020-01-30 18:59:00 | 128.4442139 | 192 | 2025-12-01 06:22:44 |
-| 408342 | 2621 | LOTEMP1 | 2020-01-30 17:59:00 | 128.4984741 | 192 | 2025-12-01 06:22:44 |
-| 408341 | 2621 | LOTEMP1 | 2020-01-30 16:59:00 | 128.4319153 | 192 | 2025-12-01 06:22:44 |
 
 ---
 
@@ -1836,7 +1842,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_OMR_Diagnostics
 
 **Primary Key:** DiagnosticID  
-**Row Count:** 13  
+**Row Count:** 4  
 
 ### Schema
 
@@ -1862,31 +1868,10 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | DiagnosticID | RunID | EquipID | ModelType | NComponents | TrainSamples | TrainFeatures | TrainResidualStd | TrainStartTime | TrainEndTime |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | d18c67fb-dfca-41b0-b309-9a5f86b8fbcd | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 2 | 375cf0e4-d46e-486d-af42-811c0a5580f1 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 3 | 56255fa1-61a5-4556-b8bd-e3a19569661e | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 4 | 53e5f267-0e88-4f56-a07e-a396727c1150 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 5 | a53903df-560f-4076-a5a6-d34f64e9e51f | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 6 | f2170c61-a77c-49bc-98b0-71aa76951952 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 7 | e210de1f-f6fb-44c9-a3f9-a50d0b7fa1aa | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 8 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 9 | f5752054-9219-4dfe-a9d0-165f32994eda | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 10 | c8605ac2-4416-4fa2-a551-fa89b8a0fecb | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-
-### Bottom 10 Records
-
-| DiagnosticID | RunID | EquipID | ModelType | NComponents | TrainSamples | TrainFeatures | TrainResidualStd | TrainStartTime | TrainEndTime |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 13 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 12 | 9bb8853b-a058-4772-b52e-c943ec04e277 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 11 | c0f2873d-e05b-475b-80b3-fa4df917ffc6 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 10 | c8605ac2-4416-4fa2-a551-fa89b8a0fecb | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 9 | f5752054-9219-4dfe-a9d0-165f32994eda | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 8 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 7 | e210de1f-f6fb-44c9-a3f9-a50d0b7fa1aa | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 6 | f2170c61-a77c-49bc-98b0-71aa76951952 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 5 | a53903df-560f-4076-a5a6-d34f64e9e51f | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
-| 4 | 53e5f267-0e88-4f56-a07e-a396727c1150 | 1 | pls | 5 | 8749 | 72 | 1.1448313171751956 | NULL | NULL |
+| 17 | 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | pca | 5 | 129 | 790 | 2.1736166741523597 | NULL | NULL |
+| 18 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | pca | 5 | 129 | 790 | 2.5312222532300086 | NULL | NULL |
+| 19 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | pca | 5 | 129 | 783 | 3.1322536090858555 | NULL | NULL |
+| 20 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | pca | 5 | 131 | 790 | 3.052277817462197 | NULL | NULL |
 
 ---
 
@@ -1894,8 +1879,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_PCA_Loadings
 
 **Primary Key:** RecordID  
-**Row Count:** 5,040  
-**Date Range:** 2025-12-25 17:55:37 to 2025-12-26 11:46:02  
+**Row Count:** 15,765  
+**Date Range:** 2025-12-27 12:24:27 to 2025-12-27 12:25:18  
 
 ### Schema
 
@@ -1916,31 +1901,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | RecordID | RunID | EquipID | EntryDateTime | ComponentNo | ComponentID | Sensor | FeatureName | Loading | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06G31_1FD Fan Damper Position_med | 0.23725233195914316 | 2025-12-25 17:55:40 |
-| 2 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06GP34_1FD Fan Outlet Pressure_med | DEMO.SIM.06GP34_1FD Fan Outlet Pressure_med | 0.23063721110930158 | 2025-12-25 17:55:40 |
-| 3 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06I03_1FD Fan Motor Current_med | DEMO.SIM.06I03_1FD Fan Motor Current_med | 0.23328489413889641 | 2025-12-25 17:55:40 |
-| 4 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06T31_1FD Fan Inlet Temperature_med | DEMO.SIM.06T31_1FD Fan Inlet Temperature_med | 0.005894088145149204 | 2025-12-25 17:55:40 |
-| 5 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06T32-1_1FD Fan Bearing Temperature_med | DEMO.SIM.06T32-1_1FD Fan Bearing Temperature_med | 0.09224670510839353 | 2025-12-25 17:55:40 |
-| 6 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_med | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_med | 0.0713896679672681 | 2025-12-25 17:55:40 |
-| 7 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06T34_1FD Fan Outlet Termperature_med | DEMO.SIM.06T34_1FD Fan Outlet Termperature_med | 0.08248458652293224 | 2025-12-25 17:55:40 |
-| 8 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_med | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_med | 0.24125680576391623 | 2025-12-25 17:55:40 |
-| 9 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_med | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_med | 0.23960697528288746 | 2025-12-25 17:55:40 |
-| 10 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 1 | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_mad | DEMO.SIM.06G31_1FD Fan Damper Position_mad | 0.1032750343350841 | 2025-12-25 17:55:40 |
+| 6391 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_29_avg_med | power_29_avg_med | 0.06831576237583573 | 2025-12-27 12:24:35 |
+| 6392 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_29_max_med | power_29_max_med | 0.06858443869676183 | 2025-12-27 12:24:35 |
+| 6393 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_29_min_med | power_29_min_med | 0.062356150753892184 | 2025-12-27 12:24:35 |
+| 6394 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_29_std_med | power_29_std_med | 0.028957640547677185 | 2025-12-27 12:24:35 |
+| 6395 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_30_avg_med | power_30_avg_med | 0.06837116839296829 | 2025-12-27 12:24:35 |
+| 6396 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_30_max_med | power_30_max_med | 0.06852783423113995 | 2025-12-27 12:24:35 |
+| 6397 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_30_min_med | power_30_min_med | 0.06282140873221853 | 2025-12-27 12:24:35 |
+| 6398 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | power_30_std_med | power_30_std_med | 0.030036866889153916 | 2025-12-27 12:24:35 |
+| 6399 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | reactive_power_27_avg_med | reactive_power_27_avg_med | 0.012448600651993196 | 2025-12-27 12:24:35 |
+| 6400 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 1 | 1 | reactive_power_27_max_med | reactive_power_27_max_med | 0.008175612047554359 | 2025-12-27 12:24:35 |
 
 ### Bottom 10 Records
 
 | RecordID | RunID | EquipID | EntryDateTime | ComponentNo | ComponentID | Sensor | FeatureName | Loading | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 5040 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_rz | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_rz | 0.17609101759334406 | 2025-12-26 11:46:05 |
-| 5039 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_rz | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_rz | 0.17993886791299363 | 2025-12-26 11:46:05 |
-| 5038 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.06T34_1FD Fan Outlet Termperature_rz | DEMO.SIM.06T34_1FD Fan Outlet Termperature_rz | -0.039855281596838404 | 2025-12-26 11:46:05 |
-| 5037 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_rz | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_rz | -0.1175839137596772 | 2025-12-26 11:46:05 |
-| 5036 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.06T32-1_1FD Fan Bearing Temperature_rz | DEMO.SIM.06T32-1_1FD Fan Bearing Temperature_rz | -0.11066922867173945 | 2025-12-26 11:46:05 |
-| 5035 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.06T31_1FD Fan Inlet Temperature_rz | DEMO.SIM.06T31_1FD Fan Inlet Temperature_rz | -0.12075107012805397 | 2025-12-26 11:46:05 |
-| 5034 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.06I03_1FD Fan Motor Current_rz | DEMO.SIM.06I03_1FD Fan Motor Current_rz | 0.19803509613756995 | 2025-12-26 11:46:05 |
-| 5033 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.06GP34_1FD Fan Outlet Pressure_rz | DEMO.SIM.06GP34_1FD Fan Outlet Pressure_rz | 0.11775297643204817 | 2025-12-26 11:46:05 |
-| 5032 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.06G31_1FD Fan Damper Position_rz | DEMO.SIM.06G31_1FD Fan Damper Position_rz | 0.169515920877398 | 2025-12-26 11:46:05 |
-| 5031 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | 5 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_kurt | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_kurt | 0.14152414395880888 | 2025-12-26 11:46:05 |
+| 22155 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | wind_speed_4_avg_rz | wind_speed_4_avg_rz | 0.04493549084603461 | 2025-12-27 12:25:26 |
+| 22154 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | wind_speed_3_std_rz | wind_speed_3_std_rz | 0.030551704685874325 | 2025-12-27 12:25:26 |
+| 22153 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | wind_speed_3_min_rz | wind_speed_3_min_rz | 0.02208703402405643 | 2025-12-27 12:25:26 |
+| 22152 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | wind_speed_3_max_rz | wind_speed_3_max_rz | 0.04662940687965499 | 2025-12-27 12:25:26 |
+| 22151 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | wind_speed_3_avg_rz | wind_speed_3_avg_rz | 0.05552718829925102 | 2025-12-27 12:25:26 |
+| 22150 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | sensor_9_avg_rz | sensor_9_avg_rz | -0.002992295549064732 | 2025-12-27 12:25:26 |
+| 22149 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | sensor_8_avg_rz | sensor_8_avg_rz | 0.002173348183830534 | 2025-12-27 12:25:26 |
+| 22148 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | sensor_7_avg_rz | sensor_7_avg_rz | 0.002696482205405415 | 2025-12-27 12:25:26 |
+| 22147 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | sensor_6_avg_rz | sensor_6_avg_rz | -0.01946690305740125 | 2025-12-27 12:25:26 |
+| 22146 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | 5 | sensor_5_std_rz | sensor_5_std_rz | 0.02211051373580976 | 2025-12-27 12:25:26 |
 
 ---
 
@@ -1948,8 +1933,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_PCA_Metrics
 
 **Primary Key:** ID  
-**Row Count:** 17  
-**Date Range:** 2025-12-25 11:54:25 to 2025-12-26 06:07:57  
+**Row Count:** 4  
+**Date Range:** 2025-12-27 06:23:37 to 2025-12-27 06:24:05  
 
 ### Schema
 
@@ -1968,31 +1953,10 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ID | RunID | EquipID | ComponentIndex | ExplainedVariance | CumulativeVariance | Eigenvalue | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | fb830dae-9960-416d-b17b-ca50b1238466 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 11:54:25 |
-| 2 | 542592bf-a9c7-4644-af53-f94e70198a1d | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 12:05:59 |
-| 3 | ced978ec-673b-4014-a5c8-950617fd87a4 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 12:18:56 |
-| 4 | 93f076b5-577f-4036-8aac-7e6653afd094 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 12:27:36 |
-| 5 | d18c67fb-dfca-41b0-b309-9a5f86b8fbcd | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 12:39:19 |
-| 6 | 375cf0e4-d46e-486d-af42-811c0a5580f1 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 12:49:46 |
-| 7 | 56255fa1-61a5-4556-b8bd-e3a19569661e | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 13:01:15 |
-| 8 | 53e5f267-0e88-4f56-a07e-a396727c1150 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 13:11:48 |
-| 9 | a53903df-560f-4076-a5a6-d34f64e9e51f | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 04:17:57 |
-| 10 | f2170c61-a77c-49bc-98b0-71aa76951952 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 04:25:17 |
-
-### Bottom 10 Records
-
-| ID | RunID | EquipID | ComponentIndex | ExplainedVariance | CumulativeVariance | Eigenvalue | CreatedAt |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 17 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 06:07:57 |
-| 16 | 9bb8853b-a058-4772-b52e-c943ec04e277 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 05:50:24 |
-| 15 | c0f2873d-e05b-475b-80b3-fa4df917ffc6 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 05:38:19 |
-| 14 | c8605ac2-4416-4fa2-a551-fa89b8a0fecb | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 05:28:07 |
-| 13 | f5752054-9219-4dfe-a9d0-165f32994eda | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 05:12:23 |
-| 12 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 04:55:56 |
-| 11 | e210de1f-f6fb-44c9-a3f9-a50d0b7fa1aa | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 04:39:47 |
-| 10 | f2170c61-a77c-49bc-98b0-71aa76951952 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 04:25:17 |
-| 9 | a53903df-560f-4076-a5a6-d34f64e9e51f | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-26 04:17:57 |
-| 8 | 53e5f267-0e88-4f56-a07e-a396727c1150 | 1 | 0 | 0.5847637327423546 | NULL | 72.0 | 2025-12-25 13:11:48 |
+| 21 | 61a6978e-47c5-494f-a88a-e4e71e9989a1 | 5003 | 0 | 0.6257169506655602 | NULL | 790.0 | 2025-12-27 06:23:37 |
+| 22 | 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | 0 | 0.6512559664854273 | NULL | 790.0 | 2025-12-27 06:23:37 |
+| 23 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 0 | 0.6137611389342381 | NULL | 783.0 | 2025-12-27 06:23:41 |
+| 24 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 0 | 0.6192699319519162 | NULL | 790.0 | 2025-12-27 06:24:05 |
 
 ---
 
@@ -2000,8 +1964,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_PCA_Models
 
 **Primary Key:** RecordID  
-**Row Count:** 15  
-**Date Range:** 2025-12-25 17:42:07 to 2025-12-26 11:46:02  
+**Row Count:** 4  
+**Date Range:** 2025-12-27 12:24:27 to 2025-12-27 12:25:18  
 
 ### Schema
 
@@ -2024,31 +1988,10 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | RecordID | RunID | EquipID | EntryDateTime | NComponents | TargetVar | VarExplainedJSON | ScalingSpecJSON | ModelVersion | TrainStartEntryDateTime |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2025-12-25 17:42:07 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 2 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2025-12-25 17:55:37 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 3 | 93F076B5-577F-4036-8AAC-7E6653AFD094 | 1 | 2025-12-25 18:04:44 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 4 | D18C67FB-DFCA-41B0-B309-9A5F86B8FBCD | 1 | 2025-12-25 18:16:49 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 5 | 375CF0E4-D46E-486D-AF42-811C0A5580F1 | 1 | 2025-12-25 18:27:58 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 6 | 56255FA1-61A5-4556-B8BD-E3A19569661E | 1 | 2025-12-25 18:39:45 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 7 | 53E5F267-0E88-4F56-A07E-A396727C1150 | 1 | 2025-12-25 18:50:12 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 8 | F2170C61-A77C-49BC-98B0-71AA76951952 | 1 | 2025-12-26 10:05:29 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 9 | E210DE1F-F6FB-44C9-A3F9-A50D0B7FA1AA | 1 | 2025-12-26 10:21:49 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 10 | 119A0E03-7732-4BA4-A344-0D27EBA12FDF | 1 | 2025-12-26 10:38:32 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-
-### Bottom 10 Records
-
-| RecordID | RunID | EquipID | EntryDateTime | NComponents | TargetVar | VarExplainedJSON | ScalingSpecJSON | ModelVersion | TrainStartEntryDateTime |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 15 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-12-26 11:46:02 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 14 | 9BB8853B-A058-4772-B52E-C943EC04E277 | 1 | 2025-12-26 11:28:06 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 13 | C0F2873D-E05B-475B-80B3-FA4DF917FFC6 | 1 | 2025-12-26 11:15:46 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 12 | C8605AC2-4416-4FA2-A551-FA89B8A0FECB | 1 | 2025-12-26 11:05:11 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 11 | F5752054-9219-4DFE-A9D0-165F32994EDA | 1 | 2025-12-26 10:55:23 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 10 | 119A0E03-7732-4BA4-A344-0D27EBA12FDF | 1 | 2025-12-26 10:38:32 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 9 | E210DE1F-F6FB-44C9-A3F9-A50D0B7FA1AA | 1 | 2025-12-26 10:21:49 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 8 | F2170C61-A77C-49BC-98B0-71AA76951952 | 1 | 2025-12-26 10:05:29 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 7 | 53E5F267-0E88-4F56-A07E-A396727C1150 | 1 | 2025-12-25 18:50:12 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
-| 6 | 56255FA1-61A5-4556-B8BD-E3A19569661E | 1 | 2025-12-25 18:39:45 | 5 | {"SPE_P95_train": 5.1218438148498535, "T2_P95_train": 4.32567024230957} | [0.19102631497606973, 0.1368361474759876, 0.10592943138675423, 0.0837418413033619, 0.067229997600... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2023-10-15 00:00:00 |
+| 19 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2025-12-27 12:24:27 | 5 | {"SPE_P95_train": 0.0, "T2_P95_train": 0.0} | [0.25799938190307775, 0.14664933955056267, 0.09290923805461906, 0.06274860737035344, 0.0534545720... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2022-05-04 13:20:00 |
+| 20 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | 2025-12-27 12:24:50 | 5 | {"SPE_P95_train": 0.0, "T2_P95_train": 0.0} | [0.2295510693116072, 0.18291527391123294, 0.09950270530972463, 0.060852496195278584, 0.0528954059... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2022-05-01 03:00:00 |
+| 21 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2025-12-27 12:24:53 | 5 | {"SPE_P95_train": 0.0, "T2_P95_train": 0.0} | [0.2442275170160447, 0.1536438321746414, 0.12445376366607512, 0.0791424872106899, 0.0497883664179... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2022-08-08 06:10:00 |
+| 22 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2025-12-27 12:25:18 | 5 | {"SPE_P95_train": 0.0, "T2_P95_train": 0.0} | [0.2621816258131944, 0.1682218852236984, 0.08260738571662195, 0.05916325324800247, 0.047095781950... | {"scaler": "RobustStandardScaler", "with_mean": true, "with_std": true} | v10.1.0 | 2022-10-13 07:30:00 |
 
 ---
 
@@ -2056,8 +1999,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_RUL
 
 **Primary Key:** EquipID, RunID  
-**Row Count:** 430  
-**Date Range:** 2025-12-14 03:55:51 to 2026-01-02 11:45:09  
+**Row Count:** 21  
+**Date Range:** 2025-12-14 03:55:51 to 2025-12-20 11:46:20  
 
 ### Schema
 
@@ -2086,16 +2029,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | EquipID | RunID | RUL_Hours | P10_LowerBound | P50_Median | P90_UpperBound | Confidence | FailureTime | Method | NumSimulations |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 198EC38B-24B0-48F7-A901-003DF53343A1 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2026-01-01 15:45:07 | Multipath | 1000 |
-| 1 | C0508133-8393-44C3-8F0B-077AD1F60518 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.5825018304475389 | 2026-01-01 15:50:50 | Multipath | 1000 |
-| 1 | 119A0E03-7732-4BA4-A344-0D27EBA12FDF | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2026-01-02 10:38:25 | Multipath | 1000 |
-| 1 | 91B3C5CC-5D51-4EF3-AA75-11DC4918CBF4 | 4.5 | 0.9866975102914279 | 4.5 | 8.613071162522862 | 0.42131843549701437 | 2025-12-25 18:57:58 | Multipath | 1000 |
-| 1 | F5752054-9219-4DFE-A9D0-165F32994EDA | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2026-01-02 10:55:16 | Multipath | 1000 |
-| 1 | D623D9FB-F56C-4D19-B180-19AD2284C09F | 168.0 | 80.51451683978054 | 168.0 | 170.2348182710401 | 0.5165273455449774 | 2026-01-01 16:56:11 | Multipath | 1000 |
-| 1 | CE7FF921-F158-42E5-BA1D-229D40168006 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2026-01-01 13:55:05 | Multipath | 1000 |
-| 1 | 99D99403-6215-4BE5-85D7-23CD30635A9F | 66.5 | 10.853672613205708 | 66.5 | 170.2348182710401 | 0.3882518577174355 | 2025-12-28 07:36:27 | Multipath | 1000 |
-| 1 | 2F886D42-DE74-4ABB-AB82-2D907B9814D4 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2026-01-01 13:44:34 | Multipath | 1000 |
-| 1 | D9E32D97-9B0B-4A57-A39C-30536D9576B5 | 122.5 | 97.68305351885137 | 122.5 | 142.87565104890865 | 0.5589916723911872 | 2025-12-30 18:42:58 | Multipath | 1000 |
+| 5092 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:42:13 | Multipath | 1000 |
+| 5092 | E1596C1E-4B19-4E7A-A7EF-168EB50EC183 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:45:30 | Multipath | 1000 |
+| 5092 | B425F409-811B-4B39-B026-3198F34D5336 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:39:26 | Multipath | 1000 |
+| 5092 | 601EDF93-FC4D-448C-9E2C-374ED1582373 | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:37:59 | Multipath | 1000 |
+| 5092 | B938DABA-38C1-4680-AF86-3B31F85FF50F | 17.166666666666664 | 14.307113899225705 | 17.166666666666664 | 19.59051480103239 | 0.5652893623846694 | 2025-12-14 04:42:44 | Multipath | 1000 |
+| 5092 | CEEAECF9-6414-4ED6-A467-5199B491715C | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:41:01 | Multipath | 1000 |
+| 5092 | 19AD36A7-7882-4538-AE66-5CEC6E8C069B | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:46:20 | Multipath | 1000 |
+| 5092 | B3B39E65-B546-413C-A1FF-67EC80C7AF7D | 143.0 | 106.33310169240622 | 143.0 | 170.2348182710401 | 0.5489622840025496 | 2025-12-19 10:43:52 | Multipath | 1000 |
+| 5092 | 251FC2E9-C235-447A-9D43-6AD22DDD1D0A | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:40:11 | Multipath | 1000 |
+| 5092 | 58CCC45C-0441-4D90-98A2-6AE5973FE05E | 168.0 | 165.7651817289599 | 168.0 | 170.2348182710401 | 0.6 | 2025-12-20 11:33:56 | Multipath | 1000 |
 
 ### Bottom 10 Records
 
@@ -2241,8 +2184,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_RefitRequests
 
 **Primary Key:** RequestID  
-**Row Count:** 76  
-**Date Range:** 2025-12-25 05:21:58 to 2025-12-26 06:11:41  
+**Row Count:** 4  
+**Date Range:** 2025-12-27 06:30:48 to 2025-12-27 06:31:16  
 
 ### Schema
 
@@ -2263,31 +2206,10 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | RequestID | EquipID | RequestedAt | Reason | AnomalyRate | DriftScore | ModelAgeHours | RegimeQuality | Acknowledged | AcknowledgedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 2025-12-25 05:21:58 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 05:29:01 |
-| 2 | 1 | 2025-12-25 05:30:25 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 05:37:13 |
-| 3 | 1 | 2025-12-25 05:38:35 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 06:54:25 |
-| 4 | 1 | 2025-12-25 06:56:08 | Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 06:59:42 |
-| 5 | 1 | 2025-12-25 07:01:05 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 07:03:25 |
-| 6 | 1 | 2025-12-25 07:04:46 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 07:07:42 |
-| 7 | 1 | 2025-12-25 07:09:01 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 07:11:38 |
-| 8 | 1 | 2025-12-25 07:13:02 | Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 07:16:29 |
-| 9 | 1 | 2025-12-25 07:17:57 | Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 07:21:17 |
-| 10 | 1 | 2025-12-25 07:22:45 | Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-25 07:25:24 |
-
-### Bottom 10 Records
-
-| RequestID | EquipID | RequestedAt | Reason | AnomalyRate | DriftScore | ModelAgeHours | RegimeQuality | Acknowledged | AcknowledgedAt |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 76 | 1 | 2025-12-26 06:11:41 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | False | NULL |
-| 75 | 1 | 2025-12-26 05:54:08 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 06:07:46 |
-| 74 | 1 | 2025-12-26 05:42:00 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 05:50:14 |
-| 73 | 1 | 2025-12-26 05:31:42 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 05:38:07 |
-| 72 | 1 | 2025-12-26 05:16:08 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 05:27:56 |
-| 71 | 1 | 2025-12-26 04:59:34 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 05:12:13 |
-| 70 | 1 | 2025-12-26 04:43:29 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 04:55:46 |
-| 69 | 1 | 2025-12-26 04:29:07 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 04:39:36 |
-| 68 | 1 | 2025-12-26 04:21:42 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 04:25:07 |
-| 67 | 1 | 2025-12-25 13:15:29 | Anomaly rate too high; Silhouette score too low | NULL | NULL | NULL | 0.0 | True | 2025-12-26 04:17:45 |
+| 80 | 5000 | 2025-12-27 06:30:48 | Silhouette score too low | NULL | NULL | NULL | 0.0 | False | NULL |
+| 81 | 5003 | 2025-12-27 06:30:48 | Silhouette score too low | NULL | NULL | NULL | 0.0 | False | NULL |
+| 82 | 5013 | 2025-12-27 06:30:49 | Silhouette score too low | NULL | NULL | NULL | 0.0 | False | NULL |
+| 83 | 5010 | 2025-12-27 06:31:16 | Silhouette score too low | NULL | NULL | NULL | 0.0 | False | NULL |
 
 ---
 
@@ -2295,7 +2217,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_RegimeDefinitions
 
 **Primary Key:** ID  
-**Row Count:** 0  
+**Row Count:** 12  
+**Date Range:** 2025-12-27 06:26:10 to 2025-12-27 06:26:37  
 
 ### Schema
 
@@ -2313,6 +2236,36 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | MaturityState | nvarchar | YES | 30 | — |
 | CreatedAt | datetime2 | NO | — | (getutcdate()) |
 | CreatedByRunID | nvarchar | YES | 50 | — |
+
+### Top 10 Records
+
+| ID | EquipID | RegimeVersion | RegimeID | RegimeName | CentroidJSON | FeatureColumns | DataPointCount | SilhouetteScore | MaturityState |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 7 | 5000 | 1 | 0 | Regime_0 | [0.2917396499704652, 0.32645193580037013, 0.23177174208669057, 0.15406001063294203, 0.31166137728... | [] | 110 | NULL | LEARNING |
+| 8 | 5000 | 1 | 1 | Regime_1 | [-1.7084235273699726, -1.8895139457615273, -1.3986691433282301, -0.8540498652417241, -1.845860685... | [] | 19 | NULL | LEARNING |
+| 9 | 5003 | 1 | 0 | Regime_0 | [-0.11307527014937278, -0.09937626516279638, -0.008573813168239295, -0.0499809403618687, 0.242925... | [] | 113 | NULL | LEARNING |
+| 10 | 5003 | 1 | 1 | Regime_1 | [0.7855003223251116, 0.5101972222328186, 0.1256801780536965, 0.029965903055574502, -1.76903894177... | [] | 16 | NULL | LEARNING |
+| 11 | 5013 | 1 | 0 | Regime_0 | [1.1013239100160759, 1.1718048602619064, 0.8186670980728983, 1.0979557428811375, 1.10139900694751... | [] | 34 | NULL | LEARNING |
+| 12 | 5013 | 1 | 1 | Regime_1 | [-0.9571371021435846, -0.9844831097757256, -0.8117585231961642, -0.6222996969694032, -0.958811484... | [] | 31 | NULL | LEARNING |
+| 13 | 5013 | 1 | 2 | Regime_2 | [-0.375968825384818, -0.20761686028435133, -0.48440716797667466, 0.20114904745430245, -0.37044659... | [] | 40 | NULL | LEARNING |
+| 14 | 5013 | 1 | 3 | Regime_3 | [-1.1050834447308313, -1.3831270757268688, -0.8264039728810878, -1.2487332983746555, -1.116041944... | [] | 12 | NULL | LEARNING |
+| 15 | 5013 | 1 | 4 | Regime_4 | [1.6785599012737689, 1.1883648633956911, 2.3031346247248035, -1.1685142986800359, 1.6729365891736... | [] | 12 | NULL | LEARNING |
+| 16 | 5010 | 1 | 0 | Regime_0 | [0.07395956263262563, 0.1925636953961924, -0.16600490057603617, 0.29864275364500104, 0.1032667960... | [] | 40 | NULL | LEARNING |
+
+### Bottom 10 Records
+
+| ID | EquipID | RegimeVersion | RegimeID | RegimeName | CentroidJSON | FeatureColumns | DataPointCount | SilhouetteScore | MaturityState |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 18 | 5010 | 1 | 2 | Regime_2 | [1.7732375475106303, 1.67223554036834, 1.9386688279254096, 1.365046832009745, 1.772301350611371, ... | [] | 23 | NULL | LEARNING |
+| 17 | 5010 | 1 | 1 | Regime_1 | [-0.6510032323638281, -0.6971255694616888, -0.5508004426956177, -0.6790673614924555, -0.666808662... | [] | 68 | NULL | LEARNING |
+| 16 | 5010 | 1 | 0 | Regime_0 | [0.07395956263262563, 0.1925636953961924, -0.16600490057603617, 0.29864275364500104, 0.1032667960... | [] | 40 | NULL | LEARNING |
+| 15 | 5013 | 1 | 4 | Regime_4 | [1.6785599012737689, 1.1883648633956911, 2.3031346247248035, -1.1685142986800359, 1.6729365891736... | [] | 12 | NULL | LEARNING |
+| 14 | 5013 | 1 | 3 | Regime_3 | [-1.1050834447308313, -1.3831270757268688, -0.8264039728810878, -1.2487332983746555, -1.116041944... | [] | 12 | NULL | LEARNING |
+| 13 | 5013 | 1 | 2 | Regime_2 | [-0.375968825384818, -0.20761686028435133, -0.48440716797667466, 0.20114904745430245, -0.37044659... | [] | 40 | NULL | LEARNING |
+| 12 | 5013 | 1 | 1 | Regime_1 | [-0.9571371021435846, -0.9844831097757256, -0.8117585231961642, -0.6222996969694032, -0.958811484... | [] | 31 | NULL | LEARNING |
+| 11 | 5013 | 1 | 0 | Regime_0 | [1.1013239100160759, 1.1718048602619064, 0.8186670980728983, 1.0979557428811375, 1.10139900694751... | [] | 34 | NULL | LEARNING |
+| 10 | 5003 | 1 | 1 | Regime_1 | [0.7855003223251116, 0.5101972222328186, 0.1256801780536965, 0.029965903055574502, -1.76903894177... | [] | 16 | NULL | LEARNING |
+| 9 | 5003 | 1 | 0 | Regime_0 | [-0.11307527014937278, -0.09937626516279638, -0.008573813168239295, -0.0499809403618687, 0.242925... | [] | 113 | NULL | LEARNING |
 
 ---
 
@@ -2402,8 +2355,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_RegimeState
 
 **Primary Key:** EquipID, StateVersion  
-**Row Count:** 1  
-**Date Range:** 2025-12-26 06:10:41 to 2025-12-26 06:10:41  
+**Row Count:** 5  
+**Date Range:** 2025-12-26 11:42:12 to 2025-12-27 06:26:36  
 
 ### Schema
 
@@ -2429,7 +2382,11 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | EquipID | StateVersion | NumClusters | ClusterCentersJson | ScalerMeanJson | ScalerScaleJson | PCAComponentsJson | PCAExplainedVarianceJson | NumPCAComponents | SilhouetteScore |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 3 | [[-0.3959299016130773, -0.3949126718764154, -1.0419757840109494, -0.9975409258739362, -1.06814680... | [] | [] | [] | [] | 0 | 0.3233703364570749 |
+| 1 | 1 | 2 | [[-0.48160468919582583, -0.47764426459677967, -0.19194448437272843, -0.3768078673995784, -0.33756... | [] | [] | [] | [] | 0 | 0.4377001021963198 |
+| 5000 | 1 | 2 | [[0.2917396499704652, 0.32645193580037013, 0.23177174208669057, 0.15406001063294203, 0.3116613772... | [] | [] | [] | [] | 0 | 0.48468588826125614 |
+| 5003 | 1 | 2 | [[-0.11307527014937278, -0.09937626516279638, -0.008573813168239295, -0.0499809403618687, 0.24292... | [] | [] | [] | [] | 0 | 0.4821212740575696 |
+| 5010 | 1 | 3 | [[0.07395956263262563, 0.1925636953961924, -0.16600490057603617, 0.29864275364500104, 0.103266796... | [] | [] | [] | [] | 0 | 0.559156687397022 |
+| 5013 | 1 | 5 | [[1.1013239100160759, 1.1718048602619064, 0.8186670980728983, 1.0979557428811375, 1.1013990069475... | [] | [] | [] | [] | 0 | 0.5042883062311074 |
 
 ---
 
@@ -2458,8 +2415,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_RegimeTimeline
 
 **Primary Key:** No primary key  
-**Row Count:** 296,615  
-**Date Range:** 2022-04-04 02:30:00 to 2025-09-14 23:00:00  
+**Row Count:** 3,639  
+**Date Range:** 2022-04-04 02:30:00 to 2022-10-16 00:30:00  
 
 ### Schema
 
@@ -2490,16 +2447,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | Timestamp | RegimeLabel | RegimeState | RunID | EquipID |
 | --- | --- | --- | --- | --- |
-| 2025-09-14 23:00:00 | 2 | unknown | 9BB8853B-A058-4772-B52E-C943EC04E277 | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | C0F2873D-E05B-475B-80B3-FA4DF917FFC6 | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | FB830DAE-9960-416D-B17B-CA50B1238466 | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | C8605AC2-4416-4FA2-A551-FA89B8A0FECB | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | A53903DF-560F-4076-A5A6-D34F64E9E51F | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | F2170C61-A77C-49BC-98B0-71AA76951952 | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | E210DE1F-F6FB-44C9-A3F9-A50D0B7FA1AA | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | 93F076B5-577F-4036-8AAC-7E6653AFD094 | 1 |
-| 2025-09-14 23:00:00 | 2 | unknown | 56255FA1-61A5-4556-B8BD-E3A19569661E | 1 |
+| 2022-10-16 00:30:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-16 00:00:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 23:30:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 23:00:00 | 1 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 22:30:00 | 0 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 22:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 21:30:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 21:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 20:30:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
+| 2022-10-15 20:00:00 | 2 | unknown | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 |
 
 ---
 
@@ -2528,7 +2485,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_Regime_Episodes
 
 **Primary Key:** Id  
-**Row Count:** 375  
+**Row Count:** 6  
 
 ### Schema
 
@@ -2545,31 +2502,12 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | Id | RunID | EquipID | StartTime | EndTime | RegimeID |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 2 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 3 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 4 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 5 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 6 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 7 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 8 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 9 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-| 10 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | NULL | NULL | NULL |
-
-### Bottom 10 Records
-
-| Id | RunID | EquipID | StartTime | EndTime | RegimeID |
-| --- | --- | --- | --- | --- | --- |
-| 375 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 374 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 373 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 372 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 371 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 370 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 369 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 368 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 367 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
-| 366 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | NULL | NULL | NULL |
+| 381 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | NULL | NULL | NULL |
+| 382 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | NULL | NULL | NULL |
+| 383 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | NULL | NULL | NULL |
+| 384 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | NULL | NULL | NULL |
+| 385 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | NULL | NULL | NULL |
+| 386 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | NULL | NULL | NULL |
 
 ---
 
@@ -2577,8 +2515,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_RunLogs
 
 **Primary Key:** LogID  
-**Row Count:** 656,958  
-**Date Range:** 2025-12-02 05:59:43 to 2025-12-17 16:27:35  
+**Row Count:** 31,438  
+**Date Range:** 2025-12-11 11:55:49 to 2025-12-13 06:16:40  
 
 ### Schema
 
@@ -2616,8 +2554,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_RunMetadata
 
 **Primary Key:** RunMetadataID  
-**Row Count:** 715  
-**Date Range:** 2025-12-02 05:59:53 to 2025-12-08 05:09:28  
+**Row Count:** 0  
 
 ### Schema
 
@@ -2636,44 +2573,14 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | ForecastMAE | float | YES | 53 | — |
 | ForecastMAPE | float | YES | 53 | — |
 
-### Top 10 Records
-
-| RunMetadataID | RunID | EquipID | EquipName | CreatedAt | RetrainDecision | RetrainReason | ForecastStateVersion | ModelAgeBatches | ForecastRMSE |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 697 | A9FC5331-B292-4515-A146-6DEFDF4DB83B | 2621 | GAS_TURBINE | 2025-12-02 05:59:53 | False | Model stable, incremental update | 32 | NULL | 0.0 |
-| 698 | B687BF83-7290-4E4F-9180-8CECAD93BF75 | 1 | FD_FAN | 2025-12-02 05:59:55 | False | Model stable, incremental update | 149 | NULL | 0.0 |
-| 699 | 8684168E-DFB2-4220-A6D6-772D3FB513EF | 1 | FD_FAN | 2025-12-02 06:01:47 | False | Model stable, incremental update | 150 | NULL | 0.0 |
-| 700 | FFD41532-B96A-43F0-AAA2-75B0341E6CAE | 1 | FD_FAN | 2025-12-02 06:01:48 | False | Model stable, incremental update | 151 | NULL | 0.0 |
-| 701 | 60B9EFF0-C9F2-4F64-B95A-1E4566B46493 | 2621 | GAS_TURBINE | 2025-12-02 06:01:48 | False | Model stable, incremental update | 33 | NULL | 0.0 |
-| 702 | 236A2227-190A-40F1-81B8-0F3F45E43CFF | 2621 | GAS_TURBINE | 2025-12-02 06:01:48 | False | Model stable, incremental update | 33 | NULL | 0.0 |
-| 703 | A98A8F95-BF62-413B-AE50-EAA158A19941 | 1 | FD_FAN | 2025-12-02 06:21:57 | True | Scheduled retrain (9720h since last > 168.0h limit) | 152 | NULL | 0.0 |
-| 704 | 2BC2A328-9D69-428C-A45A-6495E7503A61 | 1 | FD_FAN | 2025-12-02 06:22:05 | True | Forecast accuracy degraded (RMSE=47.09 > 2.0) | 153 | NULL | 47.09326712906889 |
-| 705 | 790BAAA8-3248-484A-ADD3-4B587D777863 | 1 | FD_FAN | 2025-12-02 06:22:13 | True | Forecast accuracy degraded (RMSE=68.35 > 2.0) | 154 | NULL | 68.35162486866703 |
-| 706 | 434F66BA-3426-4397-903D-5A48F15DCCAB | 1 | FD_FAN | 2025-12-02 06:22:19 | False | Model stable, incremental update | 155 | NULL | 0.0 |
-
-### Bottom 10 Records
-
-| RunMetadataID | RunID | EquipID | EquipName | CreatedAt | RetrainDecision | RetrainReason | ForecastStateVersion | ModelAgeBatches | ForecastRMSE |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1411 | 2297A0E1-DC1F-4073-AC0B-A44FF11B0391 | 1 | FD_FAN | 2025-12-08 05:09:28 | True | Anomaly energy spike (Max=2.99 > 1.5x avg) | 803 | NULL | 0.0 |
-| 1410 | DE7598F0-E4B9-4A0D-AAC9-100DF39E172F | 1 | FD_FAN | 2025-12-08 05:09:14 | True | Anomaly energy spike (Max=2.39 > 1.5x avg) | 802 | NULL | 0.0 |
-| 1409 | B837C8B2-6023-41A6-8C47-293DF05B9916 | 1 | FD_FAN | 2025-12-08 05:08:58 | True | Anomaly energy spike (Max=1.75 > 1.5x avg) | 801 | NULL | 0.0 |
-| 1408 | E5EE817F-C89E-48AE-9F12-63E1436D430A | 1 | FD_FAN | 2025-12-08 05:08:40 | True | Anomaly energy spike (Max=7.33 > 1.5x avg) | 800 | NULL | 0.0 |
-| 1407 | 303F2A8B-E23E-4155-82B4-BC56A058EB04 | 1 | FD_FAN | 2025-12-08 05:08:11 | True | Anomaly energy spike (Max=1.53 > 1.5x avg) | 799 | NULL | 0.0 |
-| 1406 | A659815F-17C2-4F69-A323-A91ED6708777 | 1 | FD_FAN | 2025-12-08 05:07:39 | True | Anomaly energy spike (Max=3.14 > 1.5x avg) | 798 | NULL | 0.0 |
-| 1405 | 8E918F6B-B84F-4440-924F-D4D970F490F6 | 1 | FD_FAN | 2025-12-08 05:07:08 | True | Anomaly energy spike (Max=9.59 > 1.5x avg) | 797 | NULL | 0.0 |
-| 1404 | 43574183-1F99-4BD8-AB6C-E89D80D9F64C | 1 | FD_FAN | 2025-12-08 05:06:36 | True | Anomaly energy spike (Max=7.40 > 1.5x avg) | 796 | NULL | 0.0 |
-| 1403 | B1CF7C65-8699-49B9-8C32-8AA9C0DCA270 | 1 | FD_FAN | 2025-12-08 05:06:04 | True | Anomaly energy spike (Max=1.56 > 1.5x avg) | 795 | NULL | 0.0 |
-| 1402 | 454F21D3-5BB3-42E6-890C-1F2BE8062D04 | 1 | FD_FAN | 2025-12-08 05:05:48 | True | Anomaly energy spike (Max=2.93 > 1.5x avg) | 794 | NULL | 0.0 |
-
 ---
 
 
 ## dbo.ACM_RunMetrics
 
 **Primary Key:** RunID, EquipID, MetricName  
-**Row Count:** 105,396  
-**Date Range:** 2025-12-01 17:15:57 to 2025-12-26 11:40:58  
+**Row Count:** 1,311  
+**Date Range:** 2025-12-11 17:29:21 to 2025-12-27 11:57:50  
 
 ### Schema
 
@@ -2689,31 +2596,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | RunID | EquipID | MetricName | MetricValue | Timestamp |
 | --- | --- | --- | --- | --- |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.n_samples.ar1_z | 540.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.n_samples.gmm_z | 540.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.n_samples.iforest_z | 540.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.n_samples.omr_z | 540.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.n_samples.pca_spe_z | 540.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.n_samples.pca_t2_z | 540.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.quality.ar1_z | 0.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.quality.gmm_z | 0.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.quality.iforest_z | 0.0 | 2025-12-19 14:24:24 |
-| 000128aa-6556-406d-b599-168a13de7880 | 5026 | fusion.quality.omr_z | 0.0 | 2025-12-19 14:24:24 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.n_samples.ar1_z | 129.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.n_samples.gmm_z | 129.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.n_samples.iforest_z | 129.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.n_samples.omr_z | 129.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.n_samples.pca_spe_z | 129.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.n_samples.pca_t2_z | 129.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.quality.ar1_z | 0.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.quality.gmm_z | 0.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.quality.iforest_z | 0.0 | 2025-12-27 11:57:22 |
+| 03097745-09ca-4250-b0c2-1d64c948247f | 5000 | fusion.quality.omr_z | 0.0 | 2025-12-27 11:57:22 |
 
 ### Bottom 10 Records
 
 | RunID | EquipID | MetricName | MetricValue | Timestamp |
 | --- | --- | --- | --- | --- |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.weight.pca_t2_z | 0.19 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.weight.pca_spe_z | 0.26000000000000006 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.weight.omr_z | 0.12000000000000001 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.weight.iforest_z | 0.15500000000000003 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.weight.gmm_z | 0.085 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.weight.ar1_z | 0.19 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.quality.pca_t2_z | 0.0 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.quality.pca_spe_z | 0.0 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.quality.omr_z | 0.0 | 2025-12-19 15:36:31 |
-| fff350ae-6407-47bf-8ebc-5916d9fadac8 | 5010 | fusion.quality.iforest_z | 0.0 | 2025-12-19 15:36:31 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.weight.pca_t2_z | 0.04964539007092199 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.weight.pca_spe_z | 0.18156028368794325 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.weight.omr_z | 0.11205673758865248 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.weight.mhal_z | 0.18156028368794325 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.weight.iforest_z | 0.18156028368794325 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.weight.gmm_z | 0.11205673758865248 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.weight.ar1_z | 0.18156028368794325 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.quality.pca_t2_z | 0.0 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.quality.pca_spe_z | 0.0 | 2025-12-11 17:37:27 |
+| fc7c8606-e4e1-4edc-afc2-6d635ac06552 | 8632 | fusion.quality.omr_z | 0.0 | 2025-12-11 17:37:27 |
 
 ---
 
@@ -2772,8 +2679,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_Run_Stats
 
 **Primary Key:** RecordID  
-**Row Count:** 15  
-**Date Range:** 2023-10-15 00:00:00 to 2023-10-15 00:00:00  
+**Row Count:** 4  
+**Date Range:** 2022-04-27 03:00:00 to 2022-10-09 08:40:00  
 
 ### Schema
 
@@ -2797,31 +2704,10 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | RecordID | RunID | EquipID | WindowStartEntryDateTime | WindowEndEntryDateTime | SamplesIn | SamplesKept | SensorsKept | CadenceOKPct | DriftP95 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 542592BF-A9C7-4644-AF53-F94E70198A1D | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 2 | CED978EC-673B-4014-A5C8-950617FD87A4 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 3 | 93F076B5-577F-4036-8AAC-7E6653AFD094 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 4 | D18C67FB-DFCA-41B0-B309-9A5F86B8FBCD | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 5 | 375CF0E4-D46E-486D-AF42-811C0A5580F1 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 6 | 56255FA1-61A5-4556-B8BD-E3A19569661E | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 7 | 53E5F267-0E88-4F56-A07E-A396727C1150 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 8 | F2170C61-A77C-49BC-98B0-71AA76951952 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 9 | E210DE1F-F6FB-44C9-A3F9-A50D0B7FA1AA | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 10 | 119A0E03-7732-4BA4-A344-0D27EBA12FDF | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-
-### Bottom 10 Records
-
-| RecordID | RunID | EquipID | WindowStartEntryDateTime | WindowEndEntryDateTime | SamplesIn | SamplesKept | SensorsKept | CadenceOKPct | DriftP95 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 15 | DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 14 | 9BB8853B-A058-4772-B52E-C943EC04E277 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 13 | C0F2873D-E05B-475B-80B3-FA4DF917FFC6 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 12 | C8605AC2-4416-4FA2-A551-FA89B8A0FECB | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 11 | F5752054-9219-4DFE-A9D0-165F32994EDA | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 10 | 119A0E03-7732-4BA4-A344-0D27EBA12FDF | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 9 | E210DE1F-F6FB-44C9-A3F9-A50D0B7FA1AA | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 8 | F2170C61-A77C-49BC-98B0-71AA76951952 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 7 | 53E5F267-0E88-4F56-A07E-A396727C1150 | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
-| 6 | 56255FA1-61A5-4556-B8BD-E3A19569661E | 1 | 2023-10-15 00:00:00 | 2025-09-14 23:29:59 | 8749 | 8749 | 9 | 100.0 | NULL |
+| 19 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | 2022-04-30 13:20:00 | 2022-05-16 03:36:59 | 129 | 129 | 81 | 100.0 | NULL |
+| 20 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | 2022-04-27 03:00:00 | 2022-05-12 17:16:59 | 129 | 129 | 81 | 100.0 | NULL |
+| 21 | 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | 2022-08-04 06:10:00 | 2022-08-19 20:26:59 | 129 | 129 | 81 | 100.0 | NULL |
+| 22 | D648127B-ADDE-4248-8A81-75034636EFE8 | 5010 | 2022-10-09 08:40:00 | 2022-10-24 22:56:59 | 131 | 131 | 81 | 100.0 | NULL |
 
 ---
 
@@ -2829,8 +2715,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_Runs
 
 **Primary Key:** RunID  
-**Row Count:** 802  
-**Date Range:** 2025-12-13 06:00:34 to 2025-12-26 06:07:19  
+**Row Count:** 57  
+**Date Range:** 2025-12-13 06:00:34 to 2025-12-29 05:27:57  
 
 ### Schema
 
@@ -2860,31 +2746,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | RunID | EquipID | EquipName | StartedAt | CompletedAt | DurationSeconds | ConfigSignature | TrainRowCount | ScoreRowCount | EpisodeCount |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 07555857-36ED-4278-8AB4-0018B10E35EE | 2621 | GAS_TURBINE | 2025-12-23 00:23:16 | 2025-12-23 00:23:17 | 0 |  | 0 | 0 | 0 |
-| 198EC38B-24B0-48F7-A901-003DF53343A1 | 1 | FD_FAN | 2025-12-25 10:10:30 | 2025-12-25 10:15:13 | 281 |  | 336 | 0 | 2 |
-| B5110E61-7861-4B27-A02B-004CFE24A761 | 5017 | WFA_TURBINE_17 | 2025-12-20 06:10:53 | 2025-12-20 06:11:31 | 38 |  | 554 | 5945 | 7 |
-| E4034AD7-1CCD-4C45-B522-00EBB5065B8B | 2621 | GAS_TURBINE | 2025-12-22 16:10:50 | 2025-12-22 16:13:34 | 163 |  | 47 | 796 | 0 |
 | E17435C3-D5F4-437E-B2F9-01365FE163D1 | 5092 | WFA_TURBINE_92 | 2025-12-13 06:11:31 | 2025-12-13 06:12:14 | 42 |  | 144 | 4819 | 2 |
-| 49FAF19F-2FE6-4148-873B-017B7CFC830E | 2621 | GAS_TURBINE | 2025-12-23 00:13:02 | 2025-12-23 00:13:03 | 0 |  | 0 | 0 | 0 |
-| 06E6233C-E6CB-4ECA-964F-019CCE7B6B36 | 5024 | WFA_TURBINE_24 | 2025-12-20 07:06:28 | 2025-12-20 07:07:03 | 34 |  | 553 | 5924 | 4 |
-| CD9F1BB3-E997-42D3-B124-01F1FC3E0DDA | 5022 | WFA_TURBINE_22 | 2025-12-20 06:34:52 | 2025-12-20 06:35:30 | 37 |  | 553 | 5922 | 3 |
-| 720DF3BF-9903-418C-9915-0219240DA724 | 5022 | WFA_TURBINE_22 | 2025-12-20 07:13:55 | 2025-12-20 07:14:29 | 34 |  | 553 | 5924 | 4 |
-| 907BB29F-756F-4730-8379-024CAAAA4F90 | 5024 | WFA_TURBINE_24 | 2025-12-20 06:44:05 | 2025-12-20 06:44:44 | 39 |  | 553 | 5922 | 3 |
+| C8EA4C4A-0B58-40C8-B284-01B64D26D884 | 5017 | WFA_TURBINE_17 | 2025-12-27 06:56:37 | 2025-12-27 06:56:49 | 12 |  | 0 | 0 | 0 |
+| 61B2669A-EDD8-4C3B-9CE4-04888D086216 | 8632 | WIND_TURBINE | 2025-12-20 04:26:22 | 2025-12-20 04:26:22 | 0 |  | 0 | 0 | 0 |
+| B1795AE8-0A34-4097-AC71-0C3CBFF9592D | 5013 | WFA_TURBINE_13 | 2025-12-27 05:49:00 | 2025-12-27 06:54:39 | 3938 |  | 129 | 3920 | 2 |
+| 4B84EB86-D803-46CE-9303-0F6FD65B78CA | 1 | FD_FAN | 2025-12-29 05:27:03 | 2025-12-29 05:27:08 | 4 |  | 0 | 0 | 0 |
+| 485841A7-C79A-4389-BD70-1240D29D6990 | 8632 | WIND_TURBINE | 2025-12-20 04:26:16 | 2025-12-20 04:26:16 | 0 |  | 0 | 0 | 0 |
+| 5E01E5D5-BB0A-42FA-97C6-14041794E22E | 2621 | GAS_TURBINE | 2025-12-27 06:58:43 | 2025-12-27 06:58:48 | 4 |  | 0 | 0 | 0 |
+| E1596C1E-4B19-4E7A-A7EF-168EB50EC183 | 5092 | WFA_TURBINE_92 | 2025-12-13 06:14:45 | 2025-12-13 06:15:31 | 45 |  | 144 | 4819 | 2 |
+| 03097745-09CA-4250-B0C2-1D64C948247F | 5000 | WFA_TURBINE_0 | 2025-12-27 05:49:00 | 2025-12-27 06:55:05 | 3964 |  | 129 | 3955 | 2 |
+| 4D28948A-7100-4FD1-B757-2B6A6E412D8E | 8632 | WIND_TURBINE | 2025-12-20 04:26:02 | 2025-12-20 04:26:02 | 0 |  | 0 | 0 | 0 |
 
 ### Bottom 10 Records
 
 | RunID | EquipID | EquipName | StartedAt | CompletedAt | DurationSeconds | ConfigSignature | TrainRowCount | ScoreRowCount | EpisodeCount |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| A3E5AD7C-06F3-426D-B093-FFB033319777 | 5025 | WFA_TURBINE_25 | 2025-12-20 07:52:36 | 2025-12-20 07:57:37 | 299 |  | 0 | 0 | 0 |
-| 4E373307-844C-479E-8FE7-FF9FB7D8C070 | 5024 | WFA_TURBINE_24 | 2025-12-20 06:40:57 | 2025-12-20 06:41:39 | 41 |  | 552 | 5917 | 3 |
-| 1FB1A67B-0173-4879-9B43-FF09F8EFE845 | 5022 | WFA_TURBINE_22 | 2025-12-20 06:47:48 | 2025-12-20 06:48:29 | 41 |  | 553 | 5926 | 5 |
-| F8F21D38-676D-497F-B9C9-FEF2CAE2B0E7 | 5000 | WFA_TURBINE_0 | 2025-12-22 09:40:53 | 2025-12-22 09:56:35 | 941 |  | 562 | 5973 | 6 |
-| BF6A836E-5A92-4230-92B5-FEDE05E009E0 | 5014 | WFA_TURBINE_14 | 2025-12-20 05:29:06 | 2025-12-20 05:29:42 | 35 |  | 554 | 5937 | 8 |
-| B1B899AE-601A-48AA-B3A1-FE482624FE1D | 5022 | WFA_TURBINE_22 | 2025-12-20 06:41:01 | 2025-12-20 06:41:36 | 34 |  | 489 | 5065 | 2 |
-| C6ABEE59-793D-4E87-B917-FD544E69334D | 2621 | GAS_TURBINE | 2025-12-22 17:46:20 | 2025-12-22 17:49:50 | 209 |  | 47 | 776 | 0 |
-| FD4A83E2-5E8D-43AF-9D02-FD1912BC4233 | 5010 | WFA_TURBINE_10 | 2025-12-22 10:51:55 | 2025-12-22 11:06:51 | 895 |  | 562 | 5979 | 9 |
-| 952ED5C7-71D9-472A-8C40-FD0A3D3967EA | 5010 | WFA_TURBINE_10 | 2025-12-22 08:55:28 | 2025-12-22 09:09:32 | 843 |  | 548 | 5901 | 5 |
-| 07AC845F-6F01-4ECA-B548-FCF90C03BE15 | 5024 | WFA_TURBINE_24 | 2025-12-20 07:35:49 | 2025-12-20 07:36:35 | 45 |  | 553 | 5810 | 7 |
+| 3E488317-AA29-4081-A473-FBE267A091ED | 5025 | WFA_TURBINE_25 | 2025-12-27 06:57:36 | 2025-12-27 06:57:48 | 12 |  | 0 | 0 | 0 |
+| E750E06F-E624-45FD-B683-FB4815EEF360 | 8634 | ELECTRIC_MOTOR | 2025-12-20 04:26:11 | 2025-12-20 04:26:12 | 0 |  | 0 | 0 | 0 |
+| 81A35D0D-2214-42A1-8DC8-F6D14783FCC5 | 8634 | ELECTRIC_MOTOR | 2025-12-20 04:25:52 | 2025-12-20 04:25:59 | 5 |  | 0 | 0 | 0 |
+| E8008D4A-B739-4894-AA3A-F62215AE4135 | 5000 | WFA_TURBINE_0 | 2025-12-27 06:56:02 | 2025-12-27 06:56:13 | 10 |  | 0 | 0 | 0 |
+| F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E | 5092 | WFA_TURBINE_92 | 2025-12-13 06:13:57 | 2025-12-13 06:14:42 | 44 |  | 144 | 4817 | 1 |
+| E8F29A1A-AB7D-489A-AC58-EAB2613A56C8 | 2621 | GAS_TURBINE | 2025-12-27 06:58:20 | 2025-12-27 06:58:24 | 3 |  | 0 | 0 | 0 |
+| 61A6978E-47C5-494F-A88A-E4E71E9989A1 | 5003 | WFA_TURBINE_3 | 2025-12-27 05:49:00 | 2025-12-27 06:55:03 | 3962 |  | 129 | 3953 | 1 |
+| DC5383BF-4484-4982-8F3A-E127BA879A11 | 5026 | WFA_TURBINE_26 | 2025-12-27 06:58:28 | 2025-12-27 06:58:41 | 13 |  | 0 | 0 | 0 |
+| 2E79C7A6-8DAB-4567-B187-E0D9AB4C54D2 | 5026 | WFA_TURBINE_26 | 2025-12-27 06:57:51 | 2025-12-27 06:58:06 | 14 |  | 0 | 0 | 0 |
+| AE60C5F3-E31D-4D61-A4D5-D9E6BFDCC217 | 5092 | WFA_TURBINE_92 | 2025-12-13 06:05:55 | 2025-12-13 06:06:32 | 37 |  | 144 | 4782 | 1 |
 
 ---
 
@@ -2940,8 +2826,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_Scores_Wide
 
 **Primary Key:** No primary key  
-**Row Count:** 298,298  
-**Date Range:** 2022-04-04 02:30:00 to 2025-09-14 23:00:00  
+**Row Count:** 3,639  
+**Date Range:** 2022-04-04 02:30:00 to 2022-10-16 00:30:00  
 
 ### Schema
 
@@ -2982,16 +2868,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | Timestamp | ar1_z | pca_spe_z | pca_t2_z | mhal_z | iforest_z | gmm_z | cusum_z | drift_z | hst_z |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
-| 2025-09-14 23:00:00 | 1.0671190023422241 | 0.20852130651474 | 2.395613431930542 | NULL | 2.701765775680542 | 0.7915700674057007 | -0.4324653744697571 | NULL | NULL |
+| 2022-10-16 00:30:00 | -0.5980498194694519 | 0.0 | 0.0 | NULL | 0.5538449287414551 | 1.2035874128341675 | -0.013208406046032906 | NULL | NULL |
+| 2022-10-16 00:00:00 | 0.008513766340911388 | 0.0 | 0.0 | NULL | 0.3183366358280182 | 1.1309788227081299 | 0.09224414825439453 | NULL | NULL |
+| 2022-10-15 23:30:00 | -0.2781026065349579 | 0.0 | 0.0 | NULL | 0.3150147795677185 | 1.3235409259796143 | 0.201992005109787 | NULL | NULL |
+| 2022-10-15 23:00:00 | -0.3151337504386902 | 0.0 | 0.0 | NULL | 0.5984691381454468 | 1.6201395988464355 | 0.3114207983016968 | NULL | NULL |
+| 2022-10-15 22:30:00 | 0.06586960703134537 | 0.0 | 0.0 | NULL | 0.1831870824098587 | 2.2528746128082275 | 0.42444688081741333 | NULL | NULL |
+| 2022-10-15 22:00:00 | 0.0 | 0.0 | 0.0 | NULL | 0.29738569259643555 | 1.7554396390914917 | 0.5385384559631348 | NULL | NULL |
+| 2022-10-15 21:30:00 | 0.48289385437965393 | 0.0 | 0.0 | NULL | 0.325592577457428 | 0.8631320595741272 | 0.6543880105018616 | NULL | NULL |
+| 2022-10-15 21:00:00 | 0.3472713828086853 | 0.0 | 0.0 | NULL | 0.4262773394584656 | 0.306374728679657 | 0.7750669121742249 | NULL | NULL |
+| 2022-10-15 20:30:00 | 1.1250247955322266 | 0.0 | 0.0 | NULL | 1.0041459798812866 | -0.01778220757842064 | 0.8988869190216064 | NULL | NULL |
+| 2022-10-15 20:00:00 | 2.6166844367980957 | 0.0 | 0.0 | NULL | 1.1738219261169434 | -0.1392204463481903 | 1.0287480354309082 | NULL | NULL |
 
 ---
 
@@ -3046,8 +2932,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_SensorCorrelations
 
 **Primary Key:** ID  
-**Row Count:** 191,844  
-**Date Range:** 2025-12-25 06:56:31 to 2025-12-26 06:12:16  
+**Row Count:** 1,244,271  
+**Date Range:** 2025-12-27 06:51:41 to 2025-12-27 06:54:33  
 
 ### Schema
 
@@ -3066,31 +2952,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ID | RunID | EquipID | Sensor1 | Sensor2 | Correlation | CorrelationType | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06G31_1FD Fan Damper Position_med | 1.0 | pearson | 2025-12-25 06:56:31 |
-| 2 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06GP34_1FD Fan Outlet Pressure_med | 0.9544004584475696 | pearson | 2025-12-25 06:56:31 |
-| 3 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06I03_1FD Fan Motor Current_med | 0.9454283456869451 | pearson | 2025-12-25 06:56:31 |
-| 4 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06T31_1FD Fan Inlet Temperature_med | 0.1142947341871645 | pearson | 2025-12-25 06:56:31 |
-| 5 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06T32-1_1FD Fan Bearing Temperature_med | 0.5062771207393317 | pearson | 2025-12-25 06:56:31 |
-| 6 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_med | 0.4177737846762664 | pearson | 2025-12-25 06:56:31 |
-| 7 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06T34_1FD Fan Outlet Termperature_med | 0.4300696403587483 | pearson | 2025-12-25 06:56:31 |
-| 8 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_med | 0.9730210379348073 | pearson | 2025-12-25 06:56:31 |
-| 9 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_med | 0.9048549456201679 | pearson | 2025-12-25 06:56:31 |
-| 10 | e17f92fb-b548-4ee1-83e0-b12f4dda2f1c | 1 | DEMO.SIM.06G31_1FD Fan Damper Position_med | DEMO.SIM.06G31_1FD Fan Damper Position_mad | 0.5021781222034186 | pearson | 2025-12-25 06:56:31 |
+| 204130 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_29_avg_med | 1.0 | pearson | 2025-12-27 06:51:41 |
+| 204131 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_29_max_med | 0.9674391717984256 | pearson | 2025-12-27 06:51:41 |
+| 204132 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_29_min_med | 0.9497565801895512 | pearson | 2025-12-27 06:51:41 |
+| 204133 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_29_std_med | 0.29966259609352025 | pearson | 2025-12-27 06:51:41 |
+| 204134 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_30_avg_med | 0.9999863741395671 | pearson | 2025-12-27 06:51:41 |
+| 204135 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_30_max_med | 0.9678224624585376 | pearson | 2025-12-27 06:51:41 |
+| 204136 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_30_min_med | 0.9537013495900214 | pearson | 2025-12-27 06:51:41 |
+| 204137 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | power_30_std_med | 0.31402673067084613 | pearson | 2025-12-27 06:51:41 |
+| 204138 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | reactive_power_27_avg_med | 0.014227662754664094 | pearson | 2025-12-27 06:51:41 |
+| 204139 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | power_29_avg_med | reactive_power_27_max_med | -0.052589802773888285 | pearson | 2025-12-27 06:51:41 |
 
 ### Bottom 10 Records
 
 | ID | RunID | EquipID | Sensor1 | Sensor2 | Correlation | CorrelationType | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 191844 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_rz | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_rz | 1.0 | pearson | 2025-12-26 06:12:16 |
-| 191843 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_rz | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_rz | 0.9593028100751169 | pearson | 2025-12-26 06:12:16 |
-| 191842 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_rz | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_rz | 1.0 | pearson | 2025-12-26 06:12:16 |
-| 191841 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.06T34_1FD Fan Outlet Termperature_rz | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_rz | 0.1963024035851471 | pearson | 2025-12-26 06:12:16 |
-| 191840 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.06T34_1FD Fan Outlet Termperature_rz | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_rz | 0.18286373902666567 | pearson | 2025-12-26 06:12:16 |
-| 191839 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.06T34_1FD Fan Outlet Termperature_rz | DEMO.SIM.06T34_1FD Fan Outlet Termperature_rz | 1.0 | pearson | 2025-12-26 06:12:16 |
-| 191838 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_rz | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow_rz | 0.15520005113530588 | pearson | 2025-12-26 06:12:16 |
-| 191837 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_rz | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow_rz | 0.1515257545718971 | pearson | 2025-12-26 06:12:16 |
-| 191836 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_rz | DEMO.SIM.06T34_1FD Fan Outlet Termperature_rz | 0.2905775827364145 | pearson | 2025-12-26 06:12:16 |
-| 191835 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_rz | DEMO.SIM.06T33-1_1FD Fan Winding Temperature_rz | 1.0 | pearson | 2025-12-26 06:12:16 |
+| 1448400 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_4_avg_rz | wind_speed_4_avg_rz | 1.0 | pearson | 2025-12-27 06:54:33 |
+| 1448399 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_std_rz | wind_speed_4_avg_rz | 0.4570344879492993 | pearson | 2025-12-27 06:54:33 |
+| 1448398 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_std_rz | wind_speed_3_std_rz | 1.0 | pearson | 2025-12-27 06:54:33 |
+| 1448397 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_min_rz | wind_speed_4_avg_rz | 0.3562723602364797 | pearson | 2025-12-27 06:54:33 |
+| 1448396 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_min_rz | wind_speed_3_std_rz | 0.10630135180079728 | pearson | 2025-12-27 06:54:33 |
+| 1448395 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_min_rz | wind_speed_3_min_rz | 1.0 | pearson | 2025-12-27 06:54:33 |
+| 1448394 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_max_rz | wind_speed_4_avg_rz | 0.5922121050655708 | pearson | 2025-12-27 06:54:33 |
+| 1448393 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_max_rz | wind_speed_3_std_rz | 0.7052258639937359 | pearson | 2025-12-27 06:54:33 |
+| 1448392 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_max_rz | wind_speed_3_min_rz | 0.07107836785210722 | pearson | 2025-12-27 06:54:33 |
+| 1448391 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | wind_speed_3_max_rz | wind_speed_3_max_rz | 1.0 | pearson | 2025-12-27 06:54:33 |
 
 ---
 
@@ -3098,7 +2984,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_SensorDefects
 
 **Primary Key:** No primary key  
-**Row Count:** 3,165  
+**Row Count:** 204  
 
 ### Schema
 
@@ -3120,31 +3006,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | DetectorType | DetectorFamily | Severity | ViolationCount | ViolationPct | MaxZ | AvgZ | CurrentZ | ActiveDefect | RunID |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Correlation Break (PCA-SPE) | Correlation | HIGH | 40 | 11.9 | 10.0 | 1.0443 | 1.454 | 0 | 198EC38B-24B0-48F7-A901-003DF53343A1 |
-| Baseline Consistency (OMR) | Baseline | MEDIUM | 31 | 9.23 | 5.2572 | 0.8882 | 1.2511 | 0 | 198EC38B-24B0-48F7-A901-003DF53343A1 |
-| cusum_z | cusum_z | MEDIUM | 30 | 8.93 | 2.8922 | 0.876 | 0.7881 | 0 | 198EC38B-24B0-48F7-A901-003DF53343A1 |
-| Time-Series Anomaly (AR1) | Time-Series | MEDIUM | 25 | 7.44 | 10.0 | 0.9187 | 0.5154 | 0 | 198EC38B-24B0-48F7-A901-003DF53343A1 |
-| Rare State (IsolationForest) | Rare | MEDIUM | 20 | 5.95 | 4.1999 | 0.7892 | 0.0103 | 0 | 198EC38B-24B0-48F7-A901-003DF53343A1 |
-| Multivariate Outlier (PCA-T2) | Multivariate | MEDIUM | 19 | 5.65 | 10.0 | 0.8282 | 0.8719 | 0 | 198EC38B-24B0-48F7-A901-003DF53343A1 |
-| Density Anomaly (GMM) | Density | MEDIUM | 19 | 5.65 | 10.0 | 0.928 | 0.5732 | 0 | 198EC38B-24B0-48F7-A901-003DF53343A1 |
-| Density Anomaly (GMM) | Density | CRITICAL | 13 | 27.66 | 3.1319 | 1.0607 | 0.6089 | 0 | E4034AD7-1CCD-4C45-B522-00EBB5065B8B |
-| Time-Series Anomaly (AR1) | Time-Series | HIGH | 6 | 12.77 | 10.0 | 1.1883 | 10.0 | 1 | E4034AD7-1CCD-4C45-B522-00EBB5065B8B |
-| Correlation Break (PCA-SPE) | Correlation | HIGH | 5 | 10.64 | 9.9799 | 1.1161 | 2.7373 | 1 | E4034AD7-1CCD-4C45-B522-00EBB5065B8B |
+| Multivariate Outlier (PCA-T2) | Multivariate | CRITICAL | 42 | 29.17 | 3.2948 | 1.4028 | 0.667 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| Correlation Break (PCA-SPE) | Correlation | HIGH | 26 | 18.06 | 2.9726 | 0.5155 | 0.0 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| cusum_z | cusum_z | HIGH | 26 | 18.06 | 3.3046 | 1.0171 | 0.8609 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| Time-Series Anomaly (AR1) | Time-Series | MEDIUM | 13 | 9.03 | 4.5867 | 0.8596 | 0.1236 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| Baseline Consistency (OMR) | Baseline | LOW | 6 | 4.17 | 4.1172 | 0.7753 | 1.3247 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| Rare State (IsolationForest) | Rare | LOW | 4 | 2.78 | 2.3156 | 0.7071 | 0.9884 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| Density Anomaly (GMM) | Density | LOW | 3 | 2.08 | 2.4915 | 0.6704 | 0.6143 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| Multivariate Distance (Mahalanobis) | Multivariate | LOW | 0 | 0.0 | 1.7818 | 0.6379 | 1.1814 | 0 | E17435C3-D5F4-437E-B2F9-01365FE163D1 |
+| Density Anomaly (GMM) | Density | HIGH | 25 | 19.38 | 5.8758 | 1.1387 | 2.4642 | 1 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D |
+| Time-Series Anomaly (AR1) | Time-Series | HIGH | 15 | 11.63 | 3.2005 | 0.8874 | 0.4137 | 0 | B1795AE8-0A34-4097-AC71-0C3CBFF9592D |
 
 ### Bottom 10 Records
 
 | DetectorType | DetectorFamily | Severity | ViolationCount | ViolationPct | MaxZ | AvgZ | CurrentZ | ActiveDefect | RunID |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Density Anomaly (GMM) | Density | CRITICAL | 314 | 56.88 | 10.0 | 4.4925 | 10.0 | 1 | 4E373307-844C-479E-8FE7-FF9FB7D8C070 |
-| Correlation Break (PCA-SPE) | Correlation | CRITICAL | 299 | 54.17 | 10.0 | 5.466 | 10.0 | 1 | 4E373307-844C-479E-8FE7-FF9FB7D8C070 |
-| Multivariate Outlier (PCA-T2) | Multivariate | CRITICAL | 278 | 50.36 | 10.0 | 5.1445 | 10.0 | 1 | 4E373307-844C-479E-8FE7-FF9FB7D8C070 |
-| Baseline Consistency (OMR) | Baseline | CRITICAL | 251 | 45.47 | 3.8965 | 2.0307 | 3.8965 | 1 | 4E373307-844C-479E-8FE7-FF9FB7D8C070 |
-| Rare State (IsolationForest) | Rare | CRITICAL | 205 | 37.14 | 8.4542 | 1.964 | 3.3594 | 1 | 4E373307-844C-479E-8FE7-FF9FB7D8C070 |
-| Time-Series Anomaly (AR1) | Time-Series | LOW | 27 | 4.89 | 10.0 | 0.4891 | 0.0 | 0 | 4E373307-844C-479E-8FE7-FF9FB7D8C070 |
-| cusum_z | cusum_z | LOW | 0 | 0.0 | 1.6472 | 0.6675 | 1.5014 | 0 | 4E373307-844C-479E-8FE7-FF9FB7D8C070 |
-| Density Anomaly (GMM) | Density | CRITICAL | 288 | 52.08 | 10.0 | 3.8776 | 6.6978 | 1 | 1FB1A67B-0173-4879-9B43-FF09F8EFE845 |
-| Baseline Consistency (OMR) | Baseline | CRITICAL | 271 | 49.01 | 4.1486 | 2.1407 | 3.7765 | 1 | 1FB1A67B-0173-4879-9B43-FF09F8EFE845 |
-| Time-Series Anomaly (AR1) | Time-Series | CRITICAL | 132 | 23.87 | 10.0 | 2.387 | 10.0 | 1 | 1FB1A67B-0173-4879-9B43-FF09F8EFE845 |
+| Correlation Break (PCA-SPE) | Correlation | CRITICAL | 70 | 48.61 | 10.0 | 5.1942 | 0.594 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| Multivariate Outlier (PCA-T2) | Multivariate | CRITICAL | 70 | 48.61 | 10.0 | 5.1923 | 0.6094 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| Time-Series Anomaly (AR1) | Time-Series | HIGH | 27 | 18.75 | 5.471 | 1.1007 | 0.0109 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| cusum_z | cusum_z | HIGH | 16 | 11.11 | 2.722 | 0.8493 | 0.9726 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| Baseline Consistency (OMR) | Baseline | MEDIUM | 14 | 9.72 | 3.2693 | 0.8891 | 0.7851 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| Multivariate Distance (Mahalanobis) | Multivariate | LOW | 5 | 3.47 | 2.3151 | 0.8641 | 0.2235 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| Rare State (IsolationForest) | Rare | LOW | 4 | 2.78 | 2.1744 | 0.7393 | 0.1282 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| Density Anomaly (GMM) | Density | LOW | 0 | 0.0 | 1.2272 | 0.5727 | 0.6617 | 0 | F8ADFB6C-950A-4C2F-B059-EC7EF3BD096E |
+| Density Anomaly (GMM) | Density | CRITICAL | 36 | 27.91 | 6.3973 | 1.207 | 4.5797 | 1 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 |
+| Time-Series Anomaly (AR1) | Time-Series | HIGH | 24 | 18.6 | 10.0 | 1.436 | 10.0 | 1 | 61A6978E-47C5-494F-A88A-E4E71E9989A1 |
 
 ---
 
@@ -3152,8 +3038,7 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_SensorForecast
 
 **Primary Key:** RunID, EquipID, Timestamp, SensorName  
-**Row Count:** 1,512  
-**Date Range:** 2025-09-15 00:00:00 to 2025-09-21 23:00:00  
+**Row Count:** 0  
 
 ### Schema
 
@@ -3170,36 +3055,6 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 | Method | nvarchar | NO | 50 | — |
 | RegimeLabel | int | YES | 10 | — |
 | CreatedAt | datetime2 | NO | — | (getdate()) |
-
-### Top 10 Records
-
-| RunID | EquipID | Timestamp | SensorName | ForecastValue | CiLower | CiUpper | ForecastStd | Method | RegimeLabel |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | 48.12678485717701 | 42.163383324219076 | 54.09018639013494 | 3.0425518025295566 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 1.3137478207230482 | 1.0301776614649123 | 1.597317979981184 | 0.14467865268272234 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.06I03_1FD Fan Motor Current | 45.37447400259745 | 40.352224855240266 | 50.39672314995464 | 2.562372013957749 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.06T31_1FD Fan Inlet Temperature | 48.36847776886253 | 45.2162894584921 | 51.52066607923297 | 1.608259342025731 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.06T32-1_1FD Fan Bearing Temperature | 63.58911051626387 | 57.92584392564117 | 69.25237710688658 | 2.8894217299095444 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature | 55.26790572467295 | 51.364490574560065 | 59.171320874785835 | 1.991538341894327 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.06T34_1FD Fan Outlet Termperature | 33.46724673606946 | 30.75095977099539 | 36.18353370114353 | 1.3858606964663636 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow | 385.33832621245307 | 335.4701265758386 | 435.20652584906753 | 25.442958998272676 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 00:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 400.0457737896118 | 348.64859073217826 | 451.44295684704537 | 26.223052580323248 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-15 01:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | 48.194414633227794 | 42.23101310026986 | 54.157816166185725 | 3.0425518025295566 | ExponentialSmoothing | 0 |
-
-### Bottom 10 Records
-
-| RunID | EquipID | Timestamp | SensorName | ForecastValue | CiLower | CiUpper | ForecastStd | Method | RegimeLabel |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 519.252444365917 | 467.8552613084834 | 570.6496274233506 | 26.223052580323248 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.FSAA_1FD Fan Left Inlet Flow | 536.9387413739273 | 487.07054173731285 | 586.8069410105418 | 25.442958998272676 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.06T34_1FD Fan Outlet Termperature | 50.7952740016389 | 48.078987036564826 | 53.51156096671298 | 1.3858606964663636 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.06T33-1_1FD Fan Winding Temperature | 70.70773715248757 | 66.80432200237469 | 74.61115230260044 | 1.991538341894327 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.06T32-1_1FD Fan Bearing Temperature | 70.07466994266613 | 64.41140335204342 | 75.73793653328885 | 2.8894217299095444 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.06T31_1FD Fan Inlet Temperature | 65.16598947272284 | 62.01380116235241 | 68.31817778309328 | 1.608259342025731 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.06I03_1FD Fan Motor Current | 56.70130454800951 | 51.679055400652324 | 61.7235536953667 | 2.562372013957749 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 1.582990346754514 | 1.2994201874963784 | 1.8665605060126498 | 0.14467865268272234 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 23:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | 59.42095745765765 | 53.45755592469972 | 65.38435899061558 | 3.0425518025295566 | ExponentialSmoothing | 0 |
-| DFFED1D3-93F6-414F-ABE4-AD82F40C48D0 | 1 | 2025-09-21 22:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | 518.5386319672564 | 467.1414489098228 | 569.93581502469 | 26.223052580323248 | ExponentialSmoothing | 0 |
 
 ---
 
@@ -3252,8 +3107,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_SensorHotspots
 
 **Primary Key:** No primary key  
-**Row Count:** 8,465  
-**Date Range:** 2022-04-04 02:30:00 to 2025-05-13 17:00:00  
+**Row Count:** 650  
+**Date Range:** 2022-04-04 02:30:00 to 2022-10-15 20:00:00  
 
 ### Schema
 
@@ -3297,16 +3152,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | SensorName | MaxTimestamp | LatestTimestamp | MaxAbsZ | MaxSignedZ | LatestAbsZ | LatestSignedZ | ValueAtPeak | LatestValue | TrainMean |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
-| DEMO.SIM.06GP34_1FD Fan Outlet Pressure | 2025-05-13 17:00:00 | 2025-09-14 23:00:00 | 6.5488 | 6.5488 | 2.2873 | 2.2873 | 2.569999933242798 | 1.3300000429153442 | 0.6644644737243652 |
+| wind_speed_3_min | 2022-10-15 20:00:00 | 2022-10-16 00:30:00 | 3.6004 | 3.6004 | 0.8879 | -0.8879 | 3.9000000953674316 | 0.4000000059604645 | 1.092366337776184 |
+| sensor_31_std | 2022-10-14 20:00:00 | 2022-10-16 00:30:00 | 7.2107 | 7.2107 | 0.3789 | -0.3789 | 217.10000610351562 | 0.8999999761581421 | 11.694656372070312 |
+| sensor_5_min | 2022-10-14 08:30:00 | 2022-10-16 00:30:00 | 5.2771 | 5.2771 | 0.9512 | 0.9512 | 90.0 | 24.0 | 9.487404823303223 |
+| sensor_5_avg | 2022-10-14 08:30:00 | 2022-10-16 00:30:00 | 3.5473 | 3.5473 | 0.4195 | 0.4195 | 90.0 | 24.0 | 15.147709846496582 |
+| sensor_5_std | 2022-10-14 07:30:00 | 2022-10-16 00:30:00 | 5.8448 | 5.8448 | 0.3911 | -0.3911 | 39.400001525878906 | 0.0 | 2.4709925651550293 |
+| sensor_18_std | 2022-10-14 07:30:00 | 2022-10-16 00:30:00 | 3.8367 | 3.8367 | 0.3003 | -0.3003 | 576.9000244140625 | 35.5 | 74.80496978759766 |
+| sensor_52_std | 2022-10-14 07:30:00 | 2022-10-16 00:30:00 | 3.7917 | 3.7917 | 0.016 | 0.016 | 5.199999809265137 | 0.699999988079071 | 0.6809160709381104 |
+| sensor_44 | 2022-10-14 06:00:00 | 2022-10-16 00:30:00 | 4.7637 | -4.7637 | 1.8938 | -1.8938 | -3614.0 | -1770.0 | -553.217529296875 |
+| sensor_47 | 2022-10-14 06:00:00 | 2022-10-16 00:30:00 | 3.6809 | -3.6809 | 2.7096 | -2.7096 | -3238.0 | -2512.0 | -486.8091735839844 |
+| sensor_26_avg | 2022-10-13 21:00:00 | 2022-10-16 00:30:00 | 11.3582 | 11.3582 | 0.0873 | -0.0873 | 50.099998474121094 | 50.0 | 50.000762939453125 |
 
 ---
 
@@ -3314,8 +3169,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ACM_SensorNormalized_TS
 
 **Primary Key:** ID  
-**Row Count:** 472,446  
-**Date Range:** 2024-08-24 21:30:00 to 2025-09-14 23:00:00  
+**Row Count:** 41,958  
+**Date Range:** 2022-05-01 03:00:00 to 2022-10-16 00:30:00  
 
 ### Schema
 
@@ -3334,31 +3189,31 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ID | RunID | EquipID | Timestamp | SensorName | RawValue | NormalizedValue | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 26248 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-24 21:30:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 40.7400016784668 | 2025-12-26 05:01:29 |
-| 26249 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-24 22:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 43.91999816894531 | 2025-12-26 05:01:29 |
-| 26250 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-24 22:30:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 35.36000061035156 | 2025-12-26 05:01:29 |
-| 26251 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-24 23:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 36.84000015258789 | 2025-12-26 05:01:29 |
-| 26252 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-24 23:30:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 37.45000076293945 | 2025-12-26 05:01:29 |
-| 26253 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-25 00:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 37.33000183105469 | 2025-12-26 05:01:29 |
-| 26254 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-25 00:30:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 37.959999084472656 | 2025-12-26 05:01:29 |
-| 26255 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-25 01:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 28.81999969482422 | 2025-12-26 05:01:29 |
-| 26256 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-25 01:30:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 37.18000030517578 | 2025-12-26 05:01:29 |
-| 26257 | 119a0e03-7732-4ba4-a344-0d27eba12fdf | 1 | 2024-08-25 02:00:00 | DEMO.SIM.06G31_1FD Fan Damper Position | NULL | 35.86000061035156 | 2025-12-26 05:01:29 |
+| 502609 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 13:20:00 | power_29_avg | NULL | 0.9634146094322205 | 2025-12-27 06:54:02 |
+| 502610 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 13:50:00 | power_29_avg | NULL | 0.9756097793579102 | 2025-12-27 06:54:02 |
+| 502611 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 14:20:00 | power_29_avg | NULL | 0.9756097793579102 | 2025-12-27 06:54:02 |
+| 502612 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 14:50:00 | power_29_avg | NULL | 0.9756097793579102 | 2025-12-27 06:54:02 |
+| 502613 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 15:20:00 | power_29_avg | NULL | 0.9754633903503418 | 2025-12-27 06:54:02 |
+| 502614 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 15:50:00 | power_29_avg | NULL | 0.9756097793579102 | 2025-12-27 06:54:02 |
+| 502615 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 16:20:00 | power_29_avg | NULL | 0.9755122065544128 | 2025-12-27 06:54:02 |
+| 502616 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 16:50:00 | power_29_avg | NULL | 0.8078048825263977 | 2025-12-27 06:54:02 |
+| 502617 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 17:20:00 | power_29_avg | NULL | 0.8672682642936707 | 2025-12-27 06:54:02 |
+| 502618 | b1795ae8-0a34-4097-ac71-0c3cbff9592d | 5013 | 2022-05-04 17:50:00 | power_29_avg | NULL | 0.9620487689971924 | 2025-12-27 06:54:02 |
 
 ### Bottom 10 Records
 
 | ID | RunID | EquipID | Timestamp | SensorName | RawValue | NormalizedValue | CreatedAt |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 498693 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 23:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 397.95001220703125 | 2025-12-26 06:13:59 |
-| 498692 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 22:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 393.2699890136719 | 2025-12-26 06:13:59 |
-| 498691 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 22:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 396.79998779296875 | 2025-12-26 06:13:59 |
-| 498690 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 21:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 359.95001220703125 | 2025-12-26 06:13:59 |
-| 498689 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 21:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 378.3500061035156 | 2025-12-26 06:13:59 |
-| 498688 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 20:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 418.4100036621094 | 2025-12-26 06:13:59 |
-| 498687 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 20:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 395.4700012207031 | 2025-12-26 06:13:59 |
-| 498686 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 19:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 373.6099853515625 | 2025-12-26 06:13:59 |
-| 498685 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 19:00:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 390.54998779296875 | 2025-12-26 06:13:59 |
-| 498684 | dffed1d3-93f6-414f-abe4-ad82f40c48d0 | 1 | 2025-09-14 18:30:00 | DEMO.SIM.FSAB_1FD Fan Right Inlet Flow | NULL | 367.2799987792969 | 2025-12-26 06:13:59 |
+| 544566 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-16 00:30:00 | wind_speed_4_avg | NULL | 2.5 | 2025-12-27 06:54:55 |
+| 544565 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-16 00:00:00 | wind_speed_4_avg | NULL | 2.4000000953674316 | 2025-12-27 06:54:55 |
+| 544564 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 23:30:00 | wind_speed_4_avg | NULL | 2.0999999046325684 | 2025-12-27 06:54:55 |
+| 544563 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 23:00:00 | wind_speed_4_avg | NULL | 2.5999999046325684 | 2025-12-27 06:54:55 |
+| 544562 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 22:30:00 | wind_speed_4_avg | NULL | 4.199999809265137 | 2025-12-27 06:54:55 |
+| 544561 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 22:00:00 | wind_speed_4_avg | NULL | 5.300000190734863 | 2025-12-27 06:54:55 |
+| 544560 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 21:30:00 | wind_speed_4_avg | NULL | 6.099999904632568 | 2025-12-27 06:54:55 |
+| 544559 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 21:00:00 | wind_speed_4_avg | NULL | 5.599999904632568 | 2025-12-27 06:54:55 |
+| 544558 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 20:30:00 | wind_speed_4_avg | NULL | 6.199999809265137 | 2025-12-27 06:54:55 |
+| 544557 | d648127b-adde-4248-8a81-75034636efe8 | 5010 | 2022-10-15 20:00:00 | wind_speed_4_avg | NULL | 7.0 | 2025-12-27 06:54:55 |
 
 ---
 
@@ -3789,8 +3644,8 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 ## dbo.ModelRegistry
 
 **Primary Key:** ModelType, EquipID, Version  
-**Row Count:** 3,820  
-**Date Range:** 2025-12-13 06:00:50 to 2025-12-26 06:10:47  
+**Row Count:** 174  
+**Date Range:** 2025-12-13 06:00:50 to 2025-12-27 06:26:52  
 
 ### Schema
 
@@ -3809,16 +3664,16 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 | ModelType | EquipID | Version | EntryDateTime | ParamsJSON | StatsJSON | RunID | ModelBytes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| ar1_params | 1 | 1 | 2025-12-25 05:38:01 | {"n_sensors": 72, "mean_autocorr": 14.3704, "mean_residual_std": 1.5281, "params_count": 144} | {"train_rows": 97, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06GP... | NULL | <binary 5677 bytes> |
-| feature_medians | 1 | 1 | 2025-12-25 05:38:06 | NULL | {"train_rows": 97, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06GP... | NULL | <binary 9064 bytes> |
-| gmm_model | 1 | 1 | 2025-12-25 05:38:06 | {"n_components": 3, "covariance_type": "diag", "bic": 152026373.84, "aic": 152025256.42, "lower_b... | {"train_rows": 97, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06GP... | NULL | <binary 7990 bytes> |
-| iforest_model | 1 | 1 | 2025-12-25 05:38:05 | {"n_estimators": 100, "contamination": 0.01, "max_features": 1.0, "max_samples": 2048} | {"train_rows": 97, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06GP... | NULL | <binary 689641 bytes> |
-| omr_model | 1 | 1 | 2025-12-25 05:38:06 | NULL | {"train_rows": 97, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06GP... | NULL | <binary 85416 bytes> |
-| pca_model | 1 | 1 | 2025-12-25 05:38:01 | {"n_components": 5, "variance_ratio_sum": 0.7769, "variance_ratio_first_component": 0.2932, "vari... | {"train_rows": 97, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06GP... | NULL | <binary 4511 bytes> |
-| ar1_params | 1 | 2 | 2025-12-25 06:55:34 | {"n_sensors": 72, "mean_autocorr": 13.0591, "mean_residual_std": 1.2951, "params_count": 144} | {"train_rows": 300, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06G... | NULL | <binary 5677 bytes> |
-| feature_medians | 1 | 2 | 2025-12-25 06:55:39 | NULL | {"train_rows": 300, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06G... | NULL | <binary 9064 bytes> |
-| gmm_model | 1 | 2 | 2025-12-25 06:55:39 | {"n_components": 3, "covariance_type": "diag", "bic": 156070828.7, "aic": 156069221.26, "lower_bo... | {"train_rows": 300, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06G... | NULL | <binary 8218 bytes> |
-| iforest_model | 1 | 2 | 2025-12-25 06:55:38 | {"n_estimators": 100, "contamination": 0.01, "max_features": 1.0, "max_samples": 2048} | {"train_rows": 300, "train_sensors": ["DEMO.SIM.06G31_1FD Fan Damper Position_med", "DEMO.SIM.06G... | NULL | <binary 1316729 bytes> |
+| ar1_params | 5000 | 1 | 2025-12-27 06:26:15 | {"n_sensors": 790, "mean_autocorr": 655489383.9208, "mean_residual_std": 448915724.5588, "params_... | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 43780 bytes> |
+| gmm_model | 5000 | 1 | 2025-12-27 06:26:20 | {"n_components": 3, "covariance_type": "diag", "bic": 6.829492608516723e+25, "aic": 6.82949260851... | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 76880 bytes> |
+| iforest_model | 5000 | 1 | 2025-12-27 06:26:20 | {"n_estimators": 100, "contamination": 0.01, "max_features": 1.0, "max_samples": 2048} | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 1422089 bytes> |
+| omr_model | 5000 | 1 | 2025-12-27 06:26:23 | NULL | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 83948 bytes> |
+| pca_model | 5000 | 1 | 2025-12-27 06:26:16 | {"n_components": 5, "variance_ratio_sum": 0.6513, "variance_ratio_first_component": 0.2442, "vari... | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 38975 bytes> |
+| ar1_params | 5003 | 1 | 2025-12-27 06:26:16 | {"n_sensors": 790, "mean_autocorr": 784001549.624, "mean_residual_std": 650872304.488, "params_co... | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 43780 bytes> |
+| gmm_model | 5003 | 1 | 2025-12-27 06:26:20 | {"n_components": 3, "covariance_type": "diag", "bic": 8.300190678260456e+25, "aic": 8.30019067826... | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 76937 bytes> |
+| iforest_model | 5003 | 1 | 2025-12-27 06:26:20 | {"n_estimators": 100, "contamination": 0.01, "max_features": 1.0, "max_samples": 2048} | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 1418921 bytes> |
+| omr_model | 5003 | 1 | 2025-12-27 06:26:23 | NULL | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 83948 bytes> |
+| pca_model | 5003 | 1 | 2025-12-27 06:26:16 | {"n_components": 5, "variance_ratio_sum": 0.6257, "variance_ratio_first_component": 0.2296, "vari... | {"train_rows": 129, "train_sensors": ["power_29_avg_med", "power_29_max_med", "power_29_min_med",... | NULL | <binary 38975 bytes> |
 
 ### Bottom 10 Records
 
