@@ -396,13 +396,20 @@ core/
 - [x] 1.4 Wire lifecycle into acm_main.py (lines 4550-4607)
 - [~] 1.5 SKIPPED: offline_pipeline.py, detector_manager.py, data_pipeline.py (over-engineering)
 
-### Phase 2: ONLINE Pipeline [NOT STARTED]
-- [ ] 2.1 ONLINE mode scoring works (gating done, needs testing)
-- [ ] 2.2 Load frozen model from ModelRegistry (uses existing cache)
-- [ ] 2.3 Regime assignment predict-only (gating done)
-- [ ] 2.4 Add UNKNOWN regime (label=-1) when confidence < threshold
-- [ ] 2.5 ONLINE fail triggers OFFLINE automatically (fallback in acm.py)
+### Phase 2: ONLINE Pipeline [COMPLETE - 7111143]
+- [x] 2.1 ONLINE mode scoring works (gating in regimes.py:1811)
+- [x] 2.2 Load frozen model from ModelRegistry (uses existing cache)
+- [x] 2.3 Regime assignment predict-only (gating done)
+- [x] 2.4 Add UNKNOWN regime (label=-1) when confidence < threshold
+- [x] 2.5 ONLINE fail triggers OFFLINE automatically (fallback in acm.py:117)
 - [ ] 2.6 Integration test: --mode online with existing model
+
+Key additions:
+- `UNKNOWN_REGIME_LABEL = -1` constant (regimes.py:41)
+- `predict_regime_with_confidence()` function (regimes.py:756-827)
+- `regime_confidence` array in output (0-1 per point)
+- `regime_unknown_count` in output
+- Config: `regimes.unknown.enabled`, `regimes.unknown.distance_percentile`
 
 ### Phase 3: Confidence and Reliability [NOT STARTED]
 - [ ] 3.1 Create core/confidence.py - unified confidence model
