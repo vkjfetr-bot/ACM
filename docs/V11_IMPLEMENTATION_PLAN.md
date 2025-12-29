@@ -2,7 +2,7 @@
 
 **Created**: 2025-12-29
 **Branch**: `feature/v11-refactor`
-**Status**: COMPLETE (Phase 6 Observability deferred)
+**Status**: COMPLETE - Ready for merge to main
 **Last Update**: 2025-12-29
 
 ## Commits
@@ -15,6 +15,8 @@
 | 6242183 | Phase 4-5: Regime stability, entry point |
 | 6a17821 | Phase 7: Version and docs update |
 | a4bea9b | Bugfix: UNKNOWN preservation, vectorized distances |
+| f2f7c57 | SQL migration script, 19 unit tests |
+| 3dff96b | Dashboard updates: RUL_Status, MaturityState, UNKNOWN regime |
 
 ---
 
