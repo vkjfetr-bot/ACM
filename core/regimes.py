@@ -38,6 +38,11 @@ except Exception:  # pragma: no cover - scipy optional in some deployments
 
 REGIME_MODEL_VERSION = "2.1"  # Bumped for FIX #1-10 changes
 
+# V11: UNKNOWN regime label for low-confidence assignments
+# Rule #3: No forced assignment when confidence is low
+# Rule #14: UNKNOWN is a valid system output
+UNKNOWN_REGIME_LABEL = -1
+
 
 class ModelVersionMismatch(Exception):
     """Raised when a cached regime model version differs from the expected version."""
@@ -104,6 +109,9 @@ _REGIME_CONFIG_SCHEMA = {
     "regimes.transient_detection.roc_threshold_trip": (float, 0.0, 100.0, "Transient trip ROC threshold"),
     "regimes.health.fused_warn_z": (float, 0.0, 10.0, "Fused Z warn threshold"),
     "regimes.health.fused_alert_z": (float, 0.0, 10.0, "Fused Z alert threshold"),
+    # V11: UNKNOWN regime support
+    "regimes.unknown.enabled": (bool, True, True, "Enable UNKNOWN regime for low-confidence assignments"),
+    "regimes.unknown.distance_percentile": (float, 0.0, 100.0, "Distance percentile threshold for UNKNOWN"),
 }
 
 # ----------------------------
@@ -743,6 +751,79 @@ def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
     centers = np.asarray(model.kmeans.cluster_centers_, dtype=np.float64, order="C")
     labels = pairwise_distances_argmin(X_scaled, centers, axis=1)
     return labels.astype(int, copy=False)
+
+
+def predict_regime_with_confidence(
+    model: RegimeModel,
+    basis_df: pd.DataFrame,
+    cfg: Dict[str, Any],
+    training_distances: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Predict regime labels with confidence scores.
+    
+    V11 Rule #3: No forced assignment when confidence is low.
+    V11 Rule #14: UNKNOWN is a valid system output.
+    
+    Args:
+        model: Fitted RegimeModel
+        basis_df: Data to predict on
+        cfg: Configuration dict
+        training_distances: Optional cached distances from training (for threshold)
+    
+    Returns:
+        Tuple of (labels, confidence_scores)
+        - labels: int array, -1 = UNKNOWN regime
+        - confidence_scores: float array 0-1, lower = less confident
+    """
+    from sklearn.metrics import pairwise_distances
+    
+    unknown_cfg = _cfg_get(cfg, "regimes.unknown", {}) or {}
+    unknown_enabled = bool(unknown_cfg.get("enabled", True))
+    distance_percentile = float(unknown_cfg.get("distance_percentile", 95.0))
+    
+    # Align features
+    aligned = basis_df.reindex(columns=model.feature_columns, fill_value=0.0)
+    aligned_arr = aligned.to_numpy(dtype=np.float64, copy=False, na_value=0.0)
+    X_scaled = model.scaler.transform(aligned_arr)
+    X_scaled = np.asarray(X_scaled, dtype=np.float64, order="C")
+    centers = np.asarray(model.kmeans.cluster_centers_, dtype=np.float64, order="C")
+    
+    # Get labels and distances
+    labels = pairwise_distances_argmin(X_scaled, centers, axis=1).astype(int, copy=False)
+    
+    # Compute distance to assigned centroid for each point
+    distances = np.zeros(len(X_scaled), dtype=np.float64)
+    for i, (point, label) in enumerate(zip(X_scaled, labels)):
+        distances[i] = np.linalg.norm(point - centers[label])
+    
+    # Compute confidence as inverse of normalized distance
+    # Use training distances to establish threshold if available
+    if training_distances is not None and len(training_distances) > 0:
+        threshold = np.percentile(training_distances, distance_percentile)
+    else:
+        # Use current batch distances as fallback
+        threshold = np.percentile(distances, distance_percentile) if len(distances) > 0 else 1.0
+    
+    # Avoid division by zero
+    threshold = max(threshold, 1e-6)
+    
+    # Confidence: 1.0 at centroid, 0.0 at threshold distance
+    confidence = np.clip(1.0 - (distances / threshold), 0.0, 1.0)
+    
+    # Mark UNKNOWN if enabled and confidence is below threshold
+    if unknown_enabled:
+        unknown_mask = distances > threshold
+        if np.any(unknown_mask):
+            labels = labels.copy()  # Don't modify original
+            labels[unknown_mask] = UNKNOWN_REGIME_LABEL
+            Console.info(
+                f"Marked {np.sum(unknown_mask)}/{len(labels)} points as UNKNOWN regime",
+                component="REGIME", unknown_count=int(np.sum(unknown_mask)),
+                threshold_distance=float(threshold)
+            )
+    
+    return labels, confidence
 
 
 def update_health_labels(
@@ -1738,8 +1819,25 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
         elif regime_model.train_hash is None and basis_hash is not None:
             regime_model.train_hash = basis_hash
 
+        # V11: Use confidence-aware prediction for score data
+        # Training data uses standard prediction (no UNKNOWN during training)
         train_labels = predict_regime(regime_model, basis_train)
-        score_labels = predict_regime(regime_model, basis_score)
+        
+        # Compute training distances for establishing threshold
+        aligned_train = basis_train.reindex(columns=regime_model.feature_columns, fill_value=0.0)
+        train_arr = aligned_train.to_numpy(dtype=np.float64, copy=False, na_value=0.0)
+        train_scaled = regime_model.scaler.transform(train_arr)
+        centers = np.asarray(regime_model.kmeans.cluster_centers_, dtype=np.float64)
+        train_distances = np.array([
+            np.linalg.norm(pt - centers[lbl]) 
+            for pt, lbl in zip(train_scaled, train_labels)
+        ])
+        
+        # Score data gets confidence-aware prediction (may assign UNKNOWN)
+        score_labels, score_confidence = predict_regime_with_confidence(
+            regime_model, basis_score, cfg, training_distances=train_distances
+        )
+        
         # Smoothing controls
         smooth_cfg = _cfg_get(cfg, "regimes.smoothing", {}) or {}
         passes = int(smooth_cfg.get("passes", 1))
@@ -1773,6 +1871,8 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
         out["regime_model"] = regime_model
         out["regime_labels_train"] = train_labels
         out["regime_labels"] = score_labels
+        out["regime_confidence"] = score_confidence  # V11: Assignment confidence
+        out["regime_unknown_count"] = int(np.sum(score_labels == UNKNOWN_REGIME_LABEL))  # V11
         derived_k = regime_model.meta.get("best_k")
         if derived_k is None:
             derived_k = getattr(regime_model.kmeans, "n_clusters", None)
@@ -1795,6 +1895,7 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
 
         if frame is not None:
             frame["regime_label"] = score_labels
+            frame["regime_confidence"] = score_confidence  # V11: Add confidence to frame
             out["frame"] = frame
         return out
 

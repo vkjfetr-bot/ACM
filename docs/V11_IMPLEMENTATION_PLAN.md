@@ -74,6 +74,15 @@
 | 01948eb | Phase 1: Add model lifecycle management |
 | 81c9dd0 | docs: Mark Phase 1 complete |
 
+### Future Consideration: Pipeline Extraction
+
+The following were deferred as current gating approach is sufficient:
+- `core/offline_pipeline.py` - Extract phases from acm_main.py
+- `core/online_pipeline.py` - Separate scoring-only pipeline
+- `core/detector_manager.py` - Detector fit/score management
+
+**Revisit if**: ONLINE/OFFLINE diverge significantly, or acm_main.py becomes unmaintainable.
+
 ---
 
 ## What Went Wrong
