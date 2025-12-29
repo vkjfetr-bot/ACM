@@ -5,13 +5,13 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 **Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
 
 **v11.0.0 New Features**:
-- DataContract validation at pipeline entry
-- MaturityState-based regime lifecycle management  
-- Standardized FeatureMatrix with schema enforcement
-- DetectorProtocol ABC for all detectors
-- Seasonality detection and adjustment
-- Asset similarity for cold-start transfer learning
-- SQL performance optimizations (deprecated ACM_Scores_Long, batched DELETEs)
+- ONLINE/OFFLINE pipeline mode separation (--mode auto/online/offline)
+- MaturityState lifecycle (COLDSTART -> LEARNING -> CONVERGED -> DEPRECATED)
+- Unified confidence model with ReliabilityStatus for all outputs
+- RUL reliability gating (NOT_RELIABLE when model not CONVERGED)
+- UNKNOWN regime (label=-1) for low-confidence assignments
+- Confidence columns in ACM_RUL, ACM_HealthTimeline, ACM_Anomaly_Events
+- Promotion criteria (7 days, 0.15 silhouette, 3 runs) for model maturity
 
 ---
 
@@ -69,14 +69,13 @@ ACM/
 |   +-- forecast_engine.py # RUL and health forecasting
 |   +-- model_persistence.py  # SQL-only model storage
 |   +-- episode_culprits_writer.py  # Episode diagnostics
-|   # v11.0.0 New Core Modules:
+|   # v11.0.0 Core Modules (ACTUAL):
+|   +-- acm.py                # Single entry point with --mode auto/online/offline
+|   +-- model_lifecycle.py    # MaturityState enum, PromotionCriteria, promotion logic
+|   +-- confidence.py         # Unified confidence model, ReliabilityStatus, RUL gating
 |   +-- pipeline_types.py     # DataContract, PipelineMode, SensorValidator
-|   +-- feature_matrix.py     # FeatureMatrix with schema enforcement
-|   +-- detector_protocol.py  # DetectorProtocol ABC
-|   +-- regime_manager.py     # MaturityState-based regime lifecycle
 |   +-- seasonality.py        # Diurnal/weekly pattern detection
 |   +-- asset_similarity.py   # Cold-start transfer learning
-|   +-- table_schemas.py      # SQL table schema validation
 +-- scripts/              # Operational scripts
 |   +-- sql_batch_runner.py   # Batch processing
 |   +-- sql/              # SQL utilities, schema export
