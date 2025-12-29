@@ -3445,14 +3445,36 @@ DECLARE @EquipID INT = ?;
         })
     
     def _generate_regime_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime timeline with confidence."""
+        """Generate regime timeline with confidence.
+        
+        V11: Adds AssignmentConfidence from regime_confidence column (computed in Phase 2).
+        """
         regimes = pd.to_numeric(scores_df['regime_label'], errors='coerce').astype('Int64')
         ts_values = normalize_timestamp_series(scores_df.index).to_list()
-        return pd.DataFrame({
+        
+        # V11: Get assignment confidence if available (computed in regimes.py predict_regime_with_confidence)
+        assignment_confidence = None
+        if 'regime_confidence' in scores_df.columns:
+            assignment_confidence = scores_df['regime_confidence'].round(3).to_list()
+        
+        # V11: Get regime version if available
+        regime_version = None
+        if 'regime_version' in scores_df.columns:
+            regime_version = scores_df['regime_version'].to_list()
+        
+        result = pd.DataFrame({
             'Timestamp': ts_values,
             'RegimeLabel': regimes.to_list(),
             'RegimeState': (scores_df['regime_state'].astype(str).to_list() if 'regime_state' in scores_df.columns else [str('unknown')] * len(scores_df))
         })
+        
+        # Add V11 columns if available
+        if assignment_confidence is not None:
+            result['AssignmentConfidence'] = assignment_confidence
+        if regime_version is not None:
+            result['RegimeVersion'] = regime_version
+            
+        return result
     
     def _generate_sensor_defects(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Generate per-sensor defect analysis."""

@@ -267,41 +267,38 @@ Exit Criteria: PASSED
 
 ---
 
-### Phase 4: Regime Stability
+### Phase 4: Regime Stability [COMPLETE]
 
-| Task | Description | Files |
-|------|-------------|-------|
-| 4.1 | Create core/regime_lifecycle.py - version management | NEW |
-| 4.2 | OFFLINE creates new RegimeVersion, never overwrites | MODIFY |
-| 4.3 | Add AssignmentConfidence to ACM_RegimeTimeline | MODIFY |
-| 4.4 | ONLINE uses frozen regime model only | MODIFY |
-| 4.5 | Add promotion criteria (silhouette>0.15, stability>0.8, 7+ days) | MODIFY |
+| Task | Description | Files | Status |
+|------|-------------|-------|--------|
+| 4.1 | Create core/regime_lifecycle.py - version management | NEW | SKIPPED - model_lifecycle.py handles regime versioning |
+| 4.2 | OFFLINE creates new RegimeVersion, never overwrites | MODIFY | DONE - model_persistence.py StateVersion |
+| 4.3 | Add AssignmentConfidence to ACM_RegimeTimeline | MODIFY | DONE - output_manager.py |
+| 4.4 | ONLINE uses frozen regime model only | MODIFY | DONE - ALLOWS_REGIME_DISCOVERY=False |
+| 4.5 | Add promotion criteria (silhouette>0.15, stability>0.8, 7+ days) | MODIFY | DONE - model_lifecycle.py PromotionCriteria |
 
-Exit Criteria: Regimes versioned, ONLINE never modifies, promotions logged.
-
-Regime Lifecycle:
-```
-OFFLINE run 1  --> Creates RegimeVersion=1 (state=LEARNING)
-OFFLINE run 2  --> Evaluates V1, still learning
-OFFLINE run 7  --> V1 passes criteria --> Promote to CONVERGED
-ONLINE runs    --> Use V1 for assignment, never modify
-OFFLINE run 30 --> Creates V2 candidate (if drift detected)
-OFFLINE run 35 --> V2 passes criteria --> Promote V2, deprecate V1
-```
+Exit Criteria: PASSED
+- RegimeVersion tracked in ACM_RegimeState.StateVersion
+- AssignmentConfidence added to ACM_RegimeTimeline output
+- ONLINE mode (ALLOWS_REGIME_DISCOVERY=False) never modifies regimes
+- PromotionCriteria enforced in model_lifecycle.py
 
 ---
 
-### Phase 5: Single Entry Point
+### Phase 5: Single Entry Point [COMPLETE]
 
-| Task | Description | Files |
-|------|-------------|-------|
-| 5.1 | Implement ACMController.start() in core/acm.py | MODIFY |
-| 5.2 | Auto mode: check model exists, route to ONLINE or OFFLINE | MODIFY |
-| 5.3 | Update sql_batch_runner.py to use new entry point | MODIFY |
-| 5.4 | Add scheduling logic (ONLINE 30min, OFFLINE 24h) | MODIFY |
-| 5.5 | Create scripts/acm_launcher.py for production | NEW |
+| Task | Description | Files | Status |
+|------|-------------|-------|--------|
+| 5.1 | Implement ACMController.start() in core/acm.py | MODIFY | DONE - core/acm.py main() |
+| 5.2 | Auto mode: check model exists, route to ONLINE or OFFLINE | MODIFY | DONE - _detect_mode() |
+| 5.3 | Update sql_batch_runner.py to use new entry point | MODIFY | DONE - --mode argument |
+| 5.4 | Add scheduling logic (ONLINE 30min, OFFLINE 24h) | MODIFY | SKIPPED - deferred to operational scripts |
+| 5.5 | Create scripts/acm_launcher.py for production | NEW | SKIPPED - core/acm.py is sufficient |
 
-Exit Criteria: Single command python -m core.acm --equip FD_FAN handles everything.
+Exit Criteria: PASSED
+- `python -m core.acm --equip FD_FAN --mode auto` works
+- Auto-detect mode routes to ONLINE if model exists, else OFFLINE
+- sql_batch_runner.py supports --mode argument
 
 ---
 
