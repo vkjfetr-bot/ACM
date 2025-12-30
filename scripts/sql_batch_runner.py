@@ -1052,9 +1052,10 @@ class SQLBatchRunner:
         # If we just completed coldstart during this run, start the batch phase
         # immediately after the coldstart window to avoid reprocessing the same window.
         start_from_ts: Optional[datetime] = None
+        coldstart_ran_this_session = not (resume and coldstart_complete)
         try:
             # Only honor coldstart_last_end when we executed coldstart above and not in resume-fast path
-            if not (resume and coldstart_complete) and 'coldstart_last_end' in locals() and coldstart_last_end is not None:
+            if coldstart_ran_this_session and 'coldstart_last_end' in locals() and coldstart_last_end is not None:
                 start_from_ts = coldstart_last_end + timedelta(seconds=1)
         except Exception:
             start_from_ts = None
@@ -1067,6 +1068,12 @@ class SQLBatchRunner:
         
         if batches > 0:
             Console.ok(f"{equip_name}: Completed - {batches} batch(es) processed", component="BATCH", equipment=equip_name, batches=batches)
+            Console.info(f"{equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", component="TIMING", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
+            return True
+        elif coldstart_ran_this_session:
+            # Coldstart consumed all available data - this is OK when using --max-batches 1
+            # The processing was successful even though there's nothing left for batch phase
+            Console.ok(f"{equip_name}: Completed via coldstart (no additional batches needed)", component="BATCH", equipment=equip_name)
             Console.info(f"{equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", component="TIMING", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
             return True
         else:

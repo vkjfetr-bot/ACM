@@ -2405,15 +2405,15 @@ class OutputManager:
                     
                     confidence_values = []
                     for _, row in df.iterrows():
-                        # Calculate episode duration in minutes
-                        duration_minutes = 60  # Default 1 hour if can't calculate
+                        # Calculate episode duration in seconds
+                        duration_seconds = 3600  # Default 1 hour if can't calculate
                         start_col = 'StartTime' if 'StartTime' in df.columns else 'start_ts'
                         end_col = 'EndTime' if 'EndTime' in df.columns else 'end_ts'
                         if start_col in df.columns and end_col in df.columns:
                             try:
                                 start_t = pd.to_datetime(row[start_col])
                                 end_t = pd.to_datetime(row[end_col])
-                                duration_minutes = (end_t - start_t).total_seconds() / 60
+                                duration_seconds = (end_t - start_t).total_seconds()
                             except Exception:
                                 pass
                         
@@ -2421,9 +2421,9 @@ class OutputManager:
                         peak_z = row.get('PeakScore', row.get('Score', 3.0))
                         
                         conf = compute_episode_confidence(
-                            maturity_state=maturity_state,
-                            episode_duration_minutes=duration_minutes,
-                            peak_z=peak_z if peak_z is not None else 3.0
+                            episode_duration_seconds=duration_seconds,
+                            peak_z=float(peak_z if peak_z is not None else 3.0),
+                            maturity_state=maturity_state
                         )
                         confidence_values.append(round(conf, 3))
                     
@@ -3413,17 +3413,14 @@ DECLARE @EquipID INT = ?;
                         pass  # Use default COLDSTART
                 
                 # Compute confidence for each timestamp based on available data
-                for i, (ts, fused_z, qflag) in enumerate(zip(scores_df.index, scores_df['fused'], quality_flag)):
+                for i, (ts, fused_z_val, qflag) in enumerate(zip(scores_df.index, scores_df['fused'], quality_flag)):
                     # Compute how many samples we have up to this point
                     sample_count = i + 1
-                    # Is this a quality issue point?
-                    is_quality_issue = qflag in ('EXTREME_VOLATILITY', 'EXTREME_ANOMALY')
                     
                     conf = compute_health_confidence(
+                        fused_z=float(fused_z_val),
                         maturity_state=maturity_state,
                         sample_count=sample_count,
-                        is_extrapolated=False,  # Health timeline is always from actual data
-                        has_quality_issues=is_quality_issue
                     )
                     confidence_values.append(round(conf, 3))
             except Exception as e:

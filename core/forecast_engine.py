@@ -146,7 +146,8 @@ class ForecastEngine:
         output_manager: OutputManager,
         equip_id: int,
         run_id: str,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        model_state: Optional[Any] = None
     ):
         """
         Initialize forecast engine.
@@ -157,12 +158,14 @@ class ForecastEngine:
             equip_id: Equipment ID
             run_id: ACM run identifier
             config: Configuration dictionary (optional, uses ACM_AdaptiveConfig if None)
+            model_state: Pre-loaded ModelState from acm_main (avoids race condition with SQL)
         """
         self.sql_client = sql_client
         self.output_manager = output_manager
         self.equip_id = equip_id
         self.run_id = run_id
         self.config = config or {}
+        self._model_state = model_state  # V11 CRITICAL-1: Use cached state to avoid race condition
         
         # Initialize managers
         self.state_mgr = StateManager(sql_client=sql_client)
@@ -212,12 +215,16 @@ class ForecastEngine:
                         'data_quality': 'NONE'
                     }
                 
-                # M3.2 + M14: Early quality gating before expensive operations
-                # Allow GAPPY data (historical replay) but block SPARSE/FLAT/NOISY
-                if data_quality in [HealthQuality.SPARSE, HealthQuality.FLAT, HealthQuality.NOISY]:
-                    # M14: Friendly message for coldstart/quality issues (not fatal)
+                # V11: Check model maturity BEFORE data quality gating
+                # During COLDSTART/LEARNING, we allow sparse data and mark as NOT_RELIABLE
+                maturity_state, _, _ = self._get_model_maturity_state()
+                is_early_maturity = maturity_state in ('COLDSTART', 'LEARNING')
+                
+                # M3.2 + M14 + V11: Quality gating with maturity awareness
+                # FLAT/NOISY are always blockers (can't forecast constant or erratic data)
+                # SPARSE is allowed during early maturity (will be marked NOT_RELIABLE)
+                if data_quality in [HealthQuality.FLAT, HealthQuality.NOISY]:
                     quality_messages = {
-                        HealthQuality.SPARSE: "Insufficient data samples - need more historical data for reliable forecast",
                         HealthQuality.FLAT: "Health data shows no variance - equipment may be in steady state",
                         HealthQuality.NOISY: "Health data has excessive noise - consider smoothing or filtering"
                     }
@@ -230,6 +237,27 @@ class ForecastEngine:
                         'error': friendly_msg,
                         'data_quality': data_quality.value
                     }
+                
+                # V11: SPARSE data handling depends on maturity
+                if data_quality == HealthQuality.SPARSE:
+                    if is_early_maturity:
+                        # During coldstart/learning, proceed with sparse data but warn
+                        Console.warn(
+                            f"SPARSE data during {maturity_state} phase - proceeding with limited confidence",
+                            component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                            quality=data_quality.value, n_samples=len(health_df) if health_df is not None else 0
+                        )
+                    else:
+                        # If model is CONVERGED but data is sparse, this indicates a data pipeline issue
+                        friendly_msg = "Insufficient data samples - need more historical data for reliable forecast"
+                        Console.warn(f"{friendly_msg}; skipping forecast (not fatal)",
+                                     component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                                     quality=data_quality.value)
+                        return {
+                            'success': False,
+                            'error': friendly_msg,
+                            'data_quality': data_quality.value
+                        }
                 
                 if data_quality == HealthQuality.GAPPY:
                     Console.warn("GAPPY data detected - proceeding with available data (historical replay mode)",
@@ -552,11 +580,20 @@ class ForecastEngine:
         
         V11 Rule #10: RUL must be gated or suppressed when model not CONVERGED.
         
+        V11 CRITICAL-1 FIX: Use cached model_state from constructor first to avoid
+        race condition where acm_main updates state but ForecastEngine reads stale SQL.
+        
         Returns:
             Tuple of (maturity_state, training_rows, training_days)
         """
         try:
-            model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
+            # V11 CRITICAL-1: Use cached state if available (passed from acm_main)
+            model_state = self._model_state
+            
+            # Fallback to SQL only if no cached state
+            if model_state is None:
+                model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
+            
             if model_state is None:
                 return 'COLDSTART', 0, 0.0
             return (

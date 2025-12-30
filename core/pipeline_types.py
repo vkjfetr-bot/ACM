@@ -149,8 +149,10 @@ class DataContract:
         issues: List[str] = []
         warnings: List[str] = []
         
-        # Check timestamp column
-        if self.timestamp_col not in df.columns:
+        # Check timestamp column (may be a column or the index)
+        ts_in_columns = self.timestamp_col in df.columns
+        ts_in_index = df.index.name == self.timestamp_col or isinstance(df.index, pd.DatetimeIndex)
+        if not ts_in_columns and not ts_in_index:
             issues.append(f"Missing timestamp column: {self.timestamp_col}")
         
         # Check required sensors

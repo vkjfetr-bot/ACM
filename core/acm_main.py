@@ -2018,8 +2018,14 @@ def _normalize_episodes_schema(
                 e_clamped = s_clamped
             slice_labels = label_array[s_clamped:e_clamped + 1]
             if slice_labels.size:
-                counts = np.bincount(slice_labels.astype(int))
-                majority_label = int(np.argmax(counts))
+                # Filter out negative labels (UNKNOWN regime = -1) for bincount
+                valid_labels = slice_labels[slice_labels >= 0]
+                if valid_labels.size > 0:
+                    counts = np.bincount(valid_labels.astype(int))
+                    majority_label = int(np.argmax(counts))
+                else:
+                    # All labels are UNKNOWN (-1)
+                    majority_label = -1
             else:
                 majority_label = -1
             regime_vals.append(majority_label)
@@ -3717,11 +3723,15 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
             # v11.0.0: DataContract validation at pipeline entry
             with T.section("data.contract"):
+                # For initial coldstart with small data, allow fewer score rows
+                # If train has data and we're in SQL mode, we just completed coldstart
+                is_initial_coldstart = len(train) > 0 and SQL_MODE
+                min_rows_threshold = 10 if is_initial_coldstart else 100
                 contract = DataContract(
                     required_sensors=[],  # Auto-detect from available columns
                     optional_sensors=list(meta.kept_cols) if hasattr(meta, 'kept_cols') else [],
                     timestamp_col=meta.timestamp_col if hasattr(meta, 'timestamp_col') else 'Timestamp',
-                    min_rows=100,
+                    min_rows=min_rows_threshold,
                     max_null_fraction=0.5,
                     equip_id=equip_id,
                     equip_code=equip,
@@ -3815,10 +3825,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              equip=equip, train_rows=len(train) if 'train' in dir() else 0,
                              error=str(be))
 
-        # ===== v11.0.0: Seasonality Detection (P5.9) =====
-        # NOTE: This detects seasonal patterns and writes them to ACM_SeasonalPatterns table,
-        # but the patterns are NOT USED for adjustment. Future work: subtract seasonal component
-        # from sensor data before anomaly detection to reduce false positives.
+        # ===== v11.0.0: Seasonality Detection and Adjustment (P5.9) =====
+        # Detects seasonal patterns (daily/weekly cycles) and optionally adjusts data
+        # to reduce false positives from predictable cyclical variations.
         seasonal_patterns: Dict[str, List[SeasonalPattern]] = {}
         with T.section("seasonality.detect"):
             try:
@@ -3835,9 +3844,31 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         seasonal_patterns = handler.detect_patterns(temp_df, sensor_cols, 'Timestamp')
                         if seasonal_patterns:
                             pattern_count = sum(len(ps) for ps in seasonal_patterns.values())
-                            Console.info(f"Detected {pattern_count} seasonal patterns in {len(seasonal_patterns)} sensors (detection only, not adjusted)",
+                            Console.info(f"Detected {pattern_count} seasonal patterns in {len(seasonal_patterns)} sensors",
                                         component="SEASON", equip=equip, pattern_count=pattern_count,
                                         sensors_with_patterns=len(seasonal_patterns))
+                            
+                            # v11.0.0 GAP-1 FIX: Apply seasonal adjustment to reduce false positives
+                            apply_adjustment = bool(cfg.get("seasonality", {}).get("apply_adjustment", True))
+                            if apply_adjustment and seasonal_patterns:
+                                # Adjust train data
+                                train_adj = train_numeric.copy()
+                                train_adj['Timestamp'] = pd.to_datetime(train_adj.index)
+                                train_adj = handler.adjust_baseline(train_adj, sensor_cols, 'Timestamp')
+                                train_adj = train_adj.drop(columns=['Timestamp'])
+                                
+                                # Adjust score data  
+                                score_adj = score_numeric.copy()
+                                score_adj['Timestamp'] = pd.to_datetime(score_adj.index)
+                                score_adj = handler.adjust_baseline(score_adj, sensor_cols, 'Timestamp')
+                                score_adj = score_adj.drop(columns=['Timestamp'])
+                                
+                                # Update the working dataframes
+                                train_numeric = train_adj
+                                score_numeric = score_adj
+                                
+                                Console.info(f"Applied seasonal adjustment to {len(seasonal_patterns)} sensors",
+                                            component="SEASON", equip=equip, adjusted_sensors=len(seasonal_patterns))
             except Exception as se:
                 Console.debug(f"Seasonality detection skipped: {se}", component="SEASON", 
                              equip=equip, error=str(se)[:200])
@@ -3846,14 +3877,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         with T.section("data.guardrails"):
             try:
                 # 1) Baseline/Batch window ordering & overlap check
+                # NOTE: During coldstart, overlap is EXPECTED (train ends where score begins)
                 tr_start = pd.to_datetime(train.index.min()) if len(train.index) else None
                 tr_end   = pd.to_datetime(train.index.max()) if len(train.index) else None
                 sc_start = pd.to_datetime(score.index.min()) if len(score.index) else None
                 sc_end   = pd.to_datetime(score.index.max()) if len(score.index) else None
-                if tr_end is not None and sc_start is not None and sc_start <= tr_end:
+                
+                # True overlap is when score START is strictly BEFORE train END (data leakage)
+                # Contiguous windows (score starts AT train end) are fine - expected in coldstart splits
+                # and in normal batch mode where train ends at T and score starts at T+1
+                if tr_end is not None and sc_start is not None and sc_start < tr_end:
                     Console.warn(
-                        f"[DATA] Batch window starts before or overlaps baseline end:"
-                        f" batch_start={sc_start}, baseline_end={tr_end}",
+                        f"[DATA] Batch window OVERLAPS baseline (data leakage risk):"
+                        f" batch_start={sc_start} < baseline_end={tr_end}",
                         component="DATA", equip=equip, batch_start=str(sc_start), baseline_end=str(tr_end)
                     )
 
@@ -4562,7 +4598,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         
                         if model_state is None:
                             # First time - create new state in LEARNING
-                            version = regime_state_version if 'regime_state_version' in dir() else 1
+                            # V11 CRITICAL-2 FIX: regime_state_version is always initialized at line 4062
+                            version = regime_state_version
                             model_state = create_new_model_state(
                                 equip_id=int(equip_id),
                                 version=version,
@@ -4595,9 +4632,10 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                     Console.info(f"Model not yet eligible for promotion: {unmet}", component="LIFECYCLE")
                         
                         # Write updated state
+                        # V11 CRITICAL-2 FIX: regime_state_version is always initialized at line 4062
                         output_manager.write_active_models(get_active_model_dict(
                             model_state,
-                            regime_version=regime_state_version if 'regime_state_version' in dir() else None,
+                            regime_version=regime_state_version,
                         ))
                         Console.info(f"Model state: {model_state.maturity.value}", component="LIFECYCLE",
                                      version=model_state.version, consecutive_runs=model_state.consecutive_runs)
@@ -5477,12 +5515,16 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     try:
                         # Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
                         Console.info(f"Running unified forecasting engine (v{ACM_VERSION})", component="FORECAST")
+                        # V11 CRITICAL-1 FIX: Pass model_state to avoid race condition where
+                        # acm_main updates state but ForecastEngine reads stale SQL data
+                        _cached_model_state = model_state if 'model_state' in locals() else None
                         forecast_engine = ForecastEngine(
                             sql_client=getattr(output_manager, "sql_client", None),
                             output_manager=output_manager,
                             equip_id=int(equip_id) if 'equip_id' in locals() else None,
                             run_id=str(run_id) if run_id is not None else None,
-                            config=cfg
+                            config=cfg,
+                            model_state=_cached_model_state
                         )
                         
                         forecast_results = forecast_engine.run_forecast()

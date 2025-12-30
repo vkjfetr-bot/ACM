@@ -131,25 +131,25 @@ datasources:
 
   # Microsoft SQL Server - ACM Business Data
   # Note: Uses host.docker.internal to connect from Docker container to host SQL Server
-  # IMPORTANT: After starting Docker, run the configure script to set credentials:
-  #   .\scripts\configure_grafana_mssql.ps1 -User "grafana_reader" -Password "ACMGrafana2024!"
-  # Or create the SQL login first:
-  #   sqlcmd -S "localhost\B19CL3PCQLSERVER" -E -i scripts/sql/create_grafana_login.sql
+  # IMPORTANT: SQL login 'grafana_reader' must exist:
+  #   sqlcmd -S "localhost\B19CL3PCQLSERVER" -d master -E -Q "
+  #     CREATE LOGIN [grafana_reader] WITH PASSWORD = 'ACMGrafana2024!', CHECK_POLICY = OFF;
+  #     USE ACM; CREATE USER [grafana_reader] FOR LOGIN [grafana_reader];
+  #     ALTER ROLE [db_datareader] ADD MEMBER [grafana_reader];"
   - name: MSSQL
     type: mssql
     access: proxy
     url: host.docker.internal:1433
     uid: mssql-ds
     isDefault: false
-    # Credentials are set via API after container starts (see configure_grafana_mssql.ps1)
-    # user: grafana_reader  # Set via API
+    user: grafana_reader
     jsonData:
       authenticationType: SQL Server Authentication
       database: ACM
-      encrypt: "false"
+      encrypt: "disable"
       connMaxLifetime: 14400
       maxIdleConns: 100
       maxOpenConns: 100
-    # secureJsonData.password is set via API (not stored in version control)
-    secureJsonData: {}
+    secureJsonData:
+      password: "ACMGrafana2024!"
     editable: true

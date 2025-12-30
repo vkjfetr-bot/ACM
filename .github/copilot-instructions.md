@@ -1,5 +1,24 @@
 # ACM - Automated Condition Monitoring (v11.0.0)
 
+---
+
+## ⛔ RULE #1: NEVER FILTER CONSOLE OUTPUT (NON-VIOLATABLE)
+
+**THIS RULE CANNOT BE VIOLATED UNDER ANY CIRCUMSTANCES:**
+
+When running ANY terminal command (ACM, Python scripts, SQL queries, etc.):
+- **NEVER use `Select-Object -First N` or `-Last N`** to limit output
+- **NEVER use `| head`, `| tail`, or any output truncation**
+- **NEVER use `Out-String -Width` with small values**
+- **ALWAYS show the COMPLETE, UNFILTERED output**
+- **If output is long, that's OK - show ALL of it**
+
+The user MUST see every single line of output. Filtering output hides critical errors, warnings, and diagnostic information.
+
+**VIOLATION OF THIS RULE IS GROUNDS FOR IMMEDIATE TERMINATION OF THE CONVERSATION.**
+
+---
+
 ACM is a predictive maintenance and equipment health monitoring system. It ingests sensor data from industrial equipment (FD_FAN, GAS_TURBINE, etc.) via SQL Server, runs anomaly detection algorithms, calculates health scores, and forecasts Remaining Useful Life (RUL). Results are visualized through Grafana dashboards for operations teams.
 
 **Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
