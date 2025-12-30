@@ -3647,6 +3647,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         )
         root_span = _span_ctx.__enter__()
 
+    # V11 CRITICAL-3: Initialize variables at function scope to avoid NameError
+    # These MUST be defined before any conditional blocks that might reference them
+    train_start: Optional[datetime] = None
+    train_end: Optional[datetime] = None
+    model_state = None  # V11 CRITICAL-1: Single source of truth for model lifecycle
+
     try:
         # ===== 1) Load data (legacy CSV path; historian SQL can be wired later) =====
         with T.section("load_data"):
@@ -4582,12 +4588,17 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 )
                 
                 # v11: Model lifecycle management - track maturity and check promotion
+                # V11 CRITICAL-3: train_start/train_end are initialized at function scope (line ~3655)
+                # Here we SET their values from actual data
+                if hasattr(train.index, 'min') and len(train.index) > 0:
+                    train_start = pd.to_datetime(train.index.min())
+                    train_end = pd.to_datetime(train.index.max())
+                else:
+                    train_start = datetime.now()
+                    train_end = datetime.now()
+                
                 if output_manager and sql_client:
                     try:
-                        # Get training window from data for lifecycle tracking
-                        train_start = train.index.min() if hasattr(train.index, 'min') else datetime.now()
-                        train_end = train.index.max() if hasattr(train.index, 'max') else datetime.now()
-                        
                         # Get silhouette score from regime model if available
                         silhouette = None
                         if regime_model is not None and hasattr(regime_model, 'meta'):
@@ -5515,16 +5526,15 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     try:
                         # Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
                         Console.info(f"Running unified forecasting engine (v{ACM_VERSION})", component="FORECAST")
-                        # V11 CRITICAL-1 FIX: Pass model_state to avoid race condition where
-                        # acm_main updates state but ForecastEngine reads stale SQL data
-                        _cached_model_state = model_state if 'model_state' in locals() else None
+                        # V11 CRITICAL-1 FIX: model_state is initialized at function scope (line ~3655)
+                        # and set during model persistence. Pass it directly - no fragile locals() check.
                         forecast_engine = ForecastEngine(
                             sql_client=getattr(output_manager, "sql_client", None),
                             output_manager=output_manager,
-                            equip_id=int(equip_id) if 'equip_id' in locals() else None,
+                            equip_id=int(equip_id),
                             run_id=str(run_id) if run_id is not None else None,
                             config=cfg,
-                            model_state=_cached_model_state
+                            model_state=model_state  # Initialized at function scope, set during lifecycle
                         )
                         
                         forecast_results = forecast_engine.run_forecast()

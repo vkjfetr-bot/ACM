@@ -73,7 +73,9 @@ from core.confidence import (
     compute_rul_confidence,
     check_rul_reliability,
 )
-from core.model_lifecycle import load_model_state_from_sql, MaturityState
+# V11 CRITICAL-1: Only import MaturityState, NOT load_model_state_from_sql
+# Model state is passed from acm_main to avoid race conditions
+from core.model_lifecycle import MaturityState
 
 
 # ========================================================================
@@ -580,29 +582,29 @@ class ForecastEngine:
         
         V11 Rule #10: RUL must be gated or suppressed when model not CONVERGED.
         
-        V11 CRITICAL-1 FIX: Use cached model_state from constructor first to avoid
-        race condition where acm_main updates state but ForecastEngine reads stale SQL.
+        V11 CRITICAL-1 FIX: Use ONLY the cached model_state from constructor.
+        NEVER fallback to SQL - that creates a race condition where acm_main
+        updates state but ForecastEngine reads stale SQL data.
         
         Returns:
             Tuple of (maturity_state, training_rows, training_days)
         """
+        # V11 CRITICAL-1: Use ONLY cached state from constructor
+        # If model_state is None, we're in COLDSTART (no models exist yet)
+        model_state = self._model_state
+        
+        if model_state is None:
+            # First run or no model exists - use conservative COLDSTART defaults
+            return 'COLDSTART', 0, 0.0
+        
         try:
-            # V11 CRITICAL-1: Use cached state if available (passed from acm_main)
-            model_state = self._model_state
-            
-            # Fallback to SQL only if no cached state
-            if model_state is None:
-                model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
-            
-            if model_state is None:
-                return 'COLDSTART', 0, 0.0
             return (
                 str(model_state.maturity.value),
                 model_state.training_rows,
                 model_state.training_days,
             )
         except Exception as e:
-            Console.warn(f"Could not load model maturity: {e}",
+            Console.warn(f"Could not extract model maturity: {e}",
                          component="FORECAST", equip_id=self.equip_id)
             return 'LEARNING', 0, 0.0  # Conservative default
     
