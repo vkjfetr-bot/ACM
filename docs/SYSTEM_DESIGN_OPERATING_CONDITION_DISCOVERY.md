@@ -1276,9 +1276,7 @@ def test_reject_non_physical_clustering():
 
 ---
 
-## 7. Migration from V11
-
-### 7.1 Compatibility Layer
+## 7. V11 Compatibility Layer
 
 V11 uses `core/regimes.py` with K-Means only. New system is backward compatible:
 
@@ -1303,42 +1301,34 @@ def discover_regimes_v11_compatible(data, timestamps, **kwargs):
     return result.labels, result.centroids, result.quality_scores['silhouette']
 ```
 
-### 7.2 Gradual Rollout
-
-1. **Phase 1**: Deploy physics validation alongside existing K-Means
-2. **Phase 2**: Enable hybrid clustering for new equipment only
-3. **Phase 3**: Backfill existing equipment with hybrid clustering
-4. **Phase 4**: Enable fleet alignment for equipment types with 5+ units
-5. **Phase 5**: Enable continuous evolution (new mode detection, aging adaptation)
-
 ---
 
-## 8. Success Criteria
+## 8. Performance Targets
 
-### 8.1 Technical Metrics
+### 8.1 Quality Metrics
 
 - **Regime Correctness**: >90% of regimes pass physics validation
 - **Label Consistency**: >80% agreement between human expert and auto-generated labels (on sample)
 - **Fleet Alignment**: >70% of equipment in same type assigned same consensus labels
 - **Temporal Stability**: <5% regime transitions per day (avoids rapid oscillation)
 
-### 8.2 Operational Metrics
+### 8.2 Efficiency Metrics
 
-- **Cold-start Time**: <24 hours with transfer learning (vs 7 days in V11)
-- **False Alarm Reduction**: <1% false positive rate (vs ~3% in V11)
-- **Operator Understanding**: Operators can interpret regime labels without training
-- **Maintenance Prioritization**: Fault diagnostics correctly contextualized by regime
+- **Computational Time**: <5 seconds per equipment for regime discovery
+- **Memory Footprint**: <500 MB for typical equipment (10K observations, 50 features)
+- **False Positive Rate**: <1% (3× improvement over V11's ~3%)
+- **Cold-start Capability**: Operational with 200+ observations (vs 1000+ in V11)
 
 ---
 
 ## Summary
 
-This system design transforms V11's statistical clustering into physics-informed, semantically meaningful operating mode discovery. Key innovations:
+This system design transforms statistical clustering into physics-informed, semantically meaningful operating mode discovery through:
 
-1. **Hybrid clustering** combines K-Means stability with HDBSCAN flexibility
-2. **Physics validation** ensures discovered regimes obey domain constraints
-3. **Semantic labeling** generates human-interpretable regime names automatically
-4. **Fleet alignment** ensures consistency across equipment
-5. **Continuous evolution** handles new modes and equipment aging gracefully
+1. **Hybrid clustering** - Combines K-Means stability with HDBSCAN flexibility
+2. **Physics validation** - Ensures discovered regimes obey domain constraints (power ordering, causality, energy balance)
+3. **Semantic labeling** - Auto-generates human-interpretable regime names from sensor signatures
+4. **Fleet alignment** - Hierarchical clustering of centroids ensures consistency across equipment
+5. **Continuous evolution** - Detects new modes and adapts to equipment aging
 
-The architecture is modular, testable, and backward-compatible with V11, enabling gradual rollout while delivering immediate value through improved regime correctness and operator understanding.
+The architecture provides complete pseudocode, data structures, and integration patterns ready for implementation.
