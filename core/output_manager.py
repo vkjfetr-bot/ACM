@@ -131,7 +131,7 @@ ALLOWED_TABLES = {
     # TIER 5: OPERATIONS & AUDIT (6 tables) - Is ACM working? What changed?
     'ACM_Runs',                  # Execution tracking and status
     'ACM_RunLogs',               # Detailed logs for troubleshooting
-    # 'ACM_RunTimers' DEPRECATED - observability stack (Tempo/Prometheus/Loki) handles timing
+    # Observability stack (Tempo/Prometheus/Loki) handles timing metrics
     'ACM_RunMetrics',            # Fusion quality metrics (EAV format)
     'ACM_Run_Stats',             # Run-level statistics
     'ACM_Config',                # Current configuration
