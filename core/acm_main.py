@@ -32,7 +32,6 @@ try:
     from .ar1_detector import AR1Detector  # Extracted from forecasting.py
     from . import fast_features
     from .forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
-    # DEPRECATED: from . import storage  # Use output_manager instead
 except ImportError:
     import pathlib
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
@@ -40,7 +39,6 @@ except ImportError:
     from core import correlation, outliers
     from core.ar1_detector import AR1Detector
     from core.forecast_engine import ForecastEngine  # v10.0.0: Unified forecasting orchestrator
-    # DEPRECATED: from core import storage  # Use output_manager instead
     try:
         from core import fast_features
     except Exception:
@@ -56,7 +54,7 @@ from core.config_history_writer import log_auto_tune_changes
 
 # Import the unified output system
 from core.output_manager import OutputManager
-# Import run metadata writer (write_timer_stats DEPRECATED - observability stack handles timing)
+# Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
 from core.episode_culprits_writer import write_episode_culprits_enhanced
 
@@ -5649,8 +5647,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     pct = (duration / total_time * 100) if total_time > 0 else 0
                     log_timer(section=section, duration_s=duration, pct=pct, total_s=total_time)
                 
-                # DEPRECATED: ACM_RunTimers SQL writes removed - observability stack (Tempo/Prometheus/Loki) handles timing
-                # Timings are now captured via:
+                # Timing data is now captured via observability stack:
                 # 1. Tempo traces (spans with durations)
                 # 2. Prometheus metrics (run_duration_seconds)
                 # 3. Loki logs (log_timer emits structured timer logs)
