@@ -73,30 +73,23 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 ACM/
 +-- .github/              # Copilot instructions (this file)
 +-- configs/              # config_table.csv, sql_connection.ini
-+-- core/                 # Main codebase
-|   +-- acm_main.py       # Pipeline orchestrator (entry point)
-|   +-- output_manager.py # All CSV/PNG/SQL writes (ALLOWED_TABLES)
++-- core/                 # Main codebase (see Module Relationships below)
+|   +-- acm_main.py       # Pipeline orchestrator (6000+ lines)
+|   +-- output_manager.py # All SQL writes (respects ALLOWED_TABLES)
 |   +-- sql_client.py     # SQL Server connectivity
-|   +-- observability.py  # Unified observability (Console, Span, Metrics, log_timer)
-|   +-- omr.py            # Overall Model Residual detector
-|   +-- correlation.py    # Correlation-based detector
-|   +-- outliers.py       # Statistical outlier detection
+|   +-- observability.py  # Console, Span, Metrics classes
 |   +-- fast_features.py  # Feature engineering (pandas/Polars)
 |   +-- fuse.py           # Multi-detector fusion
 |   +-- regimes.py        # Operating regime detection
-|   +-- drift.py          # Concept drift monitoring
 |   +-- forecast_engine.py # RUL and health forecasting
-|   +-- model_persistence.py  # SQL-only model storage
-|   +-- episode_culprits_writer.py  # Episode diagnostics
-|   # v11.0.0 Core Modules (ACTUAL):
-|   +-- acm.py                # Single entry point with --mode auto/online/offline
-|   +-- model_lifecycle.py    # MaturityState enum, PromotionCriteria, promotion logic
-|   +-- confidence.py         # Unified confidence model, ReliabilityStatus, RUL gating
-|   +-- pipeline_types.py     # DataContract, PipelineMode, SensorValidator
+|   +-- model_persistence.py  # SQL ModelRegistry storage
+|   +-- model_lifecycle.py    # MaturityState, PromotionCriteria
+|   +-- confidence.py         # Unified confidence model
+|   +-- pipeline_types.py     # DataContract, PipelineMode
 |   +-- seasonality.py        # Diurnal/weekly pattern detection
 |   +-- asset_similarity.py   # Cold-start transfer learning
 +-- scripts/              # Operational scripts
-|   +-- sql_batch_runner.py   # Batch processing
+|   +-- sql_batch_runner.py   # Production batch processing
 |   +-- sql/              # SQL utilities, schema export
 +-- docs/                 # All documentation (NEVER create docs in root)
 |   +-- archive/          # Historical/archived docs
@@ -107,6 +100,276 @@ ACM/
 +-- artifacts/            # gitignored - runtime outputs
 +-- data/                 # gitignored - sample CSVs for file-mode
 +-- logs/                 # gitignored - runtime logs
+```
+
+---
+
+## Script Relationships & Entry Points
+
+### Entry Points Hierarchy
+
+```
+1. scripts/sql_batch_runner.py (PRODUCTION - Primary entry point)
+   |
+   +-> core/acm_main.py::run_acm() (called via subprocess)
+       |
+       +-> All pipeline phases (see Pipeline Phase Sequence below)
+
+2. python -m core.acm_main --equip EQUIPMENT (TESTING - Single run)
+   |
+   +-> core/acm_main.py::run_acm() (direct call)
+       |
+       +-> All pipeline phases
+
+3. core/acm.py (ALTERNATIVE - Mode-aware router)
+   |
+   +-> Parses --mode (auto/online/offline)
+   +-> Detects mode based on cached models if auto
+   +-> Calls core/acm_main.py::run_acm() with mode
+```
+
+### Script Relationships
+
+```
+sql_batch_runner.py
+├── Purpose: Continuous batch processing, coldstart management, multi-equipment
+├── Calls: core/acm_main.py via subprocess (python -m core.acm_main)
+├── Manages: Coldstart state, batch windows, resume from last run
+├── SQL Tables: Reads ACM_ColdstartState, writes ACM_Runs
+└── Arguments:
+    --equip FD_FAN GAS_TURBINE  # Multiple equipment
+    --tick-minutes 1440          # Batch window size
+    --max-workers 2              # Parallel equipment processing
+    --start-from-beginning       # Full reset (coldstart)
+    --resume                     # Continue from last run
+    --max-batches 1              # Limit batches (testing)
+
+core/acm_main.py
+├── Purpose: Single pipeline run (train/score/forecast)
+├── Imports: All core modules (see Module Call Sequence)
+├── Manages: Model training, scoring, persistence
+└── Arguments:
+    --equip FD_FAN               # Single equipment
+    --start-time "2024-01-01T00:00:00"
+    --end-time "2024-01-31T23:59:59"
+    --mode offline|online|auto   # Pipeline mode
+
+scripts/sql/verify_acm_connection.py
+├── Purpose: Test SQL Server connectivity
+├── Calls: core/sql_client.SQLClient
+└── Output: Connection test result
+
+scripts/sql/export_comprehensive_schema.py
+├── Purpose: Export SQL schema to markdown
+├── Calls: SQL INFORMATION_SCHEMA
+└── Output: docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md
+
+scripts/sql/populate_acm_config.py
+├── Purpose: Sync config_table.csv to SQL ACM_Config
+├── Reads: configs/config_table.csv
+└── Writes: SQL ACM_Config table
+```
+
+---
+
+## Pipeline Phase Sequence (acm_main.py)
+
+The main pipeline executes in this order. Each phase corresponds to a timed section in the output:
+
+```
+PHASE 1: INITIALIZATION (startup)
+├── Parse CLI arguments (--equip, --start-time, --end-time, --mode)
+├── Load config from SQL (ConfigDict)
+├── Determine PipelineMode (ONLINE/OFFLINE/AUTO)
+├── Initialize OutputManager with SQL client
+└── Create RunID for this execution
+
+PHASE 2: DATA CONTRACT VALIDATION (data.contract)
+├── DataContract.validate(raw_data)
+├── Check sensor coverage (min 70% required)
+├── Write ACM_DataContractValidation
+└── Fail fast if validation fails
+
+PHASE 3: DATA LOADING (load_data)
+├── Load historian data from SQL (stored procedure)
+├── Apply coldstart split (60% train / 40% score)
+├── Validate timestamp column and cadence
+└── Output: train DataFrame, score DataFrame
+
+PHASE 4: BASELINE SEEDING (baseline.seed)
+├── Load baseline from ACM_BaselineBuffer
+├── Check for overlap with score data
+└── Apply baseline for normalization
+
+PHASE 5: SEASONALITY DETECTION (seasonality.detect)
+├── SeasonalityHandler.detect_patterns()
+├── Detect DAILY/WEEKLY cycles using FFT
+├── Apply seasonal adjustment if enabled (v11)
+└── Write ACM_SeasonalPatterns
+
+PHASE 6: DATA QUALITY GUARDRAILS (data.guardrails)
+├── Check train/score overlap
+├── Validate variance and coverage
+├── Write ACM_DataQuality
+└── Output quality metrics
+
+PHASE 7: FEATURE ENGINEERING (features.build + features.impute)
+├── fast_features.compute_all_features()
+├── Build rolling stats, lag features, z-scores
+├── Impute missing values from train medians
+├── Compute feature hash for caching
+└── Output: Feature matrices (train_features, score_features)
+
+PHASE 8: MODEL LOADING/TRAINING (train.detector_fit)
+├── Check for cached models in ModelRegistry
+├── If OFFLINE or models missing:
+│   ├── Fit AR1 detector (ar1_detector.py)
+│   ├── Fit PCA detector (pca via sklearn)
+│   ├── Fit IForest detector (sklearn.ensemble)
+│   ├── Fit GMM detector (sklearn.mixture)
+│   └── Fit OMR detector (omr.py)
+├── If ONLINE: Load all detectors from cache
+└── Output: Trained detector objects
+
+PHASE 9: TRANSFER LEARNING CHECK (v11)
+├── AssetSimilarity.load_profiles_from_sql()
+├── Build profile for current equipment
+├── find_similar() to match equipment
+└── Log transfer learning opportunity (not applied to detectors yet)
+
+PHASE 10: DETECTOR SCORING (score.detector_score)
+├── Score all detectors on score data
+├── Compute z-scores per detector
+├── Output: scores_wide DataFrame with detector columns
+└── Columns: ar1_z, pca_spe_z, pca_t2_z, iforest_z, gmm_z, omr_z
+
+PHASE 11: REGIME LABELING (regimes.label)
+├── regimes.label() with regime context
+├── Auto-k selection (silhouette score)
+├── K-Means clustering on raw sensor values
+├── UNKNOWN regime (-1) for low-confidence assignments
+├── Write ACM_RegimeDefinitions
+└── Output: Regime labels per row
+
+PHASE 12: MODEL PERSISTENCE (models.persistence.save)
+├── Save all models to SQL ModelRegistry
+├── Increment model version
+└── Write metadata to ACM_ModelHistory
+
+PHASE 13: MODEL LIFECYCLE (v11)
+├── load_model_state_from_sql()
+├── Update model state with run metrics
+├── Check promotion criteria (LEARNING -> CONVERGED)
+├── Write ACM_ActiveModels
+└── Output: MaturityState (COLDSTART/LEARNING/CONVERGED/DEPRECATED)
+
+PHASE 14: CALIBRATION (calibrate)
+├── Score TRAIN data for calibration baseline
+├── Compute adaptive clip_z from P99
+├── Self-tune thresholds for target FP rate
+└── Write ACM_Thresholds
+
+PHASE 15: DETECTOR FUSION (fusion.auto_tune + fusion)
+├── Auto-tune detector weights (episode separability)
+├── Compute fused_z (weighted combination)
+├── CUSUM parameter tuning (k_sigma, h_sigma)
+├── Detect anomaly episodes
+└── Output: fused_alert, episode markers
+
+PHASE 16: ADAPTIVE THRESHOLDS (thresholds.adaptive)
+├── Calculate per-regime thresholds
+├── Global thresholds: alert=3.0, warn=1.5
+└── Write to SQL
+
+PHASE 17: TRANSIENT DETECTION (regimes.transient_detection)
+├── Detect state transitions (startup, trip, steady)
+├── Label transient periods
+└── Output: Transient state per row
+
+PHASE 18: DRIFT MONITORING (drift)
+├── Compute drift metrics (CUSUM trend)
+└── Classify: STABLE, DRIFTING, FAULT
+
+PHASE 19: OUTPUT GENERATION (persist.*)
+├── write_scores_wide() -> ACM_Scores_Wide
+├── write_anomaly_events() -> ACM_Anomaly_Events
+├── write_detector_correlation() -> ACM_DetectorCorrelation
+├── write_sensor_correlation() -> ACM_SensorCorrelations
+├── write_sensor_normalized_ts() -> ACM_SensorNormalized_TS
+├── write_asset_profile() -> ACM_AssetProfiles
+└── write_seasonal_patterns() -> ACM_SeasonalPatterns
+
+PHASE 20: ANALYTICS GENERATION (outputs.comprehensive_analytics)
+├── _generate_health_timeline() -> ACM_HealthTimeline
+├── _generate_regime_timeline() -> ACM_RegimeTimeline
+├── _generate_sensor_defects() -> ACM_SensorDefects
+├── _generate_sensor_hotspots() -> ACM_SensorHotspots
+└── Compute confidence values (v11)
+
+PHASE 21: FORECASTING (outputs.forecasting)
+├── ForecastEngine.run_forecast()
+│   ├── Load health history from ACM_HealthTimeline
+│   ├── Fit degradation model (Holt-Winters)
+│   ├── Generate health forecast -> ACM_HealthForecast
+│   ├── Generate failure forecast -> ACM_FailureForecast
+│   ├── Compute RUL with Monte Carlo -> ACM_RUL
+│   ├── Compute confidence and reliability (v11)
+│   └── Generate sensor forecasts -> ACM_SensorForecast
+└── Write forecast tables
+
+PHASE 22: RUN FINALIZATION (sql.run_stats)
+├── Write PCA loadings -> ACM_PCA_Loadings
+├── Write run statistics -> ACM_Run_Stats
+├── Write run metadata -> ACM_Runs
+└── Commit all pending SQL writes
+```
+
+---
+
+## Module Dependency Graph
+
+```
+sql_batch_runner.py
+    └── subprocess calls: core/acm_main.py
+
+core/acm_main.py (MAIN ORCHESTRATOR)
+    ├── utils/config_dict.py (ConfigDict)
+    ├── core/sql_client.py (SQLClient)
+    ├── core/output_manager.py (OutputManager)
+    ├── core/observability.py (Console, Span, Metrics, T)
+    ├── core/pipeline_types.py (DataContract, PipelineMode)
+    ├── core/fast_features.py (compute_all_features)
+    ├── core/ar1_detector.py (AR1Detector)
+    ├── core/omr.py (OMRDetector)
+    ├── core/regimes.py (label, detect_transient_states)
+    ├── core/fuse.py (compute_fusion, detect_episodes)
+    ├── core/adaptive_thresholds.py (calculate_thresholds)
+    ├── core/drift.py (compute_drift_metrics)
+    ├── core/model_persistence.py (save_models, load_models)
+    ├── core/model_lifecycle.py (ModelState, promote_model)
+    ├── core/confidence.py (compute_*_confidence)
+    ├── core/seasonality.py (SeasonalityHandler)
+    ├── core/asset_similarity.py (AssetSimilarity)
+    ├── core/forecast_engine.py (ForecastEngine)
+    └── core/health_tracker.py (HealthTracker)
+
+core/output_manager.py
+    ├── core/sql_client.py (SQLClient)
+    ├── core/observability.py (Console)
+    └── core/confidence.py (compute_*_confidence)
+
+core/forecast_engine.py
+    ├── core/sql_client.py (SQLClient)
+    ├── core/degradation_model.py (fit_degradation)
+    ├── core/rul_estimator.py (estimate_rul)
+    ├── core/confidence.py (compute_rul_confidence)
+    ├── core/model_lifecycle.py (load_model_state_from_sql)
+    └── core/health_tracker.py (HealthTracker)
+
+core/regimes.py
+    ├── sklearn.cluster (KMeans)
+    ├── sklearn.metrics (silhouette_score)
+    └── core/observability.py (Console)
 ```
 
 ---

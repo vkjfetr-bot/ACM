@@ -110,15 +110,15 @@ class TestModelLifecycleModule:
         assert MaturityState.DEPRECATED.value == "DEPRECATED"
     
     def test_promotion_criteria_defaults(self):
-        """PromotionCriteria has correct default values."""
+        """PromotionCriteria has correct default values (v11.0.1 relaxed)."""
         from core.model_lifecycle import PromotionCriteria
         
         criteria = PromotionCriteria()
         assert criteria.min_training_days == 7
         assert criteria.min_silhouette_score == 0.15
-        assert criteria.min_stability_ratio == 0.8
+        assert criteria.min_stability_ratio == 0.6  # v11.0.1: relaxed from 0.8
         assert criteria.min_consecutive_runs == 3
-        assert criteria.min_training_rows == 1000  # Actual default
+        assert criteria.min_training_rows == 200  # v11.0.1: relaxed from 1000
     
     def test_model_state_creation(self):
         """ModelState can be created with all required fields."""

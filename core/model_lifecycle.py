@@ -38,12 +38,48 @@ class MaturityState(str, Enum):
 
 @dataclass
 class PromotionCriteria:
-    """Criteria for promoting model from LEARNING to CONVERGED."""
+    """Criteria for promoting model from LEARNING to CONVERGED.
+    
+    These defaults can be overridden via config_table.csv under 'lifecycle' category:
+    - lifecycle.promotion.min_training_days
+    - lifecycle.promotion.min_silhouette_score
+    - lifecycle.promotion.min_stability_ratio
+    - lifecycle.promotion.min_consecutive_runs
+    - lifecycle.promotion.min_training_rows
+    
+    v11.0.1: Relaxed defaults for faster promotion in industrial settings:
+    - min_training_rows: 200 (was 1000) - matches coldstart minimum
+    - min_stability_ratio: 0.6 (was 0.8) - allows regime switching in dynamic ops
+    """
     min_training_days: int = 7
     min_silhouette_score: float = 0.15
-    min_stability_ratio: float = 0.8
+    min_stability_ratio: float = 0.6  # v11.0.1: Relaxed from 0.8
     min_consecutive_runs: int = 3
-    min_training_rows: int = 1000
+    min_training_rows: int = 200  # v11.0.1: Relaxed from 1000
+
+    @classmethod
+    def from_config(cls, cfg: Dict[str, Any]) -> "PromotionCriteria":
+        """
+        Create PromotionCriteria from config dictionary.
+        
+        Looks for values in cfg['lifecycle']['promotion'] with fallback to defaults.
+        
+        Args:
+            cfg: Configuration dictionary (from ConfigDict)
+            
+        Returns:
+            PromotionCriteria with values from config or defaults
+        """
+        lifecycle = cfg.get("lifecycle", {}) or {}
+        promotion = lifecycle.get("promotion", {}) or {}
+        
+        return cls(
+            min_training_days=int(promotion.get("min_training_days", 7)),
+            min_silhouette_score=float(promotion.get("min_silhouette_score", 0.15)),
+            min_stability_ratio=float(promotion.get("min_stability_ratio", 0.6)),  # v11.0.1 default
+            min_consecutive_runs=int(promotion.get("min_consecutive_runs", 3)),
+            min_training_rows=int(promotion.get("min_training_rows", 200)),  # v11.0.1 default
+        )
 
 
 @dataclass

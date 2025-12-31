@@ -505,3 +505,94 @@ class AssetSimilarity:
     def profile_count(self) -> int:
         """Get count of stored profiles."""
         return len(self.profiles)
+    
+    def load_profiles_from_sql(
+        self,
+        sql_client: Any,
+        equip_type: Optional[str] = None,
+        exclude_equip_id: Optional[int] = None
+    ) -> int:
+        """
+        V11 GAP-3: Load asset profiles from ACM_AssetProfiles SQL table.
+        
+        This enables transfer learning for cold-start by finding similar
+        equipment profiles already in the database.
+        
+        Args:
+            sql_client: SQL client for database access
+            equip_type: Optional filter by equipment type (e.g., "FD_FAN")
+            exclude_equip_id: Optional equipment ID to exclude (the new equipment)
+            
+        Returns:
+            Number of profiles loaded
+        """
+        import json
+        from core.observability import Console
+        
+        query = """
+        SELECT 
+            EquipID,
+            EquipType,
+            SensorNamesJSON,
+            SensorMeansJSON,
+            SensorStdsJSON,
+            RegimeCount,
+            TypicalHealth,
+            DataHours
+        FROM ACM_AssetProfiles
+        WHERE 1=1
+        """
+        params = []
+        
+        if equip_type:
+            query += " AND EquipType = ?"
+            params.append(equip_type)
+        
+        if exclude_equip_id:
+            query += " AND EquipID != ?"
+            params.append(exclude_equip_id)
+        
+        query += " ORDER BY DataHours DESC"
+        
+        try:
+            cursor = sql_client.cursor()
+            cursor.execute(query, params if params else ())
+            rows = cursor.fetchall()
+            cursor.close()
+            
+            loaded = 0
+            for row in rows:
+                try:
+                    equip_id = row[0]
+                    equip_type_val = row[1]
+                    sensor_names = json.loads(row[2]) if row[2] else []
+                    sensor_means = json.loads(row[3]) if row[3] else {}
+                    sensor_stds = json.loads(row[4]) if row[4] else {}
+                    regime_count = row[5] or 0
+                    typical_health = row[6] or 85.0
+                    data_hours = row[7] or 0.0
+                    
+                    profile = AssetProfile(
+                        equip_id=equip_id,
+                        equip_type=equip_type_val,
+                        sensor_names=sensor_names,
+                        sensor_means=sensor_means,
+                        sensor_stds=sensor_stds,
+                        regime_count=regime_count,
+                        typical_health=typical_health,
+                        data_hours=data_hours
+                    )
+                    self.profiles[equip_id] = profile
+                    loaded += 1
+                except (json.JSONDecodeError, Exception) as e:
+                    Console.warn(f"Failed to load profile for EquipID={row[0]}: {e}",
+                                component="SIMILARITY")
+            
+            Console.debug(f"Loaded {loaded} asset profiles from SQL",
+                         component="SIMILARITY", loaded=loaded, equip_type=equip_type)
+            return loaded
+            
+        except Exception as e:
+            Console.warn(f"Failed to load asset profiles from SQL: {e}",
+                        component="SIMILARITY", error=str(e)[:200])
+            return 0

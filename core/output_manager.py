@@ -445,10 +445,18 @@ class OutputManager:
                  max_io_workers: int = 8,
                  batch_flush_rows: int = 1000,
                  batch_flush_seconds: float = 30.0,
-                 max_in_flight_futures: int = 50):
+                 max_in_flight_futures: int = 50,
+                 maturity_state: Optional[str] = None):
+        """Initialize OutputManager.
+        
+        V11 CRITICAL: maturity_state must be passed from acm_main.py run context.
+        This eliminates the race condition where writers query ACM_ActiveModels
+        independently and get stale/inconsistent state.
+        """
         self.sql_client = sql_client
         self.run_id = run_id
         self.equip_id = equip_id
+        self.maturity_state = maturity_state or 'COLDSTART'  # V11: Cached maturity
         self.batch_size = batch_size
         self._batched_transaction_active = False
         self.enable_batching = enable_batching
@@ -536,6 +544,18 @@ class OutputManager:
         }
 
         Console.info("" + f"Manager initialized (batch_size={batch_size}, batching={'ON' if enable_batching else 'OFF'}, sql_cache={sql_health_cache_seconds}s, io_workers={max_io_workers}, flush={batch_flush_rows} rows/{batch_flush_seconds}s, max_futures={max_in_flight_futures})", component="OUTPUT")
+    
+    def set_maturity_state(self, maturity_state: str) -> None:
+        """V11 CRITICAL: Update maturity state after model lifecycle is computed.
+        
+        This MUST be called from acm_main.py after model_state is determined.
+        Eliminates the race condition where writers query ACM_ActiveModels independently.
+        
+        Args:
+            maturity_state: One of 'COLDSTART', 'LEARNING', 'CONVERGED', 'DEPRECATED'
+        """
+        self.maturity_state = maturity_state
+        Console.info(f"OutputManager maturity_state set to {maturity_state}", component="OUTPUT")
     
     @contextmanager
     def batched_transaction(self):
@@ -760,6 +780,8 @@ class OutputManager:
             score = score.astype(np.float32)
         
         Console.info("" + f"Kept {len(kept)} numeric columns, dropped {len(dropped)} non-numeric", component="DATA")
+        
+        Console.status(f"Checking cadence and resampling for {len(score)} score rows...")
         
         # Cadence check + resampling (same logic as CSV mode)
         _sampling = data_cfg.get("sampling_secs", 1)
@@ -2391,17 +2413,11 @@ class OutputManager:
                     df[new] = df[old]
             
             # V11: Add confidence for each episode
-            if _CONFIDENCE_AVAILABLE and _LIFECYCLE_AVAILABLE and compute_episode_confidence is not None:
+            if _CONFIDENCE_AVAILABLE and compute_episode_confidence is not None:
                 try:
-                    # Get current maturity state from model lifecycle
-                    maturity_state = 'COLDSTART'  # Default
-                    if hasattr(self, 'sql_client') and self.sql_client is not None and load_model_state_from_sql is not None:
-                        try:
-                            model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
-                            if model_state is not None:
-                                maturity_state = str(model_state.maturity)
-                        except Exception:
-                            pass  # Use default COLDSTART
+                    # V11 FIX: Use cached maturity_state from constructor
+                    # This eliminates the race condition where we query SQL independently
+                    maturity_state = getattr(self, 'maturity_state', 'COLDSTART')
                     
                     confidence_values = []
                     for _, row in df.iterrows():
@@ -3400,17 +3416,11 @@ DECLARE @EquipID INT = ?;
         
         # V11: Compute confidence for each health reading
         confidence_values = []
-        if _CONFIDENCE_AVAILABLE and _LIFECYCLE_AVAILABLE and compute_health_confidence is not None:
+        if _CONFIDENCE_AVAILABLE and compute_health_confidence is not None:
             try:
-                # Get current maturity state from model lifecycle
-                maturity_state = 'COLDSTART'  # Default
-                if hasattr(self, 'sql_client') and self.sql_client is not None and load_model_state_from_sql is not None:
-                    try:
-                        model_state = load_model_state_from_sql(self.sql_client, self.equip_id)
-                        if model_state is not None:
-                            maturity_state = str(model_state.maturity)
-                    except Exception:
-                        pass  # Use default COLDSTART
+                # V11 FIX: Use cached maturity_state from constructor
+                # This eliminates the race condition where we query SQL independently
+                maturity_state = getattr(self, 'maturity_state', 'COLDSTART')
                 
                 # Compute confidence for each timestamp based on available data
                 for i, (ts, fused_z_val, qflag) in enumerate(zip(scores_df.index, scores_df['fused'], quality_flag)):

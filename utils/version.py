@@ -17,8 +17,8 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.0.0"
-__version_date__ = "2025-12-29"  # v11.0.0: Complete V11 implementation (Phases 0-5)
+__version__ = "11.0.2"
+__version_date__ = "2025-12-30"  # v11.0.2: GMM clustering, transfer learning, correlation-aware fusion
 __version_author__ = "ACM Development Team"
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))

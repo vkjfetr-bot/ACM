@@ -623,11 +623,37 @@ class Fuser:
 
         # Truncate to common length to avoid shape mismatches
         zs = {k: v[:n] for k, v in zs.items()}
-        wsum = sum(self.weights.get(k, 0.0) for k in keys)
+        
+        # FLAW-4 FIX: Correlation-aware weight adjustment for PCA detectors
+        # PCA-SPE and PCA-T² are often 80%+ correlated, over-representing PCA
+        # Down-weight correlated pairs proportionally to their correlation
+        w_raw = {k: float(self.weights.get(k, 0.0)) for k in keys}
+        
+        if "pca_spe_z" in keys and "pca_t2_z" in keys:
+            try:
+                spe_arr = zs["pca_spe_z"]
+                t2_arr = zs["pca_t2_z"]
+                valid_mask = np.isfinite(spe_arr) & np.isfinite(t2_arr)
+                if valid_mask.sum() > 10:
+                    corr, _ = pearsonr(spe_arr[valid_mask], t2_arr[valid_mask])
+                    if np.isfinite(corr) and corr > 0.5:
+                        # Reduce combined PCA weight proportionally to correlation
+                        # At corr=0.8, reduce each by ~30% (effective combined reduction)
+                        discount = min(0.5, (corr - 0.5))  # 0 to 0.5 discount
+                        w_raw["pca_spe_z"] *= (1 - discount)
+                        w_raw["pca_t2_z"] *= (1 - discount)
+                        Console.info(
+                            f"FLAW-4 Fix: PCA detectors corr={corr:.2f}, weights discounted by {discount:.0%}",
+                            component="FUSE", pca_corr=round(corr, 3), discount=round(discount, 3)
+                        )
+            except Exception as ce:
+                Console.debug(f"Correlation check failed: {ce}", component="FUSE")
+        
+        wsum = sum(w_raw.values())
         if wsum <= 0:
             w = {k: 1.0 / len(keys) for k in keys}
         else:
-            w = {k: float(self.weights.get(k, 0.0)) / wsum for k in keys}
+            w = {k: v / wsum for k, v in w_raw.items()}
         fused = np.zeros(n, dtype=float)
         for k in keys:
             fused += w[k] * zs[k]

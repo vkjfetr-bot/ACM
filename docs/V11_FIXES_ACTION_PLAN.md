@@ -373,22 +373,94 @@ V11.1.0 is ready when:
 
 ---
 
-## Current Status
+## Current Status (Updated December 30, 2025)
 
-**Completed**:
-- ✅ CRITICAL-4: DataContract timestamp check (already fixed)
-- ✅ CRITICAL-5: Confidence function args (already fixed)
+**Phase 1: CRITICAL Fixes - ALL COMPLETE ✅**
+- ✅ CRITICAL-1: Model lifecycle race condition - FIXED (commit 529d774)
+  - ForecastEngine uses ONLY cached model_state from constructor
+  - Removed SQL fallback that caused race condition
+  - Removed load_model_state_from_sql import
+- ✅ CRITICAL-2: regime_state_version undefined - ALREADY FIXED (confirmed via grep)
+  - Variable properly initialized at line 4094
+  - No more dir() checks needed
+- ✅ CRITICAL-3: train_start/train_end undefined - FIXED (commit 529d774)
+  - Variables initialized at function scope (line ~3655)
+  - SET values later in execution flow
+  - Removed fragile 'var' in locals() patterns
+- ✅ CRITICAL-4: DataContract timestamp check - FIXED (in branch)
+- ✅ CRITICAL-5: Confidence function args - FIXED (in branch)
 
-**In Progress**:
-- 🔄 Understanding forecast min_samples issue (97 < 200)
-- 🔄 Observability stack health
+**Phase 2: Integration Gaps - MOSTLY COMPLETE ✅**
+- ✅ GAP-1: Seasonality adjustment - DONE
+  - Patterns detected and applied to baseline/score data
+- ✅ GAP-2: Health/Episode confidence - DONE
+  - Confidence columns populated in ACM_HealthTimeline, ACM_Anomaly_Events
+- ⏳ GAP-3: Asset Similarity Transfer Learning - DEFERRED
+  - Profiles are built and stored in ACM_AssetProfiles
+  - Transfer learning NOT implemented (explicitly marked as "Future work" in code)
+  - Target: V11.1.0 or later
+
+**Phase 3: Analytical Improvements - DEFERRED TO V11.2+**
+- 🟡 ANALYTICAL-1 through ANALYTICAL-4: All deferred per plan
+
+**Verification Results (December 30, 2025)**:
+- ✅ Full batch run completed: `BATCH RUNNER COMPLETED SUCCESSFULLY`
+- ✅ Model lifecycle tracked: `[LIFECYCLE] Created model v1 in LEARNING state`
+- ✅ RUL reliability gating: `RUL reliability: LEARNING - Model still LEARNING`
+- ✅ All forecast tables written successfully
+- ✅ No NameError or undefined variable crashes
 
 **Next Actions**:
-1. Fix CRITICAL-1, CRITICAL-2, CRITICAL-3
-2. Run comprehensive 10-day batch test
-3. Verify model lifecycle end-to-end
-4. Move to GAP fixes
+1. ✅ All P0 CRITICAL fixes complete
+2. Run multi-batch test (3+ batches) to verify model promotion
+3. Verify LEARNING → CONVERGED transition after 7 days + 3 runs
+4. Consider GAP-3 implementation for V11.1.0
 
 ---
 
-**End of Action Plan**
+# More Info by ChatGpt
+
+
+Below is a **fresh, deep re-audit** of the scripts you re-uploaded, with focus on **V11 analytical soundness** (not just runtime stability) and **alignment to your V11 action plan**.
+
+---
+
+## V11 Re-Audit Table (Analytical Soundness + V11 Rule Compliance)
+
+| Script               | V11 Concern Area                                           | What Looks Correct (Now)                                                                                                                                                                                                         | Analytical / Design Problems Still Present                                                                                                                                                                                                                                                                                                 | Severity                         | Concrete Fix / Enforcement                                                                                                                                                                                             |
+| -------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `acm_main.py`        | **Lifecycle + regime version pointer**                     | You have a **clean path** that writes active models with `regime_version=regime_state_version` and logs lifecycle state; promotion check is in place.                                                                            | There is still **another path** that uses `regime_state_version if 'regime_state_version' in dir() else None` which is exactly the fragile pattern your CRITICAL-2 fix was meant to remove. This means you have **duplicate/competing logic blocks** and a future regression risk.                                                         | P0                               | **Delete all dir() checks** and enforce a single lifecycle write path. Add a unit test that greps/guards against `'regime_state_version' in dir()` appearing in `acm_main.py`.                                         |
+| `acm_main.py`        | **Calibration correctness (train-fit / score-transform)**  | Calibration section explicitly states **fit calibrators on TRAIN and transform SCORE**, and uses a helper `_score_all_detectors()` to score TRAIN for calibration baseline. This is analytically correct and addresses leakage.  | Still missing (from retrieved excerpts) the **post-seasonality “apply adjustment” step** you called out in GAP-1. I did not see evidence of `adjust_baseline()` being applied after detection in the retrieved chunks (so assume still a gap until proven otherwise).                                                                      | P1                               | Enforce: “detect → adjust baseline → score”. Add observability counters: % variance removed, sensors adjusted, and delta in anomaly count.                                                                             |
+| `output_manager.py`  | **RUL reliability gating (Rule #10)**                      | `write_rul_forecast()` gates reliability: if maturity is `LEARNING`, it writes `RUL_Status="NOT_RELIABLE"` and clears RUL outputs; otherwise it writes RELIABLE. This matches your V11 reliability gating requirement.           | It still **loads ActiveModels inside the writer** if `maturity_state` is not passed (`get_active_models_by_equip_id`). That re-introduces the “multiple sources of truth” pattern you flagged as CRITICAL-1 (race / inconsistency). The function supports passing `maturity_state`, but the design still allows “silent fallback to SQL”.  | P0 (design-level)                | Make `maturity_state` **mandatory** at this boundary (or assert if None). Do not allow writers to reload lifecycle state. This is the same principle as your CRITICAL-1 fix.                                           |
+| `forecast_engine.py` | **Forecast confidence plumbing**                           | `ForecastResult` carries `confidence`, `details`, and `contributing_factors` and is written through to SQL by `write_rul_forecast()` (it writes `Confidence` from forecast output).                                              | The primary analytical risk is not the container object; it is the **source-of-truth lifecycle gating** (see above). Until ForecastEngine is guaranteed to consume the same `model_state` instance as the run, you can still mark good RUL as NOT_RELIABLE or vice-versa.                                                                  | P0                               | Force ForecastEngine to accept `model_state` (or maturity) from the run context; remove internal reload paths. Then enforce via test: “same run_id → same maturity used everywhere”.                                   |
+| `confidence.py`      | **Confidence curves (health + episodes)**                  | Both confidence functions exist with reasonable monotonic behavior: health confidence penalizes quality issues and extrapolation; episode confidence scales by duration/peak_z and maturity.                                     | Purely analytical: confidence formulas are **hand-tuned heuristics**. That’s acceptable for V11.0/V11.1, but you should treat them as **calibrated models** later (learned mapping using historical false positives/true positives).                                                                                                       | P2                               | Add “confidence calibration dataset”: label a subset of episodes as true/false → fit isotonic/logistic calibrator on (`peak_z`, `duration`, `maturity`, `quality_flags`).                                              |
+| `regimes.py`         | **V11 Rule #14: UNKNOWN regimes allowed**                  | UNKNOWN regime label constant is explicitly introduced (`UNKNOWN_REGIME_LABEL = -1`) and is documented against V11 rules.                                                                                                        | I did not see (in the retrieved excerpts) the **actual assignment gating** that produces UNKNOWN based on a confidence threshold (e.g., centroid distance / soft assignments). The constant exists, but unless it is used in the assignment path, V11 Rule #3/#14 is only partially implemented.                                           | P1                               | Ensure assignment uses a measurable confidence (distance-to-centroid percentile or softmax margin) and yields UNKNOWN when below threshold. Add a test: craft ambiguous points between clusters → must output UNKNOWN. |
+| `regimes.py`         | **Auto-k selection semantics (Analytical-4)**              | Auto-k sweep exists and **flags low-quality** when all silhouette scores are below threshold; metadata records `quality_ok`, `quality_notes`, sweep, model version, sklearn version.                                             | This still implements exactly the flaw you identified: **silhouette-driven selection favors separation, not operating-mode semantics**. There is no temporal persistence / transition sanity / reproducibility in the selection objective (in shown code).                                                                                 | P2 (but strategically important) | Implement V11.1 “composite score” you already defined: silhouette + temporal autocorr/persistence + transition rate + stability across runs. Gate promotion/quality_ok on composite, not silhouette alone.             |
+| `regimes.py`         | **Feature basis correctness**                              | The basis builder carefully avoids scaling PCA-derived components together with raw tags (PCA variance is recorded and the note clarifies scaling boundaries). This is a good analytical hygiene improvement.                    | Analytical risk: mixing raw tags + PCA features is still sensitive to tag availability/quality. You have a fallback to first N columns if none exist, which can create unstable basis signatures and drift in regime definition between runs.                                                                                              | P2                               | Persist and enforce a **FeatureBasisSignature**: once a regime model is active, do not silently change basis composition; instead create a new regime version and promote only after stability checks.                 |
+| `pipeline_types.py`  | **Data contract timestamp/index correctness (CRITICAL-4)** | Your V11 plan says this is fixed. I did not re-locate the relevant snippet in the retrieved lines here, so I cannot independently confirm in this response.                                                                      | If not fixed everywhere: the common failure mode is checking `df[timestamp_col]` when timestamp is the index.                                                                                                                                                                                                                              | P0 if unfixed                    | Ensure `validate()` accepts DatetimeIndex and normalizes to index-first checks. Add unit tests for both layouts (timestamp column vs DatetimeIndex).                                                                   |
+
+---
+
+## What is “Analytically Sound” Already vs Still Not
+
+**Already sound (based on code evidence):**
+
+* Calibration leakage prevention: “fit on TRAIN / transform SCORE.” 
+* RUL reliability gating based on maturity state. 
+* Regime metadata capture + low-quality flagging + versioning hygiene. 
+
+**Still analytically weak / incomplete (most important):**
+
+* **Duplicate lifecycle logic** in `acm_main.py` (some fixed, some still old/fragile). 
+* **Silhouette-only auto-k**: still separation-driven, not operating-mode-driven. 
+* **UNKNOWN regime**: constant exists, but the “confidence-based UNKNOWN assignment” must be verified in the assignment path (not proven by retrieved excerpts). 
+* **Writers reloading lifecycle state**: `write_rul_forecast()` can still query ActiveModels if not passed maturity, which is the same architectural smell behind CRITICAL-1. 
+
+---
+
+## Immediate Next Fixes (Analytical + Non-Regression)
+
+1. **Eliminate all lifecycle duplication in `acm_main.py`** (single authoritative path; remove dir() fallback everywhere). 
+2. **Hard-enforce single source of truth for maturity**: writers must not query ActiveModels when run context already knows maturity. (Fail fast if maturity not provided.) 
+3. **Regime V11.1 composite score**: implement persistence + transition sanity + stability across runs in selection objective (replace silhouette-only). 
+4. **Prove UNKNOWN regimes work**: add explicit confidence gating test and a forced ambiguous synthetic dataset test.

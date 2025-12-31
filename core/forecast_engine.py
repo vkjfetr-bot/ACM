@@ -1178,6 +1178,26 @@ class ForecastEngine:
                 
                 try:
                     if USE_EXPONENTIAL_SMOOTHING:
+                        # V11 FIX: Set explicit frequency to suppress statsmodels warning
+                        # "No frequency information was provided, so inferred frequency X will be used"
+                        # Infer frequency from data cadence or use 30min as default (ACM standard)
+                        if series.index.freq is None:
+                            inferred_freq = pd.infer_freq(series.index)
+                            if inferred_freq:
+                                series = series.asfreq(inferred_freq)
+                            else:
+                                # Fallback: calculate median time delta and round to nearest standard freq
+                                time_diffs = series.index.to_series().diff().dropna()
+                                if len(time_diffs) > 0:
+                                    median_diff = time_diffs.median()
+                                    # Round to nearest standard frequency (30min, 1h, etc.)
+                                    if median_diff <= pd.Timedelta(minutes=45):
+                                        series = series.asfreq('30min')
+                                    elif median_diff <= pd.Timedelta(hours=1.5):
+                                        series = series.asfreq('1h')
+                                    else:
+                                        series = series.asfreq('1h')  # Default fallback
+                        
                         # Fit exponential smoothing with trend (Holt's method)
                         model = ExponentialSmoothing(
                             series,

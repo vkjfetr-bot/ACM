@@ -864,7 +864,7 @@ class Console:
         else:
             comp_tag = ""
         
-        print(f"{timestamp} {level_tag} {comp_tag}{_Colors.MSG}{message}{_Colors.RESET}")
+        print(f"{timestamp} {level_tag} {comp_tag}{_Colors.MSG}{message}{_Colors.RESET}", flush=True)
     
     @staticmethod
     def _send_to_loki(level: str, message: str, component: Optional[str] = None, **kwargs) -> None:
@@ -927,7 +927,7 @@ class Console:
             Console.status("="*60)  # Section divider
         """
         date, time_str = Console._format_timestamp()
-        print(f"{_Colors.DATE}[{date}{_Colors.RESET} {_Colors.TIME}{time_str}]{_Colors.RESET} {_Colors.STATUS}>>>{_Colors.RESET} {_Colors.MSG}{message}{_Colors.RESET}")
+        print(f"{_Colors.DATE}[{date}{_Colors.RESET} {_Colors.TIME}{time_str}]{_Colors.RESET} {_Colors.STATUS}>>>{_Colors.RESET} {_Colors.MSG}{message}{_Colors.RESET}", flush=True)
         # Intentionally NO Loki push - console only
     
     @staticmethod

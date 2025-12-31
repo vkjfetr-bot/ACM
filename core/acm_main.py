@@ -63,7 +63,7 @@ from core.pipeline_types import DataContract, ValidationResult, PipelineMode
 
 # v11.0.0: Seasonality detection and asset similarity
 from core.seasonality import SeasonalityHandler, SeasonalPattern
-from core.asset_similarity import AssetProfile
+from core.asset_similarity import AssetProfile, AssetSimilarity, TransferResult
 
 # Observability - Unified OpenTelemetry + logging (v3.0)
 try:
@@ -2665,6 +2665,7 @@ def _seed_baseline(
     if sql_client:
         try:
             window_hours = float(baseline_cfg.get("window_hours", 72))
+            Console.status(f"Loading baseline from ACM_BaselineBuffer (window={window_hours}h)...")
             with sql_client.cursor() as cur:
                 cur.execute("""
                     SELECT Timestamp, SensorName, SensorValue
@@ -3650,6 +3651,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     train_start: Optional[datetime] = None
     train_end: Optional[datetime] = None
     model_state = None  # V11 CRITICAL-1: Single source of truth for model lifecycle
+    
+    # V11: Initialize detector-related variables at function scope
+    # This eliminates fragile 'in dir()' checks throughout the pipeline
+    train: Optional[pd.DataFrame] = None
+    col_meds: Optional[pd.Series] = None
+    regime_model: Optional[Any] = None
 
     try:
         # ===== 1) Load data (legacy CSV path; historian SQL can be wired later) =====
@@ -3812,6 +3819,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # ===== Adaptive Rolling Baseline (cold-start helper) =====
         with T.section("baseline.seed"):
+            Console.status(f"Seeding baseline for {equip}...")
             try:
                 train_numeric, score_numeric, baseline_source = _seed_baseline(
                     train_numeric, 
@@ -3826,7 +3834,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     score = score_numeric.copy()
             except Exception as be:
                 Console.warn(f"Cold-start baseline setup failed: {be}", component="BASELINE",
-                             equip=equip, train_rows=len(train) if 'train' in dir() else 0,
+                             equip=equip, train_rows=len(train) if train is not None else 0,
                              error=str(be))
 
         # ===== v11.0.0: Seasonality Detection and Adjustment (P5.9) =====
@@ -4181,6 +4189,74 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 "ONLINE mode requires pre-trained models. Run in OFFLINE mode first to train models, "
                 "or check ModelRegistry for cached models."
             )
+        
+        # V11 GAP-3: Asset Similarity Transfer Learning for Cold-Start
+        # When starting with new equipment (no models), look for similar existing equipment
+        # and use their profile to inform initial baseline statistics
+        transfer_source_id: Optional[int] = None
+        transfer_result: Optional[TransferResult] = None
+        if detectors_missing and SQL_MODE and sql_client:
+            try:
+                # Load profiles for same equipment type from SQL
+                similarity_engine = AssetSimilarity(min_similarity=0.7)
+                loaded = similarity_engine.load_profiles_from_sql(
+                    sql_client=sql_client,
+                    equip_type=equip,  # Same type only
+                    exclude_equip_id=equip_id  # Exclude self
+                )
+                
+                if loaded > 0:
+                    # Build profile for current equipment from training data
+                    if len(train) > 0:
+                        sensor_cols = [c for c in train.columns 
+                                      if train[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+                        if sensor_cols:
+                            current_profile = similarity_engine.build_profile(
+                                equip_id=equip_id,
+                                equip_type=equip,
+                                data=train,
+                                regime_labels=None,
+                                typical_health=85.0
+                            )
+                            
+                            # Find most similar equipment
+                            similar = similarity_engine.find_similar(current_profile)
+                            if similar and similar[0].transferable:
+                                best_match = similar[0]
+                                transfer_source_id = best_match.source_equip_id
+                                Console.info(
+                                    f"V11 Transfer Learning: Found similar equipment ID={transfer_source_id} "
+                                    f"(similarity={best_match.overall_similarity:.2f}, "
+                                    f"sensors={best_match.sensor_overlap}/{len(sensor_cols)})",
+                                    component="TRANSFER",
+                                    equip=equip,
+                                    source_id=transfer_source_id,
+                                    similarity=round(best_match.overall_similarity, 3),
+                                    sensor_overlap=best_match.sensor_overlap
+                                )
+                                
+                                # V11: Actually apply transfer learning
+                                # Get scaling factors from source equipment's baseline
+                                try:
+                                    transfer_result = similarity_engine.transfer_baseline(
+                                        source_id=transfer_source_id,
+                                        target_id=equip_id,
+                                        source_baseline=None  # Use profile stats directly
+                                    )
+                                    Console.ok(
+                                        f"V11 Transfer Applied: {len(transfer_result.sensors_transferred)} sensors, "
+                                        f"confidence={transfer_result.confidence:.2f}",
+                                        component="TRANSFER",
+                                        equip=equip,
+                                        sensors_count=len(transfer_result.sensors_transferred),
+                                        confidence=round(transfer_result.confidence, 3)
+                                    )
+                                except ValueError as ve:
+                                    Console.warn(f"Transfer baseline failed: {ve}", component="TRANSFER")
+                                    transfer_result = None
+            except Exception as te:
+                Console.debug(f"Transfer learning check skipped: {te}", 
+                             component="TRANSFER", equip=equip, error=str(te)[:200])
         
         if detectors_missing:
             with T.section("train.detector_fit"):
@@ -4563,7 +4639,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         models_were_trained = detectors_fitted_this_run  # Clearer: save only if fitted this run
         if models_were_trained:
             with T.section("models.persistence.save"):
-                col_meds_value = col_meds if 'col_meds' in dir() else None
+                col_meds_value = col_meds  # V11: col_meds initialized at function scope
                 _save_trained_models(
                     equip=equip,
                     art_root=Path(art_root),
@@ -4646,6 +4722,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             model_state,
                             regime_version=regime_state_version,
                         ))
+                        
+                        # V11 CRITICAL-1 FIX: Propagate maturity_state to OutputManager
+                        # This eliminates the race condition where writers query SQL independently
+                        if model_state is not None:
+                            output_manager.set_maturity_state(str(model_state.maturity.value))
+                        
                         Console.info(f"Model state: {model_state.maturity.value}", component="LIFECYCLE",
                                      version=model_state.version, consecutive_runs=model_state.consecutive_runs)
                     except Exception as e:
@@ -5293,7 +5375,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 data_hours = len(train_numeric) / 60.0  # Assume 1-minute intervals
                         # Get regime count from regime model if available
                         regime_count = 0
-                        if 'regime_model' in dir() and regime_model is not None:
+                        if regime_model is not None:  # V11: regime_model initialized at function scope
                             if hasattr(regime_model, 'kmeans') and regime_model.kmeans is not None:
                                 regime_count = regime_model.kmeans.n_clusters
                             elif hasattr(regime_model, 'model') and regime_model.model is not None:

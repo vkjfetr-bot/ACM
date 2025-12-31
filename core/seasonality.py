@@ -361,7 +361,7 @@ class SeasonalityHandler:
         timestamp_col: str = "Timestamp"
     ) -> pd.DataFrame:
         """
-        Adjust data by removing seasonal components.
+        Adjust data by removing seasonal components (vectorized for performance).
         
         Args:
             data: DataFrame with timestamp and sensor columns
@@ -375,18 +375,36 @@ class SeasonalityHandler:
             return data.copy()
         
         result = data.copy()
-        result[timestamp_col] = pd.to_datetime(result[timestamp_col])
+        ts_series = pd.to_datetime(result[timestamp_col])
+        result[timestamp_col] = ts_series
+        
+        # Pre-compute hour and minute components once (vectorized)
+        hours = ts_series.dt.hour.values
+        minutes = ts_series.dt.minute.values
+        dayofweek = ts_series.dt.dayofweek.values
+        
+        hour_of_day = hours + minutes / 60.0  # Shape: (n_rows,)
+        hour_of_week = dayofweek * 24 + hours + minutes / 60.0  # Shape: (n_rows,)
         
         for col in sensor_cols:
             if col not in result.columns or col not in self.patterns:
                 continue
             
-            # Compute seasonal offset for each row
+            # Vectorized offset computation for all patterns of this sensor
+            total_offset = np.zeros(len(result), dtype=np.float64)
+            
             for pattern in self.patterns[col]:
-                offsets = result[timestamp_col].apply(
-                    lambda ts: self._compute_pattern_offset(ts, pattern)
-                )
-                result[col] = result[col] - offsets
+                if pattern.period_type == PatternType.DAILY:
+                    phase_position = (hour_of_day - pattern.phase_shift) / 24.0
+                elif pattern.period_type == PatternType.WEEKLY:
+                    phase_position = (hour_of_week - pattern.phase_shift) / 168.0
+                else:
+                    continue
+                
+                # Vectorized sin computation
+                total_offset += pattern.amplitude * np.sin(2 * np.pi * phase_position)
+            
+            result[col] = result[col].values - total_offset
         
         return result
     
@@ -395,7 +413,7 @@ class SeasonalityHandler:
         timestamp: pd.Timestamp,
         pattern: SeasonalPattern
     ) -> float:
-        """Compute offset for a single pattern at a timestamp."""
+        """Compute offset for a single pattern at a timestamp (scalar version for backwards compatibility)."""
         if pattern.period_type == PatternType.DAILY:
             hour_of_day = timestamp.hour + timestamp.minute / 60
             phase_position = (hour_of_day - pattern.phase_shift) / 24
