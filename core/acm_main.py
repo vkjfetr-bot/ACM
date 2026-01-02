@@ -44,24 +44,12 @@ except ImportError:
     except Exception:
         fast_features = None  # Optional dependency
 
-# Note: models/ directory deleted - all functionality consolidated into core/
-# PCA, IForest, GMM core/outliers.py and core/correlation.py
-# OMR core/omr.py (OMRDetector class)
 from core.omr import OMRDetector  # OMR-02: Overall Model Residual
-
-# Import config history writer for auto-tune logging
 from core.config_history_writer import log_auto_tune_changes
-
-# Import the unified output system
 from core.output_manager import OutputManager, write_sql_artifacts
-# Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
 from core.episode_culprits_writer import write_episode_culprits_enhanced
-
-# v11.0.0: Pipeline types for data validation
 from core.pipeline_types import DataContract, ValidationResult, PipelineMode
-
-# v11.0.0: Seasonality detection
 from core.seasonality import SeasonalPattern  # detect_and_adjust imported inline
 from core.sensor_attribution import build_contribution_timeline
 from core.adaptive_thresholds import calculate_and_persist_thresholds
