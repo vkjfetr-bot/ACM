@@ -22,22 +22,21 @@ runtime:
 ```
 
 ### Enabling File Operations (Opt-In)
-To restore legacy file-based behaviors, set these flags explicitly:
+## SQL-Only Mode (v11+)
+
+As of v11, ACM operates in **SQL-only mode**. The legacy file mode and dual_mode options have been removed.
 
 ```yaml
 output:
-  enable_file_mode: true    # Enable CSV/JSON file writes (default: false)
-  enable_forecast: true     # Enable forecast generation (default: false)
-  dual_mode: false          # Write to both SQL and files (default: false)
+  artifacts_dir: artifacts  # Local directory for temporary artifacts only
   
   charts:
-    enabled: true           # Enable chart PNG generation (default: false)
+    enabled: false          # Chart PNG generation (requires matplotlib)
 ```
 
-## Migration Guide
+## Configuration Reference
 
-### From File Mode to SQL Mode (Recommended)
-If you previously relied on file-based outputs:
+ACM v11 requires a working SQL Server connection. If the connection fails, ACM stops immediately - there is no fallback mode.
 
 1. **Update config** - Remove or comment out `storage_backend: "file"`
 2. **Query SQL tables** - All analytics now available in ACM_* tables:

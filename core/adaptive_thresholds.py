@@ -22,7 +22,7 @@ Usage:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -448,3 +448,122 @@ def calculate_thresholds_from_config(
         'method': method,
         'confidence': confidence
     }
+
+
+# =============================================================================
+# P4.4: ADAPTIVE THRESHOLD ORCHESTRATION (moved from acm_main.py)
+# =============================================================================
+
+def calculate_and_persist_thresholds(
+    fused_scores: np.ndarray,
+    cfg: Dict[str, Any],
+    equip_id: int,
+    output_manager: Optional[Any],
+    train_index: Optional[pd.Index] = None,
+    regime_labels: Optional[np.ndarray] = None,
+    regime_quality_ok: bool = False
+) -> Dict[str, Any]:
+    """
+    Calculate adaptive thresholds and persist to SQL.
+    
+    Wrapper that orchestrates threshold calculation and SQL persistence.
+    Updates cfg in-place with calculated threshold values for downstream use.
+    
+    Args:
+        fused_scores: Array of fused z-scores to calculate thresholds from
+        cfg: Configuration dictionary (updated in-place with threshold values)
+        equip_id: Equipment ID for SQL persistence
+        output_manager: OutputManager instance for writing to SQL
+        train_index: Optional datetime index for train data (for metadata)
+        regime_labels: Optional regime labels for per-regime thresholds
+        regime_quality_ok: Whether regime clustering quality is acceptable
+    
+    Returns:
+        Dictionary with threshold results including 'fused_alert_z', 'fused_warn_z', 'method', 'confidence'
+    """
+    import hashlib
+    import json
+    from core.observability import Console
+    
+    try:
+        threshold_cfg = cfg.get("thresholds", {}).get("adaptive", {})
+        if not threshold_cfg.get("enabled", True):
+            Console.info("Adaptive thresholds disabled - using static config", component="THRESHOLD")
+            return {}
+        
+        # Get regime labels if per_regime enabled and quality OK
+        use_regime_labels = None
+        if threshold_cfg.get("per_regime", False) and regime_quality_ok and regime_labels is not None:
+            use_regime_labels = regime_labels
+        
+        # Calculate thresholds
+        threshold_results = calculate_thresholds_from_config(
+            train_fused_z=fused_scores,
+            cfg=cfg,
+            regime_labels=use_regime_labels
+        )
+        
+        # Store in SQL via OutputManager if available
+        if output_manager is not None and output_manager.sql_client is not None:
+            config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
+            
+            output_manager.write_threshold_metadata(
+                equip_id=equip_id,
+                threshold_type='fused_alert_z',
+                threshold_value=threshold_results['fused_alert_z'],
+                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                sample_count=len(fused_scores),
+                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
+                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
+                config_signature=config_sig,
+                notes=f"Auto-calculated from {len(fused_scores)} accumulated samples"
+            )
+            
+            output_manager.write_threshold_metadata(
+                equip_id=equip_id,
+                threshold_type='fused_warn_z',
+                threshold_value=threshold_results['fused_warn_z'],
+                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
+                sample_count=len(fused_scores),
+                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
+                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
+                config_signature=config_sig,
+                notes=f"Auto-calculated warning threshold (50% of alert)"
+            )
+            
+            # Update cfg to use adaptive thresholds in downstream modules
+            is_per_regime = isinstance(threshold_results['fused_alert_z'], dict)
+            if is_per_regime:
+                # Store in cfg for regimes.update_health_labels() to use
+                if "regimes" not in cfg:
+                    cfg["regimes"] = {}
+                if "health" not in cfg["regimes"]:
+                    cfg["regimes"]["health"] = {}
+                cfg["regimes"]["health"]["fused_alert_z_per_regime"] = threshold_results['fused_alert_z']
+                cfg["regimes"]["health"]["fused_warn_z_per_regime"] = threshold_results['fused_warn_z']
+            else:
+                # Override static config values with adaptive ones
+                if "regimes" not in cfg:
+                    cfg["regimes"] = {}
+                if "health" not in cfg["regimes"]:
+                    cfg["regimes"]["health"] = {}
+                cfg["regimes"]["health"]["fused_alert_z"] = threshold_results['fused_alert_z']
+                cfg["regimes"]["health"]["fused_warn_z"] = threshold_results['fused_warn_z']
+            
+            # Consolidated threshold log
+            if is_per_regime:
+                regime_count = len(threshold_results['fused_alert_z']) if isinstance(threshold_results['fused_alert_z'], dict) else 0
+                Console.info(f"Thresholds calculated: per_regime=True | regimes={regime_count} | samples={len(fused_scores)} | method={threshold_results.get('method')}", component="THRESHOLD")
+            else:
+                Console.info(f"Thresholds calculated: alert={threshold_results['fused_alert_z']:.3f} | warn={threshold_results['fused_warn_z']:.3f} | samples={len(fused_scores)} | method={threshold_results.get('method')}", component="THRESHOLD")
+        else:
+            Console.warn(f"SQL client unavailable - thresholds not persisted (om={'set' if output_manager else 'None'}, sql={'set' if getattr(output_manager, 'sql_client', None) else 'None'})", component="THRESHOLD")
+        
+        return threshold_results
+        
+    except Exception as threshold_e:
+        import traceback
+        from core.observability import Console
+        Console.error(f"Adaptive threshold calculation failed: {threshold_e} | fallback=static | trace={traceback.format_exc()[:200]}", component="THRESHOLD",
+                      equip_id=equip_id, error_type=type(threshold_e).__name__)
+        return {}

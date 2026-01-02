@@ -48,15 +48,6 @@ class PipelineMode(Enum):
     OFFLINE = auto()
     
     @classmethod
-    def from_env(cls) -> "PipelineMode":
-        """Detect pipeline mode from environment variables."""
-        import os
-        # BATCH mode is set by sql_batch_runner.py
-        if os.getenv("ACM_BATCH_MODE", "").lower() in ("1", "true", "yes"):
-            return cls.OFFLINE
-        return cls.ONLINE
-    
-    @classmethod  
     def from_config(cls, cfg: Dict[str, Any]) -> "PipelineMode":
         """Detect pipeline mode from configuration."""
         mode_str = cfg.get("pipeline", {}).get("mode", "offline").lower()
@@ -522,6 +513,115 @@ class FeatureMatrix:
 
 
 # =============================================================================
+# Data Quality Guardrails
+# =============================================================================
+
+@dataclass
+class GuardrailResult:
+    """Result of running data quality guardrails."""
+    low_var_features: List[str] = field(default_factory=list)
+    low_var_threshold: float = 1e-4
+    overlap_detected: bool = False
+    overlap_seconds: float = 0.0
+    data_quality_written: bool = False
+    dropped_sensors: List[str] = field(default_factory=list)
+
+
+def run_data_guardrails(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    meta: Any,
+    cfg: Dict[str, Any],
+    output_manager: Any,
+    run_id: int,
+    equip_id: int,
+    equip: str,
+) -> GuardrailResult:
+    """
+    Run all data quality guardrails. Returns GuardrailResult with findings.
+    Writes ACM_DataQuality records to SQL.
+    
+    Checks performed:
+    1. Baseline/Batch window overlap (data leakage risk)
+    2. Low-variance sensor detection (near-constant sensors)
+    3. Data quality metrics written to SQL
+    4. Dropped sensors tracking
+    
+    Args:
+        train: Training data DataFrame
+        score: Score data DataFrame  
+        meta: Load metadata with dropped_cols attribute
+        cfg: Configuration dictionary
+        output_manager: OutputManager for SQL writes
+        run_id: Current run ID
+        equip_id: Equipment ID
+        equip: Equipment code
+        
+    Returns:
+        GuardrailResult with low_var_features list and flags
+    """
+    from core.observability import Console
+    
+    result = GuardrailResult()
+    low_var_threshold = 1e-4
+    result.low_var_threshold = low_var_threshold
+    
+    # 1) Baseline/Batch window overlap check
+    tr_end = pd.to_datetime(train.index.max()) if len(train.index) else None
+    sc_start = pd.to_datetime(score.index.min()) if len(score.index) else None
+    
+    if tr_end is not None and sc_start is not None:
+        overlap_seconds = (tr_end - sc_start).total_seconds()
+        if overlap_seconds > 60:  # 1 minute tolerance
+            result.overlap_detected = True
+            result.overlap_seconds = overlap_seconds
+            Console.warn(
+                f"Batch window OVERLAPS baseline (data leakage risk):"
+                f" batch_start={sc_start} < baseline_end={tr_end} (overlap={overlap_seconds:.0f}s)",
+                component="DATA", equip=equip, batch_start=str(sc_start), baseline_end=str(tr_end)
+            )
+    
+    # 2) Low-variance sensor detection on BASELINE
+    if len(train.columns):
+        train_stds = train.std(numeric_only=True)
+        low_var = train_stds[train_stds < low_var_threshold]
+        if len(low_var) > 0:
+            result.low_var_features = list(low_var.index)
+            preview = ", ".join(result.low_var_features[:10])
+            Console.warn(
+                f"{len(low_var)} low-variance sensor(s) in TRAIN (std<{low_var_threshold:g}): {preview}",
+                component="DATA", equip=equip, low_var_count=len(low_var), threshold=low_var_threshold
+            )
+    
+    # 3) Data quality records -> SQL:ACM_DataQuality
+    try:
+        records = output_manager._build_data_quality_records(
+            train_numeric=train,
+            score_numeric=score,
+            cfg=cfg,
+            low_var_threshold=low_var_threshold,
+        )
+        
+        if records:
+            dq = pd.DataFrame(records)
+            dq['RunID'] = run_id
+            dq['EquipID'] = int(equip_id)
+            dq['CheckName'] = 'data_quality'
+            dq['CheckResult'] = 'OK'
+            output_manager.write_dataframe(dq, "data_quality", sql_table="ACM_DataQuality", add_created_at=True)
+            result.data_quality_written = True
+    except Exception as dq_e:
+        Console.warn(f"Data quality summary skipped: {dq_e}", component="DATA",
+                     equip=equip, error_type=type(dq_e).__name__, error=str(dq_e)[:200])
+    
+    # 4) Track dropped sensors
+    if hasattr(meta, 'dropped_cols') and len(meta.dropped_cols) > 0:
+        result.dropped_sensors = list(meta.dropped_cols)
+    
+    return result
+
+
+# =============================================================================
 # Exports
 # =============================================================================
 
@@ -532,4 +632,6 @@ __all__ = [
     "SensorMeta",
     "SensorValidator",
     "FeatureMatrix",
+    "GuardrailResult",
+    "run_data_guardrails",
 ]

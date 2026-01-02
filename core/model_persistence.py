@@ -354,13 +354,12 @@ class RegimeState:
             return "[]"
 
 
-def save_regime_state(state: RegimeState, artifact_root: Path, equip: str, sql_client=None) -> None:
+def save_regime_state(state: RegimeState, equip: str, sql_client=None) -> None:
     """
-    Save RegimeState to SQL (SQL-ONLY MODE).
+    Save RegimeState to SQL.
     
     Args:
         state: RegimeState object to persist
-        artifact_root: IGNORED - kept for API compatibility
         equip: Equipment name (for logging)
         sql_client: SQL client (REQUIRED)
     """
@@ -419,12 +418,11 @@ def save_regime_state(state: RegimeState, artifact_root: Path, equip: str, sql_c
         Console.warn(f"Failed to save state to SQL: {e}", component="REGIME_STATE", equip_id=state.equip_id, state_version=state.state_version, error_type=type(e).__name__, error=str(e)[:200])
 
 
-def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] = None, sql_client=None) -> Optional[RegimeState]:
+def load_regime_state(equip: str, equip_id: Optional[int] = None, sql_client=None) -> Optional[RegimeState]:
     """
-    Load latest RegimeState from SQL (SQL-ONLY MODE).
+    Load latest RegimeState from SQL.
     
     Args:
-        artifact_root: IGNORED - kept for API compatibility
         equip: Equipment name (for logging)
         equip_id: Equipment ID (REQUIRED)
         sql_client: SQL client (REQUIRED)
@@ -433,7 +431,7 @@ def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] =
         RegimeState object or None if not found
     """
     if sql_client is None or equip_id is None:
-        Console.error("SQL client and equip_id required for SQL-only mode", component="REGIME_STATE", equipment=equip, equip_id=equip_id)
+        Console.error("SQL client and equip_id required", component="REGIME_STATE", equipment=equip, equip_id=equip_id)
         return None
     
     try:
@@ -484,15 +482,14 @@ def load_regime_state(artifact_root: Path, equip: str, equip_id: Optional[int] =
 # ============================================================================
 
 class ModelVersionManager:
-    """Manages model versioning, persistence, and loading (SQL-ONLY MODE)."""
+    """Manages model versioning, persistence, and loading via SQL."""
     
-    def __init__(self, equip: str, artifact_root: Path, sql_client=None, equip_id: Optional[int] = None):
+    def __init__(self, equip: str, sql_client=None, equip_id: Optional[int] = None):
         """
-        Initialize model version manager (SQL-ONLY MODE).
+        Initialize model version manager.
         
         Args:
             equip: Equipment name (e.g., "FD_FAN")
-            artifact_root: IGNORED - kept for API compatibility only
             sql_client: SQL client for model storage (REQUIRED)
             equip_id: Equipment ID for SQL operations (REQUIRED)
         """
@@ -501,7 +498,7 @@ class ModelVersionManager:
         self.equip_id = equip_id
         
         if not sql_client or equip_id is None:
-            Console.error("SQL client and equip_id required for SQL-only mode", component="MODEL", equipment=equip, equip_id=equip_id)
+            Console.error("SQL client and equip_id required", component="MODEL", equipment=equip, equip_id=equip_id)
     
     def get_latest_version(self) -> Optional[int]:
         """Get the latest model version number from SQL ModelRegistry."""
@@ -1237,3 +1234,181 @@ def create_model_metadata(
     return metadata
 
 
+def load_cached_models_with_validation(
+    equip: str,
+    sql_client: Optional[Any],
+    equip_id: int,
+    cfg: Dict[str, Any],
+    train_columns: List[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Load cached models from SQL and validate them.
+    
+    High-level wrapper around ModelVersionManager that handles:
+    - Creating manager instance with appropriate storage config
+    - Loading cached models
+    - Validating cache against current config and sensors
+    - Logging cache status
+    
+    Args:
+        equip: Equipment name
+        sql_client: SQL client connection
+        equip_id: Equipment ID
+        cfg: Configuration dictionary
+        train_columns: Current training column names for validation
+        
+    Returns:
+        Tuple of (cached_models dict, cached_manifest dict) or (None, None) if invalid
+    """
+    try:
+        model_manager = ModelVersionManager(
+            equip=equip, 
+            sql_client=sql_client,
+            equip_id=equip_id
+        )
+        cached_models, cached_manifest = model_manager.load_models()
+        
+        if cached_models and cached_manifest:
+            # Validate cache
+            current_config_sig = cfg.get("_signature", "unknown")
+            current_sensors = train_columns
+            
+            is_valid, invalid_reasons = model_manager.check_model_validity(
+                manifest=cached_manifest,
+                current_config_signature=current_config_sig,
+                current_sensors=current_sensors
+            )
+            
+            if is_valid:
+                # Consolidated model cache info
+                model_info = {
+                    "version": cached_manifest['version'],
+                    "created_at": cached_manifest.get('created_at', 'unknown'),
+                    "config_sig": current_config_sig[:16],
+                    "sensor_count": len(current_sensors),
+                }
+                if 'created_at' in cached_manifest:
+                    from datetime import datetime
+                    try:
+                        created_at = datetime.fromisoformat(cached_manifest['created_at'])
+                        model_info["age_hours"] = (datetime.now() - created_at).total_seconds() / 3600
+                    except Exception:
+                        pass
+                age_str = f" | age={model_info['age_hours']:.1f}h" if 'age_hours' in model_info else ""
+                Console.info(f"Using cached models v{model_info['version']}: sensors={model_info['sensor_count']} | sig={model_info['config_sig']}...{age_str}", component="MODEL")
+                return cached_models, cached_manifest
+            else:
+                # Log retrain reasons in single message
+                Console.warn(f"Cache invalid ({len(invalid_reasons)} reasons): {'; '.join(invalid_reasons[:3])}", component="MODEL",
+                             equip=equip, invalid_reason_count=len(invalid_reasons))
+                return None, None
+        return None, None
+    except Exception as e:
+        Console.warn(f"Failed to load cached models: {e}", component="MODEL",
+                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+        return None, None
+
+
+def save_trained_models(
+    equip: str,
+    sql_client: Optional[Any],
+    equip_id: int,
+    cfg: Dict[str, Any],
+    train: "pd.DataFrame",
+    ar1_detector: Any,
+    pca_detector: Any,
+    iforest_detector: Any,
+    gmm_detector: Any,
+    omr_detector: Any,
+    regime_model: Any,
+    col_meds: Optional[Dict[str, float]],
+    regime_quality_ok: bool,
+    timing_sections: Optional[Dict[str, Any]] = None,
+    run_id: str = "",
+) -> Optional[int]:
+    """Save all trained models with versioning and metadata.
+    
+    High-level wrapper around ModelVersionManager that:
+    - Collects all detector models into save dict
+    - Computes training duration from timing sections
+    - Creates metadata with quality metrics
+    - Persists to SQL
+    
+    Args:
+        equip: Equipment name
+        sql_client: SQL client connection
+        equip_id: Equipment ID
+        cfg: Configuration dictionary
+        train: Training DataFrame
+        ar1_detector: Fitted AR1 detector
+        pca_detector: Fitted PCA detector
+        iforest_detector: Fitted IForest detector
+        gmm_detector: Fitted GMM detector
+        omr_detector: Fitted OMR detector
+        regime_model: Fitted regime model
+        col_meds: Feature medians for imputation
+        regime_quality_ok: Whether regime quality passed threshold
+        timing_sections: Optional timing dict with fit section durations
+        run_id: Current run identifier
+    
+    Returns:
+        Model version number if successful, None on failure.
+    """
+    try:
+        model_manager = ModelVersionManager(
+            equip=equip,
+            sql_client=sql_client,
+            equip_id=equip_id
+        )
+        
+        # Collect all models for persistence
+        models_to_save = {
+            "ar1_params": {"phimap": ar1_detector.phimap, "sdmap": ar1_detector.sdmap} if hasattr(ar1_detector, 'phimap') else None,
+            "pca_model": pca_detector.pca if hasattr(pca_detector, 'pca') else None,
+            "iforest_model": iforest_detector.model if hasattr(iforest_detector, 'model') else None,
+            "gmm_model": gmm_detector.model if hasattr(gmm_detector, 'model') else None,
+            "omr_model": omr_detector.to_dict() if omr_detector and omr_detector._is_fitted else None,
+            "regime_model": regime_model.model if regime_model and hasattr(regime_model, 'model') else None,
+            "feature_medians": col_meds,
+        }
+        
+        # Calculate training duration from timing sections
+        training_duration_s = None
+        if timing_sections:
+            try:
+                fit_sections = ["fit.ar1", "fit.pca_subspace", "fit.iforest", "fit.gmm", "fit.omr", "regimes.fit"]
+                total_fit_time = sum([timing_sections.get(sec, {}).get("elapsed", 0.0) for sec in fit_sections])
+                if total_fit_time > 0:
+                    training_duration_s = total_fit_time
+            except Exception:
+                pass
+        
+        # Create metadata
+        regime_quality_metrics = {
+            "quality_ok": regime_quality_ok,
+            "n_regimes": regime_model.n_clusters if regime_model else 0
+        }
+        
+        metadata = create_model_metadata(
+            config_signature=cfg.get("_signature", "unknown"),
+            train_data=train,
+            models_dict=models_to_save,
+            regime_quality=regime_quality_metrics,
+            training_duration_s=training_duration_s
+        )
+        
+        # Save models
+        model_version = model_manager.save_models(
+            models=models_to_save,
+            metadata=metadata
+        )
+        
+        Console.info(f"Saved all trained models to version v{model_version}", component="MODEL")
+        return model_version
+        
+    except Exception as e:
+        import traceback
+        Console.warn(f"Failed to save models: {e}", component="MODEL",
+                     equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
+        traceback.print_exc()
+        return None

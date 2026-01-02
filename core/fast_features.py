@@ -9,12 +9,12 @@ existing pipeline. We'll extend it iteratively.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple, Literal, Dict
+from typing import Any, List, Optional, Tuple, Literal, Dict
 import inspect
 import numpy as np
 import pandas as pd
 from utils.timer import Timer
-from core.observability import Span
+from core.observability import Span, Console
 
 # Try polars
 try:
@@ -121,6 +121,76 @@ def _apply_fill(df, method: FillMethod = "median", fill_values: Optional[dict] =
         return pdf.interpolate(limit_direction="both")
     return pdf
 
+
+# ========================================================================
+# Data Utilities (moved from acm_main.py)
+# ========================================================================
+
+def ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure the DataFrame index is a timezone-naive local DatetimeIndex.
+
+    Simplified policy: treat all timestamps as local time and drop any tz info.
+    This is the canonical function for normalizing timestamp indices throughout ACM.
+    
+    Args:
+        df: DataFrame with any index type
+        
+    Returns:
+        DataFrame with timezone-naive DatetimeIndex
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors="coerce")
+    else:
+        # If timezone-aware, strip tz information and keep local wall-clock times
+        try:
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+        except Exception:
+            # Fallback: coerce to naive datetimes
+            df.index = pd.to_datetime(df.index, errors="coerce")
+    return df
+
+
+def deduplicate_index(
+    df: pd.DataFrame,
+    name: str,
+    equip: str = "",
+) -> Tuple[pd.DataFrame, int]:
+    """
+    Remove duplicate timestamps from DataFrame index, keeping the last occurrence.
+    
+    Args:
+        df: DataFrame with potentially duplicate index
+        name: Dataset name for logging (e.g., "TRAIN", "SCORE")
+        equip: Equipment name for logging context
+    
+    Returns:
+        Tuple of (deduplicated DataFrame, count of duplicates removed)
+    
+    Raises:
+        RuntimeError: If duplicates remain after deduplication (should never happen)
+    """
+    dup_count = df.index.duplicated(keep='last').sum()
+    
+    if dup_count > 0:
+        Console.warn(
+            f"Removing {dup_count} duplicate timestamps from {name} data",
+            component="DATA",
+            equip=equip,
+            duplicates=dup_count,
+            dataset=name,
+        )
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+    
+    # Assert uniqueness after deduplication
+    if not df.index.is_unique:
+        raise RuntimeError(
+            f"[DATA] {name} data still has duplicate timestamps after deduplication! "
+            f"Total: {len(df)}, Unique: {df.index.nunique()}"
+        )
+    
+    return df, dup_count
 
 
 def rolling_median(df: pd.DataFrame, window: int, cols: Optional[List[str]] = None, min_periods: int = 1,
@@ -1489,3 +1559,92 @@ def normalize_with_confidence_gating(
     z_scores = z_scores.replace([np.inf, -np.inf], np.nan)
     
     return z_scores, method_used
+
+
+# =============================================================================
+# P4.1: FEATURE IMPUTATION (moved from acm_main.py)
+# =============================================================================
+
+def impute_features(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    low_var_threshold: float,
+    output_manager: Optional[Any] = None,
+    run_id: Optional[str] = None,
+    equip_id: int = 0,
+    equip: str = "",
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    """
+    Impute missing values and drop unusable columns from feature DataFrames.
+    
+    Handles:
+    - Replace inf with NaN
+    - Fill NaN with train column medians
+    - Align score columns to train columns
+    - Drop all-NaN and low-variance columns
+    - Log dropped features via output_manager
+    
+    Args:
+        train: Training features DataFrame
+        score: Scoring features DataFrame
+        low_var_threshold: Minimum std deviation to keep a column
+        output_manager: OutputManager instance for logging dropped features
+        run_id: Run identifier
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        
+    Returns:
+        Tuple of (train_imputed, score_imputed, dropped_cols)
+    """
+    # Replace inf with NaN
+    train = train.copy()
+    score = score.copy()
+    train.replace([np.inf, -np.inf], np.nan, inplace=True)
+    score.replace([np.inf, -np.inf], np.nan, inplace=True)
+    
+    col_meds = train.median(numeric_only=True)
+    train.fillna(col_meds, inplace=True)
+    
+    # Align score to train columns
+    score = score.reindex(columns=train.columns)
+    score.fillna(col_meds, inplace=True)
+    
+    # Fill remaining NaNs with score medians
+    nan_cols = score.columns[score.isna().any()].tolist()
+    for c in nan_cols:
+        if score[c].dtype.kind in "if":
+            score[c].fillna(score[c].median(), inplace=True)
+    
+    # Find columns to drop: all-NaN or low-variance
+    all_nan_cols = [c for c in train.columns if pd.isna(col_meds.get(c))]
+    feat_stds = train.std(numeric_only=True)
+    low_var_cols = list(feat_stds[feat_stds < low_var_threshold].index)
+    cols_to_drop = list(set(all_nan_cols + low_var_cols))
+    
+    if cols_to_drop:
+        Console.warn(
+            f"Dropping {len(cols_to_drop)} columns ({len(all_nan_cols)} NaN, {len(low_var_cols)} low-var)",
+            component="FEAT", equip=equip, dropped=len(cols_to_drop)
+        )
+        train = train.drop(columns=cols_to_drop)
+        score = score.drop(columns=cols_to_drop)
+        
+        # Log to SQL via output_manager
+        if output_manager:
+            drop_records = []
+            for col in cols_to_drop:
+                reason = "all_NaN" if col in all_nan_cols else "low_variance"
+                std_val = feat_stds.get(col) if col in feat_stds.index else None
+                drop_value = float(std_val) if std_val is not None and not pd.isna(std_val) else None
+                drop_records.append({
+                    "FeatureName": str(col),
+                    "DropReason": reason,
+                    "DropValue": drop_value,
+                    "Threshold": None
+                })
+            output_manager.write_feature_drop_log(drop_records)
+    
+    if train.shape[1] == 0:
+        raise RuntimeError("[FEAT] No usable feature columns after imputation")
+    
+    return train, score, cols_to_drop

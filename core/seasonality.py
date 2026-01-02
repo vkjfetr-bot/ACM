@@ -493,3 +493,67 @@ class SeasonalityHandler:
             return 0.0
         
         return float(np.mean(confidences))
+
+
+def detect_and_adjust(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    cfg: Dict[str, Any],
+    min_rows: int = 72,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, List[SeasonalPattern]], bool]:
+    """
+    Detect seasonal patterns and optionally adjust data.
+    
+    Single entry point for seasonality processing. Handles all internal logic:
+    - Checks data sufficiency
+    - Detects patterns on train data
+    - Applies adjustments to both train and score if enabled
+    
+    Args:
+        train: Training data (DataFrame with datetime index)
+        score: Score data (DataFrame with datetime index)
+        cfg: Config dict with seasonality.apply_adjustment flag
+        min_rows: Minimum rows required (default 72 = 3 days hourly)
+    
+    Returns:
+        Tuple of (adjusted_train, adjusted_score, patterns_dict, was_adjusted)
+    """
+    patterns: Dict[str, List[SeasonalPattern]] = {}
+    
+    # Guard: insufficient data
+    if len(train) < min_rows:
+        return train, score, patterns, False
+    
+    # Get numeric sensor columns
+    sensor_cols = [c for c in train.columns 
+                   if train[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+    if not sensor_cols:
+        return train, score, patterns, False
+    
+    # Detect patterns
+    handler = SeasonalityHandler(min_periods=3, min_confidence=0.1)
+    detect_df = train.copy()
+    detect_df['_ts'] = pd.to_datetime(detect_df.index)
+    patterns = handler.detect_patterns(detect_df, sensor_cols, '_ts')
+    
+    if not patterns:
+        return train, score, patterns, False
+    
+    # Check if adjustment is enabled
+    apply_adjustment = cfg.get("seasonality", {}).get("apply_adjustment", True)
+    if not apply_adjustment:
+        return train, score, patterns, False
+    
+    # Apply adjustment to train
+    train_out = train.copy()
+    train_out['_ts'] = pd.to_datetime(train_out.index)
+    train_out = handler.adjust_baseline(train_out, sensor_cols, '_ts')
+    train_out = train_out.drop(columns=['_ts'])
+    
+    # Apply adjustment to score
+    score_out = score.copy()
+    score_out['_ts'] = pd.to_datetime(score_out.index)
+    score_out = handler.adjust_baseline(score_out, sensor_cols, '_ts')
+    score_out = score_out.drop(columns=['_ts'])
+    
+    return train_out, score_out, patterns, True

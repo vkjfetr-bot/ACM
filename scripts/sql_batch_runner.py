@@ -626,8 +626,8 @@ class SQLBatchRunner:
                 Console.info(f"{equip_name}: Detected existing models in ModelRegistry (count={model_count})", component="COLDSTART", equipment=equip_name, model_count=model_count)
                 return True, 0, 0
             
-            # Determine required rows: prefer ColdstartState.RequiredRows, else config data.min_train_samples (default 200)
-            min_required = self._get_config_int(equip_id, 'data.min_train_samples', 200)
+            # Determine required rows: prefer ColdstartState.RequiredRows, else config data.min_train_samples (default 500)
+            min_required = self._get_config_int(equip_id, 'data.min_train_samples', 500)
             if row:
                 status, accum_rows, req_rows = row
                 required = req_rows or min_required
@@ -645,7 +645,7 @@ class SQLBatchRunner:
             Console.warn(f"Could not check coldstart status: {e}", component="COLDSTART", equipment=equip_name, error=str(e), error_type=type(e).__name__)
             return False, 0, 200  # Default minimum when SQL check fails
     
-    def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False, batch_num: int = 0) -> tuple[bool, str]:
+    def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False, batch_num: int = 0, is_post_coldstart: bool = False) -> tuple[bool, str]:
         """Run single ACM batch for equipment.
         
         Args:
@@ -654,6 +654,7 @@ class SQLBatchRunner:
             end_time: Optional end time override
             dry_run: If True, print command without running
             batch_num: Current batch number (for frequency control)
+            is_post_coldstart: If True, coldstart already completed (don't show coldstart messages)
             
         Returns:
             Tuple of (success, outcome) where outcome is 'OK', 'NOOP', or 'FAIL'
@@ -678,13 +679,8 @@ class SQLBatchRunner:
             return True, "OK"
         
         Console.info(f"{printable}", component="RUN", command=printable)
-        # Force SQL mode in acm_main so that SQL historian + stored procedures
-        # are used instead of legacy CSV/file mode, regardless of older config.
-        # Also set ACM_BATCH_MODE to enable continuous learning mode detection
-        # Pass batch number for threshold update frequency control
+        # Environment variables for ACM subprocess
         env = dict(os.environ)
-        env["ACM_FORCE_SQL_MODE"] = "1"
-        env["ACM_BATCH_MODE"] = "1"
         
         # Propagate trace context to subprocess for end-to-end trace correlation
         # This allows child process logs to be linked to the parent batch runner trace
@@ -697,15 +693,13 @@ class SQLBatchRunner:
         # Propagate start-from-beginning intent to forecasting layer (used to force full-history model init)
         # Note: batch_num is 0-indexed internally; display as 1-indexed for users
         display_batch = batch_num + 1
-        if self.start_from_beginning and batch_num == 0:
+        # Only show coldstart message if this is truly a coldstart batch (not after coldstart already complete)
+        is_coldstart_batch = self.start_from_beginning and batch_num == 0 and not is_post_coldstart
+        if is_coldstart_batch:
             env["ACM_FORECAST_FULL_HISTORY_MODE"] = "1"
-            Console.info(f"{equip_name}: First batch (start-from-beginning) - will perform coldstart split and train fresh models", component="BATCH", equipment=equip_name, batch_num=display_batch)
+            Console.info(f"{equip_name}: Coldstart batch - training fresh models", component="BATCH", equipment=equip_name, batch_num=display_batch)
         else:
-            Console.info(f"{equip_name}: Batch {display_batch} - will load existing models and evolve incrementally", component="BATCH", equipment=equip_name, batch_num=display_batch)
-        env["ACM_BATCH_NUM"] = str(batch_num)
-        # Pass total batches info (if known) so acm_main can display "batch X/Y"
-        if hasattr(self, '_current_total_batches'):
-            env["ACM_BATCH_TOTAL"] = str(self._current_total_batches)
+            Console.info(f"{equip_name}: Batch {display_batch} - scoring with existing models", component="BATCH", equipment=equip_name, batch_num=display_batch)
 
         # Track batch start time for metrics
         batch_start_time = time.time()
@@ -927,7 +921,8 @@ class SQLBatchRunner:
             
             # Run ACM (it will automatically use the current batch window from SQL)
             # Pass batches_completed (total count including previous runs) for frequency control
-            success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run, batch_num=batches_completed)
+            # is_post_coldstart=True since _process_batches is called after coldstart completes
+            success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run, batch_num=batches_completed, is_post_coldstart=True)
             
             if not success:
                 Console.error(f"{equip_name}: Batch {batch_num} FAILED", component="BATCH", equipment=equip_name, batch=batch_num)

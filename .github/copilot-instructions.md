@@ -93,7 +93,6 @@ ACM/
 |   +-- confidence.py         # Unified confidence model
 |   +-- pipeline_types.py     # DataContract, PipelineMode
 |   +-- seasonality.py        # Diurnal/weekly pattern detection
-|   +-- asset_similarity.py   # Cold-start transfer learning
 +-- scripts/              # Operational scripts
 |   +-- sql_batch_runner.py   # Production batch processing
 |   +-- sql/              # SQL utilities, schema export
@@ -237,12 +236,6 @@ PHASE 8: MODEL LOADING/TRAINING (train.detector_fit)
 ├── If ONLINE: Load all detectors from cache
 └── Output: Trained detector objects
 
-PHASE 9: TRANSFER LEARNING CHECK (v11)
-├── AssetSimilarity.load_profiles_from_sql()
-├── Build profile for current equipment
-├── find_similar() to match equipment
-└── Log transfer learning opportunity (not applied to detectors yet)
-
 PHASE 10: DETECTOR SCORING (score.detector_score)
 ├── Score all detectors on score data
 ├── Compute z-scores per detector
@@ -302,7 +295,6 @@ PHASE 19: OUTPUT GENERATION (persist.*)
 ├── write_detector_correlation() -> ACM_DetectorCorrelation
 ├── write_sensor_correlation() -> ACM_SensorCorrelations
 ├── write_sensor_normalized_ts() -> ACM_SensorNormalized_TS
-├── write_asset_profile() -> ACM_AssetProfiles
 └── write_seasonal_patterns() -> ACM_SeasonalPatterns
 
 PHASE 20: ANALYTICS GENERATION (outputs.comprehensive_analytics)
@@ -355,7 +347,6 @@ core/acm_main.py (MAIN ORCHESTRATOR)
     ├── core/model_lifecycle.py (ModelState, promote_model)
     ├── core/confidence.py (compute_*_confidence)
     ├── core/seasonality.py (SeasonalityHandler)
-    ├── core/asset_similarity.py (AssetSimilarity)
     ├── core/forecast_engine.py (ForecastEngine)
     └── core/health_tracker.py (HealthTracker)
 

@@ -441,3 +441,117 @@ class ConfigDict(MutableMapping):
     def to_dict(self) -> Dict[str, Any]:
         """Export as plain dict."""
         return copy.deepcopy(self._data)
+
+
+# ========================================================================
+# Module-level config utilities (moved from acm_main.py)
+# ========================================================================
+
+def compute_config_signature(cfg: Dict[str, Any]) -> str:
+    """
+    Compute a deterministic hash of config sections that affect model fitting.
+    
+    DEBT-05: Expanded to include all sections that affect model behavior:
+    - models: Model hyperparameters (PCA, iForest, GMM, OMR, etc.)
+    - features: Feature engineering (window, FFT, etc.)
+    - preprocessing: Data preprocessing settings
+    - detectors: Detector-specific parameters (AR1, etc.)
+    - thresholds: Calibration thresholds (q, self_tune, clip_z)
+    - fusion: Fusion weights and auto-tuning settings
+    - regimes: Regime clustering parameters (k, auto_k, etc.)
+    - episodes: Episode detection thresholds (CPD k_sigma, h_sigma)
+    - drift: Drift detection parameters (p95_threshold, multi_feature)
+    
+    Args:
+        cfg: Config dict or ConfigDict instance
+        
+    Returns:
+        Hex string (16 chars) for cache validation.
+    """
+    relevant_keys = [
+        "models", "features", "preprocessing", "detectors",
+        "thresholds", "fusion", "regimes", "episodes", "drift"
+    ]
+    config_subset = {k: cfg.get(k) for k in relevant_keys if k in cfg}
+    # Sort keys for determinism
+    config_str = json.dumps(config_subset, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(config_str.encode("utf-8")).hexdigest()[:16]
+
+
+def load_config(
+    path: Optional[Path] = None,
+    equipment_name: Optional[str] = None,
+    get_equipment_id_fn: Optional[Any] = None,
+) -> ConfigDict:
+    """
+    Load config from SQL (preferred) or CSV table.
+    Returns ConfigDict that acts like a dict but supports updates.
+    
+    Priority:
+    1. SQL database (ACM_Config table) - if available
+    2. CSV table (config_table.csv) - required fallback in configs/
+    
+    Args:
+        path: Optional path to CSV config file (for explicit override)
+        equipment_name: Name of equipment (e.g., "FD_FAN", "GAS_TURBINE")
+                       If provided, loads asset-specific config overrides
+        get_equipment_id_fn: Optional function to get equipment ID from name
+    
+    Returns:
+        ConfigDict instance
+    """
+    from utils.sql_config import get_equipment_config
+    
+    # Determine equipment ID
+    equip_id = 0
+    if equipment_name and get_equipment_id_fn:
+        equip_id = get_equipment_id_fn(equipment_name)
+    elif equipment_name:
+        # Fallback: use hash-based ID if no function provided
+        hash_val = int(hashlib.md5(equipment_name.encode()).hexdigest(), 16)
+        equip_id = (hash_val % 9999) + 1
+    
+    # Auto-discover config directory if no explicit path provided
+    if path is None:
+        config_dir = Path("configs")
+        csv_path = config_dir / "config_table.csv"
+    else:
+        config_dir = path.parent
+        csv_path = path if path.suffix == '.csv' else config_dir / "config_table.csv"
+    
+    # Try SQL first (new production mode)
+    try:
+        cfg_dict = get_equipment_config(
+            equipment_code=equipment_name,
+            use_sql=True,
+            fallback_to_csv=False  # We'll handle fallback manually
+        )
+        if cfg_dict:
+            equip_label = f"{equipment_name} (EquipID={equip_id})" if equip_id > 0 else "global defaults"
+            Console.info(f"Loaded config from SQL for {equip_label}", component="CFG")
+            return ConfigDict(cfg_dict, mode="sql", equip_id=equip_id)
+    except Exception as e:
+        Console.warn(
+            f"Could not load config from SQL: {e}",
+            component="CFG",
+            equipment=equipment_name,
+            equip_id=equip_id,
+            error=str(e)
+        )
+    
+    # Fallback to CSV table (required)
+    if csv_path.exists():
+        source = "csv"
+        cfg_result = ConfigDict.from_csv(csv_path, equip_id=equip_id)
+        Console.info(
+            f"Config loaded: source={source} | equip={equipment_name} (EquipID={equip_id})",
+            component="CFG"
+        )
+        return cfg_result
+    
+    # No config found - fail fast
+    raise FileNotFoundError(
+        f"Config file not found: {csv_path}\n"
+        f"Please ensure config_table.csv exists in configs/ directory"
+    )
+

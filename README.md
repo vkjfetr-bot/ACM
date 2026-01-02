@@ -10,9 +10,8 @@ For a complete, implementation-level walkthrough (architecture, modules, configs
 - **v11.0.0**: Major architecture refactor with typed contracts and lifecycle management:
   - **DataContract Validation**: Entry-point validation ensures data quality before processing
   - **Seasonality Detection**: Diurnal/weekly pattern detection (7 daily patterns detected)
-  - **Asset Similarity**: Cold-start transfer learning using similar equipment profiles
   - **SQL Performance**: Deprecated ACM_Scores_Long, batched DELETEs for 44K+ row savings
-  - **New SQL Tables**: ACM_ActiveModels, ACM_RegimeDefinitions, ACM_DataContractValidation, ACM_SeasonalPatterns, ACM_AssetProfiles, ACM_FeatureDropLog
+  - **New SQL Tables**: ACM_ActiveModels, ACM_RegimeDefinitions, ACM_DataContractValidation, ACM_SeasonalPatterns, ACM_FeatureDropLog
   - **Grafana Dashboards**: 9 production dashboards with comprehensive equipment health monitoring
   - **Refactoring Complete**: 43 helper functions extracted, V11 features verified with 5-day batch test
 
@@ -28,8 +27,7 @@ For a complete, implementation-level walkthrough (architecture, modules, configs
 ### v11.0.0 Release Highlights
 - **📋 DataContract Validation**: Input data validated at pipeline entry (timestamps, duplicates, cadence) via `core/pipeline_types.py`
 - **🌡️ Seasonality Detection**: Diurnal/weekly patterns detected and adjusted - 7 daily patterns found in 5-day batch test
-- **🔗 Asset Similarity**: Cold-start transfer learning using similar equipment profiles in `core/asset_similarity.py`
-- **📊 6 New V11 SQL Tables**: ACM_DataContractValidation, ACM_RegimeDefinitions, ACM_ActiveModels, ACM_AssetProfiles, ACM_SeasonalPatterns, ACM_FeatureDropLog
+- **� 5 New V11 SQL Tables**: ACM_DataContractValidation, ACM_RegimeDefinitions, ACM_ActiveModels, ACM_SeasonalPatterns, ACM_FeatureDropLog
 - **🎨 9 Grafana Dashboards**: Comprehensive equipment health, forecasting, fleet overview, operations, behavior, observability
 - **🔧 43 Helper Functions Extracted**: Improved code organization with context dataclasses
 

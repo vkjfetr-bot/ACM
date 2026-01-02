@@ -329,11 +329,11 @@ def write_episode_culprits_enhanced(
         # Commit
         sql_client.conn.commit()
         
-        Console.info(f"Wrote {len(records)} enhanced culprit records to ACM_EpisodeCulprits", component="CULPRITS")
+        Console.info(f"Wrote {len(records)} culprit records to ACM_EpisodeCulprits", component="CULPRITS")
         return True
         
     except Exception as e:
-        Console.error(f"Failed to write enhanced ACM_EpisodeCulprits: {e}", component="CULPRITS")
+        Console.error(f"Failed to write ACM_EpisodeCulprits: {e}", component="CULPRITS")
         try:
             sql_client.conn.rollback()
         except:

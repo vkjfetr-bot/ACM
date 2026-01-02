@@ -491,18 +491,15 @@ EquipID,Category,ParamPath,ParamValue,ValueType
 0,models,pca.n_components,5,int
 0,models,iforest.contamination,0.001,float
 0,fusion,weights,"{""pca_spe_z"":0.25,""pca_t2_z"":0.25,""iforest_z"":0.2,""gmm_z"":0.15,""omr_z"":0.15}",json
-0,output,dual_mode,false,bool
 ```
 
-**SQL mode row (config_table.csv)**
+**Equipment-specific overrides (config_table.csv)**
 ```
 EquipID,Category,ParamPath,ParamValue,ValueType
-1,data,storage_backend,sql,string
 1,data,timestamp_col,EntryDateTime,string
 1,data,sampling_secs,60,int
 1,models,pca.incremental,true,bool
 1,runtime,reuse_model_fit,false,bool
-1,output,dual_mode,true,bool
 ```
 
 **SQL connection (configs/sql_connection.ini)**

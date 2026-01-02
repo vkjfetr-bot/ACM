@@ -146,3 +146,70 @@ def normalize_index(df: pd.DataFrame, inplace: bool = False) -> pd.DataFrame:
             df_out.index = df_out.index.tz_localize(None)
     
     return df_out
+
+
+# =======================
+# Index Mapping Utilities
+# =======================
+
+def nearest_indexer(index: pd.Index, targets, label: str = "indexer"):
+    """Map target timestamps to index positions using nearest matches.
+
+    Returns an array of index locations where ``-1`` denotes missing targets.
+    Handles non-monotonic indexes by operating on a sorted view and falls back
+    to a NumPy search path when Pandas raises for complex target shapes.
+    
+    Args:
+        index: pandas Index (typically DatetimeIndex) to map against
+        targets: Sequence of timestamps to find nearest matches for
+        label: Debug label for logging (default: "indexer")
+        
+    Returns:
+        numpy array of int positions (-1 for missing)
+    """
+    import numpy as np
+    from core.observability import Console
+    
+    if index.empty:
+        return np.full(len(targets), -1, dtype=int) if hasattr(targets, "__len__") else np.array([], dtype=int)
+
+    if not hasattr(targets, "__len__"):
+        targets = list(targets)
+
+    if len(targets) == 0:
+        return np.empty(0, dtype=int)
+
+    target_dt = pd.to_datetime(targets, errors="coerce")
+    if isinstance(target_dt, pd.Series):
+        target_dt = target_dt.to_numpy()
+    target_idx = pd.DatetimeIndex(target_dt)
+    result = np.full(target_idx.shape[0], -1, dtype=int)
+
+    valid_mask = ~target_idx.isna()
+    if not valid_mask.any():
+        return result
+
+    work_index = pd.DatetimeIndex(index)
+    if not work_index.is_monotonic_increasing:
+        work_index = work_index.sort_values()
+
+    try:
+        locs = work_index.get_indexer(target_idx, method="nearest")
+    except (ValueError, TypeError) as err:
+        Console.warn(f"[{label}] Falling back to manual nearest mapping: {err}", component="DATA",
+                     indexer_label=label, error_type=type(err).__name__, error=str(err)[:200])
+        idx_values = work_index.asi8
+        target_values = target_idx.asi8[valid_mask]
+        if target_values.size and idx_values.size:
+            pos = np.searchsorted(idx_values, target_values, side="left")
+            right_idx = np.clip(pos, 0, len(idx_values) - 1)
+            left_idx = np.clip(pos - 1, 0, len(idx_values) - 1)
+            right_dist = np.abs(idx_values[right_idx] - target_values)
+            left_dist = np.abs(idx_values[left_idx] - target_values)
+            chosen = np.where(right_dist < left_dist, right_idx, left_idx)
+            result[valid_mask] = chosen.astype(int)
+        return result
+
+    locs = np.asarray(locs, dtype=int)
+    result[valid_mask] = locs[valid_mask]
+    return result

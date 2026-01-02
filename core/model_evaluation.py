@@ -370,3 +370,179 @@ def assess_model_quality(
     
     return should_retrain, reasons, quality_report
 
+
+def auto_tune_parameters(
+    frame: pd.DataFrame,
+    episodes: pd.DataFrame,
+    score_out: Dict[str, Any],
+    regime_quality_ok: bool,
+    cfg: Dict[str, Any],
+    sql_client: Any,
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str,
+    output_manager: Optional[Any] = None,
+    cached_manifest: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Perform autonomous parameter tuning based on model quality assessment.
+    
+    Evaluates model quality metrics (anomaly rate, drift score, regime quality) and
+    proposes parameter adjustments. Records tuning actions to ACM_ConfigHistory and
+    creates refit requests in ACM_RefitRequests when quality degrades.
+    
+    Args:
+        frame: Scored DataFrame with detector z-scores and fused output
+        episodes: Detected anomaly episodes
+        score_out: Score output dict with silhouette score etc.
+        regime_quality_ok: Whether regime clustering met quality threshold
+        cfg: Configuration dictionary
+        sql_client: SQL client for database writes
+        run_id: Current run identifier
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        output_manager: Optional OutputManager for refit request persistence
+        cached_manifest: Optional cached model manifest for age checks
+    """
+    if not cfg.get("models", {}).get("auto_tune", True):
+        return
+    
+    try:
+        from core.config_history_writer import log_auto_tune_changes
+        
+        # Build regime quality metrics
+        regime_quality_metrics = {
+            "silhouette": score_out.get("silhouette", 0.0),
+            "quality_ok": regime_quality_ok
+        }
+        
+        # Perform full quality assessment
+        should_retrain, reasons, quality_report = assess_model_quality(
+            scores=frame,
+            episodes=episodes,
+            regime_quality=regime_quality_metrics,
+            cfg=cfg,
+            cached_manifest=cached_manifest
+        )
+        
+        # Extract metrics for additional retrain triggers
+        auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
+        if isinstance(auto_retrain_cfg, bool):
+            auto_retrain_cfg = {}
+        
+        # Check anomaly rate trigger
+        anomaly_rate_trigger = False
+        anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
+        current_anomaly_rate = anomaly_metrics.get("anomaly_rate", 0.0)
+        max_anomaly_rate = auto_retrain_cfg.get("max_anomaly_rate", 0.25)
+        if current_anomaly_rate > max_anomaly_rate:
+            anomaly_rate_trigger = True
+            if not should_retrain:
+                reasons = []
+            reasons.append(f"anomaly_rate={current_anomaly_rate:.2%} > {max_anomaly_rate:.2%}")
+            Console.warn(f"Anomaly rate {current_anomaly_rate:.2%} exceeds threshold {max_anomaly_rate:.2%}", 
+                        component="RETRAIN-TRIGGER", equip=equip, 
+                        anomaly_rate=round(current_anomaly_rate, 4), threshold=max_anomaly_rate)
+        
+        # Check drift score trigger
+        drift_score_trigger = False
+        drift_score = quality_report.get("metrics", {}).get("drift_score", 0.0)
+        max_drift_score = auto_retrain_cfg.get("max_drift_score", 2.0)
+        if drift_score > max_drift_score:
+            drift_score_trigger = True
+            if not should_retrain and not anomaly_rate_trigger:
+                reasons = []
+            reasons.append(f"drift_score={drift_score:.2f} > {max_drift_score:.2f}")
+        
+        # Aggregate all retrain triggers
+        needs_retraining = should_retrain or anomaly_rate_trigger or drift_score_trigger
+        
+        if not needs_retraining:
+            return
+        
+        # Auto-tune parameters based on specific issues
+        tuning_actions = []
+        
+        # Issue 1: High detector saturation - Increase clip_z
+        detector_quality = quality_report.get("metrics", {}).get("detector_quality", {})
+        if detector_quality.get("max_saturation_pct", 0) > 5.0:
+            self_tune_cfg = cfg.get("thresholds", {}).get("self_tune", {})
+            raw_clip_z = self_tune_cfg.get("clip_z", 12.0)
+            try:
+                current_clip_z = float(raw_clip_z)
+            except (TypeError, ValueError):
+                current_clip_z = 12.0
+            
+            clip_caps = [
+                self_tune_cfg.get("max_clip_z"),
+                cfg.get("model_quality", {}).get("max_clip_z"),
+                50.0,
+            ]
+            clip_cap = max((float(c) for c in clip_caps if c is not None), default=50.0)
+            clip_cap = max(clip_cap, current_clip_z, 20.0)
+            
+            proposed_clip = round(current_clip_z * 1.2, 2)
+            if proposed_clip <= current_clip_z + 0.05:
+                proposed_clip = current_clip_z + 2.0
+            new_clip_z = min(proposed_clip, clip_cap)
+            
+            if new_clip_z > current_clip_z + 0.05:
+                tuning_actions.append(f"clip_z: {current_clip_z:.2f}->{new_clip_z:.2f}")
+        
+        # Issue 2: High anomaly rate - Increase k_sigma
+        if anomaly_metrics.get("anomaly_rate", 0) > 0.10:
+            raw_k_sigma = cfg.get("episodes", {}).get("cpd", {}).get("k_sigma", 2.0)
+            try:
+                current_k = float(raw_k_sigma)
+            except (TypeError, ValueError):
+                current_k = 2.0
+            new_k = min(round(current_k * 1.1, 3), 4.0)
+            if new_k > current_k + 0.05:
+                tuning_actions.append(f"k_sigma: {current_k:.3f}->{new_k:.3f}")
+        
+        # Issue 3: Low regime quality - Increase k_max
+        regime_metrics = quality_report.get("metrics", {}).get("regime_metrics", {})
+        if regime_metrics.get("silhouette", 1.0) < 0.15:
+            auto_k_cfg = cfg.get("regimes", {}).get("auto_k", {})
+            raw_k_max = auto_k_cfg.get("k_max", cfg.get("regimes", {}).get("k_max", 8))
+            try:
+                current_k_max = int(raw_k_max)
+            except (TypeError, ValueError):
+                current_k_max = 8
+            new_k_max = min(current_k_max + 2, 12)
+            if new_k_max > current_k_max:
+                tuning_actions.append(f"k_max: {current_k_max}->{int(new_k_max)}")
+        
+        if tuning_actions:
+            # Log config changes to ACM_ConfigHistory
+            refit_triggered = False
+            try:
+                if sql_client and run_id:
+                    trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False)
+                    log_auto_tune_changes(
+                        sql_client=sql_client,
+                        equip_id=int(equip_id),
+                        tuning_actions=tuning_actions,
+                        run_id=run_id,
+                        trigger_refit=trigger_refit_on_tune
+                    )
+                    refit_triggered = trigger_refit_on_tune
+            except Exception as log_err:
+                Console.warn(f"Failed to log auto-tune changes: {log_err}", component="CONFIG_HIST",
+                            equip=equip, error=str(log_err)[:200])
+            
+            # Consolidated auto-tune log
+            Console.info(f"Auto-tune: {len(tuning_actions)} adjustments ({', '.join(tuning_actions)}) | refit={'triggered' if refit_triggered else 'next_run'}", component="AUTO-TUNE")
+        
+        # Persist refit request for next run via output_manager
+        if output_manager:
+            output_manager.write_refit_request(
+                reasons=reasons,
+                anomaly_rate=current_anomaly_rate if anomaly_rate_trigger else None,
+                drift_score=drift_score if drift_score_trigger else None,
+                regime_quality=regime_metrics.get("silhouette", 0.0),
+            )
+    
+    except Exception as e:
+        Console.warn(f"Autonomous tuning failed: {e}", component="AUTO-TUNE",
+                    equip=equip, error_type=type(e).__name__, error=str(e)[:200])

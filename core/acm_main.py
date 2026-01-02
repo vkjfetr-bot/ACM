@@ -14,10 +14,9 @@ import os
 # NOTE: Parallel fitting with ThreadPoolExecutor removed v10.2.0 - causes BLAS/OpenMP deadlocks
 from typing import Any, Callable, Dict, List, Tuple, Optional, Sequence
 
-# Suppress benign numpy/pandas overflow warnings during variance calculations
-# These occur with large sensor values but produce correct results
-# Use broad pattern to catch all overflow-related warnings
-warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*overflow.*")
+# NOTE: Overflow warnings are NOT suppressed globally (removed v11.1.6)
+# If overflow occurs, it indicates data scaling/unit issues that must be diagnosed.
+# Use local warnings.catch_warnings() ONLY if a benign overflow is expected.
 
 import numpy as np
 import pandas as pd
@@ -54,7 +53,7 @@ from core.omr import OMRDetector  # OMR-02: Overall Model Residual
 from core.config_history_writer import log_auto_tune_changes
 
 # Import the unified output system
-from core.output_manager import OutputManager
+from core.output_manager import OutputManager, write_sql_artifacts
 # Import run metadata writer
 from core.run_metadata_writer import write_run_metadata, extract_run_metadata_from_scores, extract_data_quality_score
 from core.episode_culprits_writer import write_episode_culprits_enhanced
@@ -62,9 +61,24 @@ from core.episode_culprits_writer import write_episode_culprits_enhanced
 # v11.0.0: Pipeline types for data validation
 from core.pipeline_types import DataContract, ValidationResult, PipelineMode
 
-# v11.0.0: Seasonality detection and asset similarity
-from core.seasonality import SeasonalityHandler, SeasonalPattern
-from core.asset_similarity import AssetProfile, AssetSimilarity, TransferResult
+# v11.0.0: Seasonality detection
+from core.seasonality import SeasonalPattern  # detect_and_adjust imported inline
+from core.sensor_attribution import build_contribution_timeline
+from core.adaptive_thresholds import calculate_and_persist_thresholds
+from core.smart_coldstart import seed_baseline
+from core.detector_orchestrator import (
+    score_all_detectors,
+    calibrate_all_detectors,
+    fit_all_detectors,
+    get_detector_enable_flags,
+    rebuild_detectors_from_cache,
+    compute_stable_feature_hash,
+)
+from core.model_persistence import (
+    load_cached_models_with_validation,
+    save_trained_models,
+)
+from core.model_evaluation import auto_tune_parameters
 
 # Observability - Unified OpenTelemetry + logging (v3.0)
 try:
@@ -144,9 +158,16 @@ except ImportError:
 
 # SQL client (optional; only used in SQL mode)
 try:
-    from core.sql_client import SQLClient  # type: ignore
+    from core.sql_client import SQLClient, execute_with_deadlock_retry  # type: ignore
 except Exception:
     SQLClient = None  # type: ignore
+    execute_with_deadlock_retry = None  # type: ignore
+
+# Data utilities (extracted from acm_main.py)
+from core.fast_features import ensure_local_index, deduplicate_index
+
+# Config utilities (extracted from acm_main.py)
+from utils.config_dict import compute_config_signature, load_config as load_config_from_source
 
 # Timer + Logger (safe fallbacks)
 try:
@@ -169,8 +190,8 @@ except ImportError:
 
 
 # Console from observability (backwards compatible)
-# Console is now imported above from core.observability
-from core.observability import Console
+# Console is imported in the try/except block above - DO NOT reimport here
+# as it would defeat the fallback mechanism when observability is unavailable.
 
 # V11: Model lifecycle management
 from core.model_lifecycle import (
@@ -217,10 +238,7 @@ class RuntimeContext:
     output_manager: Any  # OutputManager
     cfg: Dict[str, Any]
     args: argparse.Namespace
-    SQL_MODE: bool
-    BATCH_MODE: bool
     CONTINUOUS_LEARNING: bool
-    batch_num: int
     config_signature: str
     run_start_time: datetime
     pipeline_mode: PipelineMode = PipelineMode.OFFLINE  # v11: online/offline mode
@@ -236,17 +254,6 @@ class RuntimeContext:
     def allows_regime_discovery(self) -> bool:
         """Whether current mode allows new regime discovery."""
         return self.pipeline_mode == PipelineMode.OFFLINE
-
-
-@dataclass
-class DataContext:
-    """Context from data loading phase."""
-    train: pd.DataFrame
-    score: pd.DataFrame
-    train_numeric: pd.DataFrame
-    score_numeric: pd.DataFrame
-    meta: Any
-    coldstart_complete: bool = True
 
 
 @dataclass
@@ -292,40 +299,6 @@ class FusionContext:
     health_stats: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class RunContext:
-    """Consolidated context for error handling and phase tracking.
-    
-    Provides consistent metadata for safe_step() calls and tracks
-    partial failures for DEGRADED outcome determination.
-    """
-    equip: str
-    equip_id: int
-    run_id: Optional[str]
-    cfg: Dict[str, Any]
-    sql_client: Optional[Any]
-    output_manager: Optional[Any]
-    degradations: List[str] = field(default_factory=list)
-    phase_status: Dict[str, str] = field(default_factory=dict)  # phase_name -> "OK"|"FAILED"|"SKIPPED"
-    
-    def mark_degraded(self, step_name: str) -> None:
-        """Record a non-critical failure for DEGRADED outcome tracking."""
-        if step_name not in self.degradations:
-            self.degradations.append(step_name)
-    
-    def get_outcome(self) -> RunOutcome:
-        """Determine run outcome based on degradations."""
-        if self.degradations:
-            return RunOutcome.DEGRADED
-        return RunOutcome.OK
-    
-    def get_error_message(self) -> Optional[str]:
-        """Generate JSON error message for ACM_Runs if degraded."""
-        if not self.degradations:
-            return None
-        return json.dumps({"degraded_steps": self.degradations[:20]}, ensure_ascii=False)
-
-
 def _configure_logging(logging_cfg, args):
     """Apply CLI/config logging overrides and return flags."""
     enable_sql_logging_cfg = (logging_cfg or {}).get("enable_sql_sink")
@@ -345,272 +318,131 @@ def _configure_logging(logging_cfg, args):
     return {"enable_sql_logging": enable_sql_logging}
 
 
-def _nearest_indexer(index: pd.Index, targets: Sequence[Any], label: str = "indexer") -> np.ndarray:
-    """Map target timestamps to index positions using nearest matches.
-
-    Returns an array of index locations where ``-1`` denotes missing targets.
-    Handles non-monotonic indexes by operating on a sorted view and falls back
-    to a NumPy search path when Pandas raises for complex target shapes.
+def _get_equipment_id(equipment_name: str, sql_client: Any) -> int:
     """
-    if index.empty:
-        return np.full(len(targets), -1, dtype=int) if hasattr(targets, "__len__") else np.array([], dtype=int)
-
-    if not hasattr(targets, "__len__"):
-        targets = list(targets)
-
-    if len(targets) == 0:
-        return np.empty(0, dtype=int)
-
-    target_dt = pd.to_datetime(targets, errors="coerce")
-    if isinstance(target_dt, pd.Series):
-        target_dt = target_dt.to_numpy()
-    target_idx = pd.DatetimeIndex(target_dt)
-    result = np.full(target_idx.shape[0], -1, dtype=int)
-
-    valid_mask = ~target_idx.isna()
-    if not valid_mask.any():
-        return result
-
-    work_index = pd.DatetimeIndex(index)
-    if not work_index.is_monotonic_increasing:
-        work_index = work_index.sort_values()
-
-    try:
-        locs = work_index.get_indexer(target_idx, method="nearest")
-    except (ValueError, TypeError) as err:
-        Console.warn(f"[{label}] Falling back to manual nearest mapping: {err}", component="DATA",
-                     indexer_label=label, error_type=type(err).__name__, error=str(err)[:200])
-        idx_values = work_index.asi8
-        target_values = target_idx.asi8[valid_mask]
-        if target_values.size and idx_values.size:
-            pos = np.searchsorted(idx_values, target_values, side="left")
-            right_idx = np.clip(pos, 0, len(idx_values) - 1)
-            left_idx = np.clip(pos - 1, 0, len(idx_values) - 1)
-            right_dist = np.abs(idx_values[right_idx] - target_values)
-            left_dist = np.abs(idx_values[left_idx] - target_values)
-            chosen = np.where(right_dist < left_dist, right_idx, left_idx)
-            result[valid_mask] = chosen.astype(int)
-        return result
-
-    locs = np.asarray(locs, dtype=int)
-    result[valid_mask] = locs[valid_mask]
-    return result
-
-
-def _maybe_write_run_meta_json(local_vars: Dict[str, Any]) -> None:
-    """
-    Legacy file-mode metadata writer stub.
+    Get equipment ID from database. Equipment MUST exist in Equipment table.
     
-    In SQL-only mode (v10+), metadata is written to ACM_Runs table directly.
-    This function is kept for backward compatibility but is a no-op in SQL mode.
-    """
-    # SQL-only mode: metadata goes to ACM_Runs, not meta.json
-    if bool(local_vars.get('SQL_MODE')):
-        return  # No-op in SQL mode
-    # File mode is deprecated; do nothing
-    pass
-
-
-# ===== DRIFT-01: Multi-Feature Drift Detection Helpers =====
-def _compute_drift_trend(drift_series: np.ndarray, window: int = 20) -> float:
-    """
-    Compute drift trend as the slope of linear regression over the last `window` points.
-    Positive slope indicates upward drift, negative indicates downward drift.
-    Returns normalized slope (slope per sample).
-    """
-    if len(drift_series) < 2:
-        return 0.0
-    
-    # Use last `window` points
-    recent = drift_series[-window:] if len(drift_series) >= window else drift_series
-    if len(recent) < 2:
-        return 0.0
-    
-    # Remove NaNs
-    valid_mask = ~np.isnan(recent)
-    if valid_mask.sum() < 2:
-        return 0.0
-    
-    x = np.arange(len(recent))[valid_mask]
-    y = recent[valid_mask]
-    
-    # Linear regression: y = slope * x + intercept
-    try:
-        slope, _ = np.polyfit(x, y, 1)
-        return float(slope)
-    except Exception:
-        return 0.0
-
-
-def _compute_regime_volatility(regime_labels: np.ndarray, window: int = 20) -> float:
-    """
-    Compute regime volatility as the fraction of regime transitions in the last `window` points.
-    Returns value in [0, 1] where 0 = stable, 1 = highly volatile.
-    """
-    if len(regime_labels) < 2:
-        return 0.0
-    
-    # Use last `window` points
-    recent = regime_labels[-window:] if len(regime_labels) >= window else regime_labels
-    if len(recent) < 2:
-        return 0.0
-    
-    # Count transitions (label changes)
-    transitions = np.sum(recent[1:] != recent[:-1])
-    return float(transitions) / (len(recent) - 1)
-
-
-def _get_equipment_id(equipment_name: str) -> int:
-    """
-    Convert equipment name to numeric ID for asset-specific config.
-    Queries the Equipment table in SQL to get the actual EquipID.
+    Args:
+        equipment_name: Equipment code (e.g., "FD_FAN", "GAS_TURBINE")
+        sql_client: Active SQL connection
     
     Returns:
-        0 for global defaults, >0 for specific equipment
+        Equipment ID (always > 0)
+    
+    Raises:
+        RuntimeError: If equipment not found in database
     """
     if not equipment_name:
-        return 0
+        raise RuntimeError("Equipment name is required")
     
-    # Try to query Equipment table for the actual ID (direct connection)
-    try:
-        import pyodbc
-        import configparser
-        from pathlib import Path as P
-        
-        config_path = P(__file__).resolve().parent.parent / "configs" / "sql_connection.ini"
-        if config_path.exists():
-            config = configparser.ConfigParser()
-            config.read(config_path)
-            server = config.get('acm', 'server')
-            database = config.get('acm', 'database')
-            driver = config.get('acm', 'driver', fallback='ODBC Driver 18 for SQL Server')
-            
-            conn_str = f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};Trusted_Connection=yes;TrustServerCertificate=yes"
-            with pyodbc.connect(conn_str) as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equipment_name,))
-                row = cur.fetchone()
-                if row:
-                    return int(row[0])
-    except Exception:
-        pass  # Fall through to hash-based fallback
+    if sql_client is None:
+        raise RuntimeError("SQL client is required to look up equipment ID")
     
-    # Fallback: Generate deterministic ID from equipment name (1-9999 range)
-    # This ensures consistent IDs for equipment not yet in the database
-    import hashlib
-    hash_val = int(hashlib.md5(equipment_name.encode()).hexdigest(), 16)
-    equip_id = (hash_val % 9999) + 1  # Range: 1-9999
+    # Look up equipment ID from database
+    if hasattr(sql_client, 'get_equipment_id'):
+        equip_id = sql_client.get_equipment_id(equipment_name)
+    else:
+        cursor = sql_client.cursor()
+        cursor.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equipment_name,))
+        row = cursor.fetchone()
+        equip_id = row[0] if row else None
+    
+    if not equip_id or equip_id == 0:
+        raise RuntimeError(
+            f"Equipment '{equipment_name}' not found in database.\n"
+            f"Add it to the Equipment table first:\n"
+            f"  INSERT INTO Equipment (EquipCode, EquipName) VALUES ('{equipment_name}', '{equipment_name}')"
+        )
+    
     return equip_id
 
 
-def _load_config(path: Path = None, equipment_name: str = None) -> Dict[str, Any]:
+def _load_config(sql_client: Any, equipment_name: str) -> Dict[str, Any]:
     """
-    Load config from SQL (preferred) or CSV table.
-    Returns ConfigDict that acts like a dict but supports updates.
+    Load config from SQL database (ACM_Config table).
     
-    Priority:
-    1. SQL database (ACM_Config table) - if available
-    2. CSV table (config_table.csv) - required fallback in configs/
+    SQL-only mode: No CSV fallback. If config cannot be loaded from SQL, ACM fails.
+    Config MUST exist for the specific equipment - no global defaults fallback.
     
     Args:
-        path: Optional path to CSV config file (for explicit override)
+        sql_client: Active SQL connection (already validated)
         equipment_name: Name of equipment (e.g., "FD_FAN", "GAS_TURBINE")
-                       If provided, loads asset-specific config overrides
+    
+    Returns:
+        ConfigDict with equipment-specific configuration
+    
+    Raises:
+        RuntimeError: If equipment config not found in SQL
     """
     from utils.config_dict import ConfigDict
-    from utils.sql_config import get_equipment_config
     
-    # Determine equipment ID
-    equip_id = _get_equipment_id(equipment_name) if equipment_name else 0
+    # Equipment name is required
+    if not equipment_name:
+        raise RuntimeError("Equipment name is required to load config")
     
-    # Auto-discover config directory if no explicit path provided
-    if path is None:
-        config_dir = Path("configs")
-        csv_path = config_dir / "config_table.csv"
-    else:
-        config_dir = path.parent
-        csv_path = path if path.suffix == '.csv' else config_dir / "config_table.csv"
+    equip_id = _get_equipment_id(equipment_name, sql_client)
     
-    # Try SQL first (new production mode)
     try:
-        cfg_dict = get_equipment_config(
-            equipment_code=equipment_name,
-            use_sql=True,
-            fallback_to_csv=False  # We'll handle fallback manually
-        )
-        if cfg_dict:
-            equip_label = f"{equipment_name} (EquipID={equip_id})" if equip_id > 0 else "global defaults"
-            Console.info(f"Loaded config from SQL for {equip_label}", component="CFG")
-            return ConfigDict(cfg_dict, mode="sql", equip_id=equip_id)
+        cursor = sql_client.cursor()
+        
+        # Load config for this specific equipment ONLY (no EquipID=0 fallback)
+        cursor.execute("""
+            SELECT ParamPath, ParamValue, ValueType
+            FROM ACM_Config
+            WHERE EquipID = ?
+            ORDER BY ParamPath ASC
+        """, (equip_id,))
+        
+        rows = cursor.fetchall()
+        if not rows:
+            raise RuntimeError(
+                f"No config found in ACM_Config for equipment '{equipment_name}' (EquipID={equip_id}).\n"
+                f"Populate ACM_Config with equipment-specific settings before running ACM."
+            )
+        
+        # Build config dict from rows
+        cfg_dict: Dict[str, Any] = {}
+        for param_path, param_value, value_type in rows:
+            # Parse value based on type
+            if value_type == 'int':
+                value = int(param_value)
+            elif value_type == 'float':
+                value = float(param_value)
+            elif value_type == 'bool':
+                value = param_value.lower() in ('true', '1', 'yes')
+            elif value_type in ('list', 'json'):
+                import json
+                value = json.loads(param_value)
+            else:
+                value = param_value
+            
+            # Handle dotted paths (e.g., "models.pca.n_components" -> nested dict)
+            parts = param_path.split('.')
+            d = cfg_dict
+            for part in parts[:-1]:
+                if part not in d:
+                    d[part] = {}
+                d = d[part]
+            d[parts[-1]] = value
+        
+        Console.info(f"Config loaded from SQL for {equipment_name} (EquipID={equip_id}, {len(rows)} params)", component="CFG")
+        return ConfigDict(cfg_dict, mode="sql", equip_id=equip_id)
+        
     except Exception as e:
-        Console.warn(f"Could not load config from SQL: {e}", component="CFG",
-                     equipment=equipment_name, equip_id=equip_id, error=str(e))
-    
-    # Fallback to CSV table (required)
-    if csv_path.exists():
-        if equip_id > 0:
-            Console.info(f"Loading config for {equipment_name} (EquipID={equip_id}) from {csv_path}", component="CFG")
-        else:
-            Console.info(f"Loading global config from {csv_path}", component="CFG")
-        return ConfigDict.from_csv(csv_path, equip_id=equip_id)
-    
-    # No config found - fail fast
-    raise FileNotFoundError(
-        f"Config file not found: {csv_path}\n"
-        f"Please ensure config_table.csv exists in configs/ directory"
-    )
+        Console.error(f"Failed to load config from SQL: {e}", component="CFG",
+                      equipment=equipment_name, equip_id=equip_id, error=str(e))
+        raise RuntimeError(f"Config loading failed: {e}. Ensure ACM_Config table is populated for EquipID={equip_id}.")
 
 
-def _compute_config_signature(cfg: Dict[str, Any]) -> str:
-    """
-    Compute a deterministic hash of config sections that affect model fitting.
-    
-    DEBT-05: Expanded to include all sections that affect model behavior:
-    - models: Model hyperparameters (PCA, iForest, GMM, OMR, etc.)
-    - features: Feature engineering (window, FFT, etc.)
-    - preprocessing: Data preprocessing settings
-    - detectors: Detector-specific parameters (AR1, HST, etc.)
-    - thresholds: Calibration thresholds (q, self_tune, clip_z)
-    - fusion: Fusion weights and auto-tuning settings
-    - regimes: Regime clustering parameters (k, auto_k, etc.)
-    - episodes: Episode detection thresholds (CPD k_sigma, h_sigma)
-    - drift: Drift detection parameters (p95_threshold, multi_feature)
-    
-    Returns hex string for cache validation.
-    """
-    relevant_keys = ["models", "features", "preprocessing", "detectors", "thresholds", "fusion", "regimes", "episodes", "drift"]
-    config_subset = {k: cfg.get(k) for k in relevant_keys if k in cfg}
-    # Sort keys for determinism
-    config_str = json.dumps(config_subset, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(config_str.encode("utf-8")).hexdigest()[:16]
+# _compute_config_signature MOVED to utils/config_dict.py::compute_config_signature()
+# _ensure_local_index MOVED to core/fast_features.py::ensure_local_index()
 
-
-def _ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure the DataFrame index is a timezone-naive local DatetimeIndex.
-
-    Simplified policy: treat all timestamps as local time and drop any tz info.
-    """
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, errors="coerce")
-    else:
-        # If timezone-aware, strip tz information and keep local wall-clock times
-        try:
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-        except Exception:
-            # Fallback: coerce to naive datetimes
-            df.index = pd.to_datetime(df.index, errors="coerce")
-    return df
 
 # =======================
-# SQL helpers (local)
+# SQL helpers (local) - kept here due to specific integration needs
 # =======================
-def _continuous_learning_enabled(cfg: Dict[str, Any], batch_mode: bool) -> bool:
-    """Check if continuous learning is enabled for this run."""
-    # In batch mode, default to continuous learning unless explicitly disabled
-    if batch_mode:
-        return cfg.get("continuous_learning", {}).get("enabled", True)
-    # In single-run mode, default to disabled
+def _continuous_learning_enabled(cfg: Dict[str, Any]) -> bool:
+    """Check if continuous learning is enabled from config."""
     return cfg.get("continuous_learning", {}).get("enabled", False)
 
 def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
@@ -630,1849 +462,21 @@ def _sql_connect(cfg: Dict[str, Any]) -> Optional[Any]:
         cli.connect()
         return cli
 
-def _calculate_adaptive_thresholds(
-    fused_scores: np.ndarray,
-    cfg: Dict[str, Any],
-    equip_id: int,
-    output_manager: Optional[Any],
-    train_index: Optional[pd.Index] = None,
-    regime_labels: Optional[np.ndarray] = None,
-    regime_quality_ok: bool = False
-) -> Dict[str, Any]:
-    """
-    Calculate adaptive thresholds from fused z-scores.
-    
-    This is a standalone function that can be called independently of the auto-tune section.
-    It supports both global and per-regime thresholds based on configuration.
-    
-    Args:
-        fused_scores: Array of fused z-scores to calculate thresholds from
-        cfg: Configuration dictionary
-        equip_id: Equipment ID for SQL persistence
-        output_manager: OutputManager instance for writing to SQL
-        train_index: Optional datetime index for train data (for metadata)
-        regime_labels: Optional regime labels for per-regime thresholds
-        regime_quality_ok: Whether regime clustering quality is acceptable
-    
-    Returns:
-        Dictionary with threshold results including 'fused_alert_z', 'fused_warn_z', 'method', 'confidence'
-    """
-    try:
-        from core.adaptive_thresholds import calculate_thresholds_from_config
-        
-        threshold_cfg = cfg.get("thresholds", {}).get("adaptive", {})
-        if not threshold_cfg.get("enabled", True):
-            Console.info("Adaptive thresholds disabled - using static config values", component="THRESHOLD")
-            return {}
-        
-        Console.info(f"Calculating adaptive thresholds from {len(fused_scores)} samples...", component="THRESHOLD")
-        
-        # Get regime labels if per_regime enabled and quality OK
-        use_regime_labels = None
-        if threshold_cfg.get("per_regime", False) and regime_quality_ok and regime_labels is not None:
-            use_regime_labels = regime_labels
-        
-        # Calculate thresholds
-        threshold_results = calculate_thresholds_from_config(
-            train_fused_z=fused_scores,
-            cfg=cfg,
-            regime_labels=use_regime_labels
-        )
-        
-        # Store in SQL via OutputManager if available
-        if output_manager is not None and output_manager.sql_client is not None:
-            Console.info(
-                f"Persisting to SQL: equip_id={equip_id} | samples={len(fused_scores)} | "
-                f"method={threshold_results.get('method')} | conf={threshold_results.get('confidence')}",
-                component="THRESHOLD"
-            )
-            config_sig = hashlib.md5(json.dumps(threshold_cfg, sort_keys=True).encode()).hexdigest()[:16]
-            
-            output_manager.write_threshold_metadata(
-                equip_id=equip_id,
-                threshold_type='fused_alert_z',
-                threshold_value=threshold_results['fused_alert_z'],
-                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
-                sample_count=len(fused_scores),
-                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
-                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
-                config_signature=config_sig,
-                notes=f"Auto-calculated from {len(fused_scores)} accumulated samples"
-            )
-            Console.info("SQL write completed for fused_alert_z", component="THRESHOLD")
-            
-            output_manager.write_threshold_metadata(
-                equip_id=equip_id,
-                threshold_type='fused_warn_z',
-                threshold_value=threshold_results['fused_warn_z'],
-                calculation_method=f"{threshold_results['method']}_{threshold_results['confidence']}",
-                sample_count=len(fused_scores),
-                train_start=train_index.min() if train_index is not None and len(train_index) > 0 else None,
-                train_end=train_index.max() if train_index is not None and len(train_index) > 0 else None,
-                config_signature=config_sig,
-                notes=f"Auto-calculated warning threshold (50% of alert)"
-            )
-            Console.info("SQL write completed for fused_warn_z", component="THRESHOLD")
-            
-            # Update cfg to use adaptive thresholds in downstream modules
-            if isinstance(threshold_results['fused_alert_z'], dict):
-                Console.info(f"Per-regime thresholds: {threshold_results['fused_alert_z']}", component="THRESHOLD")
-                # Store in cfg for regimes.update_health_labels() to use
-                if "regimes" not in cfg:
-                    cfg["regimes"] = {}
-                if "health" not in cfg["regimes"]:
-                    cfg["regimes"]["health"] = {}
-                cfg["regimes"]["health"]["fused_alert_z_per_regime"] = threshold_results['fused_alert_z']
-                cfg["regimes"]["health"]["fused_warn_z_per_regime"] = threshold_results['fused_warn_z']
-            else:
-                Console.info(
-                    f"Global thresholds: "
-                    f"alert={threshold_results['fused_alert_z']:.3f}, "
-                    f"warn={threshold_results['fused_warn_z']:.3f} "
-                    f"(method={threshold_results['method']}, conf={threshold_results['confidence']})",
-                    component="THRESHOLD"
-                )
-                # Override static config values with adaptive ones
-                if "regimes" not in cfg:
-                    cfg["regimes"] = {}
-                if "health" not in cfg["regimes"]:
-                    cfg["regimes"]["health"] = {}
-                cfg["regimes"]["health"]["fused_alert_z"] = threshold_results['fused_alert_z']
-                cfg["regimes"]["health"]["fused_warn_z"] = threshold_results['fused_warn_z']
-        else:
-            Console.warn("SQL client not available - thresholds not persisted", component="THRESHOLD",
-                         equip_id=equip_id, has_output_manager=output_manager is not None)
-            Console.warn(f"Debug: output_manager is {'set' if output_manager is not None else 'None'} | "
-                         f"sql_client is {'set' if (getattr(output_manager, 'sql_client', None) is not None) else 'None'} | "
-                         f"SQL_MODE={cfg.get('runtime', {}).get('storage_backend', 'unknown')}",
-                         component="THRESHOLD")
-        
-        return threshold_results
-        
-    except Exception as threshold_e:
-        Console.error(f"Adaptive threshold calculation failed: {threshold_e}", component="THRESHOLD",
-                      equip_id=equip_id, error_type=type(threshold_e).__name__, error=str(threshold_e)[:500])
-        import traceback
-        Console.warn(f"Traceback: {traceback.format_exc()}", component="THRESHOLD",
-                     equip_id=equip_id)
-        Console.warn("Falling back to static config values", component="THRESHOLD",
-                     equip_id=equip_id)
-        return {}
-
-
-def _execute_with_deadlock_retry(cur, sql: str, params: tuple = (), max_retries: int = 3, delay: float = 0.5) -> None:
-    """Execute SQL with automatic retry on deadlock (error 1205)."""
-    import time
-    for attempt in range(max_retries):
-        try:
-            cur.execute(sql, params)
-            return
-        except Exception as e:
-            err_str = str(e)
-            # SQL Server deadlock error code 1205
-            if "1205" in err_str or "deadlock" in err_str.lower():
-                if attempt < max_retries - 1:
-                    time.sleep(delay * (attempt + 1))  # Exponential backoff
-                    continue
-            raise
-
-
 def _sql_start_run(cli: Any, cfg: Dict[str, Any], equip_code: str) -> Tuple[str, pd.Timestamp, pd.Timestamp, int]:
     """
     Start a run by inserting into ACM_Runs table.
-    No stored procedure - direct Python SQL for simpler parameter handling.
+    Delegates to sql_client.start_run() method.
     """
-    import uuid
-    
-    equip_id = _get_equipment_id(equip_code)
     tick_minutes = cfg.get("runtime", {}).get("tick_minutes", 30)
-    config_hash = cfg.get("hash", "")
     
-    default_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=tick_minutes)
-    
-    # Generate RunID
-    run_id = str(uuid.uuid4())
-    window_start = default_start
-    window_end = default_start + pd.Timedelta(minutes=tick_minutes)
-    now = pd.Timestamp.utcnow()
-
-    cur = cli.cursor()
-    try:
-        Console.info(f"Starting run RunID={run_id} (tick={tick_minutes})", component="RUN")
-        
-        # For idempotent re-runs, delete any prior run with same RunID
-        # This handles both forecast tables and ACM_Runs cleanup (v10 consolidated tables)
-        # Use retry wrapper to handle SQL deadlocks during parallel batch runs
-        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_HealthForecast WHERE RunID = ?", (run_id,))
-        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_FailureForecast WHERE RunID = ?", (run_id,))
-        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_RUL WHERE RunID = ?", (run_id,))
-        _execute_with_deadlock_retry(cur, "DELETE FROM dbo.ACM_Runs WHERE RunID = ?", (run_id,))
-        
-        # Direct INSERT into ACM_Runs instead of stored procedure
-        _execute_with_deadlock_retry(
-            cur,
-            """
-            SET QUOTED_IDENTIFIER ON;
-            INSERT INTO dbo.ACM_Runs (RunID, EquipID, StartedAt, ConfigSignature)
-            VALUES (?, ?, ?, ?)
-            """,
-            (run_id, equip_id, now, config_hash)
-        )
-        
-        cli.conn.commit()
-        Console.info(f"Started RunID={run_id} window=[{window_start},{window_end}) equip='{equip_code}' EquipID={equip_id}", component="RUN")
-        return run_id, window_start, window_end, equip_id
-    except Exception as exc:
-        try:
-            cli.conn.rollback()
-        except Exception:
-            pass
-        Console.error(f"Failed to start SQL run: {exc}", component="RUN",
-                      equip_code=equip_code, run_id=run_id, equip_id=equip_id,
-                      error_type=type(exc).__name__, error=str(exc)[:500])
-        raise
-    finally:
-        cur.close()
-
-def _sql_finalize_run(cli: Any, run_id: str, outcome: str, rows_read: int, rows_written: int, err_json: Optional[str] = None) -> None:
-    """
-    Finalize a run by updating ACM_Runs with completion status.
-    Uses direct SQL to bypass stored procedure QUOTED_IDENTIFIER issues.
-    """
-    try:
-        cur = cli.cursor()
-        try:
-            cur.execute(
-                """
-                SET QUOTED_IDENTIFIER ON;
-                UPDATE dbo.ACM_Runs
-                SET CompletedAt = GETUTCDATE(),
-                    TrainRowCount = COALESCE(?, TrainRowCount),
-                    ScoreRowCount = COALESCE(?, ScoreRowCount),
-                    ErrorMessage = COALESCE(?, ErrorMessage)
-                WHERE RunID = ?
-                """,
-                (rows_read, rows_written, err_json, run_id)
-            )
-            cli.conn.commit()
-        finally:
-            cur.close()
-    except Exception as e:
-        # Environments may lack FinalizeRun proc/tables; do not fail the pipeline
-        try:
-            Console.warn(f"FinalizeRun skipped: {e}", component="RUN",
-                         run_id=run_id, error_type=type(e).__name__, error=str(e)[:200])
-        except Exception:
-            pass
-
-
-def _score_all_detectors(
-    data: pd.DataFrame,
-    ar1_detector: Optional[Any],
-    pca_detector: Optional[Any],
-    iforest_detector: Optional[Any],
-    gmm_detector: Optional[Any],
-    omr_detector: Optional[Any],
-    ar1_enabled: bool = True,
-    pca_enabled: bool = True,
-    iforest_enabled: bool = True,
-    gmm_enabled: bool = True,
-    omr_enabled: bool = True,
-    pca_cached: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-    return_omr_contributions: bool = True,
-) -> Tuple[pd.DataFrame, Optional[Any]]:
-    """
-    Score all enabled detectors and return raw scores frame.
-    
-    Args:
-        data: DataFrame with numeric features to score
-        *_detector: Detector instances (or None if not fitted)
-        *_enabled: Whether each detector is enabled
-        pca_cached: Optional tuple of (pca_spe, pca_t2) cached scores
-        return_omr_contributions: Whether to return OMR contributions
-    
-    Returns:
-        Tuple of (frame with raw scores, omr_contributions or None)
-    """
-    frame = pd.DataFrame(index=data.index)
-    omr_contributions_data = None
-    
-    # AR1 Detector
-    if ar1_enabled and ar1_detector:
-        res = ar1_detector.score(data)
-        frame["ar1_raw"] = pd.Series(res, index=frame.index).fillna(0)
-        Console.info(f"AR1 detector scored (samples={len(data)})", component="AR1", samples=len(data))
-    
-    # PCA Subspace Detector
-    if pca_enabled and pca_detector:
-        if pca_cached is not None:
-            pca_spe, pca_t2 = pca_cached
-            Console.info(f"Using cached PCA scores (samples={len(data)})", component="PCA", samples=len(data))
-        else:
-            pca_spe, pca_t2 = pca_detector.score(data)
-            Console.info(f"PCA detector scored (samples={len(data)})", component="PCA", samples=len(data))
-        frame["pca_spe"] = pd.Series(pca_spe, index=frame.index).fillna(0)
-        frame["pca_t2"] = pd.Series(pca_t2, index=frame.index).fillna(0)
-    
-    # Isolation Forest Detector
-    if iforest_enabled and iforest_detector:
-        res = iforest_detector.score(data)
-        frame["iforest_raw"] = pd.Series(res, index=frame.index).fillna(0)
-        Console.info(f"IForest detector scored (samples={len(data)})", component="IFOREST", samples=len(data))
-    
-    # GMM Detector
-    if gmm_enabled and gmm_detector:
-        res = gmm_detector.score(data)
-        frame["gmm_raw"] = pd.Series(res, index=frame.index).fillna(0)
-        Console.info(f"GMM detector scored (samples={len(data)})", component="GMM", samples=len(data))
-    
-    # OMR Detector
-    if omr_enabled and omr_detector:
-        if return_omr_contributions:
-            omr_z, omr_contributions = omr_detector.score(data, return_contributions=True)
-            omr_contributions_data = omr_contributions
-        else:
-            omr_z = omr_detector.score(data, return_contributions=False)
-        frame["omr_raw"] = pd.Series(omr_z, index=frame.index).fillna(0)
-        Console.info(f"OMR detector scored (samples={len(data)})", component="OMR", samples=len(data))
-    
-    return frame, omr_contributions_data
-
-
-def _calibrate_all_detectors(
-    train_frame: pd.DataFrame,
-    score_frame: pd.DataFrame,
-    cal_q: float,
-    self_tune_cfg: Dict[str, Any],
-    fit_regimes: Optional[np.ndarray],
-    transform_regimes: Optional[np.ndarray],
-    omr_enabled: bool = True,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """
-    Fit calibrators on TRAIN data and transform SCORE data.
-    
-    Args:
-        train_frame: DataFrame with raw scores from train data
-        score_frame: DataFrame with raw scores from score data (will be modified)
-        cal_q: Calibration quantile (e.g., 0.98)
-        self_tune_cfg: Self-tuning configuration dict
-        fit_regimes: Regime labels for training (or None)
-        transform_regimes: Regime labels for scoring (or None)
-        omr_enabled: Whether OMR detector is enabled
-    
-    Returns:
-        Tuple of (score_frame with z-scores added, dict of calibrators)
-    """
-    calibrators = {}
-    
-    # Define calibration mappings: (raw_col, z_col, name)
-    calibration_spec = [
-        ("ar1_raw", "ar1_z", "ar1_z"),
-        ("pca_spe", "pca_spe_z", "pca_spe_z"),
-        ("pca_t2", "pca_t2_z", "pca_t2_z"),
-        ("iforest_raw", "iforest_z", "iforest_z"),
-        ("gmm_raw", "gmm_z", "gmm_z"),
-    ]
-    if omr_enabled:
-        calibration_spec.append(("omr_raw", "omr_z", "omr_z"))
-    
-    for raw_col, z_col, name in calibration_spec:
-        if raw_col in train_frame.columns and raw_col in score_frame.columns:
-            cal = fuse.ScoreCalibrator(q=cal_q, self_tune_cfg=self_tune_cfg, name=name).fit(
-                train_frame[raw_col].to_numpy(copy=False), regime_labels=fit_regimes
-            )
-            score_frame[z_col] = cal.transform(
-                score_frame[raw_col].to_numpy(copy=False), regime_labels=transform_regimes
-            )
-            calibrators[name] = cal
-    
-    return score_frame, calibrators
-
-
-def _fit_all_detectors(
-    train: pd.DataFrame,
-    cfg: Dict[str, Any],
-    ar1_enabled: bool,
-    pca_enabled: bool,
-    iforest_enabled: bool,
-    gmm_enabled: bool,
-    omr_enabled: bool,
-    ar1_detector: Optional[Any] = None,
-    pca_detector: Optional[Any] = None,
-    iforest_detector: Optional[Any] = None,
-    gmm_detector: Optional[Any] = None,
-    omr_detector: Optional[Any] = None,
-    output_manager: Optional[Any] = None,
-    sql_client: Optional[Any] = None,
-    run_id: Optional[str] = None,
-    equip_id: int = 0,
-    equip: str = "",
-    tables_dir: Optional[Path] = None,
-) -> Dict[str, Any]:
-    """
-    Fit all enabled detectors that haven't been loaded from cache.
-    
-    Args:
-        train: Training data DataFrame
-        cfg: Configuration dict
-        ar1_enabled..omr_enabled: Whether each detector is enabled
-        ar1_detector..omr_detector: Existing detectors (skip fitting if not None)
-        output_manager: OutputManager for writing PCA metrics
-        sql_client: SQL client for OMR diagnostics
-        run_id, equip_id, equip: Identifiers for logging/SQL
-        tables_dir: Output directory for diagnostics
-    
-    Returns:
-        Dict with keys:
-            - ar1_detector, pca_detector, iforest_detector, gmm_detector, omr_detector
-            - pca_train_spe, pca_train_t2 (cached PCA scores)
-            - fit_time_sec (total fitting time)
-    """
-    result = {
-        "ar1_detector": ar1_detector,
-        "pca_detector": pca_detector,
-        "iforest_detector": iforest_detector,
-        "gmm_detector": gmm_detector,
-        "omr_detector": omr_detector,
-        "pca_train_spe": None,
-        "pca_train_t2": None,
-        "fit_time_sec": 0.0,
-    }
-    
-    fit_start_time = time.perf_counter()
-    
-    # AR1 Detector
-    if ar1_enabled and result["ar1_detector"] is None:
-        Console.info("Fitting AR1 detector...", component="MODEL")
-        ar1_cfg = cfg.get("models", {}).get("ar1", {}) or {}
-        result["ar1_detector"] = AR1Detector(ar1_cfg=ar1_cfg).fit(train)
-        Console.info(f"AR1 detector fitted (samples={len(train)})", component="AR1", samples=len(train))
-    
-    # PCA Subspace Detector
-    if pca_enabled and result["pca_detector"] is None:
-        Console.info("Fitting PCA detector...", component="MODEL")
-        pca_cfg = cfg.get("models", {}).get("pca", {}) or {}
-        Console.info(f"Fit start: train shape={train.shape}", component="PCA")
-        t_pca_fit = time.perf_counter()
-        result["pca_detector"] = correlation.PCASubspaceDetector(pca_cfg=pca_cfg).fit(train)
-        Console.info(f"Fit complete in {time.perf_counter()-t_pca_fit:.3f}s", component="PCA")
-        Console.info(f"Subspace detector fitted with {result['pca_detector'].pca.n_components_} components.", component="PCA")
-        # Cache TRAIN raw PCA scores to eliminate double computation in calibration
-        result["pca_train_spe"], result["pca_train_t2"] = result["pca_detector"].score(train)
-        Console.info(f"Cached train scores: SPE={len(result['pca_train_spe'])} samples, T²={len(result['pca_train_t2'])} samples", component="PCA")
-        if output_manager is not None:
-            output_manager.write_pca_metrics(pca_detector=result["pca_detector"])
-    
-    # Isolation Forest Detector
-    if iforest_enabled and result["iforest_detector"] is None:
-        Console.info("Fitting IForest detector...", component="MODEL")
-        if_cfg = cfg.get("models", {}).get("iforest", {}) or {}
-        result["iforest_detector"] = outliers.IsolationForestDetector(if_cfg=if_cfg).fit(train)
-        Console.info(f"IForest detector fitted (samples={len(train)}, estimators={if_cfg.get('n_estimators', 100)})", component="IFOREST", samples=len(train))
-    
-    # GMM Detector
-    if gmm_enabled and result["gmm_detector"] is None:
-        Console.info("Fitting GMM detector (may take time with large data)...", component="MODEL")
-        gmm_cfg = cfg.get("models", {}).get("gmm", {}) or {}
-        gmm_cfg.setdefault("covariance_type", "full")
-        gmm_cfg.setdefault("reg_covar", 1e-3)
-        gmm_cfg.setdefault("n_init", 3)
-        gmm_cfg.setdefault("random_state", 42)
-        result["gmm_detector"] = outliers.GMMDetector(gmm_cfg=gmm_cfg).fit(train)
-        Console.info(f"GMM detector fitted (samples={len(train)}, components={gmm_cfg.get('n_components', 1)})", component="GMM", samples=len(train))
-    
-    # OMR Detector
-    if omr_enabled and result["omr_detector"] is None:
-        Console.info("Fitting OMR detector...", component="MODEL")
-        omr_cfg = cfg.get("models", {}).get("omr", {}) or {}
-        result["omr_detector"] = OMRDetector(cfg=omr_cfg).fit(train)
-        # OMR-UPGRADE: Capture diagnostics and write to SQL
-        if result["omr_detector"]._is_fitted and sql_client is not None:
-            try:
-                omr_diagnostics = result["omr_detector"].get_diagnostics()
-                if omr_diagnostics.get("fitted") and output_manager is not None:
-                    diag_df = pd.DataFrame([{
-                        "RunID": run_id,
-                        "EquipID": equip_id,
-                        "ModelType": omr_diagnostics["model_type"],
-                        "NComponents": omr_diagnostics["n_components"],
-                        "TrainSamples": omr_diagnostics["n_samples"],
-                        "TrainFeatures": omr_diagnostics["n_features"],
-                        "TrainResidualStd": omr_diagnostics["train_residual_std"],
-                        "CalibrationStatus": "VALID",
-                        "FitTimestamp": pd.Timestamp.now()
-                    }])
-                    output_manager.write_dataframe(
-                        diag_df,
-                        tables_dir / "omr_diagnostics.csv" if tables_dir else Path("."),
-                        sql_table="ACM_OMR_Diagnostics",
-                        add_created_at=True
-                    )
-                    Console.info(f"Diagnostics written: {omr_diagnostics['model_type'].upper()} model", component="OMR")
-            except Exception as e:
-                Console.warn(f"Failed to write diagnostics: {e}", component="OMR",
-                             equip=equip, error=str(e)[:200])
-        Console.info(f"OMR detector fitted (samples={len(train)}, features={train.shape[1]})", component="OMR", samples=len(train), features=train.shape[1])
-    
-    result["fit_time_sec"] = time.perf_counter() - fit_start_time
-    Console.info(f"All detectors fitted in {result['fit_time_sec']:.2f}s", component="MODEL")
-    
-    return result
-
-
-def _get_detector_enable_flags(cfg: Dict[str, Any]) -> Dict[str, bool]:
-    """
-    Determine which detectors are enabled based on fusion weights.
-    
-    A detector is enabled if its weight in fusion.weights is > 0.
-    
-    Args:
-        cfg: Configuration dict
-    
-    Returns:
-        Dict with keys: ar1_enabled, pca_enabled, iforest_enabled, gmm_enabled, omr_enabled
-    """
-    fusion_cfg = (cfg or {}).get("fusion", {})
-    fusion_weights = fusion_cfg.get("weights", {})
-    
-    flags = {
-        "ar1_enabled": fusion_weights.get("ar1_z", 0.0) > 0,
-        "pca_enabled": fusion_weights.get("pca_spe_z", 0.0) > 0 or fusion_weights.get("pca_t2_z", 0.0) > 0,
-        "iforest_enabled": fusion_weights.get("iforest_z", 0.0) > 0,
-        "gmm_enabled": fusion_weights.get("gmm_z", 0.0) > 0,
-        "omr_enabled": fusion_weights.get("omr_z", 0.0) > 0,
-    }
-    
-    # Log disabled detectors for observability
-    disabled = [name.replace("_enabled", "") for name, enabled in flags.items() if not enabled]
-    if disabled:
-        Console.info(f"Lazy evaluation: skipping disabled detectors: {', '.join(disabled)}", component="PERF")
-    
-    return flags
-
-
-def _deduplicate_index(df: pd.DataFrame, name: str, equip: str = "") -> Tuple[pd.DataFrame, int]:
-    """
-    Remove duplicate timestamps from DataFrame index, keeping the last occurrence.
-    
-    Args:
-        df: DataFrame with potentially duplicate index
-        name: Dataset name for logging (e.g., "TRAIN", "SCORE")
-        equip: Equipment name for logging context
-    
-    Returns:
-        Tuple of (deduplicated DataFrame, count of duplicates removed)
-    
-    Raises:
-        RuntimeError: If duplicates remain after deduplication (should never happen)
-    """
-    dup_count = df.index.duplicated(keep='last').sum()
-    
-    if dup_count > 0:
-        Console.warn(f"Removing {dup_count} duplicate timestamps from {name} data", component="DATA",
-                     equip=equip, duplicates=dup_count, dataset=name)
-        df = df[~df.index.duplicated(keep='last')].sort_index()
-    
-    # Assert uniqueness after deduplication
-    if not df.index.is_unique:
-        raise RuntimeError(f"[DATA] {name} data still has duplicate timestamps after deduplication! "
-                         f"Total: {len(df)}, Unique: {df.index.nunique()}")
-    
-    return df, dup_count
-
-
-def _rebuild_detectors_from_cache(
-    cached_models: Dict[str, Any],
-    cached_manifest: Optional[Dict[str, Any]],
-    cfg: Dict[str, Any],
-    equip: str = ""
-) -> Dict[str, Any]:
-    """
-    Reconstruct detector objects from cached model data.
-    
-    This helper consolidates the logic for rebuilding fitted detector objects
-    from serialized cache data (new persistence system).
-    
-    Args:
-        cached_models: Dictionary containing serialized model data
-        cached_manifest: Manifest with metadata about cached models
-        cfg: Configuration dictionary for model settings
-        equip: Equipment name for logging context
-    
-    Returns:
-        Dictionary containing:
-            - ar1_detector, pca_detector, iforest_detector, gmm_detector, omr_detector
-            - regime_model, regime_quality_ok
-            - feature_medians (col_meds)
-            - success: bool indicating if all critical models loaded
-    """
-    result = {
-        "ar1_detector": None,
-        "pca_detector": None,
-        "iforest_detector": None,
-        "gmm_detector": None,
-        "omr_detector": None,
-        "regime_model": None,
-        "regime_quality_ok": True,
-        "feature_medians": None,
-        "success": False,
-    }
-    
-    try:
-        # AR1 detector
-        if "ar1_params" in cached_models and cached_models["ar1_params"]:
-            ar1_detector = AR1Detector(ar1_cfg={})
-            ar1_detector.phimap = cached_models["ar1_params"]["phimap"]
-            ar1_detector.sdmap = cached_models["ar1_params"]["sdmap"]
-            ar1_detector._is_fitted = True
-            result["ar1_detector"] = ar1_detector
-        
-        # PCA detector
-        if "pca_model" in cached_models and cached_models["pca_model"]:
-            pca_detector = correlation.PCASubspaceDetector(pca_cfg={})
-            pca_detector.pca = cached_models["pca_model"]
-            pca_detector._is_fitted = True
-            result["pca_detector"] = pca_detector
-        
-        # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2
-        
-        # IForest detector
-        if "iforest_model" in cached_models and cached_models["iforest_model"]:
-            iforest_detector = outliers.IsolationForestDetector(if_cfg={})
-            iforest_detector.model = cached_models["iforest_model"]
-            iforest_detector._is_fitted = True
-            result["iforest_detector"] = iforest_detector
-        
-        # GMM detector
-        if "gmm_model" in cached_models and cached_models["gmm_model"]:
-            gmm_detector = outliers.GMMDetector(gmm_cfg={})
-            gmm_detector.model = cached_models["gmm_model"]
-            gmm_detector._is_fitted = True
-            result["gmm_detector"] = gmm_detector
-        
-        # OMR detector
-        if "omr_model" in cached_models and cached_models["omr_model"]:
-            omr_cfg = (cfg.get("models", {}).get("omr", {}) or {})
-            result["omr_detector"] = OMRDetector.from_dict(cached_models["omr_model"], cfg=omr_cfg)
-        
-        # Regime model
-        if "regime_model" in cached_models and cached_models["regime_model"]:
-            from core.regimes import RegimeModel
-            regime_model = RegimeModel()
-            regime_model.model = cached_models["regime_model"]
-            if cached_manifest:
-                result["regime_quality_ok"] = cached_manifest.get("models", {}).get("regimes", {}).get("quality", {}).get("quality_ok", True)
-            # CRITICAL FIX: Validate regime model compatibility
-            if regime_model.model is None:
-                Console.warn("Cached regime model is None; discarding.", component="REGIME", equip=equip)
-                regime_model = None
-            result["regime_model"] = regime_model
-        
-        # Feature medians
-        if "feature_medians" in cached_models and cached_models["feature_medians"] is not None:
-            result["feature_medians"] = cached_models["feature_medians"]
-        
-        # Validate all critical models loaded (MHAL removed v9.1.0)
-        if all([result["ar1_detector"], result["pca_detector"], result["iforest_detector"]]):
-            Console.info("Successfully loaded all models from cache", component="MODEL")
-            result["success"] = True
-        else:
-            missing = []
-            if not result["ar1_detector"]: missing.append("ar1")
-            if not result["pca_detector"]: missing.append("pca")
-            if not result["iforest_detector"]: missing.append("iforest")
-            Console.warn(f"Incomplete model cache, missing: {missing}, retraining required", component="MODEL",
-                         equip=equip, missing_models=missing)
-            # Clear all on failure
-            result["ar1_detector"] = None
-            result["pca_detector"] = None
-            result["iforest_detector"] = None
-            result["gmm_detector"] = None
-            
-    except Exception as e:
-        import traceback
-        Console.warn(f"Failed to reconstruct detectors from cache: {e}", component="MODEL",
-                     equip=equip, error_type=type(e).__name__, error=str(e)[:500])
-        Console.warn(f"Traceback: {traceback.format_exc()}", component="MODEL", equip=equip)
-        # Clear all on exception
-        result["ar1_detector"] = None
-        result["pca_detector"] = None
-        result["iforest_detector"] = None
-        result["gmm_detector"] = None
-    
-    return result
-
-
-def _update_baseline_buffer(
-    score_numeric: pd.DataFrame,
-    sql_client: Any,
-    equip_id: int,
-    cfg: Dict[str, Any],
-    coldstart_complete: bool,
-    equip: str = ""
-) -> bool:
-    """
-    Update the ACM_BaselineBuffer table with latest raw score data.
-    
-    Uses smart refresh logic to avoid writing on every batch:
-    - Always write during coldstart
-    - Write periodically (every N batches) after coldstart
-    - Uses vectorized pandas melt for 100x speedup over loops
-    
-    Args:
-        score_numeric: Raw score DataFrame with sensor columns
-        sql_client: SQL client connection
-        equip_id: Equipment ID for this run
-        cfg: Configuration dictionary
-        coldstart_complete: Whether coldstart phase is complete
-        equip: Equipment name for logging
-    
-    Returns:
-        True if buffer was written, False if skipped
-    """
-    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-    window_hours = float(baseline_cfg.get("window_hours", 72))
-    max_points = int(baseline_cfg.get("max_points", 100000))
-    refresh_interval = int(baseline_cfg.get("refresh_interval_batches", 10))
-    
-    # Determine if we should write baseline buffer this run
-    should_write_buffer = False
-    write_reason = ""
-    recent_run_count = 0
-    
-    if not coldstart_complete:
-        # Coldstart in progress - always write to build baseline
-        should_write_buffer = True
-        write_reason = "coldstart"
-    else:
-        # Models exist - check periodic refresh
-        try:
-            with sql_client.cursor() as cur:
-                run_count_result = cur.execute(
-                    "SELECT COUNT(*) FROM ACM_Runs WHERE EquipID = ? AND CreatedAt > DATEADD(DAY, -7, GETDATE())",
-                    (int(equip_id),)
-                ).fetchone()
-                recent_run_count = run_count_result[0] if run_count_result else 0
-                if recent_run_count == 0 or (recent_run_count % refresh_interval == 0):
-                    should_write_buffer = True
-                    write_reason = f"periodic_refresh (batch {recent_run_count})"
-        except Exception:
-            should_write_buffer = True
-            write_reason = "fallback"
-    
-    if not should_write_buffer:
-        batches_until_refresh = refresh_interval - (recent_run_count % refresh_interval) if refresh_interval > 0 else 0
-        Console.info(f"Skipping buffer write (models exist, next refresh in {batches_until_refresh} batches)", component="BASELINE")
-        return False
-    
-    if not isinstance(score_numeric, pd.DataFrame) or len(score_numeric) == 0:
-        return False
-    
-    # Normalize index to local naive timestamps
-    to_append = score_numeric.copy()
-    try:
-        idx_local = pd.DatetimeIndex(to_append.index).tz_localize(None)
-    except Exception:
-        idx_local = pd.DatetimeIndex(to_append.index)
-    to_append.index = idx_local
-    
-    # OPTIMIZATION v10.2.1: Vectorized pandas melt (100x faster than Python loops)
-    try:
-        to_append_reset = to_append.reset_index()
-        ts_col = to_append_reset.columns[0]
-        
-        long_df = to_append_reset.melt(
-            id_vars=[ts_col],
-            var_name='SensorName',
-            value_name='SensorValue'
-        )
-        
-        long_df = long_df.dropna(subset=['SensorValue'])
-        long_df['EquipID'] = int(equip_id)
-        long_df['DataQuality'] = None
-        long_df[ts_col] = pd.to_datetime(long_df[ts_col]).dt.tz_localize(None)
-        long_df = long_df.rename(columns={ts_col: 'Timestamp'})
-        long_df = long_df[['EquipID', 'Timestamp', 'SensorName', 'SensorValue', 'DataQuality']]
-        
-        if len(long_df) > 0:
-            baseline_records = list(long_df.itertuples(index=False, name=None))
-            
-            insert_sql = """
-            INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
-            VALUES (?, ?, ?, ?, ?)
-            """
-            with sql_client.cursor() as cur:
-                cur.fast_executemany = True
-                cur.executemany(insert_sql, baseline_records)
-            sql_client.conn.commit()
-            Console.info(f"Wrote {len(baseline_records)} records to ACM_BaselineBuffer ({write_reason})", component="BASELINE")
-            
-            # Run cleanup procedure
-            try:
-                with sql_client.cursor() as cur:
-                    cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
-                              (int(equip_id), int(window_hours), max_points))
-                sql_client.conn.commit()
-            except Exception as cleanup_err:
-                Console.warn(f"Cleanup procedure failed: {cleanup_err}", component="BASELINE",
-                             equip=equip, equip_id=equip_id, error=str(cleanup_err)[:200])
-            
-            return True
-            
-    except Exception as sql_err:
-        Console.warn(f"SQL write to ACM_BaselineBuffer failed: {sql_err}", component="BASELINE",
-                     equip=equip, equip_id=equip_id, error=str(sql_err)[:200])
-        try:
-            sql_client.conn.rollback()
-        except:
-            pass
-    
-    return False
-
-
-def _compute_stable_feature_hash(train: pd.DataFrame, equip: str = "") -> Optional[str]:
-    """
-    Compute a stable hash for training features.
-    
-    Hash is stable across pandas versions and OS by including:
-    - Shape (rows x cols)
-    - Sorted column dtypes
-    - SHA256 of sorted column data bytes
-    
-    Args:
-        train: Training DataFrame to hash
-        equip: Equipment name for logging
-        
-    Returns:
-        16-character hex hash string, or None if computation fails
-    """
-    try:
-        # Shape + dtypes for cross-platform consistency
-        shape_str = f"{train.shape[0]}x{train.shape[1]}"
-        dtype_str = "|".join(f"{col}:{train[col].dtype}" for col in sorted(train.columns))
-        
-        # Sort columns for deterministic hashing
-        train_sorted = train[sorted(train.columns)]
-        data_bytes = train_sorted.to_numpy(dtype=np.float64, copy=False).tobytes()
-        data_hash = hashlib.sha256(data_bytes).hexdigest()
-        
-        # Combine all fingerprints
-        combined = f"{shape_str}|{dtype_str}|{data_hash}"
-        feature_hash = hashlib.sha256(combined.encode('utf-8')).hexdigest()[:16]
-        Console.info(f"Stable hash computed: {feature_hash} (shape={shape_str})", component="HASH")
-        return feature_hash
-    except Exception as e:
-        Console.warn(f"Hash computation failed: {e}", component="HASH",
-                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-        return None
-
-
-def _check_refit_request(sql_client: Optional[Any], equip_id: int, equip: str = "") -> bool:
-    """
-    Check for pending refit requests in ACM_RefitRequests table.
-    
-    If a pending request exists, acknowledges it so it won't be processed again
-    on the next run.
-    
-    Args:
-        sql_client: SQL client connection
-        equip_id: Equipment ID to check
-        equip: Equipment name for logging
-        
-    Returns:
-        True if a pending refit request was found and acknowledged, False otherwise
-    """
-    if not sql_client:
-        return False
-        
-    try:
-        with sql_client.cursor() as cur:
-            cur.execute(
-                """
-                IF OBJECT_ID(N'[dbo].[ACM_RefitRequests]', N'U') IS NOT NULL
-                BEGIN
-                    SELECT TOP 1 RequestID, RequestedAt, Reason
-                    FROM [dbo].[ACM_RefitRequests]
-                    WHERE EquipID = ? AND Acknowledged = 0
-                    ORDER BY RequestedAt DESC
-                END
-                """,
-                (int(equip_id),),
-            )
-            row = cur.fetchone()
-            if row:
-                Console.warn(f"SQL refit request found: id={row[0]} at {row[1]}", component="MODEL",
-                             equip=equip, refit_request_id=row[0])
-                # Acknowledge refit so it is not re-used next run
-                cur.execute(
-                    "UPDATE [dbo].[ACM_RefitRequests] SET Acknowledged = 1, AcknowledgedAt = SYSUTCDATETIME() WHERE RequestID = ?",
-                    (int(row[0]),),
-                )
-                return True
-    except Exception as rf_err:
-        Console.warn(f"Refit check failed: {rf_err}", component="MODEL",
-                     equip=equip, error_type=type(rf_err).__name__, error=str(rf_err)[:200])
-    
-    return False
-
-
-def _load_cached_models_with_validation(
-    equip: str,
-    art_root: Path,
-    sql_client: Optional[Any],
-    equip_id: int,
-    SQL_MODE: bool,
-    dual_mode: bool,
-    cfg: Dict[str, Any],
-    train_columns: List[str],
-) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """
-    Load cached models from persistence and validate them.
-    
-    Args:
-        equip: Equipment name
-        art_root: Artifact root directory
-        sql_client: SQL client connection
-        equip_id: Equipment ID
-        SQL_MODE: Whether running in SQL-only mode
-        dual_mode: Whether running in dual-write mode
-        cfg: Configuration dictionary
-        train_columns: Current training column names for validation
-        
-    Returns:
-        Tuple of (cached_models dict, cached_manifest dict) or (None, None) if invalid
-    """
-    try:
-        from core.model_persistence import ModelVersionManager
-        
-        model_manager = ModelVersionManager(
-            equip=equip, 
-            artifact_root=art_root,
-            sql_client=sql_client if SQL_MODE or dual_mode else None,
-            equip_id=equip_id if SQL_MODE or dual_mode else None
-        )
-        cached_models, cached_manifest = model_manager.load_models()
-        
-        if cached_models and cached_manifest:
-            # Validate cache
-            current_config_sig = cfg.get("_signature", "unknown")
-            current_sensors = train_columns
-            
-            is_valid, invalid_reasons = model_manager.check_model_validity(
-                manifest=cached_manifest,
-                current_config_signature=current_config_sig,
-                current_sensors=current_sensors
-            )
-            
-            if is_valid:
-                # Enhanced logging for cached model acceptance
-                Console.info(f"Using cached models from v{cached_manifest['version']}", component="MODEL")
-                Console.info(f"Cache created: {cached_manifest.get('created_at', 'unknown')}", component="MODEL")
-                Console.info(f"Config signature: {current_config_sig[:16]}... (unchanged)", component="MODEL")
-                Console.info(f"Sensor count: {len(current_sensors)} (matching cached)", component="MODEL")
-                if 'created_at' in cached_manifest:
-                    from datetime import datetime
-                    try:
-                        created_at = datetime.fromisoformat(cached_manifest['created_at'])
-                        age_hours = (datetime.now() - created_at).total_seconds() / 3600
-                        Console.info(f"Model age: {age_hours:.1f}h ({age_hours/24:.1f}d)", component="MODEL")
-                    except Exception:
-                        pass
-                return cached_models, cached_manifest
-            else:
-                # Enhanced logging for retrain trigger reasons
-                Console.warn(f"Cached models invalid, retraining required:", component="MODEL",
-                             equip=equip, invalid_reason_count=len(invalid_reasons))
-                for reason in invalid_reasons:
-                    Console.warn(f"- {reason}", component="MODEL", equip=equip)
-                return None, None
-        return None, None
-    except Exception as e:
-        Console.warn(f"Failed to load cached models: {e}", component="MODEL",
-                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-        return None, None
-
-
-def _save_trained_models(
-    equip: str,
-    art_root: Path,
-    sql_client: Optional[Any],
-    equip_id: int,
-    SQL_MODE: bool,
-    dual_mode: bool,
-    cfg: Dict[str, Any],
-    train: pd.DataFrame,
-    ar1_detector: Any,
-    pca_detector: Any,
-    iforest_detector: Any,
-    gmm_detector: Any,
-    omr_detector: Any,
-    regime_model: Any,
-    col_meds: Optional[Dict[str, float]],
-    regime_quality_ok: bool,
-    T: Any,
-    run_id: str = "",
-) -> Optional[int]:
-    """Save all trained models with versioning and metadata.
-    
-    Creates a complete snapshot of trained detectors including metadata
-    like training duration, config signature, and regime quality metrics.
-    
-    Returns:
-        Model version number if successful, None on failure.
-    """
-    try:
-        from core.model_persistence import ModelVersionManager, create_model_metadata
-        
-        model_manager = ModelVersionManager(
-            equip=equip,
-            artifact_root=art_root,
-            sql_client=sql_client if SQL_MODE or dual_mode else None,
-            equip_id=equip_id if SQL_MODE or dual_mode else None
-        )
-        
-        # Collect all models (MHAL removed v9.1.0 - redundant with PCA-T2)
-        models_to_save = {
-            "ar1_params": {"phimap": ar1_detector.phimap, "sdmap": ar1_detector.sdmap} if hasattr(ar1_detector, 'phimap') else None,
-            "pca_model": pca_detector.pca if hasattr(pca_detector, 'pca') else None,
-            "iforest_model": iforest_detector.model if hasattr(iforest_detector, 'model') else None,
-            "gmm_model": gmm_detector.model if hasattr(gmm_detector, 'model') else None,
-            "omr_model": omr_detector.to_dict() if omr_detector and omr_detector._is_fitted else None,
-            "regime_model": regime_model.model if regime_model and hasattr(regime_model, 'model') else None,
-            "feature_medians": col_meds,
-        }
-        
-        # Calculate training duration from timing sections
-        training_duration_s = None
-        try:
-            fit_sections = ["fit.ar1", "fit.pca_subspace", "fit.iforest", "fit.gmm", "fit.omr", "regimes.fit"]
-            total_fit_time = sum([T.timings.get(sec, {}).get("elapsed", 0.0) for sec in fit_sections])
-            if total_fit_time > 0:
-                training_duration_s = total_fit_time
-        except Exception:
-            pass
-        
-        # Create metadata
-        regime_quality_metrics = {
-            "quality_ok": regime_quality_ok,
-            "n_regimes": regime_model.n_clusters if regime_model else 0  # v11.1.0: Property handles HDBSCAN/GMM
-        }
-        
-        with T.section("models.persistence.metadata"):
-            metadata = create_model_metadata(
-                config_signature=cfg.get("_signature", "unknown"),
-                train_data=train,
-                models_dict=models_to_save,
-                regime_quality=regime_quality_metrics,
-                training_duration_s=training_duration_s
-            )
-        
-        # Save models
-        model_version = model_manager.save_models(
-            models=models_to_save,
-            metadata=metadata
-        )
-        
-        Console.info(f"Saved all trained models to version v{model_version}", component="MODEL")
-        return model_version
-        
-    except Exception as e:
-        import traceback
-        Console.warn(f"Failed to save models: {e}", component="MODEL",
-                     equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
-        traceback.print_exc()
-        return None
-
-
-def _write_fusion_metrics(
-    sql_client: Optional[Any],
-    output_manager: Any,
-    fusion_weights_used: Dict[str, float],
-    tuning_diagnostics: Dict[str, Any],
-    previous_weights: Optional[Dict[str, float]],
-    run_id: str,
-    equip_id: int,
-    equip: str = "",
-    SQL_MODE: bool = True,
-) -> bool:
-    """Write fusion tuning diagnostics and metrics to SQL.
-    
-    Writes fusion weight metrics, quality scores, and sample counts
-    to ACM_RunMetrics table in EAV (Entity-Attribute-Value) format.
-    
-    Returns:
-        True if metrics were written successfully, False otherwise.
-    """
-    if not tuning_diagnostics or not sql_client:
-        return False
-        
-    try:
-        # Add timestamp and metadata
-        tuning_diagnostics["timestamp"] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-        tuning_diagnostics["warm_started"] = previous_weights is not None
-        if previous_weights:
-            tuning_diagnostics["previous_weights"] = previous_weights
-        
-        # Build metrics rows
-        metrics_rows = []
-        for detector_name, weight in fusion_weights_used.items():
-            det_metrics = tuning_diagnostics.get("detector_metrics", {}).get(detector_name, {})
-            metrics_rows.append({
-                "detector_name": detector_name,
-                "weight": weight,
-                "n_samples": det_metrics.get("n_samples", 0),
-                "quality_score": det_metrics.get("quality_score", 0.0),
-                "tuning_method": tuning_diagnostics.get("method", "unknown"),
-                "timestamp": tuning_diagnostics["timestamp"]
-            })
-        
-        if not metrics_rows:
-            return False
-            
-        # Write via output_manager (unified output)
-        metrics_df = pd.DataFrame(metrics_rows)
-        output_manager.write_dataframe(metrics_df, "fusion_metrics")
-        
-        # SQL mode: ACM_RunMetrics bulk insert (EAV format)
-        if sql_client and SQL_MODE:
-            timestamp_now = pd.Timestamp.now()
-            insert_records = [
-                (run_id, int(equip_id), f"fusion.weight.{row['detector_name']}", 
-                 float(row['weight']), timestamp_now)
-                for row in metrics_rows
-            ] + [
-                (run_id, int(equip_id), f"fusion.quality.{row['detector_name']}", 
-                 float(row['quality_score']), timestamp_now)
-                for row in metrics_rows
-            ] + [
-                (run_id, int(equip_id), f"fusion.n_samples.{row['detector_name']}", 
-                 float(row['n_samples']), timestamp_now)
-                for row in metrics_rows
-            ]
-            
-            insert_sql = """
-                INSERT INTO dbo.ACM_RunMetrics 
-                (RunID, EquipID, MetricName, MetricValue, Timestamp)
-                VALUES (?, ?, ?, ?, ?)
-            """
-            try:
-                with sql_client.cursor() as cur:
-                    cur.fast_executemany = True
-                    cur.executemany(insert_sql, insert_records)
-                sql_client.conn.commit()
-                Console.info(f"Saved fusion metrics -> SQL:ACM_RunMetrics ({len(insert_records)} records)", component="TUNE")
-                return True
-            except Exception as sql_e:
-                Console.warn(f"Failed to write fusion metrics to SQL: {sql_e}", component="TUNE",
-                             equip=equip, run_id=run_id, error=str(sql_e)[:200])
-                return False
-    except Exception as e:
-        Console.warn(f"Failed to save fusion diagnostics: {e}", component="TUNE",
-                     equip=equip, error=str(e)[:200])
-        return False
-
-
-def _log_dropped_features(
-    sql_client: Optional[Any],
-    cols_to_drop: List[str],
-    all_nan_cols: List[str],
-    col_meds: pd.Series,
-    feat_stds: pd.Series,
-    run_id: str,
-    equip_id: int,
-    equip: str = "",
-) -> bool:
-    """Log dropped features to ACM_FeatureDropLog SQL table.
-    
-    Records which features were dropped during imputation and why
-    (all_NaN or low_variance).
-    
-    Returns:
-        True if logging succeeded, False otherwise.
-    """
-    if not sql_client or not cols_to_drop:
-        return False
-        
-    try:
-        drop_records = []
-        for col in cols_to_drop:
-            reason = "all_NaN" if col in all_nan_cols else "low_variance"
-            # Use std value as the drop_value (threshold comparison)
-            std_val = feat_stds.get(col) if col in feat_stds.index else None
-            drop_value = float(std_val) if std_val is not None and not pd.isna(std_val) else None
-            drop_records.append({
-                "feature": str(col),
-                "reason": reason,
-                "drop_value": drop_value,
-            })
-        
-        if drop_records:
-            # Schema: RunID, EquipID, FeatureName, DropReason, DropValue, Threshold, CreatedAt
-            insert_records = [
-                (run_id, int(equip_id), rec["feature"], rec["reason"],
-                 rec["drop_value"], None)  # Threshold is NULL
-                for rec in drop_records
-            ]
-            insert_sql = """
-                INSERT INTO dbo.ACM_FeatureDropLog 
-                (RunID, EquipID, FeatureName, DropReason, DropValue, Threshold)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """
-            with sql_client.cursor() as cur:
-                cur.fast_executemany = True
-                cur.executemany(insert_sql, insert_records)
-            sql_client.conn.commit()
-            Console.info(f"Logged {len(drop_records)} dropped features -> SQL:ACM_FeatureDropLog", component="FEAT")
-            return True
-    except Exception as e:
-        Console.warn(f"Feature drop logging failed: {e}", component="FEAT",
-                     equip=equip, error=str(e)[:200])
-        return False
-
-
-def _write_data_quality(
-    sql_client: Optional[Any],
-    records: List[Dict[str, Any]],
-    run_id: str,
-    equip_id: int,
-    equip: str = "",
-) -> bool:
-    """Write data quality metrics to ACM_DataQuality SQL table.
-    
-    This helper writes per-sensor data quality statistics including:
-    - Row counts, null counts, null percentages for train and score windows
-    - Standard deviation (variance indicator)
-    - Longest gap (consecutive nulls) and flatline spans
-    - Time range (min/max timestamps)
-    - Interpolation method and sampling rate
-    - Notes (low variance, all nulls, flatline warnings)
-    
-    Args:
-        sql_client: SQL client with cursor() context manager
-        records: List of per-sensor data quality dictionaries
-        run_id: Current run UUID
-        equip_id: Equipment ID
-        equip: Equipment name for logging
-        
-    Returns:
-        True if write succeeded, False otherwise
-    """
-    if not sql_client or not records:
-        return False
-        
-    try:
-        insert_records = [
-            (
-                rec["sensor"],
-                rec.get("train_count", 0),
-                rec.get("train_nulls", 0),
-                rec.get("train_null_pct", 0.0),
-                rec.get("train_std", 0.0),
-                rec.get("train_longest_gap"),
-                rec.get("train_flatline_span"),
-                rec.get("train_min_ts"),
-                rec.get("train_max_ts"),
-                rec.get("score_count", 0),
-                rec.get("score_nulls", 0),
-                rec.get("score_null_pct", 0.0),
-                rec.get("score_std", 0.0),
-                rec.get("score_longest_gap"),
-                rec.get("score_flatline_span"),
-                rec.get("score_min_ts"),
-                rec.get("score_max_ts"),
-                rec.get("interp_method"),
-                rec.get("sampling_secs"),
-                rec.get("notes"),
-                run_id,
-                int(equip_id),
-                "data_quality",
-                "OK"  # CheckResult: default OK unless issues detected
-            )
-            for rec in records
-        ]
-        insert_sql = """
-            INSERT INTO dbo.ACM_DataQuality 
-            (sensor, train_count, train_nulls, train_null_pct, train_std, 
-             train_longest_gap, train_flatline_span, train_min_ts, train_max_ts,
-             score_count, score_nulls, score_null_pct, score_std,
-             score_longest_gap, score_flatline_span, score_min_ts, score_max_ts,
-             interp_method, sampling_secs, notes,
-             RunID, EquipID, CheckName, CheckResult)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        with sql_client.cursor() as cur:
-            cur.fast_executemany = True
-            cur.executemany(insert_sql, insert_records)
-        sql_client.conn.commit()
-        Console.info(f"Wrote data quality summary -> SQL:ACM_DataQuality ({len(records)} sensors)", component="DATA")
-        return True
-    except Exception as e:
-        Console.warn(f"Failed to write data quality to SQL: {e}", component="DATA",
-                     equip=equip, run_id=run_id, error=str(e)[:200])
-        return False
-
-
-def _normalize_episodes_schema(
-    episodes: pd.DataFrame,
-    frame: pd.DataFrame,
-    equip: str = "",
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Normalize episodes DataFrame schema for report/export.
-    
-    This helper ensures episodes have consistent columns and computes:
-    - episode_id (if missing)
-    - start_ts/end_ts from frame index
-    - regime labels (majority vote per episode)
-    - regime_state (majority state per episode)
-    - severity (based on regime_state)
-    - duration_s and duration_hours
-    
-    Args:
-        episodes: Raw episodes DataFrame from fusion
-        frame: Scored frame DataFrame with datetime index
-        equip: Equipment name for logging
-        
-    Returns:
-        Tuple of (normalized_episodes, sorted_frame)
-    """
-    # Defensive copy: ensure episodes is a DataFrame before .copy()
-    episodes = (episodes if isinstance(episodes, pd.DataFrame) else pd.DataFrame()).copy()
-    
-    # Ensure required columns exist
-    if "episode_id" not in episodes.columns:
-        episodes.insert(0, "episode_id", np.arange(1, len(episodes) + 1, dtype=int))
-    if "severity" not in episodes.columns:
-        episodes["severity"] = "info"
-    if "regime" not in episodes.columns:
-        episodes["regime"] = ""
-    if "start_ts" not in episodes.columns:
-        episodes["start_ts"] = pd.NaT
-    if "end_ts" not in episodes.columns:
-        episodes["end_ts"] = pd.NaT
-    
-    # Get index series from episodes
-    start_idx_series = episodes.get("start")
-    end_idx_series = episodes.get("end")
-    
-    # Ensure frame is sorted before any indexing operations
-    if not frame.index.is_monotonic_increasing:
-        Console.warn("Sorting frame index for timestamp mapping", component="EPISODE",
-                     equip=equip)
-        frame = frame.sort_index()
-    idx_array = frame.index.to_numpy()
-
-    # Prefer nearest mapping; preserve NaT (avoid clip-to-zero artefacts)
-    if start_idx_series is None:
-        # Deduplicate frame index before episode mapping to prevent aggregation errors
-        if not frame.index.is_unique:
-            Console.warn(f"Deduplicating {len(frame)} - {frame.index.nunique()} = {len(frame) - frame.index.nunique()} duplicate timestamps", component="EPISODES",
-                         equip=equip)
-            frame = frame.groupby(frame.index).first()
-            idx_array = frame.index.to_numpy()
-
-        start_positions = _nearest_indexer(frame.index, episodes["start_ts"], label="EPISODE.start")
-        start_idx_series = pd.Series(start_positions, index=episodes.index, dtype="int64")
-    if end_idx_series is None:
-        end_positions = _nearest_indexer(frame.index, episodes["end_ts"], label="EPISODE.end")
-        end_idx_series = pd.Series(end_positions, index=episodes.index, dtype="int64")
-    
-    start_idx_series = start_idx_series.fillna(-1).astype(int)
-    end_idx_series = end_idx_series.fillna(-1).astype(int)
-    
-    if len(idx_array):
-        start_idx = start_idx_series.clip(-1, len(idx_array) - 1).to_numpy()
-        end_idx = end_idx_series.clip(-1, len(idx_array) - 1).to_numpy()
-        s_idx_safe = np.where(start_idx >= 0, start_idx, 0)
-        e_idx_safe = np.where(end_idx >= 0, end_idx, 0)
-        # Create datetime arrays, use pd.NaT for invalid indices
-        start_times = idx_array[s_idx_safe]
-        end_times = idx_array[e_idx_safe]
-        episodes["start_ts"] = pd.Series(start_times, index=episodes.index, dtype='datetime64[ns]')
-        episodes["end_ts"] = pd.Series(end_times, index=episodes.index, dtype='datetime64[ns]')
-        # Set NaT for invalid indices
-        episodes.loc[start_idx < 0, "start_ts"] = pd.NaT
-        episodes.loc[end_idx < 0, "end_ts"] = pd.NaT
-    else:
-        start_idx = np.zeros(len(episodes), dtype=int)
-        end_idx = np.zeros(len(episodes), dtype=int)
-        episodes["start_ts"] = pd.NaT
-        episodes["end_ts"] = pd.NaT
-
-    # Map regime labels to episodes (majority vote)
-    label_series = frame.get("regime_label")
-    state_series = frame.get("regime_state")
-    if label_series is not None:
-        label_array = label_series.to_numpy()
-        state_array = state_series.to_numpy() if state_series is not None else None
-        regime_vals: List[Any] = []
-        regime_states: List[str] = []
-        for s_idx, e_idx in zip(start_idx, end_idx):
-            if len(label_array) == 0:
-                regime_vals.append(-1)
-                regime_states.append("unknown")
-                continue
-            s_clamped = int(np.clip(s_idx, 0, len(label_array) - 1))
-            e_clamped = int(np.clip(e_idx, 0, len(label_array) - 1))
-            if e_clamped < s_clamped:
-                e_clamped = s_clamped
-            slice_labels = label_array[s_clamped:e_clamped + 1]
-            if slice_labels.size:
-                # Filter out negative labels (UNKNOWN regime = -1) for bincount
-                valid_labels = slice_labels[slice_labels >= 0]
-                if valid_labels.size > 0:
-                    counts = np.bincount(valid_labels.astype(int))
-                    majority_label = int(np.argmax(counts))
-                else:
-                    # All labels are UNKNOWN (-1)
-                    majority_label = -1
-            else:
-                majority_label = -1
-            regime_vals.append(majority_label)
-            if state_array is not None and slice_labels.size:
-                slice_states = state_array[s_clamped:e_clamped + 1]
-                values, counts_arr = np.unique(slice_states, return_counts=True)
-                majority_state = str(values[np.argmax(counts_arr)])
-            else:
-                majority_state = "unknown"
-            regime_states.append(majority_state)
-        episodes["regime"] = regime_vals
-        episodes["regime_state"] = regime_states
-    else:
-        episodes["regime_state"] = "unknown"
-
-    # Map regime_state to severity
-    severity_map = {"critical": "critical", "suspect": "warning", "warning": "warning"}
-    severity_override = episodes["regime_state"].map(lambda s: severity_map.get(str(s)))
-    episodes["severity"] = severity_override.fillna(episodes["severity"])
-
-    # Calculate duration
-    start_ts = pd.to_datetime(episodes["start_ts"], errors="coerce")
-    end_ts = pd.to_datetime(episodes["end_ts"], errors="coerce")
-    episodes["duration_s"] = (end_ts - start_ts).dt.total_seconds()
-    try:
-        episodes["duration_hours"] = episodes["duration_s"].astype(float) / 3600.0
-    except Exception:
-        episodes["duration_hours"] = np.where(
-            pd.notna(episodes.get("duration_s")),
-            episodes.get("duration_s").astype(float) / 3600.0,
-            0.0
-        )
-    
-    # Sort and finalize
-    episodes = episodes.sort_values(["start_ts", "end_ts", "episode_id"]).reset_index(drop=True)
-    episodes["regime"] = episodes["regime"].astype(str)
-    
-    return episodes, frame
-
-
-def _write_pca_artifacts(
-    output_manager: Any,
-    pca_detector: Any,
-    frame: pd.DataFrame,
-    train: pd.DataFrame,
-    run_id: Optional[str],
-    equip_id: int,
-    equip: str,
-    spe_p95_train: float,
-    t2_p95_train: float,
-    cfg: Dict[str, Any],
-) -> Tuple[int, int, int]:
-    """Write PCA model, loadings, and metrics to SQL tables.
-    
-    This helper consolidates all PCA-related SQL writes:
-    - ACM_PCAModel: Model metadata, thresholds, scaler config
-    - ACM_PCALoadings: Component loadings per sensor
-    - ACM_PCAMetrics: P95 SPE/T2 score stats, variance explained
-    
-    Args:
-        output_manager: OutputManager instance for SQL writes
-        pca_detector: PCA detector instance with pca and scaler attributes
-        frame: Scored frame DataFrame with pca_spe and pca_t2 columns
-        train: Training DataFrame with sensor columns
-        run_id: Current run UUID
-        equip_id: Equipment ID
-        equip: Equipment name for logging
-        spe_p95_train: P95 SPE threshold from training data
-        t2_p95_train: P95 T2 threshold from training data
-        cfg: Config dictionary with runtime settings
-        
-    Returns:
-        Tuple of (rows_pca_model, rows_pca_load, rows_pca_metrics)
-    """
-    rows_pca_model = rows_pca_load = rows_pca_metrics = 0
-    
-    try:
-        now_utc = pd.Timestamp.now()
-        pca_model = getattr(pca_detector, "pca", None)
-
-        # PCA Model row (TRAIN window used)
-        var_ratio = getattr(pca_model, "explained_variance_ratio_", None)
-        var_json = json.dumps(var_ratio.tolist()) if var_ratio is not None else "[]"
-
-        # Capture actual scaler type from PCA detector
-        scaler_name = pca_detector.scaler.__class__.__name__ if hasattr(pca_detector, 'scaler') else "StandardScaler"
-        scaler_params = {}
-        if hasattr(pca_detector, 'scaler'):
-            scaler_params["with_mean"] = getattr(pca_detector.scaler, 'with_mean', True)
-            scaler_params["with_std"] = getattr(pca_detector.scaler, 'with_std', True)
-        else:
-            scaler_params = {"with_mean": True, "with_std": True}
-        
-        scaling_spec = json.dumps({"scaler": scaler_name, **scaler_params})
-        model_row = {
-            "RunID": run_id or "",
-            "EquipID": int(equip_id),
-            "EntryDateTime": now_utc,
-            "NComponents": int(getattr(pca_model, "n_components_", getattr(pca_model, "n_components", 0))),
-            "TargetVar": json.dumps({"SPE_P95_train": spe_p95_train, "T2_P95_train": t2_p95_train}),
-            "VarExplainedJSON": var_json,
-            "ScalingSpecJSON": scaling_spec,
-            "ModelVersion": cfg.get("runtime", {}).get("version", "v5.0.0"),
-            "TrainStartEntryDateTime": train.index.min() if len(train.index) else None,
-            "TrainEndEntryDateTime": train.index.max() if len(train.index) else None
-        }
-        rows_pca_model = output_manager.write_pca_model(model_row)
-
-        # PCA Loadings
-        comps = getattr(pca_model, "components_", None)
-        if comps is not None and hasattr(train, "columns"):
-            load_rows = []
-            for k in range(comps.shape[0]):
-                for j, sensor in enumerate(train.columns):
-                    load_rows.append({
-                        "RunID": run_id or "",
-                        "EntryDateTime": now_utc,
-                        "ComponentNo": int(k + 1),
-                        "Sensor": str(sensor),
-                        "Loading": float(comps[k, j])
-                    })
-            df_load = pd.DataFrame(load_rows)
-            rows_pca_load = output_manager.write_pca_loadings(df_load, run_id or "")
-
-        # PCA Metrics
-        spe_p95 = float(np.nanpercentile(frame["pca_spe"].to_numpy(dtype=np.float32), 95)) if "pca_spe" in frame.columns else None
-        t2_p95 = float(np.nanpercentile(frame["pca_t2"].to_numpy(dtype=np.float32), 95)) if "pca_t2" in frame.columns else None
-
-        var90_n = None
-        if var_ratio is not None:
-            csum = np.cumsum(var_ratio)
-            var90_n = int(np.searchsorted(csum, 0.90) + 1)
-        df_metrics = pd.DataFrame([{
-            "RunID": run_id or "",
-            "EntryDateTime": now_utc,
-            "Var90_N": var90_n,
-            "ReconRMSE": None,
-            "P95_ReconRMSE": spe_p95,
-            "Notes": json.dumps({"SPE_P95_score": spe_p95, "T2_P95_score": t2_p95})
-        }])
-        rows_pca_metrics = output_manager.write_pca_metrics(df_metrics, run_id or "")
-    except Exception as e:
-        Console.warn(f"PCA artifacts write skipped: {e}", component="SQL",
-                     equip=equip, run_id=run_id, error=str(e)[:200])
-    
-    return rows_pca_model, rows_pca_load, rows_pca_metrics
-
-
-def _compute_drift_alert_mode(
-    frame: pd.DataFrame,
-    cfg: Dict[str, Any],
-    regime_quality_ok: bool = False,
-    equip: str = "",
-) -> pd.DataFrame:
-    """Compute drift alert mode using multi-feature detection or simple threshold.
-    
-    This helper determines whether the system is in DRIFT mode (gradual degradation
-    requiring retraining) or FAULT mode (transient anomaly) using:
-    - Multi-feature detection: drift trend, fused level, regime volatility with hysteresis
-    - Simple threshold: P95 drift exceeds configured threshold
-    
-    Args:
-        frame: Scored frame DataFrame with drift_z, cusum_z, fused columns
-        cfg: Config dictionary with drift settings
-        regime_quality_ok: Whether regime clustering is of sufficient quality
-        equip: Equipment name for logging
-        
-    Returns:
-        Frame with alert_mode column added ('DRIFT' or 'FAULT')
-    """
-    # Find the drift column
-    drift_col = "cusum_z" if "cusum_z" in frame.columns else ("drift_z" if "drift_z" in frame.columns else None)
-    
-    # Retrieve multi-feature drift configuration
-    drift_cfg = (cfg or {}).get("drift", {})
-    multi_feat_cfg = drift_cfg.get("multi_feature", {})
-    multi_feat_enabled = bool(multi_feat_cfg.get("enabled", False))
-    
-    if drift_col is None:
-        frame["alert_mode"] = "FAULT"
-        return frame
-    
-    try:
-        drift_array = frame[drift_col].to_numpy(dtype=np.float32)
-        
-        if multi_feat_enabled:
-            # DRIFT-01: Multi-feature logic with hysteresis
-            trend_window = int(multi_feat_cfg.get("trend_window", 20))
-            trend_threshold = float(multi_feat_cfg.get("trend_threshold", 0.05))
-            fused_drift_min = float(multi_feat_cfg.get("fused_drift_min", 2.0))
-            fused_drift_max = float(multi_feat_cfg.get("fused_drift_max", 5.0))
-            regime_volatility_max = float(multi_feat_cfg.get("regime_volatility_max", 0.3))
-            hysteresis_on = float(multi_feat_cfg.get("hysteresis_on", 3.0))
-            hysteresis_off = float(multi_feat_cfg.get("hysteresis_off", 1.5))
-            
-            # Compute features
-            drift_trend = _compute_drift_trend(drift_array, window=trend_window)
-            fused_p95 = float(np.nanpercentile(frame["fused"].to_numpy(dtype=np.float32), 95)) if "fused" in frame.columns else 0.0
-            
-            # Compute regime volatility if regime labels exist
-            regime_volatility = 0.0
-            if "regime_label" in frame.columns and regime_quality_ok:
-                regime_labels = frame["regime_label"].to_numpy()
-                regime_volatility = _compute_regime_volatility(regime_labels, window=trend_window)
-            
-            drift_p95 = float(np.nanpercentile(drift_array, 95))
-            
-            # Previous alert mode (for hysteresis) - assume "FAULT" if unavailable
-            prev_alert_mode = "FAULT"
-            
-            # Composite rule for drift detection
-            is_drift_condition = (
-                abs(drift_trend) > trend_threshold and
-                fused_drift_min <= fused_p95 <= fused_drift_max and
-                regime_volatility < regime_volatility_max
-            )
-            
-            # Hysteresis logic
-            if prev_alert_mode == "DRIFT":
-                alert_mode = "DRIFT" if drift_p95 > hysteresis_off else "FAULT"
-            else:
-                alert_mode = "DRIFT" if (drift_p95 > hysteresis_on and is_drift_condition) else "FAULT"
-            
-            frame["alert_mode"] = alert_mode
-            Console.info(
-                f"Multi-feature: {drift_col} P95={drift_p95:.3f}, trend={drift_trend:.4f}, "
-                f"fused_P95={fused_p95:.3f}, regime_vol={regime_volatility:.3f} -> {alert_mode}",
-                component="DRIFT"
-            )
-        else:
-            # Fallback to legacy simple threshold
-            drift_p95 = float(np.nanpercentile(drift_array, 95))
-            drift_threshold = float(drift_cfg.get("p95_threshold", 2.0))
-            frame["alert_mode"] = "DRIFT" if drift_p95 > drift_threshold else "FAULT"
-            Console.info(f"{drift_col} P95={drift_p95:.3f} (threshold={drift_threshold:.1f}) -> alert_mode={frame['alert_mode'].iloc[-1]}", component="DRIFT")
-    except Exception as e:
-        Console.warn(f"Detection failed: {e}", component="DRIFT",
-                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-        frame["alert_mode"] = "FAULT"
-    
-    return frame
-
-
-def _build_data_quality_records(
-    train_numeric: pd.DataFrame,
-    score_numeric: pd.DataFrame,
-    cfg: Dict[str, Any],
-    low_var_threshold: float = 1e-4,
-) -> List[Dict[str, Any]]:
-    """Build per-sensor data quality records for train and score windows.
-    
-    This helper computes quality metrics for each sensor including:
-    - Row counts, null counts, null percentages
-    - Standard deviation (variance indicator)
-    - Longest gap (consecutive nulls)
-    - Flatline spans (consecutive identical values)
-    - Time ranges (min/max timestamps)
-    - Quality notes (low variance, all nulls, flatline warnings)
-    
-    Args:
-        train_numeric: Training data DataFrame
-        score_numeric: Score data DataFrame
-        cfg: Config dictionary with data settings
-        low_var_threshold: Threshold for low-variance detection
-        
-    Returns:
-        List of per-sensor data quality dictionaries
-    """
-    interp_method = str((cfg.get("data", {}) or {}).get("interp_method", "linear"))
-    sampling_secs = (cfg.get("data", {}) or {}).get("sampling_secs", None)
-    
-    # Find common columns
-    common_cols = []
-    if hasattr(train_numeric, "columns") and hasattr(score_numeric, "columns"):
-        common_cols = [c for c in train_numeric.columns if c in score_numeric.columns]
-    
-    def calc_longest_gap(series: pd.Series) -> int:
-        """Calculate longest consecutive null run."""
-        if len(series) == 0:
-            return 0
-        is_null = series.isna()
-        if not is_null.any():
-            return 0
-        null_runs = is_null.astype(int).groupby((~is_null).cumsum()).sum()
-        return int(null_runs.max()) if len(null_runs) > 0 else 0
-    
-    def calc_flatline_span(series: pd.Series) -> int:
-        """Calculate longest consecutive identical value run."""
-        if len(series) == 0:
-            return 0
-        numeric = pd.to_numeric(series, errors='coerce').dropna()
-        if len(numeric) < 2:
-            return 0
-        is_same = (numeric == numeric.shift()).astype(int)
-        flat_runs = is_same.groupby((~is_same.astype(bool)).cumsum()).sum()
-        return int(flat_runs.max()) if len(flat_runs) > 0 else 0
-    
-    records = []
-    for col in common_cols:
-        tr_series = train_numeric[col]
-        sc_series = score_numeric[col]
-        tr_total = int(len(tr_series))
-        sc_total = int(len(sc_series))
-        tr_nulls = int(tr_series.isna().sum())
-        sc_nulls = int(sc_series.isna().sum())
-        tr_std = float(pd.to_numeric(tr_series, errors="coerce").std()) if tr_total else float("nan")
-        sc_std = float(pd.to_numeric(sc_series, errors="coerce").std()) if sc_total else float("nan")
-        
-        tr_longest_gap = calc_longest_gap(tr_series)
-        sc_longest_gap = calc_longest_gap(sc_series)
-        tr_flatline = calc_flatline_span(tr_series)
-        sc_flatline = calc_flatline_span(sc_series)
-        
-        # Format timestamps
-        tr_min_ts = pd.Timestamp(tr_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
-        tr_max_ts = pd.Timestamp(tr_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
-        sc_min_ts = pd.Timestamp(sc_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
-        sc_max_ts = pd.Timestamp(sc_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
-        
-        # Build quality notes
-        note_bits = []
-        if tr_total > 0 and tr_std < low_var_threshold:
-            note_bits.append("low_variance_train")
-        if tr_total > 0 and tr_nulls == tr_total:
-            note_bits.append("all_nulls_train")
-        if sc_total > 0 and sc_nulls == sc_total:
-            note_bits.append("all_nulls_score")
-        if tr_flatline > 100:
-            note_bits.append(f"flatline_train_{tr_flatline}pts")
-        if sc_flatline > 100:
-            note_bits.append(f"flatline_score_{sc_flatline}pts")
-        
-        records.append({
-            "sensor": str(col),
-            "train_count": tr_total,
-            "train_nulls": tr_nulls,
-            "train_null_pct": (100.0 * tr_nulls / tr_total) if tr_total else 0.0,
-            "train_std": tr_std,
-            "train_longest_gap": tr_longest_gap,
-            "train_flatline_span": tr_flatline,
-            "train_min_ts": tr_min_ts,
-            "train_max_ts": tr_max_ts,
-            "score_count": sc_total,
-            "score_nulls": sc_nulls,
-            "score_null_pct": (100.0 * sc_nulls / sc_total) if sc_total else 0.0,
-            "score_std": sc_std,
-            "score_longest_gap": sc_longest_gap,
-            "score_flatline_span": sc_flatline,
-            "score_min_ts": sc_min_ts,
-            "score_max_ts": sc_max_ts,
-            "interp_method": interp_method,
-            "sampling_secs": sampling_secs,
-            "notes": ",".join(note_bits)
-        })
-    
-    return records
-
-
-def _build_health_timeline(
-    frame: pd.DataFrame,
-    cfg: Dict[str, Any],
-    run_id: Optional[str],
-    equip_id: int,
-    equip: str
-) -> Tuple[Optional[pd.DataFrame], int, int]:
-    """
-    Build health timeline DataFrame from fused scores.
-    
-    Computes health index using softer sigmoid formula (v10.1.0), applies
-    exponential smoothing to prevent unrealistic jumps, and adds quality flags.
-    
-    Args:
-        frame: Score DataFrame with 'fused' column (required)
-        cfg: Config dictionary with health.* settings
-        run_id: Run identifier for SQL
-        equip_id: Equipment ID
-        equip: Equipment name for logging
-        
-    Returns:
-        Tuple of (health_df, volatile_count, extreme_count)
-        - health_df: DataFrame ready for ACM_HealthTimeline (or None if no fused column)
-        - volatile_count: Number of volatile transitions detected
-        - extreme_count: Number of extreme anomaly scores detected
-    """
-    if 'fused' not in frame.columns:
-        return None, 0, 0
-    
-    # v10.1.0: Calculate raw health index using softer sigmoid formula
-    # OLD: 100/(1+Z^2) was too aggressive (Z=2.5 gave 14%)
-    # NEW: Sigmoid with z_threshold=5.0, Z=2.5 gives ~50%, Z=5 gives ~15%
-    z_threshold = cfg.get('health', {}).get('z_threshold', 5.0)
-    steepness = cfg.get('health', {}).get('steepness', 1.5)
-    abs_z = np.abs(frame['fused'])
-    normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
-    sigmoid = 1 / (1 + np.exp(-normalized * steepness))
-    raw_health = np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
-    
-    # Apply exponential smoothing to prevent unrealistic jumps
-    # alpha = 0.3 means 30% new value, 70% previous (smooths over ~3 periods)
-    alpha = cfg.get('health', {}).get('smoothing_alpha', 0.3)
-    smoothed_health = pd.Series(raw_health).ewm(alpha=alpha, adjust=False).mean()
-    
-    # Data quality flags based on rate of change
-    health_change = smoothed_health.diff().abs()
-    max_change_per_period = cfg.get('health', {}).get('max_change_per_period', 20.0)
-    quality_flag = np.where(
-        health_change > max_change_per_period,
-        'VOLATILE',
-        'NORMAL'
-    )
-    quality_flag[0] = 'NORMAL'  # First point has no previous value
-    
-    # Check for extreme FusedZ values (data quality issue indicator)
-    extreme_z_threshold = cfg.get('health', {}).get('extreme_z_threshold', 10.0)
-    quality_flag = np.where(
-        np.abs(frame['fused']) > extreme_z_threshold,
-        'EXTREME_ANOMALY',
-        quality_flag
+    run_id, window_start, window_end, equip_id = cli.start_run(
+        cfg=cfg,
+        equip_code=equip_code,
+        deadlock_retry_func=execute_with_deadlock_retry
     )
     
-    health_df = pd.DataFrame({
-        'Timestamp': frame.index,
-        'HealthIndex': smoothed_health,
-        'RawHealthIndex': raw_health,  # Keep unsmoothed for reference
-        'HealthZone': pd.cut(
-            smoothed_health,
-            bins=[-1, 30, 50, 70, 85, 101],
-            labels=['CRITICAL', 'ALERT', 'WATCH', 'CAUTION', 'GOOD']
-        ),
-        'FusedZ': frame['fused'],
-        'QualityFlag': quality_flag,
-        'RunID': run_id,
-        'EquipID': equip_id
-    })
-    
-    # Count quality issues
-    volatile_count = int((quality_flag == 'VOLATILE').sum())
-    extreme_count = int((quality_flag == 'EXTREME_ANOMALY').sum())
-    
-    # Log quality issues
-    if volatile_count > 0:
-        Console.warn(f"{volatile_count} volatile health transitions detected (>{max_change_per_period}% change)", component="HEALTH",
-                     equip=equip, volatile_count=volatile_count, threshold=max_change_per_period)
-    if extreme_count > 0:
-        Console.warn(f"{extreme_count} extreme anomaly scores detected (|Z| > {extreme_z_threshold})", component="HEALTH",
-                     equip=equip, extreme_count=extreme_count, z_threshold=extreme_z_threshold)
-    
-    return health_df, volatile_count, extreme_count
+    Console.info(f"Run started: {equip_code} (ID={equip_id}) | RunID={run_id[:8]} | window=[{window_start},{window_end}) | tick={tick_minutes}m", component="RUN")
+    return run_id, window_start, window_end, equip_id
 
 
 def _build_features(
@@ -2483,635 +487,73 @@ def _build_features(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Build engineered features from raw sensor data.
-    
+
     Transforms raw sensor time series into statistical features using
     fast_features.compute_basic_features(). Handles:
     - Fill value computation from TRAIN only (prevents data leakage)
     - Polars/pandas conversion (handled internally by fast_features)
     - Index preservation
     - Numeric type enforcement
-    
+
     Args:
         train: Training/baseline DataFrame (raw sensors)
         score: Scoring/batch DataFrame (raw sensors)
         cfg: Config dict with features.window setting
         equip: Equipment name for logging
-        
+
     Returns:
         Tuple of (train_features, score_features) DataFrames
     """
     if fast_features is None:
         Console.warn("fast_features not available; returning raw inputs", component="FEAT", equip=equip)
         return train, score
-    
+
     if not cfg.get("runtime", {}).get("phases", {}).get("features", True):
         Console.info("Feature building disabled in config", component="FEAT", equip=equip)
         return train, score
-    
+
     feat_win = int((cfg.get("features", {}) or {}).get("window", 3))
     Console.info(f"Building features with window={feat_win}", component="FEAT", equip=equip)
-    
+
     # Preserve indices
     idx_train = train.index
     idx_score = score.index
-    
+
     # Compute fill values from TRAIN only (prevents data leakage to SCORE)
     train_fill_values = train.select_dtypes(include=[np.number]).median().to_dict()
     Console.info(f"Computed {len(train_fill_values)} fill values from training data", component="FEAT")
-    
+
     # Build features - fast_features handles Polars/pandas internally
     train_feat = fast_features.compute_basic_features(train, window=feat_win)
     score_feat = fast_features.compute_basic_features(score, window=feat_win, fill_values=train_fill_values)
-    
+
     # Normalize to pandas, restore indices, enforce numeric
     if not isinstance(train_feat, pd.DataFrame):
         train_feat = train_feat.to_pandas() if hasattr(train_feat, "to_pandas") else pd.DataFrame(train_feat)
     if not isinstance(score_feat, pd.DataFrame):
         score_feat = score_feat.to_pandas() if hasattr(score_feat, "to_pandas") else pd.DataFrame(score_feat)
-    
+
     train_feat.index = idx_train
     score_feat.index = idx_score
     train_feat = train_feat.apply(pd.to_numeric, errors="coerce")
     score_feat = score_feat.apply(pd.to_numeric, errors="coerce")
-    
+
     Console.info(f"Features built: train={train_feat.shape}, score={score_feat.shape}", component="FEAT")
     return train_feat, score_feat
 
 
-def _impute_features(
-    train: pd.DataFrame,
-    score: pd.DataFrame,
-    low_var_threshold: float,
-    sql_client: Optional[Any],
-    run_id: Optional[str],
-    equip_id: int,
-    equip: str = "",
-) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
-    """
-    Impute missing values and drop unusable columns from feature DataFrames.
-    
-    Handles:
-    - Replace inf with NaN
-    - Fill NaN with train column medians
-    - Align score columns to train columns
-    - Drop all-NaN and low-variance columns
-    - Log dropped features to SQL
-    
-    Args:
-        train: Training features DataFrame
-        score: Scoring features DataFrame
-        low_var_threshold: Minimum std deviation to keep a column
-        sql_client: SQL client for logging dropped features
-        run_id: Run identifier
-        equip_id: Equipment ID
-        equip: Equipment name for logging
-        
-    Returns:
-        Tuple of (train_imputed, score_imputed, dropped_cols)
-    """
-    if not isinstance(train, pd.DataFrame):
-        return train, score, []
-    
-    # Replace inf with NaN
-    train.replace([np.inf, -np.inf], np.nan, inplace=True)
-    score.replace([np.inf, -np.inf], np.nan, inplace=True)
-    
-    Console.info("Imputing non-finite values using train medians", component="FEAT", equip=equip)
-    col_meds = train.median(numeric_only=True)
-    train.fillna(col_meds, inplace=True)
-    
-    # Align score to train columns
-    score = score.reindex(columns=train.columns)
-    score.fillna(col_meds, inplace=True)
-    
-    # Fill remaining NaNs with score medians
-    nan_cols = score.columns[score.isna().any()].tolist()
-    for c in nan_cols:
-        if score[c].dtype.kind in "if":
-            score[c].fillna(score[c].median(), inplace=True)
-    
-    # Find columns to drop: all-NaN or low-variance
-    all_nan_cols = [c for c in train.columns if pd.isna(col_meds.get(c))]
-    feat_stds = train.std(numeric_only=True)
-    low_var_cols = list(feat_stds[feat_stds < low_var_threshold].index)
-    cols_to_drop = list(set(all_nan_cols + low_var_cols))
-    
-    if cols_to_drop:
-        Console.warn(
-            f"Dropping {len(cols_to_drop)} columns ({len(all_nan_cols)} NaN, {len(low_var_cols)} low-var)",
-            component="FEAT", equip=equip, dropped=len(cols_to_drop)
-        )
-        train = train.drop(columns=cols_to_drop)
-        score = score.drop(columns=cols_to_drop)
-        
-        # Log to SQL
-        _log_dropped_features(
-            sql_client=sql_client,
-            cols_to_drop=cols_to_drop,
-            all_nan_cols=all_nan_cols,
-            col_meds=col_meds,
-            feat_stds=feat_stds,
-            run_id=run_id,
-            equip_id=equip_id,
-            equip=equip,
-        )
-    
-    if train.shape[1] == 0:
-        raise RuntimeError("[FEAT] No usable feature columns after imputation")
-    
-    return train, score, cols_to_drop
-
-
-def _seed_baseline(
-    train: pd.DataFrame,
-    score: pd.DataFrame,
-    sql_client: Optional[Any],
-    equip_id: int,
-    cfg: Dict[str, Any],
-    equip: str = "",
-    is_coldstart: bool = False,
-) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str]]:
-    """
-    Seed training baseline when insufficient data available (batch mode).
-    
-    In batch mode, SmartColdstart returns empty train (all data goes to score).
-    This function loads baseline from:
-    1. ACM_BaselineBuffer table (SQL) - cached baseline from previous runs
-    2. First portion of score data (fallback)
-    3. Split score in half if overlap detected
-    
-    Also handles gap bridging when baseline ends before score starts.
-    
-    Args:
-        train: Training DataFrame (may be empty in batch mode)
-        score: Scoring DataFrame
-        sql_client: SQL client for ACM_BaselineBuffer access
-        equip_id: Equipment ID
-        cfg: Config dict with runtime.baseline settings
-        equip: Equipment name for logging
-        is_coldstart: If True, train/score already split from coldstart - skip re-seeding
-        
-    Returns:
-        Tuple of (train, score, source_used) where source_used describes origin
-    """
-    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
-    min_points = int(baseline_cfg.get("min_points", 300))
-    train_rows = len(train) if isinstance(train, pd.DataFrame) else 0
-    
-    # FIX: If this is a coldstart run and train already has data from coldstart split,
-    # don't re-seed from score - that would cause overlap/data leakage!
-    if is_coldstart and train_rows > 0:
-        Console.info(f"Coldstart mode: using train data from coldstart split ({train_rows} rows)", 
-                    component="BASELINE", equip=equip)
-        return train, score, None
-    
-    # If train already has enough rows, no seeding needed
-    if train_rows >= min_points:
-        return train, score, None
-    
-    used: Optional[str] = None
-    
-    # Try 1: Load from SQL ACM_BaselineBuffer
-    if sql_client:
-        try:
-            window_hours = float(baseline_cfg.get("window_hours", 72))
-            Console.status(f"Loading baseline from ACM_BaselineBuffer (window={window_hours}h)...")
-            with sql_client.cursor() as cur:
-                cur.execute("""
-                    SELECT Timestamp, SensorName, SensorValue
-                    FROM dbo.ACM_BaselineBuffer
-                    WHERE EquipID = ? AND Timestamp >= DATEADD(HOUR, -?, GETDATE())
-                    ORDER BY Timestamp
-                """, (int(equip_id), int(window_hours)))
-                rows = cur.fetchall()
-            
-            if rows:
-                # Transform long format → wide format (pivot)
-                baseline_data = {}
-                for row in rows:
-                    ts = pd.Timestamp(row.Timestamp)
-                    sensor = str(row.SensorName)
-                    value = float(row.SensorValue)
-                    if ts not in baseline_data:
-                        baseline_data[ts] = {}
-                    baseline_data[ts][sensor] = value
-                
-                buf = pd.DataFrame.from_dict(baseline_data, orient='index').sort_index()
-                buf.index = pd.to_datetime(buf.index).tz_localize(None)
-                
-                # Align to score columns
-                if isinstance(score, pd.DataFrame) and hasattr(buf, "columns"):
-                    common_cols = [c for c in buf.columns if c in score.columns]
-                    if common_cols:
-                        buf = buf[common_cols]
-                
-                train = buf.copy()
-                used = f"ACM_BaselineBuffer ({len(train)} rows)"
-        except Exception as sql_err:
-            Console.warn(f"Failed to load from ACM_BaselineBuffer: {sql_err}", 
-                        component="BASELINE", equip=equip, error=str(sql_err)[:200])
-    
-    # Try 2: Seed from score data
-    if used is None and isinstance(score, pd.DataFrame) and len(score) > 0:
-        seed_n = min(len(score), max(min_points, int(0.2 * len(score))))
-        train = score.iloc[:seed_n].copy()
-        used = f"score head ({seed_n} rows)"
-        
-        # Check for overlap - train must end BEFORE score starts
-        tr_end_ts = pd.to_datetime(train.index.max())
-        sc_start_ts = pd.to_datetime(score.index.min())
-        
-        if tr_end_ts >= sc_start_ts:
-            # Split score in half to avoid overlap
-            split_idx = len(score) // 2
-            if split_idx >= min_points:
-                train = score.iloc[:split_idx].copy()
-                score = score.iloc[split_idx:].copy()
-                used = f"score split (train={split_idx}, no overlap)"
-                Console.info(f"Split score to avoid overlap: train={split_idx}, score={len(score)}", 
-                           component="BASELINE")
-            else:
-                Console.warn(f"Cannot split score (too few rows: {len(score)}), accepting overlap", 
-                           component="BASELINE", equip=equip)
-    
-    if used:
-        Console.info(f"Using adaptive baseline: {used}", component="BASELINE", equip=equip)
-        
-        # Gap detection: if baseline ends >1h before score starts, extend it
-        if isinstance(train, pd.DataFrame) and len(train) > 0:
-            tr_end = pd.to_datetime(train.index.max())
-            sc_start = pd.to_datetime(score.index.min()) if len(score) > 0 else None
-            
-            if sc_start and tr_end < sc_start:
-                gap_hours = (sc_start - tr_end).total_seconds() / 3600
-                if gap_hours > 1.0:
-                    Console.warn(f"Baseline gap: {gap_hours:.1f}h between baseline end and score start", 
-                               component="BASELINE", equip=equip)
-                    # Extend with first 20% of score
-                    if len(score) > 10:
-                        ext_size = max(10, int(0.2 * len(score)))
-                        extension = score.iloc[:ext_size].copy()
-                        train = pd.concat([train, extension], axis=0).drop_duplicates()
-                        Console.info(f"Extended baseline with {ext_size} score rows to bridge gap", 
-                                   component="BASELINE")
-    
-    return train, score, used
-
-
-def _build_regime_timeline(
-    frame: pd.DataFrame,
-    regime_model: Any,
-    run_id: Optional[str],
-    equip_id: int
-) -> Optional[pd.DataFrame]:
-    """
-    Build regime timeline DataFrame from frame's regime labels.
-    
-    Creates a timeline with regime labels and health state labels (if available
-    from the regime model). Used for ACM_RegimeTimeline SQL table.
-    
-    Args:
-        frame: Score DataFrame with 'regime_label' column
-        regime_model: Optional RegimeModel with health_labels mapping
-        run_id: Run identifier for SQL
-        equip_id: Equipment ID
-        
-    Returns:
-        DataFrame ready for ACM_RegimeTimeline (or None if no regime_label column)
-    """
-    if 'regime_label' not in frame.columns:
-        return None
-    
-    regime_df = pd.DataFrame({
-        'Timestamp': frame.index,
-        'RegimeLabel': frame['regime_label'].astype(int),
-        'EquipID': equip_id,
-        'RunID': run_id
-    })
-    
-    # Add RegimeState based on regime_model if available
-    if regime_model and hasattr(regime_model, 'health_labels'):
-        regime_df['RegimeState'] = regime_df['RegimeLabel'].map(
-            lambda x: regime_model.health_labels.get(int(x), 'unknown')
-        )
-    else:
-        regime_df['RegimeState'] = 'unknown'
-    
-    return regime_df
-
-
-def _build_drift_ts(
-    frame: pd.DataFrame,
-    equip_id: int,
-    run_id: Optional[str],
-    cfg: Dict[str, Any],
-) -> Optional[pd.DataFrame]:
-    """
-    Build DriftTS DataFrame from frame's drift_z column.
-    
-    Creates a time series of drift Z-scores with method metadata.
-    Used for ACM_DriftTS SQL table.
-    
-    Args:
-        frame: Score DataFrame with 'drift_z' column
-        equip_id: Equipment ID
-        run_id: Run identifier for SQL
-        cfg: Config dict with drift.method setting
-        
-    Returns:
-        DataFrame ready for ACM_DriftTS (or None if no drift_z column)
-    """
-    if "drift_z" not in frame.columns:
-        return None
-    
-    drift_method = (cfg.get("drift", {}) or {}).get("method", "CUSUM")
-    return pd.DataFrame({
-        "EntryDateTime": pd.to_datetime(frame.index),
-        "EquipID": int(equip_id),
-        "DriftZ": frame["drift_z"].astype(np.float32),
-        "Method": drift_method,
-        "RunID": run_id or ""
-    })
-
-
-def _build_anomaly_events(
-    episodes: pd.DataFrame,
-    equip_id: int,
-    run_id: Optional[str],
-) -> Optional[pd.DataFrame]:
-    """
-    Build AnomalyEvents DataFrame from episodes.
-    
-    Transforms episode data into events format for ACM_Anomaly_Events SQL table.
-    
-    Args:
-        episodes: DataFrame with start_ts, end_ts, severity, score, culprits columns
-        equip_id: Equipment ID
-        run_id: Run identifier for SQL
-        
-    Returns:
-        DataFrame ready for ACM_Anomaly_Events (or None if no episodes)
-    """
-    if episodes is None or len(episodes) == 0:
-        return None
-    
-    return pd.DataFrame({
-        "EquipID": int(equip_id),
-        "start_ts": episodes["start_ts"],
-        "end_ts": episodes["end_ts"],
-        "severity": episodes.get("severity", pd.Series(["info"] * len(episodes))),
-        "Detector": "FUSION",
-        "Score": episodes.get("score", np.nan),
-        "ContributorsJSON": episodes.get("culprits", "{}"),
-        "RunID": run_id or ""
-    })
-
-
-def _build_regime_episodes(
-    episodes: pd.DataFrame,
-    equip_id: int,
-    run_id: Optional[str],
-) -> Optional[pd.DataFrame]:
-    """
-    Build RegimeEpisodes DataFrame from episodes.
-    
-    Transforms episode data into regime episodes format for ACM_RegimeEpisodes SQL table.
-    
-    Args:
-        episodes: DataFrame with start_ts, end_ts, regime columns
-        equip_id: Equipment ID
-        run_id: Run identifier for SQL
-        
-    Returns:
-        DataFrame ready for ACM_RegimeEpisodes (or None if no episodes)
-    """
-    if episodes is None or len(episodes) == 0:
-        return None
-    
-    return pd.DataFrame({
-        "EquipID": int(equip_id),
-        "StartEntryDateTime": episodes["start_ts"],
-        "EndEntryDateTime": episodes["end_ts"],
-        "RegimeLabel": episodes.get("regime", pd.Series([""] * len(episodes))),
-        "Confidence": np.nan,
-        "RunID": run_id or ""
-    })
-
-
-def _auto_tune_parameters(
-    frame: pd.DataFrame,
-    episodes: pd.DataFrame,
-    score_out: Dict[str, Any],
-    regime_quality_ok: bool,
-    cfg: Dict[str, Any],
-    sql_client: Any,
-    run_id: Optional[str],
-    equip_id: int,
-    equip: str,
-    cached_manifest: Optional[Dict[str, Any]] = None,
-) -> None:
-    """
-    Perform autonomous parameter tuning based on model quality assessment.
-    
-    Evaluates model quality metrics (anomaly rate, drift score, regime quality) and
-    proposes parameter adjustments. Records tuning actions to ACM_ConfigHistory and
-    creates refit requests in ACM_RefitRequests when quality degrades.
-    
-    Args:
-        frame: Scored DataFrame with detector z-scores and fused output
-        episodes: Detected anomaly episodes
-        score_out: Score output dict with silhouette score etc.
-        regime_quality_ok: Whether regime clustering met quality threshold
-        cfg: Configuration dictionary
-        sql_client: SQL client for database writes
-        run_id: Current run identifier
-        equip_id: Equipment ID
-        equip: Equipment name for logging
-        cached_manifest: Optional cached model manifest for age checks
-    """
-    if not cfg.get("models", {}).get("auto_tune", True):
-        return
-    
-    try:
-        from core.model_evaluation import assess_model_quality
-        
-        # Build regime quality metrics
-        regime_quality_metrics = {
-            "silhouette": score_out.get("silhouette", 0.0),
-            "quality_ok": regime_quality_ok
-        }
-        
-        # Perform full quality assessment
-        should_retrain, reasons, quality_report = assess_model_quality(
-            scores=frame,
-            episodes=episodes,
-            regime_quality=regime_quality_metrics,
-            cfg=cfg,
-            cached_manifest=cached_manifest
-        )
-        
-        # Extract metrics for additional retrain triggers
-        auto_retrain_cfg = cfg.get("models", {}).get("auto_retrain", {})
-        if isinstance(auto_retrain_cfg, bool):
-            auto_retrain_cfg = {}
-        
-        # Check anomaly rate trigger
-        anomaly_rate_trigger = False
-        anomaly_metrics = quality_report.get("metrics", {}).get("anomaly_metrics", {})
-        current_anomaly_rate = anomaly_metrics.get("anomaly_rate", 0.0)
-        max_anomaly_rate = auto_retrain_cfg.get("max_anomaly_rate", 0.25)
-        if current_anomaly_rate > max_anomaly_rate:
-            anomaly_rate_trigger = True
-            if not should_retrain:
-                reasons = []
-            reasons.append(f"anomaly_rate={current_anomaly_rate:.2%} > {max_anomaly_rate:.2%}")
-            Console.warn(f"Anomaly rate {current_anomaly_rate:.2%} exceeds threshold {max_anomaly_rate:.2%}", 
-                        component="RETRAIN-TRIGGER", equip=equip, 
-                        anomaly_rate=round(current_anomaly_rate, 4), threshold=max_anomaly_rate)
-        
-        # Check drift score trigger
-        drift_score_trigger = False
-        drift_score = quality_report.get("metrics", {}).get("drift_score", 0.0)
-        max_drift_score = auto_retrain_cfg.get("max_drift_score", 2.0)
-        if drift_score > max_drift_score:
-            drift_score_trigger = True
-            if not should_retrain and not anomaly_rate_trigger:
-                reasons = []
-            reasons.append(f"drift_score={drift_score:.2f} > {max_drift_score:.2f}")
-            Console.warn(f"Drift score {drift_score:.2f} exceeds threshold {max_drift_score:.2f}", 
-                        component="RETRAIN-TRIGGER", equip=equip, 
-                        drift_score=round(drift_score, 2), threshold=max_drift_score)
-        
-        # Aggregate all retrain triggers
-        needs_retraining = should_retrain or anomaly_rate_trigger or drift_score_trigger
-        
-        if not needs_retraining:
-            Console.info(f"Model quality acceptable, no tuning needed", component="AUTO-TUNE")
-            return
-        
-        Console.warn(f"Quality degradation detected: {', '.join(reasons)}", component="AUTO-TUNE",
-                    equip=equip, reason_count=len(reasons))
-        
-        # Auto-tune parameters based on specific issues
-        tuning_actions = []
-        
-        # Issue 1: High detector saturation - Increase clip_z
-        detector_quality = quality_report.get("metrics", {}).get("detector_quality", {})
-        if detector_quality.get("max_saturation_pct", 0) > 5.0:
-            self_tune_cfg = cfg.get("thresholds", {}).get("self_tune", {})
-            raw_clip_z = self_tune_cfg.get("clip_z", 12.0)
-            try:
-                current_clip_z = float(raw_clip_z)
-            except (TypeError, ValueError):
-                current_clip_z = 12.0
-            
-            clip_caps = [
-                self_tune_cfg.get("max_clip_z"),
-                cfg.get("model_quality", {}).get("max_clip_z"),
-                50.0,
-            ]
-            clip_cap = max((float(c) for c in clip_caps if c is not None), default=50.0)
-            clip_cap = max(clip_cap, current_clip_z, 20.0)
-            
-            proposed_clip = round(current_clip_z * 1.2, 2)
-            if proposed_clip <= current_clip_z + 0.05:
-                proposed_clip = current_clip_z + 2.0
-            new_clip_z = min(proposed_clip, clip_cap)
-            
-            if new_clip_z > current_clip_z + 0.05:
-                tuning_actions.append(f"thresholds.self_tune.clip_z: {current_clip_z:.2f}->{new_clip_z:.2f}")
-            elif current_clip_z >= clip_cap - 0.05:
-                Console.warn(f"[AUTO-TUNE] Clip_z already at ceiling {clip_cap:.2f}")
-        
-        # Issue 2: High anomaly rate - Increase k_sigma
-        if anomaly_metrics.get("anomaly_rate", 0) > 0.10:
-            raw_k_sigma = cfg.get("episodes", {}).get("cpd", {}).get("k_sigma", 2.0)
-            try:
-                current_k = float(raw_k_sigma)
-            except (TypeError, ValueError):
-                current_k = 2.0
-            new_k = min(round(current_k * 1.1, 3), 4.0)
-            if new_k > current_k + 0.05:
-                tuning_actions.append(f"episodes.cpd.k_sigma: {current_k:.3f}->{new_k:.3f}")
-        
-        # Issue 3: Low regime quality - Increase k_max
-        regime_metrics = quality_report.get("metrics", {}).get("regime_metrics", {})
-        if regime_metrics.get("silhouette", 1.0) < 0.15:
-            auto_k_cfg = cfg.get("regimes", {}).get("auto_k", {})
-            raw_k_max = auto_k_cfg.get("k_max", cfg.get("regimes", {}).get("k_max", 8))
-            try:
-                current_k_max = int(raw_k_max)
-            except (TypeError, ValueError):
-                current_k_max = 8
-            new_k_max = min(current_k_max + 2, 12)
-            if new_k_max > current_k_max:
-                tuning_actions.append(f"regimes.auto_k.k_max: {current_k_max}->{int(new_k_max)}")
-        
-        if tuning_actions:
-            Console.info(f"Applied {len(tuning_actions)} parameter adjustments: {', '.join(tuning_actions)}", 
-                        component="AUTO-TUNE")
-            Console.info(f"Retraining required on next run to apply changes", component="AUTO-TUNE")
-            
-            # Log config changes to ACM_ConfigHistory
-            try:
-                if sql_client and run_id:
-                    trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False)
-                    log_auto_tune_changes(
-                        sql_client=sql_client,
-                        equip_id=int(equip_id),
-                        tuning_actions=tuning_actions,
-                        run_id=run_id,
-                        trigger_refit=trigger_refit_on_tune
-                    )
-                    if trigger_refit_on_tune:
-                        Console.info("on_tuning_change=True: refit request created", component="AUTO-TUNE")
-            except Exception as log_err:
-                Console.warn(f"Failed to log auto-tune changes: {log_err}", component="CONFIG_HIST",
-                            equip=equip, error=str(log_err)[:200])
-        else:
-            Console.info(f"No automatic parameter adjustments available", component="AUTO-TUNE")
-        
-        # Persist refit request for next run - SQL mode only
-        try:
-            if sql_client:
-                with sql_client.cursor() as cur:
-                    cur.execute("""
-                        IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
-                        BEGIN
-                            CREATE TABLE [dbo].[ACM_RefitRequests] (
-                                [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                                [EquipID] INT NOT NULL,
-                                [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-                                [Reason] NVARCHAR(MAX) NULL,
-                                [AnomalyRate] FLOAT NULL,
-                                [DriftScore] FLOAT NULL,
-                                [ModelAgeHours] FLOAT NULL,
-                                [RegimeQuality] FLOAT NULL,
-                                [Acknowledged] BIT NOT NULL DEFAULT 0,
-                                [AcknowledgedAt] DATETIME2 NULL
-                            );
-                            CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
-                        END
-                    """)
-                    cur.execute("""
-                        INSERT INTO [dbo].[ACM_RefitRequests]
-                            (EquipID, Reason, AnomalyRate, DriftScore, RegimeQuality)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (
-                        int(equip_id),
-                        "; ".join(reasons),
-                        float(current_anomaly_rate) if anomaly_rate_trigger else None,
-                        float(drift_score) if drift_score_trigger else None,
-                        float(regime_metrics.get("silhouette", 0.0)),
-                    ))
-                Console.info("SQL refit request recorded in ACM_RefitRequests", component="MODEL")
-        except Exception as re:
-            Console.warn(f"Failed to write refit request: {re}", component="MODEL",
-                        equip=equip, error=str(re)[:200])
-    
-    except Exception as e:
-        Console.warn(f"Autonomous tuning failed: {e}", component="AUTO-TUNE",
-                    equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+# ========================================================================
+# EXTRACTED FUNCTIONS - Now in dedicated modules (v11.2.0)
+# ========================================================================
+# _sql_finalize_run -> sql_client.py::SQLClient.finalize_run()
+# _execute_with_deadlock_retry -> sql_client.py::execute_with_deadlock_retry()
+# _deduplicate_index -> fast_features.py::deduplicate_index()
+# _ensure_local_index -> fast_features.py::ensure_local_index()
+# _compute_config_signature -> config_dict.py::compute_config_signature()
+# _score_all_detectors -> detector_orchestrator.py
+# _calibrate_all_detectors -> detector_orchestrator.py
+# _fit_all_detectors -> detector_orchestrator.py
+# _get_detector_enable_flags -> detector_orchestrator.py
 
 
 def safe_step(
@@ -3127,12 +569,12 @@ def safe_step(
     **extra_context,
 ) -> Tuple[Any, bool]:
     """Execute an operation with standardized error handling.
-    
+
     Consolidates micro try/except blocks into a single pattern that:
     - Logs failures consistently with equip/run_id context
     - Tracks degradations for partial failure reporting
     - Returns (result, success) tuple for caller decisions
-    
+
     Args:
         operation: Zero-arg callable to execute
         step_name: Human-readable step name for logging
@@ -3144,7 +586,7 @@ def safe_step(
         critical: If True, re-raises exception after logging
         degradations: Optional list to append step_name on failure
         **extra_context: Additional key=value pairs for structured logging
-    
+
     Returns:
         Tuple of (result, success_bool)
         On failure: (default, False)
@@ -3164,145 +606,23 @@ def safe_step(
             error=str(e)[:300],
             **extra_context,
         )
-        
-        if log_level == "debug":
-            Console.debug(err_msg, **log_kwargs)
-        elif log_level == "error":
+
+        if log_level == "error":
             Console.error(err_msg, **log_kwargs)
         else:
             Console.warn(err_msg, **log_kwargs)
-        
+
         if degradations is not None:
             degradations.append(step_name)
-        
+
         if critical:
             raise
-        
+
         return default, False
 
-
-def _write_sql_artifacts(
-    output_manager: Any,
-    frame: pd.DataFrame,
-    episodes: pd.DataFrame,
-    train: pd.DataFrame,
-    pca_detector: Optional[Any],
-    sql_client: Optional[Any],
-    run_id: Optional[str],
-    equip_id: int,
-    equip: str,
-    cfg: Dict[str, Any],
-    meta: Any,
-    win_start: Optional[pd.Timestamp],
-    win_end: Optional[pd.Timestamp],
-    rows_read: int,
-    spe_p95_train: float,
-    t2_p95_train: float,
-    anomaly_count: int,
-    T: Any,
-) -> int:
-    """
-    Write SQL-specific artifacts: DriftTS, AnomalyEvents, RegimeEpisodes, PCA, RunStats, Culprits.
-    
-    Returns:
-        Total rows written across all artifact tables.
-    """
-    rows_written = 0
-    
-    # DriftSeries
-    with T.section("sql.drift_series"):
-        try:
-            df_drift = _build_drift_ts(frame, equip_id, run_id, cfg)
-            if df_drift is not None:
-                rows_written += output_manager.write_drift_series(df_drift)
-        except Exception as e:
-            Console.warn(f"DriftSeries write skipped: {e}", component="SQL",
-                         equip=equip, run_id=run_id, error=str(e)[:200])
-
-    # AnomalyEvents
-    with T.section("sql.events"):
-        try:
-            df_events = _build_anomaly_events(episodes, equip_id, run_id)
-            if df_events is not None:
-                rows_written += output_manager.write_anomaly_events(df_events, run_id or "")
-        except Exception as e:
-            Console.warn(f"AnomalyEvents write skipped: {e}", component="SQL",
-                         equip=equip, run_id=run_id, error=str(e)[:200])
-
-    # RegimeEpisodes
-    with T.section("sql.regimes"):
-        try:
-            df_reg = _build_regime_episodes(episodes, equip_id, run_id)
-            if df_reg is not None:
-                rows_written += output_manager.write_regime_episodes(df_reg, run_id or "")
-        except Exception as e:
-            Console.warn(f"RegimeEpisodes write skipped: {e}", component="SQL",
-                         equip=equip, run_id=run_id, error=str(e)[:200])
-
-    # PCA artifacts
-    with T.section("sql.pca"):
-        rows_pca_model, rows_pca_load, rows_pca_metrics = _write_pca_artifacts(
-            output_manager=output_manager,
-            pca_detector=pca_detector,
-            frame=frame,
-            train=train,
-            run_id=run_id,
-            equip_id=equip_id,
-            equip=equip,
-            spe_p95_train=spe_p95_train,
-            t2_p95_train=t2_p95_train,
-            cfg=cfg,
-        )
-        rows_written += int(rows_pca_model + rows_pca_load + rows_pca_metrics)
-
-    # RunStats
-    with T.section("sql.run_stats"):
-        try:
-            if sql_client and run_id and win_start is not None and win_end is not None:
-                drift_p95 = None
-                if "drift_z" in frame.columns:
-                    drift_p95 = float(np.nanpercentile(frame["drift_z"].to_numpy(dtype=np.float32), 95))
-                sensors_kept = len(getattr(meta, "kept_cols", []))
-                cadence_ok_pct = float(getattr(meta, "cadence_ok", 1.0)) * 100.0 if hasattr(meta, "cadence_ok") else None
-
-                output_manager.write_run_stats({
-                    "RunID": run_id,
-                    "EquipID": int(equip_id),
-                    "WindowStartEntryDateTime": win_start,
-                    "WindowEndEntryDateTime": win_end,
-                    "SamplesIn": rows_read,
-                    "SamplesKept": rows_read,
-                    "SensorsKept": sensors_kept,
-                    "CadenceOKPct": cadence_ok_pct,
-                    "DriftP95": drift_p95,
-                    "ReconRMSE": None,
-                    "AnomalyCount": anomaly_count
-                })
-        except Exception as e:
-            Console.warn(f"RunStats not recorded: {e}", component="RUN",
-                         equip=equip, run_id=run_id, error=str(e)[:200])
-
-    # Episode culprits
-    with T.section("sql.culprits"):
-        try:
-            if sql_client and run_id and isinstance(episodes, pd.DataFrame) and len(episodes) > 0:
-                write_episode_culprits_enhanced(
-                    sql_client=sql_client,
-                    run_id=run_id,
-                    episodes=episodes,
-                    scores_df=frame,
-                    equip_id=equip_id
-                )
-                Console.info(f"Wrote episode culprits for RunID={run_id}", component="CULPRITS")
-        except Exception as e:
-            Console.warn(f"Failed to write ACM_EpisodeCulprits: {e}", component="CULPRITS",
-                         equip=equip, run_id=run_id, error=str(e))
-    
-    return rows_written
-
-
-# =======================
-
+"""
+-------------------------------------------------------------------------------------------
+"""
 
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -3321,11 +641,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     ap.add_argument("--equip", required=True, help="Equipment name (e.g., FD_FAN, GAS_TURBINE)")
     ap.add_argument("--mode", choices=["online", "offline"], default="offline",
                     help="Pipeline mode: online (scoring only, requires model), offline (full discovery)")
-    ap.add_argument("--config", default=None, help="Config file path (auto-discovers configs/ directory if not specified)")
-    ap.add_argument("--train-csv", help="Path to baseline CSV (historical normal data), overrides config.")
-    ap.add_argument("--baseline-csv", dest="train_csv", help="Alias for --train-csv (baseline data)")
-    ap.add_argument("--score-csv", help="Path to batch CSV (current data to analyze), overrides config.")
-    ap.add_argument("--batch-csv", dest="score_csv", help="Alias for --score-csv (batch data)")
     ap.add_argument("--clear-cache", action="store_true", help="Force re-training by deleting the cached model for this equipment.")
     ap.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Override global log level.")
     ap.add_argument("--log-format", choices=["text", "json"], help="Override log output format.")
@@ -3336,16 +651,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     ap.add_argument("--end-time", help="End time for analysis window (ISO format: 2023-11-15T00:00:00)")
     args = ap.parse_args()
 
-    # Initialize observability (traces/metrics to OTLP collector, logs to Loki)
-    # Uses localhost endpoints: OTLP on 4318, Loki on 3100
-    # Get equip_id early for observability tagging
-    equip_id_init = _get_equipment_id(args.equip) if args.equip else 0
+    equip = args.equip
+    
+    # ========================================================================
+    # OBSERVABILITY FIRST: Initialize logging so we can capture SQL failures
+    # Note: equip_id=0 because we don't have SQL connection yet to look it up.
+    # The real equip_id will be resolved after SQL connects.
+    # ========================================================================
     
     if _OBSERVABILITY_AVAILABLE:
         try:
             init_observability(
-                equipment=args.equip,
-                equip_id=equip_id_init,
+                equipment=equip,
+                equip_id=0,  # Will be updated after SQL connects
                 service_name="acm-pipeline",
                 otlp_endpoint="http://localhost:4318",
                 loki_endpoint="http://localhost:3100",
@@ -3354,7 +672,6 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 enable_loki=True,
                 enable_profiling=True,
             )
-            # Start profiling (collect CPU samples for Pyroscope)
             start_profiling()
         except Exception as e:
             Console.warn(f"Observability init failed (non-fatal): {e}", component="OTEL",
@@ -3366,211 +683,168 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     try:
         from utils.timer import enable_timer_metrics, set_timer_equipment
         from core.resource_monitor import enable_resource_metrics, set_resource_equipment
-        enable_timer_metrics(args.equip)
-        enable_resource_metrics(args.equip)
+        enable_timer_metrics(equip)
+        enable_resource_metrics(equip)
     except ImportError:
         pass  # Optional integration
 
-    equip = args.equip
-    
+    # ========================================================================
+    # FAIL-FAST: SQL connection MUST succeed before config/pipeline setup
+    # If SQL is down, ACM cannot function - exit immediately.
+    # ========================================================================
+    Console.info("Connecting to SQL Server...", component="SQL")
+    try:
+        if not SQLClient:
+            raise RuntimeError("SQLClient not available. Ensure core/sql_client.py exists and pyodbc is installed.")
+        sql_client = SQLClient.from_ini('acm')
+        sql_client.connect()
+        # Quick health check
+        _cur = sql_client.cursor()
+        _cur.execute("SELECT 1")
+        _cur.fetchone()
+        Console.ok("SQL connection established", component="SQL")
+    except Exception as e:
+        Console.error(f"SQL connection failed: {e}", component="SQL",
+                      error_type=type(e).__name__, error=str(e)[:500])
+        Console.error("Check configs/sql_connection.ini and ensure SQL Server is running.", component="SQL")
+        raise SystemExit(1)
+
     with T.section("startup"):
-        # SQL-ONLY MODE: No artifacts folder
-        cfg_path = Path(args.config) if args.config else None
-        cfg = _load_config(cfg_path, equipment_name=equip)
+        # Load config from SQL (no CSV fallback - SQL is the single source of truth)
+        cfg = _load_config(sql_client, equipment_name=equip)
         
         # DEBT-10: Deep copy config to prevent accidental mutation
         import copy
         cfg = copy.deepcopy(cfg)
-        Console.info("Config deep-copied to prevent accidental mutations", component="CFG")
         
         logging_cfg = (cfg.get("logging") or {})
     logging_settings = _configure_logging(logging_cfg, args)
     enable_sql_logging = logging_settings.get("enable_sql_logging", True)
     
-    # Store equipment ID in config for later use
-    equip_id = _get_equipment_id(equip)
+    # Get equipment ID from SQL (already resolved during config loading)
+    equip_id = _get_equipment_id(equip, sql_client)
     if not hasattr(cfg, '_equip_id') or cfg._equip_id == 0:
         cfg._equip_id = equip_id
     
     # Compute config signature for cache validation
-    config_signature = _compute_config_signature(cfg)
-    Console.info(f"Config signature: {config_signature}", component="CFG")
+    config_signature = compute_config_signature(cfg)
+    # Config source already logged in _load_config; just store signature
     
     # CRITICAL FIX: Store signature in config for cache validation
     cfg["_signature"] = config_signature
 
-    # SQL-only mode: always True unless ACM_FORCE_FILE_MODE=1
-    SQL_MODE = os.getenv("ACM_FORCE_FILE_MODE", "0") != "1"
-    
-    # Detect batch mode (running under sql_batch_runner)
-    BATCH_MODE = os.getenv("ACM_BATCH_MODE", "0") == "1"
-    
     # v11: Pipeline mode from CLI (online = scoring only, offline = full discovery)
     pipeline_mode_str = getattr(args, "mode", "offline")
     PIPELINE_MODE = PipelineMode.ONLINE if pipeline_mode_str == "online" else PipelineMode.OFFLINE
     ALLOWS_MODEL_REFIT = PIPELINE_MODE == PipelineMode.OFFLINE
     ALLOWS_REGIME_DISCOVERY = PIPELINE_MODE == PipelineMode.OFFLINE
     
-    # Check if continuous learning is enabled
-    CONTINUOUS_LEARNING = _continuous_learning_enabled(cfg, BATCH_MODE)
+    # Check if continuous learning is enabled (from config only)
+    CONTINUOUS_LEARNING = _continuous_learning_enabled(cfg)
     
     # Get continuous learning settings
     cl_cfg = cfg.get("continuous_learning", {})
     model_update_interval = int(cl_cfg.get("model_update_interval", 1))  # Default: update every batch
     threshold_update_interval = int(cl_cfg.get("threshold_update_interval", 1))  # Default: update every batch
-    force_retraining = BATCH_MODE and CONTINUOUS_LEARNING  # Force retraining in continuous learning mode
+    force_retraining = CONTINUOUS_LEARNING  # Force retraining when continuous learning enabled
     
     # Validate interval settings for production deployment
+    invalid_intervals = []
     if model_update_interval <= 0:
-        Console.warn(f"Invalid model_update_interval={model_update_interval}, defaulting to 1", component="CFG",
-                     invalid_value=model_update_interval)
+        invalid_intervals.append(f"model_update_interval={model_update_interval}")
         model_update_interval = 1
     if threshold_update_interval <= 0:
-        Console.warn(f"Invalid threshold_update_interval={threshold_update_interval}, defaulting to 1", component="CFG",
-                     invalid_value=threshold_update_interval)
+        invalid_intervals.append(f"threshold_update_interval={threshold_update_interval}")
         threshold_update_interval = 1
+    if invalid_intervals:
+        Console.warn(f"Invalid intervals defaulted to 1: {', '.join(invalid_intervals)}", component="CFG")
     
-    # Production-ready: Works with infinite batch processing (no max_batches dependency)
-    # Batch numbering uses absolute count from progress file, not loop counter
-    # Frequency control: batch_num % interval == 0 works indefinitely
-    
-    # Get batch number and total from environment (set by sql_batch_runner)
-    batch_num = int(os.getenv("ACM_BATCH_NUM", "0"))
-    batch_total_str = os.getenv("ACM_BATCH_TOTAL")
-    batch_total = int(batch_total_str) if batch_total_str else None
-    
-    # Set full observability context (equipment + batch info)
+    # Set observability context (equipment info only - no batch coupling)
     set_acm_context(
         equipment=equip,
-        equip_id=equip_id,
-        batch_num=batch_num,
-        batch_total=batch_total
+        equip_id=equip_id
     )
     
-    # Store batch number in config for access throughout pipeline
+    # Get run count from SQL for interval calculations (replaces batch_num env var)
+    # This is the count of completed runs for this equipment
+    run_count = 0
+    try:
+        cur = sql_client.get_cursor()
+        cur.execute("SELECT COUNT(*) FROM ACM_Runs WHERE EquipID = ?", (equip_id,))
+        row = cur.fetchone()
+        run_count = row[0] if row else 0
+    except Exception:
+        run_count = 0  # First run or error - will trigger threshold calc
+    
+    # Store run count in config for access throughout pipeline
     if "runtime" not in cfg:
         cfg["runtime"] = {}
-    cfg["runtime"]["batch_num"] = batch_num
-    if batch_total:
-        cfg["runtime"]["batch_total"] = batch_total
+    cfg["runtime"]["run_count"] = run_count
 
-    # Log batch info at startup
-    batch_display = f"{batch_num + 1}/{batch_total}" if batch_total else str(batch_num + 1)
-    Console.info(f"Batch {batch_display} | Equipment: {equip}", component="RUN")
-    Console.info(f"storage_backend=SQL_ONLY | batch_mode={BATCH_MODE} | continuous_learning={CONTINUOUS_LEARNING}", component="CFG")
-    Console.info(f"pipeline_mode={pipeline_mode_str.upper()} | allows_refit={ALLOWS_MODEL_REFIT} | allows_discovery={ALLOWS_REGIME_DISCOVERY}", component="CFG")
-    if CONTINUOUS_LEARNING:
-        Console.info(f"model_update_interval={model_update_interval}  |  threshold_update_interval={threshold_update_interval}", component="CFG")
-    sql_log_sink = None
+    # Log startup info - consolidated
+    pipeline_info = f"mode={pipeline_mode_str.upper()} | refit={ALLOWS_MODEL_REFIT} | discovery={ALLOWS_REGIME_DISCOVERY}"
+    intervals_info = f" | intervals=model:{model_update_interval},thresh:{threshold_update_interval}" if CONTINUOUS_LEARNING else ""
+    Console.info(f"Run #{run_count + 1} | {equip} | {pipeline_info}{intervals_info}", component="RUN")
 
-    # CRITICAL FIX: ALWAYS enforce artifacts/{EQUIP}/run_{timestamp}/ structure
-    # SQL-ONLY MODE: No artifacts directories
-    equip_slug = equip.replace(" ", "_")
-    run_id_ts = time.strftime("%Y%m%d_%H%M%S")
-    Console.info(f"SQL-only mode: run_{run_id_ts}", component="RUN")
-    
-    # SQL-ONLY MODE: Dummy values for filesystem variables (unused in SQL mode)
-    run_dir = Path(".")  # Dummy - never created
-    tables_dir = Path(".")  # Dummy - never created
-    art_root = Path(".")  # Dummy artifact root for SQL-ONLY mode (no filesystem persistence)
-    models_dir = Path(".")  # Dummy models directory for SQL-ONLY mode
-    # TASK-7-FIX: Define stable_models_dir to prevent NameError in regime loading fallback
-    stable_models_dir = Path("artifacts") / equip_slug / "models"  # Fallback path for legacy code
-    # SQL MODE: disable legacy joblib cache reuse (SQL-only)
-    reuse_models = False  # SQL-ONLY MODE: No filesystem model caching
- 
-    # SQL-ONLY MODE: Initialize state variables
-    model_cache_path = None
+    # Initialize state variables
     detector_cache: Optional[Dict[str, Any]] = None
-    train_feature_hash: Optional[str] = None  # DEBT-09: Changed to str for stable hash
+    train_feature_hash: Optional[str] = None
     current_train_columns: Optional[List[str]] = None
     regime_model: Optional[regimes.RegimeModel] = None
     regime_basis_train: Optional[pd.DataFrame] = None
     regime_basis_score: Optional[pd.DataFrame] = None
     regime_basis_meta: Dict[str, Any] = {}
     regime_basis_hash: Optional[int] = None
-    train_numeric: Optional[pd.DataFrame] = None
-    score_numeric: Optional[pd.DataFrame] = None
+    raw_train: Optional[pd.DataFrame] = None
+    raw_score: Optional[pd.DataFrame] = None
     cache_payload: Optional[Dict[str, Any]] = None
     regime_quality_ok: bool = True
     refit_requested: bool = False
-
-    if args.clear_cache:
-        if model_cache_path.exists():
-            model_cache_path.unlink()
-            Console.info(f"Cleared model cache at {model_cache_path}", component="CACHE")
-        else:
-            Console.info(f"No model cache found at {model_cache_path} to clear.", component="CACHE")
 
     # Heuristic ETAs (adjust via config if needed)
     eta_load = float((cfg.get("hints") or {}).get("eta_load_sec", 30))
     eta_fit  = float((cfg.get("hints") or {}).get("eta_fit_sec", 8))
     eta_score = float((cfg.get("hints") or {}).get("eta_score_sec", 6))
 
-    # Check if dual-write mode is enabled
-    dual_mode = cfg.get("output", {}).get("dual_mode", False)
-
-    # ===== SQL: Start Run (window discovery) or Dual Mode Setup =====
-    sql_client: Optional[Any] = None
+    # ===== SQL: Start Run (window discovery) =====
+    # sql_client already connected at startup (fail-fast)
     run_id: Optional[str] = None
     win_start: Optional[pd.Timestamp] = None
     win_end: Optional[pd.Timestamp] = None
-    equip_id: int = 0
+    
+    # Track CLI overrides for consolidated logging
+    cli_overrides = []
 
-    if SQL_MODE:
+    # Start the run in SQL
+    run_id, win_start, win_end, equip_id = _sql_start_run(sql_client, cfg, equip)
+    
+    # FAIL-FAST: Validate equip_id immediately after SQL lookup
+    if equip_id <= 0:
+        raise RuntimeError(
+            f"EquipID is required and must be a positive integer. "
+            f"Current value: {equip_id}. Equipment '{equip}' not found in Equipment table."
+        )
+    
+    # Update observability context with run_id for proper tagging of traces/metrics/logs
+    set_acm_context(run_id=run_id, equip_id=equip_id)
+    
+    # Override window if CLI args provided (e.g. for batch backfill)
+    if args.start_time:
         try:
-            sql_client = _sql_connect(cfg)
-            # ALWAYS use CLI --equip argument (not config equip_codes)
-            # This ensures the correct equipment is used regardless of config defaults
-            equip_code = equip
-            Console.info(f"Using equipment from CLI argument: {equip_code}", component="RUN")
-            run_id, win_start, win_end, equip_id = _sql_start_run(sql_client, cfg, equip_code)
-            
-            # Update observability context with run_id for proper tagging of traces/metrics/logs
-            set_acm_context(run_id=run_id, equip_id=equip_id)
-            
-            # Override window if CLI args provided (e.g. for batch backfill)
-            if args.start_time:
-                try:
-                    win_start = pd.Timestamp(args.start_time)
-                    Console.info(f"Overriding WindowStart from CLI: {win_start}", component="RUN")
-                except Exception as e:
-                    Console.warn(f"Failed to parse --start-time: {e}", component="RUN",
-                                 start_time_arg=args.start_time, error=str(e)[:100])
-            
-            if args.end_time:
-                try:
-                    win_end = pd.Timestamp(args.end_time)
-                    Console.info(f"Overriding WindowEnd from CLI: {win_end}", component="RUN")
-                except Exception as e:
-                    Console.warn(f"Failed to parse --end-time: {e}", component="RUN",
-                                 end_time_arg=args.end_time, error=str(e)[:100])
-
+            win_start = pd.Timestamp(args.start_time)
+            cli_overrides.append(f"start={win_start}")
         except Exception as e:
-            Console.error(f"Failed to start SQL run: {e}", component="RUN",
-                          equip=equip, error_type=type(e).__name__, error=str(e)[:500])
-            # ensure finalize in finally still runs with whatever we have
-            raise
-    elif dual_mode:
-        # Dual mode: Create SQL connection but don't start run (use file timestamps)
+            Console.warn(f"Failed to parse --start-time: {e}", component="RUN")
+    
+    if args.end_time:
         try:
-            sql_client = _sql_connect(cfg)
-            # Generate run_id for dual mode (UUID format for SQL compatibility)
-            import uuid
-            run_id = str(uuid.uuid4())
-            # Set equip_id for dual mode
-            equip_id = _get_equipment_id(equip)
-            Console.info(f"Created SQL connection for dual-write mode, run_id={run_id}", component="DUAL")
-            # Update observability context with run_id for proper tagging
-            set_acm_context(run_id=run_id, equip_id=equip_id)
+            win_end = pd.Timestamp(args.end_time)
+            cli_overrides.append(f"end={win_end}")
         except Exception as e:
-            Console.warn(f"Failed to connect to SQL for dual-write, will use file-only mode: {e}", component="DUAL",
-                         equip=equip, error=str(e))
-            sql_client = None
-            run_id = None
-
-    # SQL log sink is now integrated into core.observability and initialized via init_observability()
-    # No separate setup needed - logs are automatically sent to ACM_RunLogs when sql_client is passed to init()
+            Console.warn(f"Failed to parse --end-time: {e}", component="RUN")
+    
+    if cli_overrides:
+        Console.info(f"CLI overrides: {', '.join(cli_overrides)}", component="RUN")
 
     # Create OutputManager early - needed for data loading and all outputs
     output_manager = OutputManager(
@@ -3578,19 +852,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         run_id=run_id,
         equip_id=equip_id
     )
-    # Diagnostic: verify SQL client attached and healthy
-    if output_manager.sql_client is None:
-        Console.warn("Diagnostic: OutputManager.sql_client is None (SQL writes disabled)", component="OUTPUT",
-                     equip=equip, run_id=run_id)
-    else:
-        try:
-            _cur = output_manager.sql_client.cursor()
-            _cur.execute("SELECT 1")
-            _ = _cur.fetchone()
-            Console.info("Diagnostic: SQL client attached and health check passed", component="OUTPUT")
-        except Exception as _e:
-            Console.error(f"Diagnostic: SQL client attached but health check failed: {_e}", component="OUTPUT",
-                         equip=equip, run_id=run_id, error_type=type(_e).__name__, error=str(_e)[:200])
+    output_manager.equipment = equip  # Set equipment name for logging
 
     # ---------- Robust finalize context ----------
     outcome = "OK"
@@ -3610,48 +872,25 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     _span_ctx = None
     root_span = None
     
-    # Check for parent trace context from batch runner (passed via environment)
-    # This enables end-to-end trace correlation across subprocess boundaries
-    parent_trace_id = os.environ.get("TRACEPARENT_TRACE_ID")
-    parent_span_id = os.environ.get("TRACEPARENT_SPAN_ID")
-    parent_context = None
+    # v11.1.6: Removed custom TRACEPARENT_TRACE_ID/SPAN_ID env var handling
+    # This was a custom propagation scheme that:
+    # - Used non-standard env vars (not W3C traceparent format)
+    # - Imported internal/private OTEL APIs (_SPAN_KEY)
+    # - Was fragile and hard to maintain
+    # Instead, correlation between batch runner and ACM runs is via:
+    # - Consistent acm.run_id, acm.batch_num, acm.equipment attributes
+    # - These can be queried in Tempo/Loki without complex trace linking
     
     if tracer and hasattr(tracer, 'start_as_current_span'):
-        # If we have parent trace context from batch runner, create a linked span
-        if parent_trace_id and parent_span_id and OTEL_AVAILABLE:
-            try:
-                from opentelemetry.trace import SpanContext, TraceFlags, set_span_in_context
-                from opentelemetry.trace.propagation import _SPAN_KEY
-                from opentelemetry import context as otel_context
-                
-                # Recreate parent span context from environment variables
-                parent_span_context = SpanContext(
-                    trace_id=int(parent_trace_id, 16),
-                    span_id=int(parent_span_id, 16),
-                    is_remote=True,
-                    trace_flags=TraceFlags(0x01),  # Sampled
-                )
-                # Create a non-recording span with the parent context
-                from opentelemetry.trace import NonRecordingSpan
-                parent_span = NonRecordingSpan(parent_span_context)
-                parent_context = set_span_in_context(parent_span)
-            except Exception as e:
-                Console.warn(f"Failed to restore parent trace context: {e}", component="OTEL")
-                parent_context = None
-        
         span_name = f"acm.run:{equip}" if equip else "acm.run"
         _span_ctx = tracer.start_as_current_span(
             span_name,
-            context=parent_context,  # Link to parent trace if available
             attributes={
-                "service.name": "acm-startup",  # Virtual service for Tempo coloring (aligns with phase mapping)
-                "acm.phase": "startup",  # High-level phase for coloring
+                "acm.phase": "startup",
                 "acm.equipment": equip,
                 "acm.equip_id": equip_id,
                 "acm.run_id": run_id,
                 "acm.batch_num": batch_num,
-                "acm.batch_mode": BATCH_MODE,
-                "acm.parent_trace_id": parent_trace_id or "",  # Record for debugging
             }
         )
         root_span = _span_ctx.__enter__()
@@ -3666,90 +905,54 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     # This eliminates fragile 'in dir()' checks throughout the pipeline
     train: Optional[pd.DataFrame] = None
     col_meds: Optional[pd.Series] = None
-    regime_model: Optional[Any] = None
+    # NOTE: regime_model already declared at line 2602, don't redeclare
 
     try:
-        # ===== 1) Load data (legacy CSV path; historian SQL can be wired later) =====
+        # ===== 1) Load data from SQL =====
         with T.section("load_data"):
-            # Ensure data section exists in config
-            if "data" not in cfg:
-                cfg["data"] = {}
+            from core.smart_coldstart import SmartColdstart
             
-            # Override data paths from CLI if provided
-            if args.train_csv:
-                cfg["data"]["train_csv"] = args.train_csv
-            if args.score_csv:
-                cfg["data"]["score_csv"] = args.score_csv
+            coldstart_manager = SmartColdstart(
+                sql_client=sql_client,
+                equip_id=equip_id,
+                equip_name=equip,
+                stage='score'
+            )
             
-            # Cold-start mode: If no baseline provided, will bootstrap from batch data
-            train_csv_provided = "train_csv" in cfg.get("data", {}) or args.train_csv
-
-            if SQL_MODE:
-                # SQL mode: Use smart coldstart with retry logic
-                from core.smart_coldstart import SmartColdstart
-                
-                coldstart_manager = SmartColdstart(
-                    sql_client=sql_client,
-                    equip_id=equip_id,
-                    equip_name=equip,
-                    stage='score'  # Always use 'score' stage for now
-                )
-                
-                # Detect historical replay mode: if start_time was explicitly provided via CLI
-                # then we're replaying historical data and should expand windows forward in time
-                historical_replay = bool(args.start_time)
-                
-                # Attempt data loading with intelligent retry
-                train, score, meta, coldstart_complete = coldstart_manager.load_with_retry(
-                    output_manager=output_manager,
-                    cfg=cfg,
-                    initial_start=win_start,
-                    initial_end=win_end,
-                    max_attempts=3,
-                    historical_replay=historical_replay
-                )
-                
-                # If coldstart not complete, exit gracefully (will retry next job run)
-                if not coldstart_complete:
-                    Console.info("Deferred to next job run - insufficient data for training", component="COLDSTART")
-                    Console.info("Job will retry automatically when more data arrives", component="COLDSTART")
-                    
-                    # Mark run as NOOP (no operation) - not a failure
-                    outcome = "NOOP"
-                    rows_read = 0
-                    rows_written = 0
-                    
-                    # Finalize and exit
-                    if sql_client and run_id:
-                        _sql_finalize_run(sql_client, run_id=run_id, outcome=outcome, 
-                                        rows_read=rows_read, rows_written=rows_written, err_json=None)
-                    return  # Exit gracefully
-                else:
-                    # Coldstart complete - record metric
-                    record_coldstart(equip)
-                    
-            else:
-                # File mode: Load from CSV files
-                train, score, meta = output_manager.load_data(cfg)
-                coldstart_complete = True  # File mode always has complete data
-                
-            train = _ensure_local_index(train)
-            score = _ensure_local_index(score)
+            # Historical replay: expand windows forward when start_time explicitly provided
+            historical_replay = bool(args.start_time)
+            
+            train, score, meta, coldstart_complete = coldstart_manager.load_with_retry(
+                output_manager=output_manager,
+                cfg=cfg,
+                initial_start=win_start,
+                initial_end=win_end,
+                max_attempts=3,
+                historical_replay=historical_replay
+            )
+            
+            if not coldstart_complete:
+                Console.info("Coldstart deferred - insufficient data, will retry next run", component="COLDSTART")
+                if sql_client and run_id:
+                    sql_client.finalize_run(run_id=run_id, outcome="NOOP", 
+                                    rows_read=0, rows_written=0, err_json=None)
+                return
+            
+            record_coldstart(equip)
+            train = ensure_local_index(train)
+            score = ensure_local_index(score)
             
             # Deduplicate indices early to prevent O(n²) performance and silent data loss
-            train, train_dups = _deduplicate_index(train, "TRAIN", equip)
-            score, score_dups = _deduplicate_index(score, "SCORE", equip)
+            train, train_dups = deduplicate_index(train, "TRAIN", equip)
+            score, score_dups = deduplicate_index(score, "SCORE", equip)
             meta.dup_timestamps_removed = int(train_dups + score_dups)
-            Console.info(f"Index integrity verified: BASELINE={len(train)} unique, BATCH={len(score)} unique", component="DATA")
 
-            # v11.0.0: DataContract validation at pipeline entry
+            # DataContract validation at pipeline entry
             with T.section("data.contract"):
-                # For initial coldstart with small data, allow fewer score rows
-                # If train has data and we're in SQL mode, we just completed coldstart
-                is_initial_coldstart = len(train) > 0 and SQL_MODE
+                is_initial_coldstart = len(train) > 0
                 min_rows_threshold = 10 if is_initial_coldstart else 100
                 contract = DataContract(
-                    required_sensors=[],  # Auto-detect from available columns
+                    required_sensors=[],
                     optional_sensors=list(meta.kept_cols) if hasattr(meta, 'kept_cols') else [],
                     timestamp_col=meta.timestamp_col if hasattr(meta, 'timestamp_col') else 'Timestamp',
                     min_rows=min_rows_threshold,
@@ -3758,46 +961,30 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     equip_code=equip,
                 )
                 validation = contract.validate(score)
-                if not validation.passed:
-                    # v11.0.0: Fail fast on DataContract validation errors
-                    error_msg = f"DataContract validation FAILED: {validation.issues}"
-                    Console.error(error_msg, component="DATA", equip=equip, run_id=run_id, issues=validation.issues)
-                    # Write validation result before failing
-                    if output_manager:
-                        try:
-                            import json as _json_early
-                            sig = contract.signature() if hasattr(contract, 'signature') and callable(contract.signature) else None
-                            output_manager.write_data_contract_validation({
-                                'Passed': False,
-                                'RowsValidated': len(score),
-                                'ColumnsValidated': len(score.columns),
-                                'IssuesJSON': _json_early.dumps(validation.issues) if validation.issues else None,
-                                'WarningsJSON': _json_early.dumps(validation.warnings) if validation.warnings else None,
-                                'ContractSignature': sig,
-                            })
-                        except Exception:
-                            pass  # Best effort - don't mask the real error
-                    raise ValueError(error_msg)
-                if validation.warnings:
-                    for w in validation.warnings[:3]:  # Limit warning spam
-                        Console.info(f"DataContract warning: {w}", component="DATA")
                 
-                # v11: Write validation result to SQL
+                # Write validation result to SQL (both success and failure)
                 if output_manager:
                     try:
-                        import json as _json
-                        # Call signature() method if it exists, otherwise use None
                         sig = contract.signature() if hasattr(contract, 'signature') and callable(contract.signature) else None
                         output_manager.write_data_contract_validation({
                             'Passed': validation.passed,
                             'RowsValidated': len(score),
                             'ColumnsValidated': len(score.columns),
-                            'IssuesJSON': _json.dumps(validation.issues) if validation.issues else None,
-                            'WarningsJSON': _json.dumps(validation.warnings) if validation.warnings else None,
+                            'IssuesJSON': json.dumps(validation.issues) if validation.issues else None,
+                            'WarningsJSON': json.dumps(validation.warnings) if validation.warnings else None,
                             'ContractSignature': sig,
                         })
                     except Exception as e:
-                        Console.warn(f"Failed to write DataContract validation: {e}", component="DATA")
+                        if validation.passed:
+                            Console.warn(f"Failed to write DataContract validation: {e}", component="DATA")
+                
+                if not validation.passed:
+                    error_msg = f"DataContract validation FAILED: {validation.issues}"
+                    Console.error(error_msg, component="DATA", equip=equip, run_id=run_id, issues=validation.issues)
+                    raise ValueError(error_msg)
+                    
+                if validation.warnings:
+                    Console.warn(f"DataContract: {len(validation.warnings)} warnings | {validation.warnings[0] if validation.warnings else ''}", component="DATA")
 
             if len(score) == 0:
                 Console.warn("SCORE window empty after cleaning; marking run as NOOP", component="DATA",
@@ -3806,8 +993,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 rows_read = 0
                 rows_written = 0
                 if sql_client and run_id:
-                    _sql_finalize_run(
-                        sql_client,
+                    sql_client.finalize_run(
                         run_id=run_id,
                         outcome=outcome,
                         rows_read=rows_read,
@@ -3824,492 +1010,176 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             f"dup_removed={getattr(meta, 'dup_timestamps_removed', 0)}"
         )
         T.log("data_split_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
-        train_numeric = train.copy()
-        score_numeric = score.copy()
 
         # ===== Adaptive Rolling Baseline (cold-start helper) =====
         with T.section("baseline.seed"):
             Console.status(f"Seeding baseline for {equip}...")
             try:
-                # FIX: Pass is_coldstart=True when coldstart just completed to prevent
-                # re-seeding from score which causes overlap/data leakage warnings
-                train_numeric, score_numeric, baseline_source = _seed_baseline(
-                    train_numeric, 
-                    score_numeric, 
-                    sql_client if SQL_MODE else None,
+                train, score, baseline_source = seed_baseline(
+                    train.copy(), 
+                    score.copy(), 
+                    sql_client,
                     equip_id,
                     cfg,
                     equip=equip,
-                    is_coldstart=coldstart_complete,  # True after successful coldstart split
+                    is_coldstart=coldstart_complete,
+                    ensure_local_index_fn=ensure_local_index,
                 )
-                if baseline_source:
-                    train = train_numeric.copy()
-                    score = score_numeric.copy()
             except Exception as be:
                 Console.warn(f"Cold-start baseline setup failed: {be}", component="BASELINE",
                              equip=equip, train_rows=len(train) if train is not None else 0,
                              error=str(be))
 
-        # ===== v11.0.0: Seasonality Detection and Adjustment (P5.9) =====
+        # ===== Seasonality Detection and Adjustment =====
         # Detects seasonal patterns (daily/weekly cycles) and optionally adjusts data
         # to reduce false positives from predictable cyclical variations.
+        # ===== Seasonality Detection and Adjustment =====
         seasonal_patterns: Dict[str, List[SeasonalPattern]] = {}
+        seasonal_adjusted = False
         with T.section("seasonality.detect"):
             try:
-                if isinstance(train_numeric, pd.DataFrame) and len(train_numeric) >= 72:  # Need at least 3 days
-                    handler = SeasonalityHandler(min_periods=3, min_confidence=0.1)
-                    # Get numeric sensor columns (exclude timestamp if present)
-                    sensor_cols = [c for c in train_numeric.columns 
-                                   if train_numeric[c].dtype in ['float64', 'float32', 'int64', 'int32']]
-                    # Detect patterns using index as timestamp
-                    if sensor_cols:
-                        # Create temp df with timestamp column from index
-                        temp_df = train_numeric.copy()
-                        temp_df['Timestamp'] = pd.to_datetime(temp_df.index)
-                        seasonal_patterns = handler.detect_patterns(temp_df, sensor_cols, 'Timestamp')
-                        if seasonal_patterns:
-                            pattern_count = sum(len(ps) for ps in seasonal_patterns.values())
-                            Console.info(f"Detected {pattern_count} seasonal patterns in {len(seasonal_patterns)} sensors",
-                                        component="SEASON", equip=equip, pattern_count=pattern_count,
-                                        sensors_with_patterns=len(seasonal_patterns))
-                            
-                            # v11.0.0 GAP-1 FIX: Apply seasonal adjustment to reduce false positives
-                            apply_adjustment = bool(cfg.get("seasonality", {}).get("apply_adjustment", True))
-                            if apply_adjustment and seasonal_patterns:
-                                # Adjust train data
-                                train_adj = train_numeric.copy()
-                                train_adj['Timestamp'] = pd.to_datetime(train_adj.index)
-                                train_adj = handler.adjust_baseline(train_adj, sensor_cols, 'Timestamp')
-                                train_adj = train_adj.drop(columns=['Timestamp'])
-                                
-                                # Adjust score data  
-                                score_adj = score_numeric.copy()
-                                score_adj['Timestamp'] = pd.to_datetime(score_adj.index)
-                                score_adj = handler.adjust_baseline(score_adj, sensor_cols, 'Timestamp')
-                                score_adj = score_adj.drop(columns=['Timestamp'])
-                                
-                                # Update the working dataframes
-                                train_numeric = train_adj
-                                score_numeric = score_adj
-                                
-                                # v11.1.4 BUG FIX (SEASON-EP): ALSO update the main train/score dataframes
-                                # CRITICAL: Without this, seasonally adjusted data never reaches feature engineering!
-                                # The train_numeric/score_numeric were updated but train/score (used by _build_features) were not
-                                for col in sensor_cols:
-                                    if col in train.columns and col in train_adj.columns:
-                                        train[col] = train_adj[col].values
-                                    if col in score.columns and col in score_adj.columns:
-                                        score[col] = score_adj[col].values
-                                
-                                Console.info(f"Applied seasonal adjustment to {len(seasonal_patterns)} sensors",
-                                            component="SEASON", equip=equip, adjusted_sensors=len(seasonal_patterns))
+                from core.seasonality import detect_and_adjust as detect_seasonality
+                train, score, seasonal_patterns, seasonal_adjusted = detect_seasonality(train, score, cfg)
+                if seasonal_patterns:
+                    pattern_count = sum(len(ps) for ps in seasonal_patterns.values())
+                    Console.info(f"Seasonal: {pattern_count} patterns in {len(seasonal_patterns)} sensors | adjusted={seasonal_adjusted}", component="SEASON")
             except Exception as se:
-                Console.debug(f"Seasonality detection skipped: {se}", component="SEASON", 
-                             equip=equip, error=str(se)[:200])
+                Console.warn(f"Seasonality detection skipped: {se}", component="SEASON")
 
-        # ===== Data quality guardrails (High #4) =====
+        # ===== Data quality guardrails =====
+        low_var_threshold = 1e-4  # Used by feature imputation
         with T.section("data.guardrails"):
             try:
-                # 1) Baseline/Batch window ordering & overlap check
-                # NOTE: During coldstart, overlap is EXPECTED (train ends where score begins)
-                tr_start = pd.to_datetime(train.index.min()) if len(train.index) else None
-                tr_end   = pd.to_datetime(train.index.max()) if len(train.index) else None
-                sc_start = pd.to_datetime(score.index.min()) if len(score.index) else None
-                sc_end   = pd.to_datetime(score.index.max()) if len(score.index) else None
-                
-                # True overlap is when score START is strictly BEFORE train END (data leakage)
-                # Contiguous windows (score starts AT train end) are fine - expected in coldstart splits
-                # and in normal batch mode where train ends at T and score starts at T+1
-                # FIX: Use <= check but with tolerance for timestamps that are effectively equal
-                if tr_end is not None and sc_start is not None:
-                    overlap_seconds = (tr_end - sc_start).total_seconds()
-                    # Only warn if score starts MORE than 1 minute before train ends (true overlap)
-                    # Tolerance handles floating point and rounding in timestamp comparisons
-                    if overlap_seconds > 60:  # 1 minute tolerance
-                        Console.warn(
-                            f"Batch window OVERLAPS baseline (data leakage risk):"
-                            f" batch_start={sc_start} < baseline_end={tr_end} (overlap={overlap_seconds:.0f}s)",
-                            component="DATA", equip=equip, batch_start=str(sc_start), baseline_end=str(tr_end)
-                        )
-
-                # 2) Low-variance sensor detection on BASELINE
-                # FEAT-04: Increased threshold from 1e-6 to 1e-4 to catch more near-constant sensors
-                # that cause ill-conditioned covariance matrices in MHAL and pathological AR1 fits
-                low_var_threshold = 1e-4
-                low_var_features = []
-                if isinstance(train_numeric, pd.DataFrame) and len(train_numeric.columns):
-                    train_stds = train_numeric.std(numeric_only=True)
-                    low_var = train_stds[train_stds < low_var_threshold]
-                    if len(low_var) > 0:
-                        low_var_features = list(low_var.index)
-                        preview = ", ".join(low_var_features[:10])
-                        Console.warn(
-                            f"{len(low_var)} low-variance sensor(s) in TRAIN (std<{low_var_threshold:g}): {preview}",
-                            component="DATA", equip=equip, low_var_count=len(low_var), threshold=low_var_threshold
-                        )
-                    
-                    # BATCH-CONTINUITY-02: Log variance statistics for debugging batch artifacts
-                    if len(train_stds) > 0:
-                        var_min = float(train_stds.min())
-                        var_median = float(train_stds.median())
-                        var_p95 = float(train_stds.quantile(0.95))
-                        Console.debug(
-                            f"Baseline variance: min={var_min:.2e}, "
-                            f"median={var_median:.2e}, p95={var_p95:.2e}",
-                            component="DATA"
-                        )
-
-                # 3) Missing data report (per-tag null counts) -> tables/data_quality.csv
-                # REFACTOR v11: Extracted to _build_data_quality_records() helper
-                with T.section("data.guardrails.data_quality"):
-                    try:
-                        tables_dir = (run_dir / "tables")
-                        
-                        # Build per-sensor data quality records
-                        records = _build_data_quality_records(
-                            train_numeric=train_numeric,
-                            score_numeric=score_numeric,
-                            cfg=cfg,
-                            low_var_threshold=low_var_threshold,
-                        )
-                        
-                        # OM-CSV-03: Write data quality summary to SQL (ACM_DataQuality)
-                        if records:
-                            dq = pd.DataFrame(records)
-                            
-                            # DQ-01: Write all quality metrics to SQL
-                            _write_data_quality(
-                                sql_client=sql_client,
-                                records=records,
-                                run_id=run_id,
-                                equip_id=equip_id,
-                                equip=equip,
-                            )
-
-                        counters_records = [
-                            {"metric": "tz_stripped_total", "value": int(getattr(meta, "tz_stripped", 0))},
-                            {"metric": "future_rows_dropped_total", "value": int(getattr(meta, "future_rows_dropped", 0))},
-                            {"metric": "dup_timestamps_removed_total", "value": int(getattr(meta, "dup_timestamps_removed", 0))},
-                        ]
-                        counters_df = pd.DataFrame(counters_records)
-                        output_manager.write_dataframe(counters_df, tables_dir / "data_quality_counters.csv")
-                        Console.info(f"Wrote data quality counters -> {tables_dir / 'data_quality_counters.csv'}", component="DATA")
-                        
-                        # 4) Generate dropped_sensors.csv - track sensors excluded from analysis
-                        if hasattr(meta, 'dropped_cols') and len(meta.dropped_cols) > 0:
-                            dropped_records = []
-                            for dropped_col in meta.dropped_cols:
-                                dropped_records.append({
-                                    "sensor": str(dropped_col),
-                                    "reason": "non_numeric_or_excluded_during_load",
-                                    "train_present": dropped_col in (train.columns if hasattr(train, 'columns') else []),
-                                    "score_present": dropped_col in (score.columns if hasattr(score, 'columns') else []),
-                                })
-                            # SQL-only: dropped sensors logged to SQL tables via OutputManager
-                    except Exception as dq_e:
-                        Console.warn(f"Data quality summary skipped: {dq_e}", component="DATA",
-                                     equip=equip, error_type=type(dq_e).__name__, error=str(dq_e)[:200])
+                from core.pipeline_types import run_data_guardrails
+                guardrail_result = run_data_guardrails(
+                    train=train,
+                    score=score,
+                    meta=meta,
+                    cfg=cfg,
+                    output_manager=output_manager,
+                    run_id=run_id,
+                    equip_id=equip_id,
+                    equip=equip,
+                )
+                low_var_threshold = guardrail_result.low_var_threshold
             except Exception as g_e:
                 Console.warn(f"Guardrail checks skipped: {g_e}", component="DATA",
                              equip=equip, error_type=type(g_e).__name__, error=str(g_e)[:200])
 
+        # Preserve raw sensor data before feature engineering (needed for regime basis)
+        raw_train = train.copy()
+        raw_score = score.copy()
+
         # ===== Feature construction =====
-        # Transform raw sensor data into statistical features using fast_features module.
-        # Polars/pandas conversion is handled internally by fast_features.
         with T.section("features.build"):
-            def _do_build_features():
-                nonlocal train, score
-                train, score = _build_features(train, score, cfg, equip)
-                T.log("feature_engineering_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
-            safe_step(
-                _do_build_features,
+            result, ok = safe_step(
+                lambda: _build_features(train, score, cfg, equip),
                 "feature_build", "FEAT", equip, run_id,
                 degradations=degradations
             )
+            if ok and result is not None:
+                train, score = result
+                T.log("feature_engineering_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
 
         # ===== Impute missing values in feature space =====
         with T.section("features.impute"):
-            def _do_impute_features():
-                nonlocal train, score
-                train, score, _ = _impute_features(
-                    train, score, low_var_threshold, sql_client, run_id, equip_id, equip
-                )
-            safe_step(
-                _do_impute_features,
+            result, ok = safe_step(
+                lambda: fast_features.impute_features(train, score, low_var_threshold, output_manager, run_id, equip_id, equip),
                 "feature_impute", "FEAT", equip, run_id,
                 degradations=degradations
             )
+            if ok and result is not None:
+                train, score, _ = result
 
         current_train_columns = list(train.columns)
         with T.section("features.hash"):
-            train_feature_hash = _compute_stable_feature_hash(train, equip)
+            train_feature_hash = compute_stable_feature_hash(train, equip)
 
         # Respect refit-request from SQL table entries
         with T.section("models.refit_flag"):
-            refit_requested = _check_refit_request(sql_client, equip_id, equip)
+            refit_requested = output_manager.check_refit_request()
 
-        if reuse_models and model_cache_path.exists() and not refit_requested:
-            with T.section("models.cache_local"):
-                try:
-                    cached_bundle = joblib.load(model_cache_path)
-                    cached_cols = cached_bundle.get("train_columns")
-                    cached_hash = cached_bundle.get("train_hash")
-                    cached_cfg_sig = cached_bundle.get("config_signature")
-                    
-                    # Validate cache: columns, train data hash, and config signature must match
-                    with T.section("models.cache_local.validate"):
-                        cols_match = (cached_cols == current_train_columns)
-                        hash_match = (cached_hash is None or cached_hash == train_feature_hash)
-                        cfg_match = (cached_cfg_sig is None or cached_cfg_sig == config_signature)
-                    
-                    if cols_match and hash_match and cfg_match:
-                        detector_cache = cached_bundle
-                        Console.info(f"Reusing cached detectors from {model_cache_path}", component="MODEL")
-                        Console.info(f"Cache validated: config_sig={config_signature[:8]}...", component="MODEL") 
-                    else:
-                        reasons = []
-                        if not cols_match: reasons.append("columns changed")
-                        if not hash_match: reasons.append(f"train data changed ({cached_hash[:8] if cached_hash else 'none'} -> {train_feature_hash[:8]})")
-                        if not cfg_match: reasons.append(f"config changed ({cached_cfg_sig[:8] if cached_cfg_sig else 'none'} -> {config_signature[:8]})")
-                        Console.warn(f"Cache invalidated ({', '.join(reasons)}); re-fitting.", component="MODEL",
-                                     equip=equip, invalidation_reasons=reasons[:5])
-                except Exception as e:
-                    Console.warn(f"Failed to load cached detectors: {e}", component="MODEL",
-                                 equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-
-        # EquipID: In SQL_MODE, equip_id is set by _sql_start_run() from stored procedure.
-        # File-mode inference removed (SQL-only architecture).
-        
-        # Validate equip_id for SQL/dual modes
-        if (SQL_MODE or dual_mode) and equip_id <= 0:
-            raise RuntimeError(
-                f"EquipID is required and must be a positive integer in SQL/dual mode. "
-                f"Current value: {equip_id}. In SQL mode, this should come from _sql_start_run(). "
-                f"In dual mode, set runtime.equip_id in config OR ensure load_data provides it."
-            )
-
-        # ===== 2) Fit heads on TRAIN =====
-        
-        # ===== Model Persistence: Try loading cached models =====
-        cached_models = None
-        cached_manifest = None
-        # Skip persisted caches whenever a refit was requested to force fresh training
-        # CONTINUOUS LEARNING: Disable caching when continuous learning is enabled to force retraining
+        # ===== 2) Load or Fit Detectors =====
+        ar1_detector = pca_detector = iforest_detector = gmm_detector = omr_detector = None
+        pca_train_spe = pca_train_t2 = None
+        regime_model = None
+        regime_state = None
+        regime_state_version = 0
+        col_meds = None
+        det_flags = get_detector_enable_flags(cfg)
         use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested and not force_retraining
         
-        if force_retraining:
-            Console.info("Continuous learning enabled - models will retrain on accumulated data", component="MODEL")
-        
-        if use_cache and detector_cache is None:
-            with T.section("models.persistence.load"):
+        with T.section("models.load"):
+            if use_cache and detector_cache is None:
                 current_sensors = list(train.columns) if hasattr(train, 'columns') else []
-                cached_models, cached_manifest = _load_cached_models_with_validation(
-                    equip=equip,
-                    art_root=Path(art_root),
-                    sql_client=sql_client,
-                    equip_id=equip_id,
-                    SQL_MODE=SQL_MODE,
-                    dual_mode=dual_mode,
-                    cfg=cfg,
-                    train_columns=current_sensors,
+                cached_models, cached_manifest = load_cached_models_with_validation(
+                    equip=equip, sql_client=sql_client, equip_id=equip_id,
+                    cfg=cfg, train_columns=current_sensors,
                 )
-        
-        # Initialize detector variables
-        # NOTE: MHAL removed v9.1.0 - redundant with PCA-T2 (both compute Mahalanobis distance)
-        ar1_detector = pca_detector = iforest_detector = gmm_detector = omr_detector = None  # type: ignore
-        # CRITICAL FIX: Cache PCA train scores to avoid recomputation
-        pca_train_spe = pca_train_t2 = None
-        
-        # PERF-03: Check fusion weights to skip disabled detectors (lazy evaluation)
-        detector_flags = _get_detector_enable_flags(cfg)
-        ar1_enabled = detector_flags["ar1_enabled"]
-        pca_enabled = detector_flags["pca_enabled"]
-        iforest_enabled = detector_flags["iforest_enabled"]
-        gmm_enabled = detector_flags["gmm_enabled"]
-        omr_enabled = detector_flags["omr_enabled"]
-        
-        # Try loading cached regime model from joblib persistence (new system) OR RegimeState
-        regime_model = None
-        regime_state_version = 0
-        try:
-            # REGIME-STATE-01: Try loading from RegimeState first (enables continuity)
-            from core.model_persistence import load_regime_state
-            regime_state = load_regime_state(
-                artifact_root=Path(art_root),
-                equip=equip,
-                equip_id=equip_id if SQL_MODE or dual_mode else None,
-                sql_client=sql_client if SQL_MODE or dual_mode else None
-            )
-            
-            if regime_state is not None and regime_state.quality_ok:
-                Console.info(f"Loaded state v{regime_state.state_version}: K={regime_state.n_clusters}, silhouette={regime_state.silhouette_score:.3f}", component="REGIME_STATE")
-                regime_state_version = regime_state.state_version
-                
-                # Reconstruct RegimeModel from state (will be validated against current basis later)
-                # Note: Feature columns will be set from regime_basis_train when available
-                regime_model = "STATE_LOADED"  # Placeholder, will be reconstructed in label()
-            else:
-                # Fallback to old joblib persistence
-                regime_model = regimes.load_regime_model(stable_models_dir)
-                if regime_model is not None:
-                    Console.info(f"Loaded cached regime model (legacy): K={regime_model.n_clusters}, hash={regime_model.train_hash}", component="REGIME")
-        except Exception as e:
-            Console.warn(f"Failed to load cached regime state/model: {e}", component="REGIME",
-                         equip=equip, error_type=type(e).__name__, error=str(e)[:200])
-            regime_model = None
-            regime_state = None
-            regime_state_version = 0
-        
-        # Try loading from cache (either old detector_cache or new persistence system)
-        if cached_models:
-            with T.section("models.persistence.rebuild"):
-                # REFACTOR v11: Use helper function for cache reconstruction
-                rebuild_result = _rebuild_detectors_from_cache(
-                    cached_models=cached_models,
-                    cached_manifest=cached_manifest,
-                    cfg=cfg,
-                    equip=equip
-                )
-                ar1_detector = rebuild_result["ar1_detector"]
-                pca_detector = rebuild_result["pca_detector"]
-                iforest_detector = rebuild_result["iforest_detector"]
-                gmm_detector = rebuild_result["gmm_detector"]
-                omr_detector = rebuild_result["omr_detector"]
-                if rebuild_result["regime_model"] is not None:
-                    regime_model = rebuild_result["regime_model"]
-                    regime_quality_ok = rebuild_result["regime_quality_ok"]
-                if rebuild_result["feature_medians"] is not None:
-                    col_meds = rebuild_result["feature_medians"]
-        
-        elif detector_cache:
-            with T.section("models.cache_local.apply"):
+                if cached_models:
+                    rebuild_result = rebuild_detectors_from_cache(
+                        cached_models=cached_models, cached_manifest=cached_manifest,
+                        cfg=cfg, equip=equip
+                    )
+                    ar1_detector = rebuild_result["ar1_detector"]
+                    pca_detector = rebuild_result["pca_detector"]
+                    iforest_detector = rebuild_result["iforest_detector"]
+                    gmm_detector = rebuild_result["gmm_detector"]
+                    omr_detector = rebuild_result["omr_detector"]
+                    regime_model = rebuild_result.get("regime_model")
+                    col_meds = rebuild_result.get("feature_medians")
+                        
+            elif detector_cache:
                 ar1_detector = detector_cache.get("ar1")
                 pca_detector = detector_cache.get("pca")
                 iforest_detector = detector_cache.get("iforest")
                 gmm_detector = detector_cache.get("gmm")
                 regime_model = detector_cache.get("regime_model")
-                cached_regime_hash = detector_cache.get("regime_basis_hash")
-                regime_quality_ok = bool(detector_cache.get("regime_quality_ok", True))
-            if regime_model is not None:
-                regime_model.meta["quality_ok"] = regime_quality_ok
-            # MHAL removed v9.1.0 - redundant with PCA-T2
-            if not all([ar1_detector, pca_detector, iforest_detector]):
-                Console.warn("Cached detectors incomplete; re-fitting this run.", component="MODEL",
-                             equip=equip)
-                detector_cache = None
-                regime_model = None
-            else:
-                Console.info("Using cached detectors from previous training run.", component="MODEL")
-                if regime_model is not None and cached_regime_hash is not None:
-                    regime_model.train_hash = cached_regime_hash
-
-        # Fit models if not loaded from cache (MHAL removed v9.1.0)
-        # NOTE: Sequential fitting to avoid BLAS/OpenMP thread deadlocks with ThreadPoolExecutor
-        detectors_missing = not all([ar1_detector or not ar1_enabled, 
-                                      pca_detector or not pca_enabled, 
-                                      iforest_detector or not iforest_enabled])
-        
-        # V11 ONLINE mode gate: fail fast if models missing and fitting not allowed
-        if detectors_missing and not ALLOWS_MODEL_REFIT:
-            raise RuntimeError(
-                f"[ONLINE MODE] Required detector models not found in cache for {equip}. "
-                "ONLINE mode requires pre-trained models. Run in OFFLINE mode first to train models, "
-                "or check ModelRegistry for cached models."
-            )
-        
-        # V11 GAP-3: Asset Similarity Transfer Learning for Cold-Start
-        # When starting with new equipment (no models), look for similar existing equipment
-        # and use their profile to inform initial baseline statistics
-        transfer_source_id: Optional[int] = None
-        transfer_result: Optional[TransferResult] = None
-        if detectors_missing and SQL_MODE and sql_client:
-            try:
-                # Load profiles for same equipment type from SQL
-                similarity_engine = AssetSimilarity(min_similarity=0.7)
-                loaded = similarity_engine.load_profiles_from_sql(
-                    sql_client=sql_client,
-                    equip_type=equip,  # Same type only
-                    exclude_equip_id=equip_id  # Exclude self
-                )
                 
-                if loaded > 0:
-                    # Build profile for current equipment from training data
-                    if len(train) > 0:
-                        sensor_cols = [c for c in train.columns 
-                                      if train[c].dtype in ['float64', 'float32', 'int64', 'int32']]
-                        if sensor_cols:
-                            current_profile = similarity_engine.build_profile(
-                                equip_id=equip_id,
-                                equip_type=equip,
-                                data=train,
-                                regime_labels=None,
-                                typical_health=85.0
-                            )
-                            
-                            # Find most similar equipment
-                            similar = similarity_engine.find_similar(current_profile)
-                            if similar and similar[0].transferable:
-                                best_match = similar[0]
-                                transfer_source_id = best_match.source_equip_id
-                                Console.info(
-                                    f"V11 Transfer Learning: Found similar equipment ID={transfer_source_id} "
-                                    f"(similarity={best_match.overall_similarity:.2f}, "
-                                    f"sensors={best_match.sensor_overlap}/{len(sensor_cols)})",
-                                    component="TRANSFER",
-                                    equip=equip,
-                                    source_id=transfer_source_id,
-                                    similarity=round(best_match.overall_similarity, 3),
-                                    sensor_overlap=best_match.sensor_overlap
-                                )
-                                
-                                # V11: Actually apply transfer learning
-                                # Get scaling factors from source equipment's baseline
-                                try:
-                                    transfer_result = similarity_engine.transfer_baseline(
-                                        source_id=transfer_source_id,
-                                        target_id=equip_id,
-                                        source_baseline=None  # Use profile stats directly
-                                    )
-                                    Console.ok(
-                                        f"V11 Transfer Applied: {len(transfer_result.sensors_transferred)} sensors, "
-                                        f"confidence={transfer_result.confidence:.2f}",
-                                        component="TRANSFER",
-                                        equip=equip,
-                                        sensors_count=len(transfer_result.sensors_transferred),
-                                        confidence=round(transfer_result.confidence, 3)
-                                    )
-                                except ValueError as ve:
-                                    Console.warn(f"Transfer baseline failed: {ve}", component="TRANSFER")
-                                    transfer_result = None
-            except Exception as te:
-                Console.debug(f"Transfer learning check skipped: {te}", 
-                             component="TRANSFER", equip=equip, error=str(te)[:200])
+                if regime_model is not None:
+                    regime_model.meta["quality_ok"] = bool(detector_cache.get("regime_quality_ok", True))
+                    if detector_cache.get("regime_basis_hash"):
+                        regime_model.train_hash = detector_cache["regime_basis_hash"]
+                
+                if not all([ar1_detector, pca_detector, iforest_detector]):
+                    Console.warn("Cached detectors incomplete; will re-fit", component="MODEL")
+                    ar1_detector = pca_detector = iforest_detector = gmm_detector = omr_detector = None
+                    regime_model = None
+            
+            # Load regime state from SQL if no regime model loaded
+            if regime_model is None:
+                try:
+                    from core.model_persistence import load_regime_state
+                    regime_state = load_regime_state(equip=equip, equip_id=equip_id, sql_client=sql_client)
+                    if regime_state is not None and regime_state.quality_ok:
+                        regime_state_version = regime_state.state_version
+                        regime_model = "STATE_LOADED"
+                        Console.info(f"Regime loaded from state_v{regime_state_version} | K={regime_state.n_clusters}", component="REGIME")
+                except Exception as e:
+                    Console.warn(f"Failed to load regime state: {e}", component="REGIME")
+
+        # Check if we need to fit detectors
+        detectors_missing = not all([
+            ar1_detector or not det_flags["ar1_enabled"],
+            pca_detector or not det_flags["pca_enabled"],
+            iforest_detector or not det_flags["iforest_enabled"],
+        ])
+        
+        if detectors_missing and not ALLOWS_MODEL_REFIT:
+            Console.error(
+                "ONLINE mode requires pre-trained models but none found in cache",
+                component="MODEL", equip=equip, mode="ONLINE",
+                hint="Run in OFFLINE mode first, or check ModelRegistry"
+            )
+            raise RuntimeError(f"Required detector models not found in cache for {equip}")
         
         if detectors_missing:
             with T.section("train.detector_fit"):
-                Console.info("Starting detector fitting...", component="MODEL")
-                fit_result = _fit_all_detectors(
-                    train=train,
-                    cfg=cfg,
-                    ar1_enabled=ar1_enabled,
-                    pca_enabled=pca_enabled,
-                    iforest_enabled=iforest_enabled,
-                    gmm_enabled=gmm_enabled,
-                    omr_enabled=omr_enabled,
-                    ar1_detector=ar1_detector,
-                    pca_detector=pca_detector,
-                    iforest_detector=iforest_detector,
-                    gmm_detector=gmm_detector,
-                    omr_detector=omr_detector,
-                    output_manager=output_manager,
-                    sql_client=sql_client,
-                    run_id=run_id,
-                    equip_id=equip_id,
-                    equip=equip,
-                    tables_dir=tables_dir,
+                fit_result = fit_all_detectors(
+                    train=train, cfg=cfg, **det_flags,
+                    output_manager=output_manager, sql_client=sql_client,
+                    run_id=run_id, equip_id=equip_id, equip=equip,
                 )
-                
-                # Extract fitted detectors
                 ar1_detector = fit_result["ar1_detector"]
                 pca_detector = fit_result["pca_detector"]
                 iforest_detector = fit_result["iforest_detector"]
@@ -4318,94 +1188,43 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 pca_train_spe = fit_result["pca_train_spe"]
                 pca_train_t2 = fit_result["pca_train_t2"]
 
-        # Validate required detectors are present (skip disabled ones) - MHAL removed v9.1.0
-        required_detectors = []
-        if ar1_enabled and not ar1_detector: required_detectors.append("ar1")
-        if pca_enabled and not pca_detector: required_detectors.append("pca")
-        if iforest_enabled and not iforest_detector: required_detectors.append("iforest")
-        if gmm_enabled and not gmm_detector: required_detectors.append("gmm")
-        if omr_enabled and not omr_detector: required_detectors.append("omr")
+        # Validate all enabled detectors are present
+        missing = []
+        if det_flags["ar1_enabled"] and not ar1_detector: missing.append("ar1")
+        if det_flags["pca_enabled"] and not pca_detector: missing.append("pca")
+        if det_flags["iforest_enabled"] and not iforest_detector: missing.append("iforest")
+        if det_flags["gmm_enabled"] and not gmm_detector: missing.append("gmm")
+        if det_flags["omr_enabled"] and not omr_detector: missing.append("omr")
         
-        if required_detectors:
-            raise RuntimeError(f"[MODEL] Required detector initialization failed for enabled detectors: {required_detectors}")
+        if missing:
+            Console.error(f"Detector initialization failed: {missing}", component="MODEL", equip=equip)
+            raise RuntimeError(f"Required detector initialization failed: {missing}")
 
-        # ===== ADAPTIVE PARAMETER TUNING: Continuous Self-Monitoring =====
-        # Check model health and auto-adjust parameters if needed
-        Console.info("Checking model health...", component="ADAPTIVE")
-        param_adjustments = []
-        
-        # NOTE: MHAL condition number / NaN checks removed v9.1.0 - detector deprecated
-        
-        # ACM-CSV-03: Write parameter adjustments to SQL:ACM_ConfigHistory
-        if param_adjustments:
-            Console.info(f"Writing {len(param_adjustments)} parameter adjustment(s) to config...", component="ADAPTIVE")
-            
-            # SQL mode: Write to ACM_ConfigHistory via config_history_writer
-            if sql_client:
-                try:
-                    from core.config_history_writer import write_config_changes_bulk
-                    
-                    # Transform param_adjustments to config_history format
-                    changes = [
-                        {
-                            "parameter_path": adj['param'],
-                            "old_value": adj['old'],
-                            "new_value": adj['new'],
-                            "change_reason": adj['reason']
-                        }
-                        for adj in param_adjustments
-                    ]
-                    
-                    success = write_config_changes_bulk(
-                        sql_client=sql_client,
-                        equip_id=int(equip_id),
-                        changes=changes,
-                        changed_by="ADAPTIVE_TUNING",
-                        run_id=run_id
-                    )
-                    
-                    if success:
-                        Console.info(f"Config changes written to SQL:ACM_ConfigHistory", component="ADAPTIVE")
-                        Console.info(f"Rerun ACM to apply new parameters (current run continues with old params)", component="ADAPTIVE")
-                    else:
-                        Console.warn(f"Failed to write config changes to SQL", component="ADAPTIVE",
-                                     equip=equip, run_id=run_id)
-                        
-                except Exception as e:
-                    Console.error(f"Failed to update config SQL: {e}", component="ADAPTIVE",
-                                 equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:200])
-        else:
-            Console.info("All model parameters within healthy ranges", component="ADAPTIVE")
-
-        # Build regime feature basis with safe_step for consistent error handling
-        regime_basis_train = None
-        regime_basis_score = None
-        regime_basis_meta = {}
-        regime_basis_hash = None
-        
-        def _do_build_regime_basis():
-            nonlocal regime_basis_train, regime_basis_score, regime_basis_meta, regime_basis_hash
-            regime_basis_train, regime_basis_score, regime_basis_meta = regimes.build_feature_basis(
-                train_features=train,
-                score_features=score,
-                raw_train=train_numeric,
-                raw_score=score_numeric,
-                pca_detector=pca_detector,
-                cfg=cfg,
+        # ===== 3) Build Regime Feature Basis =====
+        def _build_regime_basis():
+            """Build regime feature basis and compute schema hash."""
+            basis_train, basis_score, basis_meta = regimes.build_feature_basis(
+                train_features=train, score_features=score,
+                raw_train=raw_train, raw_score=raw_score,
+                pca_detector=pca_detector, cfg=cfg,
             )
-            # v11.1.1 FIX: Use SCHEMA hash (feature column names + regime config), not DATA hash
-            # This ensures regimes are STATIC once discovered - the same equipment with same sensors
-            # should always have the same regimes regardless of which time window is being processed.
-            # Previously used: pd.util.hash_pandas_object(regime_basis_train) which changed every batch!
+            # Schema hash ensures regimes are STATIC once discovered
             regime_cfg_str = str(cfg.get("regimes", {}))
-            schema_str = ",".join(sorted(regime_basis_train.columns)) + "|" + regime_cfg_str
-            regime_basis_hash = int(hashlib.sha256(schema_str.encode()).hexdigest()[:15], 16)
+            schema_str = ",".join(sorted(basis_train.columns)) + "|" + regime_cfg_str
+            basis_hash = int(hashlib.sha256(schema_str.encode()).hexdigest()[:15], 16)
+            return basis_train, basis_score, basis_meta, basis_hash
         
-        safe_step(
-            _do_build_regime_basis,
+        regime_basis_result, ok = safe_step(
+            _build_regime_basis,
             "regime_feature_basis", "REGIME", equip, run_id,
             degradations=degradations
         )
+        if ok and regime_basis_result:
+            regime_basis_train, regime_basis_score, regime_basis_meta, regime_basis_hash = regime_basis_result
+        else:
+            regime_basis_train = regime_basis_score = None
+            regime_basis_meta = {}
+            regime_basis_hash = None
 
         if regime_model is not None:
             # v11.1.1 FIX: Only check feature column match - NOT data hash
@@ -4423,44 +1242,38 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              current_cols=list(regime_basis_train.columns)[:5] if regime_basis_train is not None else [])
                 regime_model = None
 
-        # ===== 3) Score on SCORE =====
-        # REFACTOR v11: Extracted to _score_all_detectors() helper function
+        # ===== 4) Score on SCORE =====
+        # v11.2: Extracted to detector_orchestrator.score_all_detectors()
         with T.section("score.detector_score"):
-            Console.info("Starting detector scoring...", component="MODEL")
             score_start_time = time.perf_counter()
             
-            frame, omr_contributions_data = _score_all_detectors(
+            frame, omr_contributions_data = score_all_detectors(
                 data=score,
                 ar1_detector=ar1_detector,
                 pca_detector=pca_detector,
                 iforest_detector=iforest_detector,
                 gmm_detector=gmm_detector,
                 omr_detector=omr_detector,
-                ar1_enabled=ar1_enabled,
-                pca_enabled=pca_enabled,
-                iforest_enabled=iforest_enabled,
-                gmm_enabled=gmm_enabled,
-                omr_enabled=omr_enabled,
+                **det_flags,
             )
-        
-        Console.info(f"All detectors scored in {time.perf_counter()-score_start_time:.2f}s", component="MODEL")
 
-        # ===== 4) Regimes (Run before calibration to enable regime-aware thresholds) =====
+        # ===== 5) Regimes (Run before calibration to enable regime-aware thresholds) =====
         train_regime_labels = None
         score_regime_labels = None
         regime_model_was_trained = False
         
         with T.section("regimes.label"):
             # REGIME-STATE-02: Reconstruct model from loaded state if available
+            regime_state_action = "none"
             if regime_model == "STATE_LOADED" and regime_state is not None and regime_basis_train is not None:
                 try:
                     regime_model = regimes.regime_state_to_model(
                         state=regime_state,
                         feature_columns=list(regime_basis_train.columns),
-                        raw_tags=list(train_numeric.columns) if train_numeric is not None else [],
+                        raw_tags=list(raw_train.columns) if raw_train is not None else [],
                         train_hash=regime_basis_hash
                     )
-                    Console.info(f"Reconstructed RegimeModel from state v{regime_state.state_version}", component="REGIME_STATE")
+                    regime_state_action = f"reconstructed_v{regime_state.state_version}"
                 except Exception as e:
                     Console.warn(f"Failed to reconstruct model from state: {e}", component="REGIME_STATE",
                                  equip=equip, state_version=regime_state.state_version, error=str(e)[:200])
@@ -4526,13 +1339,12 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     # Save state
                     save_regime_state(
                         state=new_state,
-                        artifact_root=Path(art_root),
                         equip=equip,
-                        sql_client=sql_client if SQL_MODE or dual_mode else None
+                        sql_client=sql_client
                     )
                     
                     regime_state_version = new_state.state_version
-                    Console.info(f"Saved state v{regime_state_version}: K={new_state.n_clusters}, quality_ok={new_state.quality_ok}", component="REGIME_STATE")
+                    regime_defs_count = 0
                     
                     # v11.1.0: Write regime definitions to ACM_RegimeDefinitions (HDBSCAN/GMM)
                     if output_manager and regime_model is not None and regime_model.model is not None:
@@ -4561,9 +1373,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                     'MaturityState': new_state.maturity_state if hasattr(new_state, 'maturity_state') else 'LEARNING',
                                 })
                             output_manager.write_regime_definitions(regime_defs, version=regime_state_version)
-                            Console.info(f"Wrote {len(regime_defs)} regime definitions", component="REGIME")
+                            regime_defs_count = len(regime_defs)
                         except Exception as e:
                             Console.warn(f"Failed to write regime definitions: {e}", component="REGIME")
+                    
+                    Console.info(f"Regime state: saved_v{regime_state_version} | K={new_state.n_clusters} | defs={regime_defs_count}", component="REGIME_STATE")
                 except Exception as e:
                     Console.warn(f"Failed to save regime state: {e}", component="REGIME_STATE",
                                  equip=equip, error_type=type(e).__name__, error=str(e)[:200])
@@ -4573,6 +1387,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # ===== ORPHAN-FIX: Write regime occupancy and transitions =====
         with T.section("regimes.occupancy"):
+            occupancy_count = 0
+            transition_count = 0
             try:
                 if score_regime_labels is not None and len(score_regime_labels) > 0 and output_manager:
                     # Compute regime occupancy (time spent in each regime)
@@ -4598,9 +1414,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             'PointCount': int(count),
                         })
                     if occupancy_data:
-                        rows = output_manager.write_regime_occupancy(occupancy_data)
-                        if rows > 0:
-                            Console.info(f"Wrote {rows} regime occupancy records", component="REGIME")
+                        occupancy_count = output_manager.write_regime_occupancy(occupancy_data)
                     
                     # Compute regime transitions (how often regime changes)
                     if len(score_regime_labels) > 1:
@@ -4613,9 +1427,10 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                     transitions[from_r] = {}
                                 transitions[from_r][to_r] = transitions[from_r].get(to_r, 0) + 1
                         if transitions:
-                            rows = output_manager.write_regime_transitions(transitions)
-                            if rows > 0:
-                                Console.info(f"Wrote {rows} regime transition records", component="REGIME")
+                            transition_count = output_manager.write_regime_transitions(transitions)
+                    
+                    if occupancy_count > 0 or transition_count > 0:
+                        Console.info(f"Regime analysis: occupancy={occupancy_count} | transitions={transition_count}", component="REGIME")
             except Exception as e:
                 Console.warn(f"Regime occupancy/transitions write failed: {e}", component="REGIME",
                              equip=equip, error=str(e)[:200])
@@ -4651,9 +1466,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     if isinstance(auto_retrain_cfg, bool):
                         auto_retrain_cfg = {}  # Convert legacy boolean to dict
                     
-                    # Check model age (SQL mode temporal validation)
+                    # Check model age (temporal validation)
                     model_age_trigger = False
-                    if SQL_MODE and cached_manifest:
+                    model_age_hours = 0.0
+                    max_age_hours = 720  # default
+                    if cached_manifest:
                         created_at_str = cached_manifest.get("created_at")
                         if created_at_str:
                             try:
@@ -4661,39 +1478,34 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 created_at = datetime.fromisoformat(created_at_str)
                                 model_age_hours = (datetime.now() - created_at).total_seconds() / 3600
                                 max_age_hours = auto_retrain_cfg.get("max_model_age_hours", 720)  # 30 days default
-                                
                                 if model_age_hours > max_age_hours:
-                                    Console.warn(f"Model age {model_age_hours:.1f}h exceeds limit {max_age_hours}h - forcing retraining", component="MODEL",
-                                                 equip=equip, model_age_hours=round(model_age_hours, 1), max_age_hours=max_age_hours)
                                     model_age_trigger = True
-                            except Exception as age_e:
-                                Console.warn(f"Failed to check model age: {age_e}", component="MODEL",
-                                             equip=equip, error=str(age_e)[:200])
+                            except Exception:
+                                pass
                     
-                    # Check regime quality (SQL mode data-driven trigger)
+                    # Check regime quality (data-driven trigger)
                     regime_quality_trigger = False
-                    if SQL_MODE:
-                        min_silhouette = auto_retrain_cfg.get("min_regime_quality", 0.3)
-                        current_silhouette = regime_quality_metrics.get("silhouette", 0.0)
-                        if not regime_quality_ok or current_silhouette < min_silhouette:
-                            Console.warn(f"Regime quality degraded (silhouette={current_silhouette:.3f} < {min_silhouette}) - forcing retraining", component="MODEL",
-                                         equip=equip, silhouette=round(current_silhouette, 3), min_silhouette=min_silhouette)
-                            regime_quality_trigger = True
+                    min_silhouette = auto_retrain_cfg.get("min_regime_quality", 0.3)
+                    current_silhouette = regime_quality_metrics.get("silhouette", 0.0)
+                    if not regime_quality_ok or current_silhouette < min_silhouette:
+                        regime_quality_trigger = True
                     
-                    # Aggregate triggers
-                    if config_changed:
-                        Console.warn(f"Config changed - forcing retraining", component="MODEL",
-                                     equip=equip)
-                        force_retrain = True
-                    elif model_age_trigger or regime_quality_trigger:
+                    # Aggregate triggers and log consolidated retraining reason
+                    if config_changed or model_age_trigger or regime_quality_trigger:
+                        reasons = []
+                        if config_changed:
+                            reasons.append("config_changed")
+                        if model_age_trigger:
+                            reasons.append(f"age={model_age_hours:.0f}h>{max_age_hours}h")
+                        if regime_quality_trigger:
+                            reasons.append(f"silhouette={current_silhouette:.3f}<{min_silhouette}")
+                        Console.warn(f"Forcing retraining: {' | '.join(reasons)}", component="MODEL", equip=equip)
                         force_retrain = True
                     
-                    # Invalidate cached models if retraining required (MHAL removed v9.1.0)
+                    # Invalidate cached models if retraining required
                     if force_retrain:
                         cached_models = None
                         ar1_detector = pca_detector = iforest_detector = gmm_detector = None
-                        # Re-fit detectors immediately after invalidation
-                        Console.info("Re-fitting detectors due to forced retraining...", component="MODEL")
                         
                         # Determine retrain reason for observability
                         retrain_reason = "config_changed" if config_changed else (
@@ -4703,21 +1515,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         )
                         record_model_refit(equip, reason=retrain_reason, detector="all")
                         
-                        # Use the helper function for consistent fitting
-                        retrain_result = _fit_all_detectors(
-                            train=train,
-                            cfg=cfg,
-                            ar1_enabled=ar1_enabled,
-                            pca_enabled=pca_enabled,
-                            iforest_enabled=iforest_enabled,
-                            gmm_enabled=gmm_enabled,
-                            omr_enabled=omr_enabled,
-                            output_manager=output_manager,
-                            sql_client=sql_client,
-                            run_id=run_id,
-                            equip_id=equip_id,
-                            equip=equip,
-                            tables_dir=tables_dir,
+                        # v11.2: Extracted to detector_orchestrator.fit_all_detectors()
+                        retrain_result = fit_all_detectors(
+                            train=train, cfg=cfg, **det_flags,
+                            output_manager=output_manager, sql_client=sql_client,
+                            run_id=run_id, equip_id=equip_id, equip=equip,
                         )
                         ar1_detector = retrain_result["ar1_detector"]
                         pca_detector = retrain_result["pca_detector"]
@@ -4738,13 +1540,10 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         if models_were_trained:
             with T.section("models.persistence.save"):
                 col_meds_value = col_meds  # V11: col_meds initialized at function scope
-                _save_trained_models(
+                save_trained_models(
                     equip=equip,
-                    art_root=Path(art_root),
                     sql_client=sql_client,
                     equip_id=equip_id,
-                    SQL_MODE=SQL_MODE,
-                    dual_mode=dual_mode,
                     cfg=cfg,
                     train=train,
                     ar1_detector=ar1_detector,
@@ -4755,7 +1554,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     regime_model=regime_model,
                     col_meds=col_meds_value,
                     regime_quality_ok=regime_quality_ok,
-                    T=T,
+                    timing_sections=T.timings if hasattr(T, 'timings') else None,
                     run_id=run_id,
                 )
                 
@@ -4806,12 +1605,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             )
                             
                             # Check promotion eligibility if still LEARNING
+                            promotion_happened = False
                             if model_state.maturity == MaturityState.LEARNING:
                                 eligible, unmet = check_promotion_eligibility(model_state)
                                 if eligible:
                                     old_maturity = model_state.maturity.value
                                     model_state = promote_model(model_state)
-                                    Console.ok(f"Model promoted to CONVERGED", component="LIFECYCLE")
+                                    promotion_happened = True
                                     
                                     # ===== ORPHAN-FIX: Write regime promotion log =====
                                     try:
@@ -4825,14 +1625,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                             'ConsecutiveRuns': model_state.consecutive_runs,
                                             'TotalDays': model_state.total_days,
                                         }]
-                                        rows = output_manager.write_regime_promotion_log(promotion_record)
-                                        if rows > 0:
-                                            Console.info(f"Logged regime promotion", component="LIFECYCLE")
-                                    except Exception as e:
-                                        Console.warn(f"Regime promotion log write failed: {e}", component="LIFECYCLE",
-                                                     equip=equip, error=str(e)[:200])
-                                else:
-                                    Console.info(f"Model not yet eligible for promotion: {unmet}", component="LIFECYCLE")
+                                        output_manager.write_regime_promotion_log(promotion_record)
+                                    except Exception:
+                                        pass  # Silent failure for promotion log
+                                    
+                                    Console.ok(f"Model promoted: LEARNING->CONVERGED (runs={model_state.consecutive_runs}, days={model_state.total_days:.1f})", component="LIFECYCLE")
                         
                         # Write updated state
                         # V11 CRITICAL-2 FIX: regime_state_version is always initialized at line 4062
@@ -4852,7 +1649,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         Console.warn(f"Failed to update model lifecycle: {e}", component="LIFECYCLE",
                                      error=str(e)[:200])
 
-        # ===== 5) Calibrate -> pca_spe_z, pca_t2_z, ar1_z, iforest_z, gmm_z, omr_z =====
+        # ===== 6) Calibrate -> pca_spe_z, pca_t2_z, ar1_z, iforest_z, gmm_z, omr_z =====
         # CRITICAL FIX: Fit calibrators on TRAIN data, transform SCORE data
         with T.section("calibrate"):
             cal_q = float((cfg or {}).get("thresholds", {}).get("q", 0.98))
@@ -4861,10 +1658,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             quality_ok = bool(use_per_regime and regime_quality_ok and train_regime_labels is not None and score_regime_labels is not None)
             
             # Score TRAIN data with all fitted detectors using helper function
-            # REFACTOR v11: Reuse _score_all_detectors with cached PCA scores
-            Console.info("Scoring TRAIN data for calibration baseline...", component="CAL")
+            # v11.2: Extracted to detector_orchestrator.score_all_detectors()
             pca_cached = (pca_train_spe, pca_train_t2) if pca_train_spe is not None else None
-            train_frame, _ = _score_all_detectors(
+            train_frame, _ = score_all_detectors(
                 data=train,
                 ar1_detector=ar1_detector,
                 pca_detector=pca_detector,
@@ -4909,11 +1705,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             train_z_p99[det_name] = p99
             
             # Set adaptive clip: max(default, 1.5 * max_train_p99), capped at 50
+            adaptive_clip = default_clip
             if train_z_p99:
                 max_train_p99 = max(train_z_p99.values())
                 adaptive_clip = max(default_clip, min(max_train_p99 * 1.5, 50.0))
                 self_tune_cfg["clip_z"] = adaptive_clip
-                Console.info(f"Adaptive clip_z={adaptive_clip:.2f} (TRAIN P99 max={max_train_p99:.2f})", component="CAL")
             
             fit_regimes = train_regime_labels if quality_ok else None
             transform_regimes = score_regime_labels if quality_ok else None
@@ -4921,8 +1717,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             # Surface per-regime calibration activity
             frame["per_regime_active"] = 1 if quality_ok else 0
             
-            # REFACTOR v11: Use helper function for calibration
-            frame, calibrators_dict = _calibrate_all_detectors(
+            # v11.2: Extracted to detector_orchestrator.calibrate_all_detectors()
+            frame, calibrators_dict = calibrate_all_detectors(
                 train_frame=train_frame,
                 score_frame=frame,
                 cal_q=cal_q,
@@ -4962,8 +1758,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 calibrators.append(("omr_z", cal_omr))
 
             # DET-07: Generate per-regime threshold transparency table
+            per_regime_count = 0
             if quality_ok and use_per_regime:
-                Console.info("Generating per-regime threshold table...", component="CAL")
                 per_regime_rows = []
                 for detector_name, calibrator in calibrators:
                     for regime_id in sorted(calibrator.regime_thresh_.keys()):
@@ -4984,7 +1780,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     per_regime_df = pd.DataFrame(per_regime_rows)
                     # Pass logical artifact name instead of file path
                     output_manager.write_dataframe(per_regime_df, "per_regime_thresholds")
-                    Console.info(f"Wrote per-regime thresholds: {len(per_regime_rows)} regime-detector pairs", component="CAL")
+                    per_regime_count = len(per_regime_rows)
 
             # ANA-09: Always write thresholds table with global fallback
             threshold_rows: List[Dict[str, Any]] = []
@@ -5012,9 +1808,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 thresholds_df = pd.DataFrame(threshold_rows)
                 # Pass logical artifact name instead of file path
                 output_manager.write_dataframe(thresholds_df, "acm_thresholds")
-                Console.info(f"Wrote thresholds table with {len(threshold_rows)} rows -> acm_thresholds", component="CAL")
 
             # ===== ORPHAN-FIX: Write calibration summary =====
+            cal_summary_count = 0
             try:
                 if output_manager and calibrators:
                     calibration_summary = []
@@ -5027,313 +1823,79 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             'NumRegimes': len(calibrator.regime_thresh_) if hasattr(calibrator, 'regime_thresh_') else 0,
                         })
                     if calibration_summary:
-                        rows = output_manager.write_calibration_summary(calibration_summary)
-                        if rows > 0:
-                            Console.info(f"Wrote {rows} calibration summary records", component="CAL")
+                        cal_summary_count = output_manager.write_calibration_summary(calibration_summary)
             except Exception as e:
                 Console.warn(f"Calibration summary write failed: {e}", component="CAL",
                              equip=equip, error=str(e)[:200])
+            
+            # Consolidated calibration log
+            Console.info(f"Calibration complete: q={cal_q} | clip_z={adaptive_clip:.2f} | detectors={len(calibrators)} | thresholds={len(threshold_rows)} | per_regime={per_regime_count} | summary={cal_summary_count}", component="CAL")
 
-        # ===== 6) Fusion + episodes =====
-        with T.section("fusion"): # type: ignore
-            # Active detectors: PCA-SPE, PCA-TSquared, AR1, IForest, GMM, OMR
-            default_w = {
-                "pca_spe_z": 0.30,
-                "pca_t2_z": 0.20,
-                "ar1_z": 0.20,
-                "iforest_z": 0.15,
-                "gmm_z": 0.05,
-                "omr_z": 0.10,
-            }
-            weights = (cfg or {}).get("fusion", {}).get("weights", default_w)
-            fusion_weights_used = dict(weights)
-            avail = set(frame.columns)
+        # ===== 7) Fusion + episodes =====
+        with T.section("fusion"):
+            from core.fuse import run_fusion_pipeline, FusionResult
             
-            # CRITICAL FIX #10: Validate weights keys against available detectors BEFORE fusion
-            # This prevents KeyError crashes from misconfigured weights
-            invalid_keys = [k for k in weights.keys() if not k.endswith('_z')]
-            if invalid_keys:
-                raise ValueError(f"[FUSE] Invalid detector keys in fusion.weights: {invalid_keys}. "
-                               f"All keys must end with '_z' (e.g., 'ar1_z', 'pca_spe_z')")
+            fusion_result: FusionResult = run_fusion_pipeline(
+                frame=frame,
+                train_frame=train_frame,
+                score_data=score,
+                train_data=train,
+                cfg=cfg,
+                score_regime_labels=score_regime_labels,
+                train_regime_labels=train_regime_labels,
+                output_manager=output_manager,
+                previous_weights=previous_weights,
+                equip=equip,
+            )
             
-            missing = [k for k in weights.keys() if k not in avail]
-            # Filter out permanently unimplemented detectors from warnings
-            missing_to_warn = list(missing)  # MHAL and River removed v9.1.0
-            if missing_to_warn:
-                Console.warn(f"Ignoring missing streams: {missing_to_warn}; available={sorted([c for c in avail if c.endswith('_z')])}", component="FUSE",
-                             equip=equip, missing_streams=missing_to_warn)
-            present = {k: frame[k].to_numpy(copy=False) for k in weights.keys() if k in avail}
-            if not present:
-                raise RuntimeError("[FUSE] No valid input streams for fusion. Check your fusion.weights keys or ensure detectors are enabled.")
+            # Unpack results
+            frame["fused"] = fusion_result.fused_scores
+            episodes = fusion_result.episodes
+            fusion_weights_used = fusion_result.weights_used
             
-            # FUSE-11: Dynamic weight normalization for present streams only
-            # Remove weights for missing detectors and renormalize
-            if missing:
-                # Build new weights dict with only present detectors
-                present_weights = {k: weights[k] for k in present.keys()}
-                total_present = sum(present_weights.values())
-                
-                if total_present > 0:
-                    # Renormalize to sum to 1.0
-                    weights = {k: v / total_present for k, v in present_weights.items()}
-                    Console.info(f"Dynamic normalization: {len(missing)} detector(s) absent, renormalized {len(weights)} weights", component="FUSE")
-                else:
-                    # All weights were zero - use equal weighting
-                    equal_weight = 1.0 / len(present)
-                    weights = {k: equal_weight for k in present.keys()}
-                    Console.warn(f"All configured weights were 0.0, using equal weighting ({equal_weight:.3f} each)", component="FUSE",
-                                 equip=equip, equal_weight=round(equal_weight, 3))
-                
-                fusion_weights_used = dict(weights)
+            if fusion_result.train_fused is not None:
+                train_frame["fused"] = fusion_result.train_fused
             
-            # FUSE-10: Load previous weights for warm-start (persistent learning)
-            previous_weights = None
-            if run_dir:
-                try:
-                    # Look for previous weight_tuning.json in equipment's artifact folder
-                    equipment_artifact_root = run_dir.parent
-                    prev_runs = sorted([d for d in equipment_artifact_root.glob("run_*") if d.is_dir()], reverse=True)
-                    
-                    # Skip current run, look for most recent previous run
-                    for prev_run_dir in prev_runs[1:] if len(prev_runs) > 1 else []:
-                        prev_tune_path = prev_run_dir / "tables" / "weight_tuning.json"
-                        if prev_tune_path.exists():
-                            with open(prev_tune_path, 'r') as f:
-                                prev_data = json.load(f)
-                                previous_weights = prev_data.get("tuned_weights", {})
-                                Console.info(f"Loaded previous weights from {prev_tune_path.name}", component="TUNE")
-                                break
-                except Exception as load_e:
-                    Console.warn(f"Failed to load previous weights: {load_e}", component="TUNE",
-                                 equip=equip, error=str(load_e)[:200])
+            # Record observability metrics
+            detector_scores = {"fused_z": float(fusion_result.fused_scores[-1]) if len(fusion_result.fused_scores) > 0 else 0.0}
+            for det in ["ar1_z", "pca_spe_z", "pca_t2_z", "iforest_z", "gmm_z", "omr_z"]:
+                if det in frame.columns:
+                    detector_scores[det] = float(frame[det].iloc[-1])
+            record_detector_scores(equip, detector_scores)
             
-            # Use previous weights as starting point if available
-            if previous_weights:
-                # Warm-start: blend config weights with learned weights (favor learned)
-                warm_start_lr = float((cfg or {}).get("fusion", {}).get("auto_tune", {}).get("warm_start_lr", 0.7))
-                weights = {k: (1 - warm_start_lr) * weights.get(k, 0.0) + warm_start_lr * previous_weights.get(k, weights.get(k, 0.0)) 
-                          for k in weights.keys()}
-                # Normalize
-                total = sum(weights.values())
-                if total > 0:
-                    weights = {k: v / total for k, v in weights.items()}
-                Console.info(f"Warm-start blending: warm_start_lr={warm_start_lr:.2f}", component="TUNE")
-            
-            # DET-06: Auto-tune weights before fusion
-            tuned_weights = None
-            tuning_diagnostics = None
-            Console.info("Starting detector weight auto-tuning...", component="FUSE")
-            with T.section("fusion.auto_tune"):
-                try:
-                    # First fusion pass with current weights to get baseline (no regime labels needed for preview)
-                    fused_baseline, _ = fuse.combine(present, weights, cfg, original_features=score, regime_labels=None)
-                    fused_baseline_np = np.asarray(fused_baseline, dtype=np.float32).reshape(-1)
-                    
-                    # Tune weights based on episode separability (not circular correlation)
-                    tuned_weights, tuning_diagnostics = fuse.tune_detector_weights(
-                        streams=present,
-                        fused=fused_baseline_np,
-                        current_weights=weights,
-                        cfg=cfg
-                    )
-                    
-                    # Use tuned weights if tuning was enabled
-                    if tuning_diagnostics.get("enabled"):
-                        weights = tuned_weights
-                        fusion_weights_used = dict(tuned_weights)
-                        Console.info("Using auto-tuned weights for final fusion", component="TUNE")
-                        
-                        # Save tuning diagnostics to ACM_RunMetrics
-                        _write_fusion_metrics(
-                            sql_client=sql_client,
-                            output_manager=output_manager,
-                            fusion_weights_used=fusion_weights_used,
-                            tuning_diagnostics=tuning_diagnostics,
-                            previous_weights=previous_weights,
-                            run_id=run_id,
-                            equip_id=equip_id,
-                            equip=equip,
-                            SQL_MODE=SQL_MODE,
-                        )
-                except Exception as tune_e:
-                    Console.warn(f"Weight auto-tuning failed: {tune_e}", component="TUNE",
-                                 equip=equip, error_type=type(tune_e).__name__, error=str(tune_e)[:200])
-            
-            # Calculate fusion on TRAIN data for threshold calculation later
-            # Build present dict for train data
-            train_present = {}
-            for detector_name in present.keys():
-                # Map score column names to train_frame columns
-                if detector_name in train_frame.columns:
-                    train_present[detector_name] = train_frame[detector_name].to_numpy(copy=False)
-            
-            # Calculate fusion on train data (for threshold baseline)
-            if train_present and not train.empty:
-                try:
-                    train_fused, _ = fuse.combine(train_present, weights, cfg, original_features=train, regime_labels=train_regime_labels)
-                    train_fused_np = np.asarray(train_fused, dtype=np.float32).reshape(-1)
-                    train_frame["fused"] = train_fused_np
-                except Exception as train_fuse_e:
-                    Console.warn(f"Failed to calculate train fusion: {train_fuse_e}", component="FUSE",
-                                 equip=equip, error_type=type(train_fuse_e).__name__, error=str(train_fuse_e)[:200])
-                    train_frame["fused"] = np.zeros(len(train))
-            
-            # v10.1.0: Pass regime labels to enable episode-regime correlation
-            Console.info("Computing final fusion and detecting episodes...", component="FUSE")
-            fused, episodes = fuse.combine(present, weights, cfg, original_features=score, regime_labels=score_regime_labels)
-            fused_np = np.asarray(fused, dtype=np.float32).reshape(-1)
-            if fused_np.shape[0] != len(frame.index):
-                raise RuntimeError(f"[FUSE] Fused length {fused_np.shape[0]} != frame length {len(frame.index)}")
-            frame["fused"] = fused_np
-            episode_count = len(episodes)
-            Console.info(f"Detected {episode_count} anomaly episodes", component="FUSE")
-            
-            # Record detector scores for Prometheus/Grafana observability dashboard
-            # Build scores dict from latest row (most recent z-scores)
-            detector_scores_dict = {"fused_z": float(fused_np[-1]) if len(fused_np) > 0 else 0.0}
-            for detector_name in ["ar1_z", "pca_spe_z", "pca_t2_z", "iforest_z", "gmm_z", "omr_z"]:
-                if detector_name in frame.columns:
-                    col_data = frame[detector_name].to_numpy(copy=False)
-                    detector_scores_dict[detector_name] = float(col_data[-1]) if len(col_data) > 0 else 0.0
-            record_detector_scores(equip, detector_scores_dict)
-            
-            # Record episode metrics for Prometheus
-            if episode_count > 0:
-                record_episode(equip, count=episode_count, severity="warning")
-            
-            # ===== CONTINUOUS LEARNING: Calculate adaptive thresholds on accumulated data =====
-            # This runs AFTER fusion, using combined train+score data (or just train if not continuous learning)
-            # Frequency control: Only recalculate if update interval reached or first run
-            with T.section("thresholds.adaptive"):
-                # Determine if we should recalculate thresholds this batch
-                should_update_thresholds = False
-                
-                # Check if this is the first run (coldstart complete but no previous thresholds)
-                is_first_threshold_calc = coldstart_complete and not hasattr(cfg, '_thresholds_calculated')
-                
-                # Check if update interval reached (for batch mode)
-                batch_num = cfg.get("runtime", {}).get("batch_num", 0)
-                interval_reached = (batch_num % threshold_update_interval == 0) if threshold_update_interval > 0 else True
-                
-                # Update conditions:
-                # 1. First calculation after coldstart
-                # 2. Continuous learning enabled AND interval reached
-                # 3. NOT in continuous learning but coldstart just completed (single calculation)
-                if is_first_threshold_calc:
-                    should_update_thresholds = True
-                    Console.info("First threshold calculation after coldstart", component="THRESHOLD")
-                elif CONTINUOUS_LEARNING and interval_reached:
-                    should_update_thresholds = True
-                    Console.info(f"Update interval reached (batch {batch_num}, interval={threshold_update_interval})", component="THRESHOLD")
-                elif not CONTINUOUS_LEARNING and not hasattr(cfg, '_thresholds_calculated'):
-                    should_update_thresholds = True
-                    Console.info("Single threshold calculation (non-continuous mode)", component="THRESHOLD")
-                
-                if should_update_thresholds:
-                    # Prepare data for threshold calculation
-                    # In continuous learning: use accumulated data (train + score combined)
-                    # Otherwise: use just train data
-                    if CONTINUOUS_LEARNING and not train.empty and not score.empty:
-                        Console.info("Calculating thresholds on accumulated data (train + score)", component="THRESHOLD")
-                        # Combine train and score for accumulated dataset
-                        accumulated_data = pd.concat([train, score], axis=0)
-                        
-                        # Build detector scores dict for accumulated data
-                        accumulated_present = {}
-                        for detector_name in present.keys():
-                            if detector_name in train_frame.columns and detector_name in frame.columns:
-                                # Concatenate train and score detector scores
-                                train_scores = train_frame[detector_name].to_numpy(copy=False)
-                                score_scores = frame[detector_name].to_numpy(copy=False)
-                                accumulated_present[detector_name] = np.concatenate([train_scores, score_scores])
-                            elif detector_name in frame.columns:
-                                # Only available in score data
-                                accumulated_present[detector_name] = frame[detector_name].to_numpy(copy=False)
-                        
-                        # Calculate fusion on accumulated data
-                        if accumulated_present:
-                            try:
-                                # Build accumulated regime labels for episode-regime correlation
-                                accumulated_regime_labels = None
-                                if regime_quality_ok and train_regime_labels is not None and score_regime_labels is not None:
-                                    accumulated_regime_labels = np.concatenate([train_regime_labels, score_regime_labels])
-                                
-                                accumulated_fused, _ = fuse.combine(
-                                    accumulated_present, 
-                                    weights, 
-                                    cfg, 
-                                    original_features=accumulated_data,
-                                    regime_labels=accumulated_regime_labels
-                                )
-                                accumulated_fused_np = np.asarray(accumulated_fused, dtype=np.float32).reshape(-1)
-                                
-                                # Get regime labels if available
-                                accumulated_regime_labels = None
-                                if regime_quality_ok:
-                                    if "regime_label" in train.columns and "regime_label" in score.columns:
-                                        train_regimes = train["regime_label"].to_numpy(copy=False)
-                                        score_regimes = frame.get("regime_label")
-                                        if score_regimes is not None:
-                                            score_regimes = score_regimes.to_numpy(copy=False)
-                                            accumulated_regime_labels = np.concatenate([train_regimes, score_regimes])
-                                
-                                # Calculate thresholds using standalone function
-                                _calculate_adaptive_thresholds(
-                                    fused_scores=accumulated_fused_np,
-                                    cfg=cfg,
-                                    equip_id=equip_id,
-                                    output_manager=output_manager,
-                                    train_index=accumulated_data.index,
-                                    regime_labels=accumulated_regime_labels,
-                                    regime_quality_ok=regime_quality_ok
-                                )
-                                cfg._thresholds_calculated = True
-                            except Exception as acc_e:
-                                Console.warn(f"Failed to calculate on accumulated data: {acc_e}", component="THRESHOLD",
-                                             equip=equip, error=str(acc_e)[:200])
-                                Console.warn("Falling back to train-only calculation", component="THRESHOLD",
-                                             equip=equip)
-                                # Fallback to train-only
-                                if not train.empty and "fused" in train_frame.columns:
-                                    train_fused_np = train_frame["fused"].to_numpy(copy=False)
-                                    train_regime_labels = train["regime_label"].to_numpy(copy=False) if "regime_label" in train.columns else None
-                                    _calculate_adaptive_thresholds(
-                                        fused_scores=train_fused_np,
-                                        cfg=cfg,
-                                        equip_id=equip_id,
-                                        output_manager=output_manager,
-                                        train_index=train.index,
-                                        regime_labels=train_regime_labels,
-                                        regime_quality_ok=regime_quality_ok
-                                    )
-                                    cfg._thresholds_calculated = True
-                    else:
-                        # Non-continuous mode or train-only: calculate on train data
-                        Console.info("Calculating thresholds on training data only", component="THRESHOLD")
-                        if not train.empty and "fused" in train_frame.columns:
-                            train_fused_np = train_frame["fused"].to_numpy(copy=False)
-                            train_regime_labels = train["regime_label"].to_numpy(copy=False) if "regime_label" in train.columns else None
-                            _calculate_adaptive_thresholds(
-                                fused_scores=train_fused_np,
-                                cfg=cfg,
-                                equip_id=equip_id,
-                                output_manager=output_manager,
-                                train_index=train.index,
-                                regime_labels=train_regime_labels,
-                                regime_quality_ok=regime_quality_ok
-                            )
-                            cfg._thresholds_calculated = True
-                        else:
-                            Console.warn("No train data available for threshold calculation", component="THRESHOLD",
-                                         equip=equip)
-                else:
-                    Console.info(f"Skipping threshold update (batch {batch_num}, next update at batch {(batch_num // threshold_update_interval + 1) * threshold_update_interval})", component="THRESHOLD")
+            if len(episodes) > 0:
+                record_episode(equip, count=len(episodes), severity="warning")
 
-        Console.info("Starting regime health labeling and transient detection...", component="REGIME")
+        # ===== Adaptive Thresholds =====
+        with T.section("thresholds.adaptive"):
+            # Determine if we should update thresholds this run
+            run_count = cfg.get("runtime", {}).get("run_count", 0)
+            interval_reached = (run_count % threshold_update_interval == 0) if threshold_update_interval > 0 else True
+            should_update = (
+                (coldstart_complete and not hasattr(cfg, '_thresholds_calculated')) or
+                (CONTINUOUS_LEARNING and interval_reached)
+            )
+            
+            if should_update and "fused" in train_frame.columns:
+                train_fused_np = train_frame["fused"].to_numpy(copy=False)
+                regime_labels_for_thresh = train["regime_label"].to_numpy(copy=False) if "regime_label" in train.columns else None
+                
+                calculate_and_persist_thresholds(
+                    fused_scores=train_fused_np,
+                    cfg=cfg,
+                    equip_id=equip_id,
+                    output_manager=output_manager,
+                    train_index=train.index,
+                    regime_labels=regime_labels_for_thresh,
+                    regime_quality_ok=regime_quality_ok
+                )
+                cfg._thresholds_calculated = True
+                Console.info(f"Threshold: updated at run {run_count}", component="THRESHOLD")
+
+        # Regime health labeling and transient detection
         regime_stats: Dict[int, Dict[str, float]] = {}
+        transient_counts: Dict[str, int] = {}
         if not regime_quality_ok and "regime_label" in frame.columns:
-            Console.warn("Per-regime thresholds disabled (quality low).", component="REGIME",
-                         equip=equip)
             frame["regime_state"] = "unknown"
         if regime_model is not None and regime_quality_ok and "regime_label" in frame.columns and "fused" in frame.columns:
             try:
@@ -5344,8 +1906,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     # Use OutputManager for efficient writing (logical name)
                     output_manager.write_dataframe(summary_df, "regime_summary")
             except Exception as e:
-                Console.warn(f"Health labelling skipped: {e}", component="REGIME",
-                             equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(f"Health labelling skipped: {e}", component="REGIME")
         if "regime_label" in frame.columns and "regime_state" not in frame.columns:
             frame["regime_state"] = frame["regime_label"].map(lambda _: "unknown")
         
@@ -5359,25 +1920,18 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         cfg=cfg
                     )
                     frame["transient_state"] = transient_states
-                    
-                    # Log distribution
                     transient_counts = frame["transient_state"].value_counts().to_dict() if "transient_state" in frame.columns else {}
-                    Console.info(f"Distribution: {transient_counts}", component="TRANSIENT")
                 except Exception as trans_e:
-                    Console.warn(f"Detection failed: {trans_e}", component="TRANSIENT",
-                                 equip=equip, error_type=type(trans_e).__name__, error=str(trans_e)[:200])
+                    Console.warn(f"Transient detection failed: {trans_e}", component="TRANSIENT")
                     frame["transient_state"] = "unknown"
         
-        if regime_stats:
-            state_counts = frame["regime_state"].value_counts().to_dict() if "regime_state" in frame.columns else {}
-            Console.info(f"state histogram {state_counts}", component="REGIME")
-        elif not regime_quality_ok:
-            Console.warn("Clustering quality below threshold; per-regime thresholds disabled.", component="REGIME",
-                         equip=equip)
+        # Consolidated regime/transient log
+        state_counts = frame["regime_state"].value_counts().to_dict() if "regime_state" in frame.columns else {}
+        Console.info(f"Regime: quality_ok={regime_quality_ok} | states={state_counts} | transient={transient_counts}", component="REGIME")
 
         # ===== Autonomous Parameter Tuning: Update config based on quality =====
-        # REFACTOR v11: Extracted to _auto_tune_parameters() helper
-        _auto_tune_parameters(
+        # REFACTOR v11: Extracted to model_evaluation.auto_tune_parameters()
+        auto_tune_parameters(
             frame=frame,
             episodes=episodes,
             score_out=score_out,
@@ -5387,11 +1941,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             run_id=run_id,
             equip_id=equip_id,
             equip=equip,
+            output_manager=output_manager,
             cached_manifest=cached_manifest if 'cached_manifest' in locals() else None,
         )
 
         if reuse_models:
-                # MHAL removed from cache_payload v9.1.0
                 cache_payload = {
                     "ar1": ar1_detector,
                     "pca": pca_detector,
@@ -5406,15 +1960,15 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     "regime_quality_ok": regime_quality_ok,
                 }
 
-        # ===== 7) Drift =====
+        # ===== 8) Drift =====
         with T.section("drift"):
             score_out["frame"] = frame # type: ignore
             score_out = drift.compute(score, score_out, cfg)
             frame = score_out["frame"]
 
         # DRIFT-01: Multi-Feature Drift Detection
-        # REFACTOR v11: Extracted to _compute_drift_alert_mode() helper
-        frame = _compute_drift_alert_mode(
+        # v11.2: Extracted to drift.compute_drift_alert_mode()
+        frame = drift.compute_drift_alert_mode(
             frame=frame,
             cfg=cfg,
             regime_quality_ok=regime_quality_ok,
@@ -5438,15 +1992,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         }
                     if drift_state:
                         rows = output_manager.write_drift_controller(drift_state)
-                        if rows > 0:
-                            Console.info(f"Wrote drift controller state", component="DRIFT")
             except Exception as e:
                 Console.warn(f"Drift controller write failed: {e}", component="DRIFT",
                              equip=equip, error=str(e)[:200])
 
         # --- Normalize episodes schema for report/export ------------
-        # REFACTOR v11: Extracted to _normalize_episodes_schema() helper
-        episodes, frame = _normalize_episodes_schema(
+        # v11.2: Extracted to fuse.normalize_episodes_schema()
+        episodes, frame = fuse.normalize_episodes_schema(
             episodes=episodes,
             frame=frame,
             equip=equip,
@@ -5457,13 +2009,10 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         with T.section("baseline.buffer_write"):
             try:
                 if sql_client:
-                    _update_baseline_buffer(
-                        score_numeric=score_numeric,
-                        sql_client=sql_client,
-                        equip_id=equip_id,
+                    output_manager.update_baseline_buffer(
+                        score_numeric=raw_score,
                         cfg=cfg,
-                        coldstart_complete=coldstart_complete,
-                        equip=equip
+                        coldstart_complete=coldstart_complete
                     )
             except Exception as be:
                 Console.warn(f"Baseline buffer update failed: {be}", component="BASELINE",
@@ -5472,16 +2021,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         sensor_context: Optional[Dict[str, Any]] = None
         with T.section("sensor.context"):
             try:
-                if (
-                    isinstance(train_numeric, pd.DataFrame)
-                    and isinstance(score_numeric, pd.DataFrame)
-                    and len(train_numeric)
-                    and len(score_numeric)
-                ):
-                    common_cols = [col for col in score_numeric.columns if col in train_numeric.columns]
+                if len(raw_train) and len(raw_score):
+                    common_cols = [col for col in raw_score.columns if col in raw_train.columns]
                     if common_cols:
-                        train_baseline = train_numeric[common_cols].copy()
-                        score_baseline = score_numeric[common_cols].copy()
+                        train_baseline = raw_train[common_cols]
+                        score_baseline = raw_score[common_cols]
                         # ROBUST: Use median instead of mean for baseline
                         train_median = train_baseline.median()
                         # ROBUST: Use MAD instead of std for scale
@@ -5512,134 +2056,18 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                              equip=equip, error_type=type(sensor_ctx_err).__name__, error=str(sensor_ctx_err)[:200])
                 sensor_context = None
 
-        # ===== v11.0.0: Asset Profile Building (P5.10) =====
-        # NOTE: This builds asset profiles and writes them to ACM_AssetProfiles table,
-        # but profiles are NOT QUERIED for cold-start transfer learning. Future work:
-        # find similar equipment profiles and use their models to seed new equipment.
-        asset_profile: Optional[AssetProfile] = None
-        with T.section("asset.profile"):
-            try:
-                if isinstance(train_numeric, pd.DataFrame) and len(train_numeric) > 0:
-                    sensor_cols = [c for c in train_numeric.columns 
-                                   if train_numeric[c].dtype in ['float64', 'float32', 'int64', 'int32']]
-                    if sensor_cols:
-                        # ROBUST: Compute sensor statistics using median/MAD
-                        sensor_medians = {c: float(train_numeric[c].median()) for c in sensor_cols if not pd.isna(train_numeric[c].median())}
-                        sensor_mads = {c: float((train_numeric[c] - train_numeric[c].median()).abs().median() * 1.4826) 
-                                      for c in sensor_cols if not pd.isna(train_numeric[c].median())}
-                        # Use robust stats but keep variable names for compatibility
-                        sensor_means = sensor_medians
-                        sensor_stds = sensor_mads
-                        # Calculate data hours from index
-                        data_hours = 0.0
-                        if hasattr(train_numeric.index, 'min') and hasattr(train_numeric.index, 'max'):
-                            try:
-                                idx_min = pd.to_datetime(train_numeric.index.min())
-                                idx_max = pd.to_datetime(train_numeric.index.max())
-                                data_hours = (idx_max - idx_min).total_seconds() / 3600.0
-                            except Exception:
-                                data_hours = len(train_numeric) / 60.0  # Assume 1-minute intervals
-                        # Get regime count from regime model if available
-                        regime_count = 0
-                        if regime_model is not None:  # V11: regime_model initialized at function scope
-                            # v11.1.0: n_clusters property handles HDBSCAN and GMM
-                            regime_count = regime_model.n_clusters if hasattr(regime_model, 'n_clusters') else 0
-                        # Build profile
-                        asset_profile = AssetProfile(
-                            equip_id=equip_id,
-                            equip_type=equip,
-                            sensor_names=sensor_cols,
-                            sensor_means=sensor_means,
-                            sensor_stds=sensor_stds,
-                            regime_count=regime_count,
-                            typical_health=85.0,  # Default; updated if health computed
-                            data_hours=data_hours
-                        )
-                        Console.debug(f"Built asset profile: {len(sensor_cols)} sensors, {data_hours:.1f} hours, {regime_count} regimes (profile stored, not used for transfer learning)",
-                                     component="PROFILE", equip=equip, sensors=len(sensor_cols))
-            except Exception as pe:
-                Console.debug(f"Asset profile building skipped: {pe}", component="PROFILE",
-                             equip=equip, error=str(pe)[:200])
-
-        # ===== ORPHAN-FIX: Write contribution timeline =====
+        # ===== Write contribution timeline (using extracted function) =====
         with T.section("contribution.timeline"):
             try:
-                if output_manager and 'Timestamp' in frame.columns:
-                    # Compute detector contributions from z-scores and fusion weights
-                    detector_cols = ['ar1_z', 'pca_spe_z', 'pca_t2_z', 'iforest_z', 'gmm_z', 'omr_z']
-                    avail_cols = [c for c in detector_cols if c in frame.columns]
-                    if avail_cols and fusion_weights_used:
-                        # VECTORIZED: Build contribution timeline without iterrows
-                        # Filter valid timestamps
-                        valid_mask = frame['Timestamp'].notna()
-                        valid_frame = frame.loc[valid_mask, ['Timestamp'] + avail_cols].copy()
-                        
-                        if len(valid_frame) > 0:
-                            # Build weight array for available columns
-                            weights = np.array([fusion_weights_used.get(c, 0.0) for c in avail_cols])
-                            
-                            # Extract z-values as numpy array and take absolute
-                            z_matrix = valid_frame[avail_cols].fillna(0.0).abs().values  # (n_rows, n_detectors)
-                            
-                            # Compute weighted values: z * weight for each detector
-                            weighted_matrix = z_matrix * weights[np.newaxis, :]  # broadcast weights
-                            
-                            # Total weighted sum per row
-                            total_weighted = weighted_matrix.sum(axis=1, keepdims=True)  # (n_rows, 1)
-                            
-                            # Contribution percentages: (weighted / total) * 100, avoid div by zero
-                            with np.errstate(divide='ignore', invalid='ignore'):
-                                pct_matrix = np.where(total_weighted > 0, 
-                                                      weighted_matrix / total_weighted * 100.0, 
-                                                      0.0)
-                            
-                            # FIX A3: TRULY VECTORIZED using pd.melt() - O(1) pandas ops vs O(n*m) Python loops
-                            # Build DataFrames for RawZ and ContributionPct matrices
-                            timestamps = valid_frame['Timestamp'].values
-                            
-                            # Create wide DataFrames then melt to long format
-                            z_df = pd.DataFrame(z_matrix, columns=avail_cols)
-                            z_df['Timestamp'] = timestamps
-                            pct_df = pd.DataFrame(pct_matrix, columns=avail_cols)
-                            pct_df['Timestamp'] = timestamps
-                            
-                            # Melt RawZ to long format
-                            z_long = z_df.melt(
-                                id_vars='Timestamp', 
-                                value_vars=avail_cols,
-                                var_name='DetectorCol', 
-                                value_name='RawZ'
-                            )
-                            
-                            # Melt ContributionPct to long format
-                            pct_long = pct_df.melt(
-                                id_vars='Timestamp',
-                                value_vars=avail_cols,
-                                var_name='DetectorCol',
-                                value_name='ContributionPct'
-                            )
-                            
-                            # Merge and add detector name (strip _z suffix)
-                            contrib_df = z_long.copy()
-                            contrib_df['ContributionPct'] = pct_long['ContributionPct']
-                            contrib_df['DetectorType'] = contrib_df['DetectorCol'].str.replace('_z', '', regex=False)
-                            
-                            # Add weights - vectorized lookup
-                            weight_map = {col: weights[i] for i, col in enumerate(avail_cols)}
-                            contrib_df['Weight'] = contrib_df['DetectorCol'].map(weight_map)
-                            
-                            # Select final columns
-                            contrib_df = contrib_df[['Timestamp', 'DetectorType', 'ContributionPct', 'RawZ', 'Weight']]
-                            
-                            if len(contrib_df) > 0:
-                                rows = output_manager.write_contribution_timeline(contrib_df)
-                                if rows > 0:
-                                    Console.info(f"Wrote {rows} contribution timeline records", component="CONTRIB")
+                if output_manager and fusion_weights_used:
+                    contrib_df = build_contribution_timeline(frame, fusion_weights_used)
+                    if contrib_df is not None and len(contrib_df) > 0:
+                        rows = output_manager.write_contribution_timeline(contrib_df)
             except Exception as e:
                 Console.warn(f"Contribution timeline write failed: {e}", component="CONTRIB",
                              equip=equip, error=str(e)[:200])
 
-        # ===== 8) Persist artifacts / Finalize (SQL-only) =====
+        # ===== 9) Persist artifacts / Finalize (SQL-only) =====
         rows_read = int(score.shape[0])
         anomaly_count = int(len(episodes))
         
@@ -5656,16 +2084,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 )
 
             with T.section("persist.write_episodes"):
-                def _write_episodes():
-                    output_manager.write_episodes(episodes)
-                    episode_count = len(episodes) if episodes is not None else 0
-                    if episode_count > 0:
-                        record_episode(equip, count=episode_count, severity="info")
                 safe_step(
-                    _write_episodes,
+                    lambda: output_manager.write_episodes(episodes),
                     "write_episodes", "IO", equip, run_id,
                     degradations=degradations
                 )
+                if episodes:
+                    record_episode(equip, count=len(episodes), severity="info")
 
             # Culprits now handled via SQL in OutputManager
             
@@ -5677,58 +2102,56 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     if len(z_cols) >= 2:
                         z_df = frame[z_cols].dropna(how='all')
                         if len(z_df) > 10:  # Need enough data for correlation
-                            corr_matrix = z_df.corr(method='pearson')
-                            # Convert to nested dict format
-                            det_corr = {d1: {d2: corr_matrix.loc[d1, d2] for d2 in corr_matrix.columns} for d1 in corr_matrix.index}
-                            output_manager.write_detector_correlation(det_corr)
-                except Exception as e:
-                    Console.debug(f"Detector correlation write skipped: {e}", component="PERSIST",
-                                  equip=equip, run_id=run_id, error=str(e)[:200])
+                            # Filter out zero-variance columns to avoid divide-by-zero in correlation
+                            z_variances = z_df.var()
+                            z_cols_with_variance = z_variances[z_variances > 1e-10].index.tolist()
+                            if len(z_cols_with_variance) >= 2:
+                                corr_matrix = z_df[z_cols_with_variance].corr(method='pearson')
+                                # Convert to nested dict format
+                                det_corr = {d1: {d2: corr_matrix.loc[d1, d2] for d2 in corr_matrix.columns} for d1 in corr_matrix.index}
+                                output_manager.write_detector_correlation(det_corr)
+                except Exception:
+                    pass  # Detector correlation is optional
             
             # Sensor Correlation Matrix (from raw sensor data, not feature matrix)
             with T.section("persist.sensor_correlation"):
                 try:
-                    # Use score_numeric (raw sensors) not train (feature-engineered matrix)
-                    raw_sensor_df = score_numeric if score_numeric is not None else score
-                    if raw_sensor_df is not None and hasattr(raw_sensor_df, 'corr') and raw_sensor_df.shape[1] >= 2:
+                    if raw_score is not None and hasattr(raw_score, 'corr') and raw_score.shape[1] >= 2:
                         # Only compute correlation for actual numeric sensor columns
-                        sensor_cols = [c for c in raw_sensor_df.columns 
-                                      if raw_sensor_df[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+                        sensor_cols = [c for c in raw_score.columns 
+                                      if raw_score[c].dtype in ['float64', 'float32', 'int64', 'int32']]
                         if len(sensor_cols) >= 2:
-                            sensor_corr = raw_sensor_df[sensor_cols].corr(method='pearson')
-                            output_manager.write_sensor_correlations(sensor_corr, corr_type='pearson')
-                except Exception as e:
-                    Console.debug(f"Sensor correlation write skipped: {e}", component="PERSIST",
-                                  equip=equip, run_id=run_id, error=str(e)[:200])
+                            # Filter out zero-variance columns to avoid divide-by-zero in correlation
+                            sensor_variances = raw_score[sensor_cols].var()
+                            sensor_cols_with_variance = sensor_variances[sensor_variances > 1e-10].index.tolist()
+                            if len(sensor_cols_with_variance) >= 2:
+                                sensor_corr = raw_score[sensor_cols_with_variance].corr(method='pearson')
+                                output_manager.write_sensor_correlations(sensor_corr, corr_type='pearson')
+                except Exception:
+                    pass  # Sensor correlation is optional
 
             # Sensor Normalized Time Series (for sensor forecasting)
-            # Use score_numeric which has raw sensor values (not feature-engineered)
             with T.section("persist.sensor_normalized_ts"):
                 try:
-                    # Use score_numeric (raw sensor data) instead of frame (which has detector z-scores)
-                    raw_sensor_df = score_numeric if score_numeric is not None else score
-                    if raw_sensor_df is not None and len(raw_sensor_df) > 0:
+                    if raw_score is not None and len(raw_score) > 0:
                         # All numeric columns in raw data are sensors
-                        sensor_cols = [c for c in raw_sensor_df.columns 
-                                      if raw_sensor_df[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+                        sensor_cols = [c for c in raw_score.columns 
+                                      if raw_score[c].dtype in ['float64', 'float32', 'int64', 'int32']]
                         if sensor_cols:
                             # Calculate target max rows: 10K total (not 10K timestamps × N sensors!)
                             # With N sensors, we can have at most 10000/N timestamps
                             max_total_rows = 10000
                             max_timestamps = max(100, max_total_rows // len(sensor_cols))
                             
-                            sample_frame = raw_sensor_df
-                            if len(raw_sensor_df) > max_timestamps:
-                                step = max(1, len(raw_sensor_df) // max_timestamps)
-                                sample_frame = raw_sensor_df.iloc[::step]
+                            sample_frame = raw_score
+                            if len(raw_score) > max_timestamps:
+                                step = max(1, len(raw_score) // max_timestamps)
+                                sample_frame = raw_score.iloc[::step]
                             
                             rows_written = output_manager.write_sensor_normalized_ts(sample_frame, sensor_cols)
-                            if rows_written > 0:
-                                Console.debug(f"Wrote {rows_written} sensor normalized TS rows ({len(sample_frame)} timestamps x {len(sensor_cols)} sensors)", 
-                                            component="PERSIST")
                 except Exception as e:
-                    Console.debug(f"Sensor normalized TS write skipped: {e}", component="PERSIST",
-                                  equip=equip, run_id=run_id, error=str(e)[:200])
+                    Console.warn(f"Sensor normalized TS write failed: {e}", component="PERSIST",
+                                 equip=equip, error_type=type(e).__name__, error=str(e)[:200])
 
             # === v11.0.0: Seasonal Patterns Write (P5.9) ===
             with T.section("persist.seasonal_patterns"):
@@ -5750,40 +2173,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 pattern_list.append(pattern_dict)
                         if pattern_list:
                             rows = output_manager.write_seasonal_patterns(pattern_list)
-                            if rows > 0:
-                                Console.info(f"Wrote {rows} seasonal patterns to SQL", component="SEASON",
-                                            equip=equip, patterns=rows)
                 except Exception as e:
-                    Console.debug(f"Seasonal patterns write skipped: {e}", component="PERSIST",
-                                  equip=equip, run_id=run_id, error=str(e)[:200])
-
-            # === v11.0.0: Asset Profile Write (P5.10) ===
-            with T.section("persist.asset_profile"):
-                try:
-                    if asset_profile and output_manager:
-                        import json as _json
-                        profile_dict = {
-                            'EquipType': asset_profile.equip_type,
-                            'SensorNamesJSON': _json.dumps(asset_profile.sensor_names),
-                            'SensorMeansJSON': _json.dumps(asset_profile.sensor_means),
-                            'SensorStdsJSON': _json.dumps(asset_profile.sensor_stds),
-                            'RegimeCount': asset_profile.regime_count,
-                            'TypicalHealth': asset_profile.typical_health,
-                            'DataHours': asset_profile.data_hours,
-                        }
-                        rows = output_manager.write_asset_profile(profile_dict)
-                        if rows > 0:
-                            Console.info(f"Wrote asset profile to SQL", component="PROFILE",
-                                        equip=equip, sensors=len(asset_profile.sensor_names))
-                except Exception as e:
-                    Console.debug(f"Asset profile write skipped: {e}", component="PERSIST",
-                                  equip=equip, run_id=run_id, error=str(e)[:200])
+                    Console.warn(f"Seasonal patterns write failed: {e}", component="PERSIST",
+                                 equip=equip, error_type=type(e).__name__, error=str(e)[:200])
 
             # ===== MEMORY CLEANUP: Free large objects no longer needed =====
             # After persist, we no longer need raw sensor data or training matrices
-            # Free train_numeric, score_numeric but KEEP detector references for _write_sql_artifacts
             try:
-                del train_numeric, score_numeric
+                del raw_train, raw_score
             except NameError:
                 pass  # Already deleted or never created
             try:
@@ -5796,146 +2193,66 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 # Keep pca_detector intact - it's needed for PCA loadings in _write_sql_artifacts
             except Exception:
                 pass
-            gc.collect()  # Force garbage collection
+            gc.collect()
 
-            # === COMPREHENSIVE ANALYTICS GENERATION ===
-            # Run in ALL modes to ensure SQL tables (HealthTimeline, RegimeTimeline) are populated
-            try:
-                # Use OutputManager directly for all output operations
-                tables_dir = run_dir / "tables"
-
-                with T.section("outputs.comprehensive_analytics"):
-                    # Generate comprehensive analytics tables using OutputManager
-                    Console.info("Generating comprehensive analytics tables...", component="ANALYTICS")
-                    
-                    # TUNE-FIX: Inject tuned weights into cfg so ACM_FusionQualityReport uses actual tuned values
-                    # This ensures the dashboard shows the weights that were actually used, not the original config
-                    if fusion_weights_used:
-                        if 'fusion' not in cfg:
-                            cfg['fusion'] = {}
-                        cfg['fusion']['weights'] = dict(fusion_weights_used)
-                    
-                    try:
-                        # Generate all 23+ analytical tables
-                        output_manager.generate_all_analytics_tables(
-                            scores_df=frame,
-                            cfg=cfg,
-                            sensor_context=sensor_context
-                        )
-                        Console.info("Successfully generated all comprehensive analytics tables", component="ANALYTICS")
-                        table_count = 23  # Comprehensive table count
-                    except Exception as e:
-                        Console.error(f"Error generating comprehensive analytics: {str(e)}", component="ANALYTICS",
-                                     equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
-                        # Fallback to basic tables - mark as DEGRADED
-                        Console.info("Falling back to basic table generation...", component="ANALYTICS")
-                        degradations.append("analytics_fallback")
-                        table_count = 0
-                        
-                        # Health timeline (if we have fused scores)
-                        health_df, _, _ = _build_health_timeline(frame, cfg, run_id, equip_id, equip)
-                        if health_df is not None:
-                            output_manager.write_dataframe(
-                                health_df,
-                                "health_timeline",
-                                sql_table="ACM_HealthTimeline",  # CRITICAL: Required for RUL/Forecasting
-                                add_created_at=True
-                            )
-                            table_count += 1
-                        
-                        # Regime timeline (if available)
-                        regime_df = _build_regime_timeline(frame, regime_model, run_id, equip_id)
-                        if regime_df is not None:
-                            output_manager.write_dataframe(
-                                regime_df, 
-                                "regime_timeline",
-                                sql_table="ACM_RegimeTimeline",
-                                add_created_at=True
-                            )
-                            table_count += 1
-
-                Console.info(f"Generated {table_count} analytics tables via OutputManager", component="OUTPUTS")
-                Console.info(f"Analytics tables written to SQL (mode=sql, dir={tables_dir})", component="OUTPUTS", table_count=table_count)
+            # === ANALYTICS GENERATION ===
+            with T.section("outputs.comprehensive_analytics"):
+                # Inject tuned fusion weights into cfg for dashboard reporting
+                if fusion_weights_used:
+                    cfg.setdefault('fusion', {})['weights'] = dict(fusion_weights_used)
                 
-                # === FORECAST GENERATION ===
-                # FOR-CSV-01: Retired forecast_deprecated.run() in favor of comprehensive
-                # enhanced forecasting (RUL + failure hazard) later in pipeline.
-                # The legacy quick-forecast is replaced by the full enhanced forecasting
-                # module which runs after analytics generation and provides richer outputs.
+                analytics_result = output_manager.generate_all_analytics_tables(
+                    scores_df=frame, cfg=cfg, sensor_context=sensor_context
+                )
+                table_count = analytics_result.get("sql_tables", 0)
+                Console.info(f"Analytics: tables={table_count}", component="OUTPUTS")
 
-                # === RUL + FORECASTING (Unified Engine) ===
-                with T.section("outputs.forecasting"):
+            # === RUL + FORECASTING ===
+            with T.section("outputs.forecasting"):
+                forecast_engine = ForecastEngine(
+                    sql_client=getattr(output_manager, "sql_client", None),
+                    output_manager=output_manager,
+                    equip_id=int(equip_id),
+                    run_id=str(run_id) if run_id is not None else None,
+                    config=cfg,
+                    model_state=model_state,
+                )
+                forecast_results = forecast_engine.run_forecast()
+                
+                if forecast_results.get('success'):
+                    Console.info(
+                        f"Forecast: RUL P10/50/90={forecast_results['rul_p10']:.0f}/{forecast_results['rul_p50']:.0f}/{forecast_results['rul_p90']:.0f}h | tables={len(forecast_results['tables_written'])} | top_sensors={forecast_results['top_sensors'][:3]}",
+                        component="FORECAST",
+                    )
+                    # Record RUL metrics for Prometheus
                     try:
-                        # Unified forecasting via ForecastEngine (replaces legacy forecasting.estimate_rul)
-                        Console.info(f"Running unified forecasting engine (v{ACM_VERSION})", component="FORECAST")
-                        # V11 CRITICAL-1 FIX: model_state is initialized at function scope (line ~3655)
-                        # and set during model persistence. Pass it directly - no fragile locals() check.
-                        forecast_engine = ForecastEngine(
-                            sql_client=getattr(output_manager, "sql_client", None),
-                            output_manager=output_manager,
-                            equip_id=int(equip_id),
-                            run_id=str(run_id) if run_id is not None else None,
-                            config=cfg,
-                            model_state=model_state  # Initialized at function scope, set during lifecycle
+                        record_rul(
+                            equip,
+                            rul_hours=float(forecast_results['rul_p50']),
+                            p10=float(forecast_results['rul_p10']),
+                            p50=float(forecast_results['rul_p50']),
+                            p90=float(forecast_results['rul_p90']),
                         )
-                        
-                        forecast_results = forecast_engine.run_forecast()
-                        
-                        if forecast_results.get('success'):
-                            Console.info(
-                                f"[FORECAST] RUL P50={forecast_results['rul_p50']:.1f}h, "
-                                f"P10={forecast_results['rul_p10']:.1f}h, P90={forecast_results['rul_p90']:.1f}h"
-                            )
-                            Console.info(f"Top sensors: {forecast_results['top_sensors']}", component="FORECAST")
-                            Console.info(f"Wrote tables: {', '.join(forecast_results['tables_written'])}", component="FORECAST")
-                            
-                            # Record RUL metrics for Prometheus (pass all percentiles at once)
-                            try:
-                                record_rul(
-                                    equip,
-                                    rul_hours=float(forecast_results['rul_p50']),  # Main value
-                                    p10=float(forecast_results['rul_p10']),
-                                    p50=float(forecast_results['rul_p50']),
-                                    p90=float(forecast_results['rul_p90'])
-                                )
-                                # Record active defects if available
-                                if 'active_defects' in forecast_results:
-                                    record_active_defects(equip, int(forecast_results['active_defects']))
-                            except Exception as metric_err:
-                                Console.debug(f"Failed to record forecast metrics: {metric_err}", component="OTEL")
-                        else:
-                            Console.warn(f"Forecast failed: {forecast_results.get('error', 'Unknown error')}", component="FORECAST",
-                                         equip=equip, run_id=run_id, data_quality=forecast_results.get('data_quality'))
-                            degradations.append("forecast_failed")
-                        
-                    except Exception as e:
-                        Console.error(f"Unified forecasting engine failed: {e}", component="FORECAST",
-                                      equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
-                        Console.error(f"RUL estimation skipped - ForecastEngine must be fixed", component="FORECAST",
-                                      equip=equip, run_id=run_id)
-                        degradations.append("forecast_engine_exception")
-                        
-                # ===== MEMORY CLEANUP: Free sensor context after forecasting =====
-                # After forecasting, we only need frame for final SQL writes
-                try:
-                    if sensor_context is not None:
-                        sensor_context.clear() if hasattr(sensor_context, 'clear') else None
-                        sensor_context = None
-                except Exception:
-                    pass
-                gc.collect()
-                        
-            except Exception as e:
-                Console.warn(f"Output generation failed: {e}", component="OUTPUTS",
-                             equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])
-                degradations.append("output_generation_failed")
+                        if 'active_defects' in forecast_results:
+                            record_active_defects(equip, int(forecast_results['active_defects']))
+                    except Exception:
+                        pass  # OTEL metrics are optional
+                else:
+                    Console.warn(
+                        f"Forecast failed: {forecast_results.get('error', 'Unknown')}",
+                        component="FORECAST", equip=equip, run_id=run_id,
+                    )
+                    degradations.append("forecast_failed")
 
-            # File mode path exits here (finally still runs, no SQL finalize executed).
+            # Memory cleanup: free sensor context after forecasting
+            sensor_context = None
+            gc.collect()
+
             run_completion_time = datetime.now()
-            _maybe_write_run_meta_json(locals())
 
         # === SQL-SPECIFIC ARTIFACT WRITING ===
-        rows_written = _write_sql_artifacts(
+        # v11.2: Extracted to output_manager.write_sql_artifacts()
+        rows_written = write_sql_artifacts(
             output_manager=output_manager,
             frame=frame,
             episodes=episodes,
@@ -5954,13 +2271,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             t2_p95_train=t2_p95_train,
             anomaly_count=anomaly_count,
             T=T,
+            culprit_writer_func=write_episode_culprits_enhanced,
         )
 
         if reuse_models and cache_payload:
             with T.section("sql.cache_detectors"):
                 try:
                     joblib.dump(cache_payload, model_cache_path)
-                    Console.info(f"Cached detectors to {model_cache_path}", component="MODEL")
                 except Exception as e:
                     Console.warn(f"Failed to cache detectors: {e}", component="MODEL",
                                  equip=equip, cache_path=str(model_cache_path), error=str(e))
@@ -6001,11 +2318,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     # Also emit to Loki for Grafana timer panel
                     pct = (duration / total_time * 100) if total_time > 0 else 0
                     log_timer(section=section, duration_s=duration, pct=pct, total_s=total_time)
-                
-                # Timing data is now captured via observability stack:
-                # 1. Tempo traces (spans with durations)
-                # 2. Prometheus metrics (run_duration_seconds)
-                # 3. Loki logs (log_timer emits structured timer logs)
+
             except Exception:
                 pass
 
@@ -6017,50 +2330,38 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 pass
             sql_log_sink = None
         
-        # === WRITE RUN METADATA TO ACM_RUNS (ALWAYS, EVEN FOR NOOP) ===
-        # This must happen for ALL runs (OK, NOOP, FAIL) for proper audit trail
-        if SQL_MODE and sql_client and run_id: # type: ignore
+        # === FINALIZE RUN IN SQL ===
+        if sql_client and run_id:
             try:
-                from datetime import datetime
                 run_completion_time = datetime.now()
                 
-                # Extract health metrics from scores if available
+                # 1. Extract run metadata from scores
                 if 'frame' in locals() and isinstance(frame, pd.DataFrame) and len(frame) > 0:
                     per_regime_enabled = bool(quality_ok and use_per_regime) if 'quality_ok' in locals() and 'use_per_regime' in locals() else False
                     regime_count = len(set(score_regime_labels)) if 'score_regime_labels' in locals() and score_regime_labels is not None else 0
                     run_metadata = extract_run_metadata_from_scores(frame, per_regime_enabled=per_regime_enabled, regime_count=regime_count)
-                    data_quality_path = tables_dir / "data_quality.csv" if 'tables_dir' in locals() else None
                     data_quality_score = extract_data_quality_score(
-                        data_quality_path=data_quality_path,
-                        sql_client=sql_client if SQL_MODE else None,
+                        data_quality_path=None,
+                        sql_client=sql_client,
                         run_id=run_id,
-                        equip_id=equip_id if 'equip_id' in locals() else 0
+                        equip_id=equip_id if 'equip_id' in locals() else 0,
                     )
-                    
-                    # Record data quality for Prometheus/Grafana observability
-                    record_data_quality(
-                        equipment=equip if 'equip' in locals() else "UNKNOWN",
-                        quality_score=float(data_quality_score) if data_quality_score else 0.0,
-                    )
+                    record_data_quality(equip, float(data_quality_score) if data_quality_score else 0.0)
                 else:
-                    # NOOP or failed run - use defaults
                     run_metadata = {"health_status": "UNKNOWN", "avg_health_index": None, "min_health_index": None, "max_fused_z": None}
                     data_quality_score = 0.0
                 
-                # Get kept columns list
-                kept_cols_str = ",".join(getattr(meta, "kept_cols", [])) if 'meta' in locals() else ""
-                
-                # Write run metadata
+                # 2. Write run metadata to ACM_Runs
                 write_run_metadata(
                     sql_client=sql_client,
                     run_id=run_id,
                     equip_id=int(equip_id) if 'equip_id' in locals() else 0,
-                    equip_name=equip if 'equip' in locals() else "UNKNOWN",
+                    equip_name=equip,
                     started_at=run_start_time,
                     completed_at=run_completion_time,
                     config_signature=config_signature if 'config_signature' in locals() else "UNKNOWN",
                     train_row_count=len(train) if 'train' in locals() and isinstance(train, pd.DataFrame) else 0,
-                    score_row_count=len(frame) if 'frame' in locals() and isinstance(frame, pd.DataFrame) else (len(score) if 'score' in locals() and isinstance(score, pd.DataFrame) else rows_read),
+                    score_row_count=len(frame) if 'frame' in locals() and isinstance(frame, pd.DataFrame) else rows_read,
                     episode_count=len(episodes) if 'episodes' in locals() and isinstance(episodes, pd.DataFrame) else 0,
                     health_status=run_metadata.get("health_status", "UNKNOWN"),
                     avg_health_index=run_metadata.get("avg_health_index"),
@@ -6068,65 +2369,41 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     max_fused_z=run_metadata.get("max_fused_z"),
                     data_quality_score=data_quality_score,
                     refit_requested=refit_requested if 'refit_requested' in locals() else False,
-                    kept_columns=kept_cols_str,
-                    error_message=err_json if outcome in ("FAIL", "DEGRADED") and 'err_json' in locals() else None
+                    kept_columns=",".join(getattr(meta, "kept_cols", [])) if 'meta' in locals() else "",
+                    error_message=err_json if outcome in ("FAIL", "DEGRADED") else None,
                 )
-                Console.info(f"Wrote run metadata to ACM_Runs for RunID={run_id} (outcome={outcome})", component="RUN_META")
-            except Exception as meta_err:
-                Console.warn(f"Failed to write ACM_Runs metadata: {meta_err}", component="RUN_META",
-                             equip=equip, run_id=run_id, error=str(meta_err)[:200])
-        
-        # Always finalize and close SQL in SQL mode
-        if SQL_MODE and sql_client and run_id: # type: ignore
-            try:
-                _sql_finalize_run(
-                    sql_client,
+                
+                # 3. Finalize run status
+                sql_client.finalize_run(
                     run_id=run_id,
                     outcome=outcome,
                     rows_read=rows_read,
                     rows_written=rows_written,
-                    err_json=err_json
+                    err_json=err_json,
                 )
                 Console.info(f"Finalized RunID={run_id} outcome={outcome} rows_in={rows_read} rows_out={rows_written}", component="RUN")
                 
-                # Record OTEL metrics for Prometheus
-                if _OBSERVABILITY_AVAILABLE and 'run_start_time' in locals() and run_start_time:
-                    try:
-                        duration_seconds = (run_completion_time - run_start_time).total_seconds() if 'run_completion_time' in locals() and run_completion_time else 0.0
-                        equipment_name = equip if 'equip' in locals() else "UNKNOWN"
+                # 4. Record OTEL metrics
+                if _OBSERVABILITY_AVAILABLE and run_start_time:
+                    duration_seconds = (run_completion_time - run_start_time).total_seconds()
+                    record_run(equip, outcome or "OK", duration_seconds)
+                    record_batch_processed(equip, duration_seconds, rows_read, (outcome or "ok").lower())
+                    if run_metadata.get("avg_health_index") is not None:
+                        record_health_score(equip, float(run_metadata["avg_health_index"]))
+                    if outcome == "FAIL":
+                        record_error(equip, str(err_json) if err_json else "Run failed", "RunFailure")
                         
-                        # Record run outcome (counter + histogram)
-                        record_run(equipment_name, outcome or "OK", duration_seconds)
-                        
-                        # Record batch processing
-                        record_batch_processed(
-                            equipment=equipment_name,
-                            duration_seconds=duration_seconds,
-                            rows=rows_read,
-                            status=outcome.lower() if outcome else "unknown"
-                        )
-                        # Record health score if available
-                        if 'run_metadata' in locals() and run_metadata.get("avg_health_index") is not None:
-                            record_health_score(equip, float(run_metadata.get("avg_health_index", 0)))
-                        # Record error if run failed
-                        if outcome == "FAIL":
-                            error_type = type(err_json).__name__ if 'err_json' in locals() and err_json else "unknown"
-                            error_msg = str(err_json) if err_json else "Run failed"
-                            record_error(equip, error_msg, error_type)
-                    except Exception as metric_err:
-                        Console.debug(f"Metrics recording failed (non-fatal): {metric_err}", component="OTEL")
             except Exception as fe:
-                Console.error(f"Finalize failed (finally): {fe}", component="RUN",
-                             equip=equip, run_id=run_id, error_type=type(fe).__name__, error=str(fe)[:200])
+                Console.error(f"Run finalization failed: {fe}", component="RUN", equip=equip, run_id=run_id)
             finally:
-                # CRITICAL FIX: Close OutputManager to prevent connection leaks
+                # Close connections
                 try:
                     if 'output_manager' in locals():
                         output_manager.close()
                 except Exception:
                     pass
                 try:
-                    getattr(sql_client, "close", lambda: None)()
+                    sql_client.close()
                 except Exception:
                     pass
         
@@ -6141,11 +2418,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             except Exception:
                 pass
         
-        # Stop profiling and flush all observability data
+        # Stop profiling and flush observability
         if _OBSERVABILITY_AVAILABLE:
             try:
                 stop_profiling()
-                shutdown_observability()  # Flush traces, metrics, logs
+                shutdown_observability()
             except Exception:
                 pass
 

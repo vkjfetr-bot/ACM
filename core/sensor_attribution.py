@@ -758,3 +758,105 @@ def rank_sensors_by_contribution(
     
     df = pd.DataFrame(records)
     return df
+
+
+# =============================================================================
+# P4.3: CONTRIBUTION TIMELINE BUILDER (moved from acm_main.py)
+# =============================================================================
+
+def build_contribution_timeline(
+    frame: pd.DataFrame,
+    fusion_weights: Dict[str, float],
+    detector_cols: Optional[List[str]] = None,
+) -> Optional[pd.DataFrame]:
+    """
+    Build detector contribution timeline from z-score frame.
+    
+    Computes per-timestamp contribution percentages for each detector
+    based on weighted z-scores.
+    
+    Args:
+        frame: DataFrame with Timestamp and detector z-score columns
+        fusion_weights: Dict mapping detector column names to weights
+        detector_cols: Optional list of detector columns to use (defaults to standard set)
+        
+    Returns:
+        DataFrame with columns [Timestamp, DetectorType, ContributionPct, RawZ, Weight]
+        or None if no valid data
+    """
+    if detector_cols is None:
+        detector_cols = ['ar1_z', 'pca_spe_z', 'pca_t2_z', 'iforest_z', 'gmm_z', 'omr_z']
+    
+    if 'Timestamp' not in frame.columns:
+        return None
+    
+    avail_cols = [c for c in detector_cols if c in frame.columns]
+    if not avail_cols or not fusion_weights:
+        return None
+    
+    # Filter valid timestamps
+    valid_mask = frame['Timestamp'].notna()
+    valid_frame = frame.loc[valid_mask, ['Timestamp'] + avail_cols]
+    
+    if len(valid_frame) == 0:
+        return None
+    
+    # Build weight array for available columns
+    weights = np.array([fusion_weights.get(c, 0.0) for c in avail_cols])
+    
+    # Extract z-values as numpy array and take absolute
+    z_matrix = valid_frame[avail_cols].fillna(0.0).abs().values  # (n_rows, n_detectors)
+    
+    # Compute weighted values: z * weight for each detector
+    weighted_matrix = z_matrix * weights[np.newaxis, :]  # broadcast weights
+    
+    # Total weighted sum per row
+    total_weighted = weighted_matrix.sum(axis=1, keepdims=True)  # (n_rows, 1)
+    
+    # Contribution percentages: (weighted / total) * 100, avoid div by zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        pct_matrix = np.where(total_weighted > 0, 
+                              weighted_matrix / total_weighted * 100.0, 
+                              0.0)
+    
+    # Vectorized: Build DataFrames and melt to long format
+    timestamps = valid_frame['Timestamp'].values
+    
+    # Create wide DataFrames then melt to long format
+    z_df = pd.DataFrame(z_matrix, columns=avail_cols)
+    z_df['Timestamp'] = timestamps
+    pct_df = pd.DataFrame(pct_matrix, columns=avail_cols)
+    pct_df['Timestamp'] = timestamps
+    
+    # Melt RawZ to long format
+    z_long = z_df.melt(
+        id_vars='Timestamp', 
+        value_vars=avail_cols,
+        var_name='DetectorCol', 
+        value_name='RawZ'
+    )
+    
+    # Melt ContributionPct to long format
+    pct_long = pct_df.melt(
+        id_vars='Timestamp',
+        value_vars=avail_cols,
+        var_name='DetectorCol',
+        value_name='ContributionPct'
+    )
+    
+    # Merge and add detector name (strip _z suffix)
+    contrib_df = z_long.copy()
+    contrib_df['ContributionPct'] = pct_long['ContributionPct']
+    contrib_df['DetectorType'] = contrib_df['DetectorCol'].str.replace('_z', '', regex=False)
+    
+    # Add weights - vectorized lookup
+    weight_map = {col: weights[i] for i, col in enumerate(avail_cols)}
+    contrib_df['Weight'] = contrib_df['DetectorCol'].map(weight_map)
+    
+    # Select final columns
+    contrib_df = contrib_df[['Timestamp', 'DetectorType', 'ContributionPct', 'RawZ', 'Weight']]
+    
+    if len(contrib_df) == 0:
+        return None
+    
+    return contrib_df

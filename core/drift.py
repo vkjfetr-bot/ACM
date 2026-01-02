@@ -10,25 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Any, Dict
-from pathlib import Path
 
 from . import fuse
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-
-# ---------- timestamp parsing helpers (no parse_dates; UTC-safe) ----------
-# REG-COR-01: Import _to_datetime_mixed from regimes to avoid duplication
-from core.regimes import _to_datetime_mixed
-
-def _read_scores_csv(p: Path) -> pd.DataFrame:
-    if not p.exists():
-        return pd.DataFrame()
-    df = pd.read_csv(p, dtype={"timestamp": "string"})
-    df["timestamp"] = _to_datetime_mixed(df["timestamp"])
-    df = df.set_index("timestamp")
-    return df[~df.index.isna()]
 
 
 class CUSUMDetector:
@@ -68,6 +51,74 @@ class CUSUMDetector:
             self.sum_neg = max(0.0, self.sum_neg - val - self.drift)
             scores[i] = max(self.sum_pos, self.sum_neg)
         return scores
+
+
+# ============================================================================
+# DRIFT-01: Multi-Feature Drift Detection Helpers (moved from acm_main.py)
+# ============================================================================
+
+def compute_drift_trend(drift_series: np.ndarray, window: int = 20) -> float:
+    """
+    Compute drift trend as the slope of linear regression over the last `window` points.
+    
+    Positive slope indicates upward drift (degradation), negative indicates recovery.
+    Returns normalized slope (slope per sample).
+    
+    Args:
+        drift_series: Array of drift/CUSUM z-scores
+        window: Number of recent points to use for trend calculation
+    
+    Returns:
+        Slope of linear regression fit. Positive = worsening, negative = improving.
+    """
+    if len(drift_series) < 2:
+        return 0.0
+    
+    # Use last `window` points
+    recent = drift_series[-window:] if len(drift_series) >= window else drift_series
+    if len(recent) < 2:
+        return 0.0
+    
+    # Remove NaNs
+    valid_mask = ~np.isnan(recent)
+    if valid_mask.sum() < 2:
+        return 0.0
+    
+    x = np.arange(len(recent))[valid_mask]
+    y = recent[valid_mask]
+    
+    # Linear regression: y = slope * x + intercept
+    try:
+        slope, _ = np.polyfit(x, y, 1)
+        return float(slope)
+    except Exception:
+        return 0.0
+
+
+def compute_regime_volatility(regime_labels: np.ndarray, window: int = 20) -> float:
+    """
+    Compute regime volatility as the fraction of regime transitions in the last `window` points.
+    
+    High volatility suggests unstable operating conditions or noisy regime assignments.
+    
+    Args:
+        regime_labels: Array of regime label assignments (integers)
+        window: Number of recent points to analyze
+    
+    Returns:
+        Value in [0, 1] where 0 = completely stable, 1 = regime changes every step.
+    """
+    if len(regime_labels) < 2:
+        return 0.0
+    
+    # Use last `window` points
+    recent = regime_labels[-window:] if len(regime_labels) >= window else regime_labels
+    if len(recent) < 2:
+        return 0.0
+    
+    # Count transitions (label changes)
+    transitions = np.sum(recent[1:] != recent[:-1])
+    return float(transitions) / (len(recent) - 1)
 
 
 def compute(score_df: pd.DataFrame, score_out: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -110,37 +161,98 @@ def compute(score_df: pd.DataFrame, score_out: Dict[str, Any], cfg: Dict[str, An
     return score_out
 
 
-def run(ctx: Any) -> Dict[str, Any]:
-    """
-    Reporting hook for the drift module.
-    Generates a plot of the CUSUM score over time.
-    """
-    sc_path = ctx.run_dir / "scores.csv"
-    sc = _read_scores_csv(sc_path)
-    if sc.empty:
-        return {"module": "drift", "plots": [], "tables": [], "metrics": {}}
+# ============================================================================
+# DRIFT-02: Alert Mode Classification (moved from acm_main.py v11.2)
+# ============================================================================
 
-    plots = []
-    # Corrected: The drift score is now named 'cusum_z' in scores.csv
-    drift_col = "cusum_z" if "cusum_z" in sc.columns else "drift_z"
-    if drift_col in sc.columns:
-        try:
-            fig, ax = plt.subplots(figsize=(12, 4))
-            sc[drift_col].plot(ax=ax, linewidth=1)
-            ax.set_title("CUSUM Drift Score (Z-score)")
-            ax.set_xlabel("")
-            ax.grid(alpha=0.3)
-            plt.tight_layout()
-            p = ctx.plots_dir / "drift_cusum_score.png"
-            fig.savefig(p, dpi=144, bbox_inches="tight")
-            plt.close(fig)
-            plots.append({
-                "title": "CUSUM Drift Score",
-                "path": str(p),
-                "caption": "CUSUM score on the fused anomaly signal."
-            })
-        except Exception:
-            # Ignore plotting errors
-            pass
-
-    return {"module": "drift", "plots": plots, "tables": [], "metrics": {}}
+def compute_drift_alert_mode(
+    frame: pd.DataFrame,
+    cfg: Dict[str, Any],
+    regime_quality_ok: bool = False,
+    equip: str = "",
+) -> pd.DataFrame:
+    """Compute drift alert mode using multi-feature detection or simple threshold.
+    
+    This helper determines whether the system is in DRIFT mode (gradual degradation
+    requiring retraining) or FAULT mode (transient anomaly) using:
+    - Multi-feature detection: drift trend, fused level, regime volatility with hysteresis
+    - Simple threshold: P95 drift exceeds configured threshold
+    
+    Args:
+        frame: Scored frame DataFrame with drift_z, cusum_z, fused columns
+        cfg: Config dictionary with drift settings
+        regime_quality_ok: Whether regime clustering is of sufficient quality
+        equip: Equipment name for logging
+        
+    Returns:
+        Frame with alert_mode column added ('DRIFT' or 'FAULT')
+    """
+    from .observability import Console
+    
+    # Find the drift column
+    drift_col = "cusum_z" if "cusum_z" in frame.columns else ("drift_z" if "drift_z" in frame.columns else None)
+    
+    # Retrieve multi-feature drift configuration
+    drift_cfg = (cfg or {}).get("drift", {})
+    multi_feat_cfg = drift_cfg.get("multi_feature", {})
+    multi_feat_enabled = bool(multi_feat_cfg.get("enabled", False))
+    
+    if drift_col is None:
+        frame["alert_mode"] = "FAULT"
+        return frame
+    
+    try:
+        drift_array = frame[drift_col].to_numpy(dtype=np.float32)
+        
+        if multi_feat_enabled:
+            # DRIFT-01: Multi-feature logic with hysteresis
+            trend_window = int(multi_feat_cfg.get("trend_window", 20))
+            trend_threshold = float(multi_feat_cfg.get("trend_threshold", 0.05))
+            fused_drift_min = float(multi_feat_cfg.get("fused_drift_min", 2.0))
+            fused_drift_max = float(multi_feat_cfg.get("fused_drift_max", 5.0))
+            regime_volatility_max = float(multi_feat_cfg.get("regime_volatility_max", 0.3))
+            hysteresis_on = float(multi_feat_cfg.get("hysteresis_on", 3.0))
+            hysteresis_off = float(multi_feat_cfg.get("hysteresis_off", 1.5))
+            
+            # Compute features (using local helpers)
+            drift_trend = compute_drift_trend(drift_array, window=trend_window)
+            fused_p95 = float(np.nanpercentile(frame["fused"].to_numpy(dtype=np.float32), 95)) if "fused" in frame.columns else 0.0
+            
+            # Compute regime volatility if regime labels exist
+            regime_volatility = 0.0
+            if "regime_label" in frame.columns and regime_quality_ok:
+                regime_labels = frame["regime_label"].to_numpy()
+                regime_volatility = compute_regime_volatility(regime_labels, window=trend_window)
+            
+            drift_p95 = float(np.nanpercentile(drift_array, 95))
+            
+            # Previous alert mode (for hysteresis) - assume "FAULT" if unavailable
+            prev_alert_mode = "FAULT"
+            
+            # Composite rule for drift detection
+            is_drift_condition = (
+                abs(drift_trend) > trend_threshold and
+                fused_drift_min <= fused_p95 <= fused_drift_max and
+                regime_volatility < regime_volatility_max
+            )
+            
+            # Hysteresis logic
+            if prev_alert_mode == "DRIFT":
+                alert_mode = "DRIFT" if drift_p95 > hysteresis_off else "FAULT"
+            else:
+                alert_mode = "DRIFT" if (drift_p95 > hysteresis_on and is_drift_condition) else "FAULT"
+            
+            frame["alert_mode"] = alert_mode
+            Console.info(f"Drift: {drift_col} P95={drift_p95:.3f} | trend={drift_trend:.4f} | fused={fused_p95:.3f} | mode={alert_mode}", component="DRIFT")
+        else:
+            # Fallback to legacy simple threshold
+            drift_p95 = float(np.nanpercentile(drift_array, 95))
+            drift_threshold = float(drift_cfg.get("p95_threshold", 2.0))
+            frame["alert_mode"] = "DRIFT" if drift_p95 > drift_threshold else "FAULT"
+            Console.info(f"Drift: {drift_col} P95={drift_p95:.3f} | threshold={drift_threshold:.1f} | mode={frame['alert_mode'].iloc[-1]}", component="DRIFT")
+    except Exception as e:
+        Console.warn(f"Detection failed: {e}", component="DRIFT",
+                     equip=equip, error_type=type(e).__name__, error=str(e)[:200])
+        frame["alert_mode"] = "FAULT"
+    
+    return frame

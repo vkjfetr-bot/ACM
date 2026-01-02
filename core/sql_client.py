@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 from contextlib import contextmanager
 import configparser
 from pathlib import Path
@@ -390,3 +390,181 @@ class SQLClient:
         finally:
             if span_context is not None:
                 span_context.__exit__(None, None, None)
+
+    # ---------- ACM-specific methods ----------
+    def get_equipment_id(self, equipment_name: str) -> int:
+        """
+        Convert equipment name to numeric ID from Equipment table.
+        
+        Args:
+            equipment_name: Equipment code (e.g., 'FD_FAN', 'GAS_TURBINE')
+        
+        Returns:
+            EquipID from Equipment table, or hash-based fallback (1-9999)
+        """
+        if not equipment_name:
+            return 0
+        
+        # Query Equipment table for actual ID
+        if self.conn is not None:
+            try:
+                with self.get_cursor() as cur:
+                    cur.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equipment_name,))
+                    row = cur.fetchone()
+                    if row:
+                        return int(row[0])
+            except Exception:
+                pass  # Fall through to hash-based fallback
+        
+        # Fallback: Generate deterministic ID from equipment name (1-9999 range)
+        import hashlib
+        hash_val = int(hashlib.md5(equipment_name.encode()).hexdigest(), 16)
+        equip_id = (hash_val % 9999) + 1  # Range: 1-9999
+        return equip_id
+
+    def start_run(
+        self, 
+        cfg: Dict[str, Any], 
+        equip_code: str,
+        deadlock_retry_func: Optional[Callable] = None
+    ) -> Tuple[str, Any, Any, int]:
+        """
+        Start a run by inserting into ACM_Runs table.
+        
+        Args:
+            cfg: Configuration dictionary (for tick_minutes, hash)
+            equip_code: Equipment code string
+            deadlock_retry_func: Function to execute SQL with deadlock retry
+            
+        Returns:
+            Tuple of (run_id, window_start, window_end, equip_id)
+        """
+        import uuid
+        import pandas as pd
+        
+        equip_id = self.get_equipment_id(equip_code)
+        tick_minutes = cfg.get("runtime", {}).get("tick_minutes", 30)
+        config_hash = cfg.get("hash", "")
+        
+        default_start = pd.Timestamp.utcnow() - pd.Timedelta(minutes=tick_minutes)
+        
+        # Generate RunID
+        run_id = str(uuid.uuid4())
+        window_start = default_start
+        window_end = default_start + pd.Timedelta(minutes=tick_minutes)
+        now = pd.Timestamp.utcnow()
+
+        if self.conn is None:
+            raise RuntimeError("SQLClient.start_run() called before connect().")
+        
+        # Use simple execute if no retry function provided
+        if deadlock_retry_func is None:
+            def deadlock_retry_func(cur, sql, params):
+                cur.execute(sql, params)
+            
+        cur = self.cursor()
+        try:
+            # For idempotent re-runs, delete any prior run with same RunID
+            deadlock_retry_func(cur, "DELETE FROM dbo.ACM_HealthForecast WHERE RunID = ?", (run_id,))
+            deadlock_retry_func(cur, "DELETE FROM dbo.ACM_FailureForecast WHERE RunID = ?", (run_id,))
+            deadlock_retry_func(cur, "DELETE FROM dbo.ACM_RUL WHERE RunID = ?", (run_id,))
+            deadlock_retry_func(cur, "DELETE FROM dbo.ACM_Runs WHERE RunID = ?", (run_id,))
+            
+            # Direct INSERT into ACM_Runs
+            deadlock_retry_func(
+                cur,
+                """
+                SET QUOTED_IDENTIFIER ON;
+                INSERT INTO dbo.ACM_Runs (RunID, EquipID, StartedAt, ConfigSignature)
+                VALUES (?, ?, ?, ?)
+                """,
+                (run_id, equip_id, now, config_hash)
+            )
+            
+            self.conn.commit()
+            return run_id, window_start, window_end, equip_id
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            cur.close()
+
+    def finalize_run(
+        self,
+        run_id: str,
+        outcome: str,
+        rows_read: int,
+        rows_written: int,
+        err_json: Optional[str] = None,
+    ) -> None:
+        """
+        Finalize a run by updating ACM_Runs with completion status.
+        Uses direct SQL to bypass stored procedure QUOTED_IDENTIFIER issues.
+        
+        Args:
+            run_id: The run UUID
+            outcome: Status string (e.g., "SUCCESS", "NOOP", "ERROR")
+            rows_read: Count of rows loaded from historian
+            rows_written: Count of rows written to output tables
+            err_json: Optional error message JSON
+        """
+        try:
+            cur = self.cursor()
+            try:
+                cur.execute(
+                    """
+                    SET QUOTED_IDENTIFIER ON;
+                    UPDATE dbo.ACM_Runs
+                    SET CompletedAt = GETUTCDATE(),
+                        TrainRowCount = COALESCE(?, TrainRowCount),
+                        ScoreRowCount = COALESCE(?, ScoreRowCount),
+                        ErrorMessage = COALESCE(?, ErrorMessage)
+                    WHERE RunID = ?
+                    """,
+                    (rows_read, rows_written, err_json, run_id)
+                )
+                self.conn.commit()
+            finally:
+                cur.close()
+        except Exception as e:
+            # Environments may lack the table/columns; do not fail the pipeline
+            pass
+
+
+def execute_with_deadlock_retry(
+    cur: Any,
+    sql: str,
+    params: tuple = (),
+    max_retries: int = 3,
+    delay: float = 0.5,
+) -> None:
+    """
+    Execute SQL with automatic retry on deadlock (SQL Server error 1205).
+    
+    This is a module-level function that can be passed to start_run() or 
+    used directly when executing statements that may conflict with other
+    concurrent transactions.
+    
+    Args:
+        cur: Database cursor
+        sql: SQL statement to execute
+        params: Parameters for the SQL statement
+        max_retries: Maximum number of retry attempts
+        delay: Base delay between retries (exponential backoff applied)
+    """
+    import time
+    for attempt in range(max_retries):
+        try:
+            cur.execute(sql, params)
+            return
+        except Exception as e:
+            err_str = str(e)
+            # SQL Server deadlock error code 1205
+            if "1205" in err_str or "deadlock" in err_str.lower():
+                if attempt < max_retries - 1:
+                    time.sleep(delay * (attempt + 1))  # Exponential backoff
+                    continue
+            raise

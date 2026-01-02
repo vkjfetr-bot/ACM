@@ -11,7 +11,7 @@ from utils.detector_labels import format_culprit_label
 
 import numpy as np
 import pandas as pd
-from scipy.stats import pearsonr, spearmanr  # type: ignore
+from scipy.stats import spearmanr  # type: ignore
 from sklearn.metrics import average_precision_score, roc_curve  # type: ignore
 
 
@@ -51,424 +51,367 @@ def tune_detector_weights(
     Returns:
         Tuple of (tuned_weights, diagnostics)
     """
+    tune_cfg = (cfg or {}).get("fusion", {}).get("auto_tune", {}) if cfg else {}
+    enabled = tune_cfg.get("enabled", False)
+    
+    if not enabled:
+        return current_weights, {"enabled": False, "reason": "auto_tune.enabled=False in config"}
+
     with Span("fusion.tune_weights", n_detectors=len(streams), n_samples=len(fused) if isinstance(fused, np.ndarray) else 0):
-        tune_cfg = (cfg or {}).get("fusion", {}).get("auto_tune", {}) if cfg else {}
-        enabled = tune_cfg.get("enabled", False)
-        
-        if not enabled:
-            return current_weights, {"enabled": False, "reason": "auto_tune.enabled=False in config"}
+        # FUSE-09: Configurable parameters
+        learning_rate = float(tune_cfg.get("learning_rate", 0.3))
+        min_weight = float(tune_cfg.get("min_weight", 0.05))
+        temperature = float(tune_cfg.get("temperature", 2.0))
+        detector_priors = tune_cfg.get("detector_priors", {})  # Dict[str, float] for per-detector biases
     
-    # FUSE-09: Configurable parameters
-    learning_rate = float(tune_cfg.get("learning_rate", 0.3))
-    min_weight = float(tune_cfg.get("min_weight", 0.05))
-    temperature = float(tune_cfg.get("temperature", 2.0))
-    detector_priors = tune_cfg.get("detector_priors", {})  # Dict[str, float] for per-detector biases
+        # P2-FIX (v11.1.6): Circular tuning guard
+        # If require_external_labels is True, only tune if episodes come from external source
+        require_external = tune_cfg.get("require_external_labels", False)
     
-    # P2-FIX (v11.1.6): Circular tuning guard
-    # If require_external_labels is True, only tune if episodes come from external source
-    require_external = tune_cfg.get("require_external_labels", False)
+        # Check if episodes_df has a "source" column or attribute indicating origin
+        episode_source = "unknown"
+        if episodes_df is not None and not episodes_df.empty:
+            if hasattr(episodes_df, 'attrs') and 'source' in episodes_df.attrs:
+                episode_source = episodes_df.attrs.get('source', 'unknown')
+            elif 'source' in episodes_df.columns:
+                episode_source = episodes_df['source'].iloc[0] if len(episodes_df) > 0 else 'unknown'
     
-    # Check if episodes_df has a "source" column or attribute indicating origin
-    episode_source = "unknown"
-    if episodes_df is not None and not episodes_df.empty:
-        if hasattr(episodes_df, 'attrs') and 'source' in episodes_df.attrs:
-            episode_source = episodes_df.attrs.get('source', 'unknown')
-        elif 'source' in episodes_df.columns:
-            episode_source = episodes_df['source'].iloc[0] if len(episodes_df) > 0 else 'unknown'
-    
-    if require_external and episode_source in ("current_run", "same_run", "unknown"):
-        Console.warn(
-            "Circular tuning guard: require_external_labels=True but episodes appear to be from "
-            f"same run (source='{episode_source}'). Weight tuning disabled to prevent mode collapse.",
-            component="TUNE", episode_source=episode_source
-        )
-        return current_weights, {
-            "enabled": False, 
-            "reason": "circular_tuning_guard",
-            "episode_source": episode_source
-        }
-
-    # ANA-02: Enforce episode_separability as default and log requested method
-    requested_method_raw = tune_cfg.get("method", "episode_separability")
-    requested_method = str(requested_method_raw).strip().lower()
-    valid_methods = {"episode_separability", "correlation"}
-    method_fallback_reason: Optional[str] = None
-    if requested_method not in valid_methods:
-        Console.warn(f"Unknown tuning method '{requested_method_raw}', defaulting to episode_separability", component="TUNE", requested_method=requested_method_raw, valid_methods=list(valid_methods))
-        tuning_method = "episode_separability"
-        method_fallback_reason = "unknown_method"
-    else:
-        tuning_method = requested_method
-    
-    # Warn about potential circularity even when guard is disabled
-    if tuning_method == "episode_separability" and episode_source in ("current_run", "same_run"):
-        Console.warn(
-            f"Weight tuning using episode_separability with same-run episodes (source='{episode_source}'). "
-            "This may cause self-reinforcing weight drift. Consider require_external_labels=True.",
-            component="TUNE", episode_source=episode_source
-        )
-    
-    diagnostics = {
-        "enabled": True,
-        "method": tuning_method,
-        "requested_method": requested_method,
-        "episode_source": episode_source,  # v11.1.6: Track episode source
-        "learning_rate": learning_rate,
-        "temperature": temperature,
-        "min_weight": min_weight,
-        "detector_priors": dict(detector_priors),
-        "detector_metrics": {},
-        "config_weights": dict(current_weights),  # ANA-01: Capture original config weights
-        "raw_weights": {},
-        "tuned_weights": {},
-        "present_detectors": sorted(list(streams.keys()))  # ANA-03: Track which detectors were available
-    }
-
-    fused_signal = np.asarray(fused, dtype=np.float32).reshape(-1)
-    n_total = len(fused_signal)
-    if n_total == 0:
-        diagnostics["reason"] = "empty_fused_signal"
-        return current_weights, diagnostics
-
-    min_samples_required = max(10, int(0.1 * n_total))
-
-    if method_fallback_reason:
-        diagnostics["fallback_reason"] = method_fallback_reason
-
-    # Construct binary labels from episode windows when available.
-    labels: Optional[np.ndarray] = None
-    if episodes_df is not None and not episodes_df.empty:
-        if fused_index is None or len(fused_index) != n_total:
-            Console.warn("Episodes provided but fused_index missing or misaligned; skipping PR-AUC labeling", component="TUNE", episodes_count=len(episodes_df), fused_index_len=len(fused_index) if fused_index is not None else 0, n_total=n_total)
-        else:
-            try:
-                fused_dt_index = pd.DatetimeIndex(fused_index)
-            except Exception:
-                fused_dt_index = pd.to_datetime(cast(Any, fused_index))
-
-            # Normalize tz to avoid tz-aware/naive comparison errors
-            try:
-                if getattr(fused_dt_index, "tz", None) is not None:
-                    fused_dt_index = fused_dt_index.tz_localize(None)
-            except Exception:
-                pass
-
-            # PERF-OPT: Vectorized episode mask construction
-            positive_mask = np.zeros(n_total, dtype=bool)
-            
-            # Pre-parse all episode timestamps at once
-            start_times = pd.to_datetime(episodes_df.get("start_ts"), errors="coerce")
-            end_times = pd.to_datetime(episodes_df.get("end_ts"), errors="coerce")
-            
-            # Remove timezone info if present
-            if hasattr(start_times, 'tz') and start_times.tz is not None:
-                start_times = start_times.tz_localize(None)
-            if hasattr(end_times, 'tz') and end_times.tz is not None:
-                end_times = end_times.tz_localize(None)
-            
-            # Build mask for valid episodes
-            valid_mask = (
-                pd.notna(start_times) & 
-                pd.notna(end_times) & 
-                (end_times >= start_times) &
-                (end_times >= fused_dt_index[0]) &
-                (start_times <= fused_dt_index[-1])
+        if require_external and episode_source in ("current_run", "same_run", "unknown"):
+            Console.warn(
+                "Circular tuning guard: require_external_labels=True but episodes appear to be from "
+                f"same run (source='{episode_source}'). Weight tuning disabled to prevent mode collapse.",
+                component="TUNE", episode_source=episode_source
             )
-            
-            # Create positive mask using numpy broadcasting for valid episodes
-            fused_values = fused_dt_index.values
-            
-            # PERF-OPT: Pre-extract valid episode boundaries as numpy arrays
-            valid_indices = valid_mask[valid_mask].index.tolist()
-            n_valid_episodes = len(valid_indices)
-            
-            if n_valid_episodes > 0:
-                valid_starts = start_times.loc[valid_indices].values
-                valid_ends = end_times.loc[valid_indices].values
-                
-                # Vectorized interval check - loop over episodes (typically <100)
-                for start_ts, end_ts in zip(valid_starts, valid_ends):
-                    window_mask = (fused_values >= start_ts) & (fused_values <= end_ts)
-                    if window_mask.any():
-                        positive_mask |= window_mask
-
-            diagnostics["label_source"] = {
-                "label_type": "episodes_window",
-                "episodes_count": int(len(episodes_df)),
-                "positive_samples": int(positive_mask.sum()),
-                "negative_samples": int(n_total - positive_mask.sum())
+            return current_weights, {
+                "enabled": False, 
+                "reason": "circular_tuning_guard",
+                "episode_source": episode_source
             }
 
-            if positive_mask.any():
-                labels = positive_mask.astype(np.int8)
-            else:
-                diagnostics["label_source"]["warning"] = "no_samples_marked_positive"
-
-    if "label_source" not in diagnostics:
-        diagnostics["label_source"] = {
-            "label_type": "unavailable",
-            "episodes_count": int(len(episodes_df)) if episodes_df is not None else 0
+        # ANA-02: Enforce episode_separability as default and log requested method
+        requested_method_raw = tune_cfg.get("method", "episode_separability")
+        requested_method = str(requested_method_raw).strip().lower()
+        valid_methods = {"episode_separability", "correlation"}
+        method_fallback_reason: Optional[str] = None
+        if requested_method not in valid_methods:
+            Console.warn(f"Unknown tuning method '{requested_method_raw}', defaulting to episode_separability", component="TUNE", requested_method=requested_method_raw, valid_methods=list(valid_methods))
+            tuning_method = "episode_separability"
+            method_fallback_reason = "unknown_method"
+        else:
+            tuning_method = requested_method
+    
+        # Warn about potential circularity even when guard is disabled
+        if tuning_method == "episode_separability" and episode_source in ("current_run", "same_run"):
+            Console.warn(
+                f"Weight tuning using episode_separability with same-run episodes (source='{episode_source}'). "
+                "This may cause self-reinforcing weight drift. Consider require_external_labels=True.",
+                component="TUNE", episode_source=episode_source
+            )
+    
+        diagnostics = {
+            "enabled": True,
+            "method": tuning_method,
+            "requested_method": requested_method,
+            "episode_source": episode_source,  # v11.1.6: Track episode source
+            "learning_rate": learning_rate,
+            "temperature": temperature,
+            "min_weight": min_weight,
+            "detector_priors": dict(detector_priors),
+            "detector_metrics": {},
+            "config_weights": dict(current_weights),  # ANA-01: Capture original config weights
+            "raw_weights": {},
+            "tuned_weights": {},
+            "present_detectors": sorted(list(streams.keys()))  # ANA-03: Track which detectors were available
         }
 
-    diagnostics["primary_metric"] = "pr_auc"
-
-    if tuning_method == "episode_separability":
-        quality_scores: Dict[str, float] = {}
-
-        for detector_name, detector_signal in streams.items():
-            det_diag: Dict[str, Any] = {}
-            try:
-                mask = np.isfinite(detector_signal)
-                n_valid = int(np.sum(mask))
-                det_diag["n_samples"] = n_valid
-
-                if n_valid < min_samples_required:
-                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required}) - using prior", component="TUNE", detector=detector_name, n_valid=n_valid, min_required=min_samples_required, method=tuning_method)
-                    prior = float(detector_priors.get(detector_name, 1.0 / max(len(streams), 1)))
-                    fallback_score = prior
-                    quality_scores[detector_name] = fallback_score
-                    det_diag.update({
-                        "status": "under_sampled",
-                        "metric_type": "prior_only",
-                        "metric_value": 0.0,
-                        "prior": prior,
-                        "final_score": float(fallback_score)
-                    })
-                    diagnostics["detector_metrics"][detector_name] = det_diag
-                    continue
-
-                det_clean = detector_signal[mask].astype(np.float64)
-
-                # Degenerate signal guards
-                if np.allclose(det_clean, 0.0, atol=1e-6):
-                    Console.warn(f"{detector_name}: all zeros - limited separability", component="TUNE", detector=detector_name, n_samples=len(det_clean), method=tuning_method)
-                    prior = float(detector_priors.get(detector_name, 1.0))
-                    fallback_score = prior * 0.01
-                    quality_scores[detector_name] = fallback_score
-                    det_diag.update({
-                        "status": "degenerate_zeros",
-                        "metric_type": "prior_only",
-                        "metric_value": 0.0,
-                        "prior": prior,
-                        "final_score": float(fallback_score)
-                    })
-                    diagnostics["detector_metrics"][detector_name] = det_diag
-                    continue
-
-                finite_signal = det_clean[np.abs(det_clean) > 1e-6]
-                if finite_signal.size > 0 and np.unique(np.sign(finite_signal)).size == 1:
-                    Console.warn(f"{detector_name}: all same sign - limited separability", component="TUNE", detector=detector_name, n_samples=len(finite_signal), method=tuning_method)
-                    prior = float(detector_priors.get(detector_name, 1.0))
-                    fallback_score = prior * 0.1
-                    quality_scores[detector_name] = fallback_score
-                    det_diag.update({
-                        "status": "degenerate_same_sign",
-                        "metric_type": "prior_only",
-                        "metric_value": 0.0,
-                        "prior": prior,
-                        "final_score": float(fallback_score)
-                    })
-                    diagnostics["detector_metrics"][detector_name] = det_diag
-                    continue
-
-                metric_type: Optional[str] = None
-                metric_value: Optional[float] = None
-                metric_details: Dict[str, Any] = {}
-
-                if labels is not None:
-                    labels_clean = labels[mask]
-                    pos_valid = int(labels_clean.sum())
-                    neg_valid = int(len(labels_clean) - pos_valid)
-                    det_diag["positive_samples"] = pos_valid
-                    det_diag["negative_samples"] = neg_valid
-
-                    if pos_valid > 0 and neg_valid > 0:
-                        try:
-                            pr_auc = float(average_precision_score(labels_clean, det_clean))
-                            if np.isfinite(pr_auc):
-                                metric_type = "pr_auc"
-                                metric_value = float(np.clip(pr_auc, 0.0, 1.0))
-                        except Exception as pr_err:
-                            det_diag["pr_auc_error"] = str(pr_err)
-
-                        if metric_value is None:
-                            try:
-                                fpr, tpr, thresholds = roc_curve(labels_clean, det_clean)
-                                if tpr.size:
-                                    youden = tpr - fpr
-                                    if not np.all(np.isnan(youden)):
-                                        idx_best = int(np.nanargmax(youden))
-                                        metric_type = "youden_j"
-                                        metric_value = float(np.clip(youden[idx_best], 0.0, 1.0))
-                                        metric_details = {
-                                            "best_threshold": float(thresholds[idx_best]),
-                                            "tpr": float(tpr[idx_best]),
-                                            "fpr": float(fpr[idx_best])
-                                        }
-                            except Exception as roc_err:
-                                det_diag["youden_error"] = str(roc_err)
-                    else:
-                        det_diag["status"] = "imbalanced_labels"
-                else:
-                    det_diag["status"] = det_diag.get("status", "no_labels")
-
-                if metric_value is None or not np.isfinite(metric_value):
-                    metric_value = 0.0
-                    metric_type = metric_type or ("no_labels" if labels is None else "insufficient_data")
-
-                prior = float(detector_priors.get(detector_name, 1.0))
-                final_score = float(max(metric_value, 0.0)) * prior
-                if final_score <= 0:
-                    final_score = max(prior * 1e-3, 1e-6)
-
-                quality_scores[detector_name] = final_score
-                det_diag.setdefault("status", "ok")
-                det_diag.update({
-                    "metric_type": metric_type,
-                    "metric_value": float(metric_value),
-                    "prior": prior,
-                    "final_score": float(final_score)
-                })
-                det_diag.update(metric_details)
-                diagnostics["detector_metrics"][detector_name] = det_diag
-
-            except Exception as e:
-                Console.warn(f"{detector_name}: metric calculation failed - {e}", component="TUNE", detector=detector_name, method=tuning_method, error_type=type(e).__name__, error=str(e)[:200])
-                prior = float(detector_priors.get(detector_name, 0.1))
-                fallback_score = prior
-                quality_scores[detector_name] = fallback_score
-                diagnostics["detector_metrics"][detector_name] = {
-                    "status": "error",
-                    "error": str(e),
-                    "metric_type": "prior_only",
-                    "metric_value": 0.0,
-                    "prior": prior,
-                    "final_score": float(fallback_score)
-                }
-
-        if not quality_scores:
-            diagnostics["reason"] = "no_valid_quality_scores"
+        fused_signal = np.asarray(fused, dtype=np.float32).reshape(-1)
+        n_total = len(fused_signal)
+        if n_total == 0:
+            diagnostics["reason"] = "empty_fused_signal"
             return current_weights, diagnostics
 
-        # BUGFIX v11.1.5: Numerically stable softmax (subtract max before exp)
-        # Prevents overflow when quality scores are large relative to temperature
-        score_array = np.array(list(quality_scores.values()), dtype=np.float64)
-        scaled_scores = score_array / temperature
-        shifted_scores = scaled_scores - np.max(scaled_scores)  # Stability: max becomes 0
-        exp_scores = np.exp(shifted_scores)
-        softmax_weights = exp_scores / np.sum(exp_scores)
+        min_samples_required = max(10, int(0.1 * n_total))
 
-        raw_weights = {}
-        for i, detector_name in enumerate(quality_scores.keys()):
-            weight_val = float(softmax_weights[i])
-            raw_weights[detector_name] = weight_val
-            diagnostics["raw_weights"][detector_name] = weight_val
-    
-    else:
-        diagnostics["primary_metric"] = "abs_correlation"
-        # Fallback: correlation-based tuning (LEGACY - circular but retained for compatibility)
-        Console.warn("Using legacy correlation-based tuning (circular dependency)", component="TUNE", method="correlation", n_detectors=len(streams), n_total=n_total)
-        correlations = {}
-        
-        for detector_name, detector_signal in streams.items():
-            try:
-                mask = np.isfinite(detector_signal) & np.isfinite(fused_signal)
-                n_valid = int(np.sum(mask))
+        if method_fallback_reason:
+            diagnostics["fallback_reason"] = method_fallback_reason
+
+        # Construct binary labels from episode windows when available.
+        labels: Optional[np.ndarray] = None
+        if episodes_df is not None and not episodes_df.empty:
+            if fused_index is None or len(fused_index) != n_total:
+                Console.warn("Episodes provided but fused_index missing or misaligned; skipping PR-AUC labeling", component="TUNE", episodes_count=len(episodes_df), fused_index_len=len(fused_index) if fused_index is not None else 0, n_total=n_total)
+            else:
+                try:
+                    fused_dt_index = pd.DatetimeIndex(fused_index)
+                except Exception:
+                    fused_dt_index = pd.to_datetime(cast(Any, fused_index))
+
+                # Normalize tz to avoid tz-aware/naive comparison errors
+                try:
+                    if getattr(fused_dt_index, "tz", None) is not None:
+                        fused_dt_index = fused_dt_index.tz_localize(None)
+                except Exception:
+                    pass
+
+                # PERF-OPT: Vectorized episode mask construction
+                positive_mask = np.zeros(n_total, dtype=bool)
+            
+                # Pre-parse all episode timestamps at once
+                start_times = pd.to_datetime(episodes_df.get("start_ts"), errors="coerce")
+                end_times = pd.to_datetime(episodes_df.get("end_ts"), errors="coerce")
+            
+                # Remove timezone info if present
+                if hasattr(start_times, 'tz') and start_times.tz is not None:
+                    start_times = start_times.tz_localize(None)
+                if hasattr(end_times, 'tz') and end_times.tz is not None:
+                    end_times = end_times.tz_localize(None)
+            
+                # Build mask for valid episodes
+                valid_mask = (
+                    pd.notna(start_times) & 
+                    pd.notna(end_times) & 
+                    (end_times >= start_times) &
+                    (end_times >= fused_dt_index[0]) &
+                    (start_times <= fused_dt_index[-1])
+                )
+            
+                # Create positive mask using numpy broadcasting for valid episodes
+                fused_values = fused_dt_index.values
+            
+                # PERF-OPT: Pre-extract valid episode boundaries as numpy arrays
+                valid_indices = valid_mask[valid_mask].index.tolist()
+                n_valid_episodes = len(valid_indices)
+            
+                if n_valid_episodes > 0:
+                    valid_starts = start_times.loc[valid_indices].values
+                    valid_ends = end_times.loc[valid_indices].values
                 
-                if n_valid < min_samples_required:
-                    Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required})", component="TUNE", detector=detector_name, n_valid=n_valid, min_required=min_samples_required, method="correlation")
-                    correlations[detector_name] = 0.0
+                    # Vectorized interval check - loop over episodes (typically <100)
+                    for start_ts, end_ts in zip(valid_starts, valid_ends):
+                        window_mask = (fused_values >= start_ts) & (fused_values <= end_ts)
+                        if window_mask.any():
+                            positive_mask |= window_mask
+
+                diagnostics["label_source"] = {
+                    "label_type": "episodes_window",
+                    "episodes_count": int(len(episodes_df)),
+                    "positive_samples": int(positive_mask.sum()),
+                    "negative_samples": int(n_total - positive_mask.sum())
+                }
+
+                if positive_mask.any():
+                    labels = positive_mask.astype(np.int8)
+                else:
+                    diagnostics["label_source"]["warning"] = "no_samples_marked_positive"
+
+        if "label_source" not in diagnostics:
+            diagnostics["label_source"] = {
+                "label_type": "unavailable",
+                "episodes_count": int(len(episodes_df)) if episodes_df is not None else 0
+            }
+
+        diagnostics["primary_metric"] = "pr_auc"
+
+        if tuning_method == "episode_separability":
+            quality_scores: Dict[str, float] = {}
+
+            for detector_name, detector_signal in streams.items():
+                det_diag: Dict[str, Any] = {}
+                try:
+                    mask = np.isfinite(detector_signal)
+                    n_valid = int(np.sum(mask))
+                    det_diag["n_samples"] = n_valid
+
+                    if n_valid < min_samples_required:
+                        Console.warn(f"{detector_name}: under-sampled ({n_valid}/{min_samples_required}) - using prior", component="TUNE", detector=detector_name, n_valid=n_valid, min_required=min_samples_required, method=tuning_method)
+                        prior = float(detector_priors.get(detector_name, 1.0 / max(len(streams), 1)))
+                        fallback_score = prior
+                        quality_scores[detector_name] = fallback_score
+                        det_diag.update({
+                            "status": "under_sampled",
+                            "metric_type": "prior_only",
+                            "metric_value": 0.0,
+                            "prior": prior,
+                            "final_score": float(fallback_score)
+                        })
+                        diagnostics["detector_metrics"][detector_name] = det_diag
+                        continue
+
+                    det_clean = detector_signal[mask].astype(np.float64)
+
+                    # Degenerate signal guards
+                    if np.allclose(det_clean, 0.0, atol=1e-6):
+                        Console.warn(f"{detector_name}: all zeros - limited separability", component="TUNE", detector=detector_name, n_samples=len(det_clean), method=tuning_method)
+                        prior = float(detector_priors.get(detector_name, 1.0))
+                        fallback_score = prior * 0.01
+                        quality_scores[detector_name] = fallback_score
+                        det_diag.update({
+                            "status": "degenerate_zeros",
+                            "metric_type": "prior_only",
+                            "metric_value": 0.0,
+                            "prior": prior,
+                            "final_score": float(fallback_score)
+                        })
+                        diagnostics["detector_metrics"][detector_name] = det_diag
+                        continue
+
+                    finite_signal = det_clean[np.abs(det_clean) > 1e-6]
+                    if finite_signal.size > 0 and np.unique(np.sign(finite_signal)).size == 1:
+                        Console.warn(f"{detector_name}: all same sign - limited separability", component="TUNE", detector=detector_name, n_samples=len(finite_signal), method=tuning_method)
+                        prior = float(detector_priors.get(detector_name, 1.0))
+                        fallback_score = prior * 0.1
+                        quality_scores[detector_name] = fallback_score
+                        det_diag.update({
+                            "status": "degenerate_same_sign",
+                            "metric_type": "prior_only",
+                            "metric_value": 0.0,
+                            "prior": prior,
+                            "final_score": float(fallback_score)
+                        })
+                        diagnostics["detector_metrics"][detector_name] = det_diag
+                        continue
+
+                    metric_type: Optional[str] = None
+                    metric_value: Optional[float] = None
+                    metric_details: Dict[str, Any] = {}
+
+                    if labels is not None:
+                        labels_clean = labels[mask]
+                        pos_valid = int(labels_clean.sum())
+                        neg_valid = int(len(labels_clean) - pos_valid)
+                        det_diag["positive_samples"] = pos_valid
+                        det_diag["negative_samples"] = neg_valid
+
+                        if pos_valid > 0 and neg_valid > 0:
+                            try:
+                                pr_auc = float(average_precision_score(labels_clean, det_clean))
+                                if np.isfinite(pr_auc):
+                                    metric_type = "pr_auc"
+                                    metric_value = float(np.clip(pr_auc, 0.0, 1.0))
+                            except Exception as pr_err:
+                                det_diag["pr_auc_error"] = str(pr_err)
+
+                            if metric_value is None:
+                                try:
+                                    fpr, tpr, thresholds = roc_curve(labels_clean, det_clean)
+                                    if tpr.size:
+                                        youden = tpr - fpr
+                                        if not np.all(np.isnan(youden)):
+                                            idx_best = int(np.nanargmax(youden))
+                                            metric_type = "youden_j"
+                                            metric_value = float(np.clip(youden[idx_best], 0.0, 1.0))
+                                            metric_details = {
+                                                "best_threshold": float(thresholds[idx_best]),
+                                                "tpr": float(tpr[idx_best]),
+                                                "fpr": float(fpr[idx_best])
+                                            }
+                                except Exception as roc_err:
+                                    det_diag["youden_error"] = str(roc_err)
+                        else:
+                            det_diag["status"] = "imbalanced_labels"
+                    else:
+                        det_diag["status"] = det_diag.get("status", "no_labels")
+
+                    if metric_value is None or not np.isfinite(metric_value):
+                        metric_value = 0.0
+                        metric_type = metric_type or ("no_labels" if labels is None else "insufficient_data")
+
+                    prior = float(detector_priors.get(detector_name, 1.0))
+                    final_score = float(max(metric_value, 0.0)) * prior
+                    if final_score <= 0:
+                        final_score = max(prior * 1e-3, 1e-6)
+
+                    quality_scores[detector_name] = final_score
+                    det_diag.setdefault("status", "ok")
+                    det_diag.update({
+                        "metric_type": metric_type,
+                        "metric_value": float(metric_value),
+                        "prior": prior,
+                        "final_score": float(final_score)
+                    })
+                    det_diag.update(metric_details)
+                    diagnostics["detector_metrics"][detector_name] = det_diag
+
+                except Exception as e:
+                    Console.warn(f"{detector_name}: metric calculation failed - {e}", component="TUNE", detector=detector_name, method=tuning_method, error_type=type(e).__name__, error=str(e)[:200])
+                    prior = float(detector_priors.get(detector_name, 0.1))
+                    fallback_score = prior
+                    quality_scores[detector_name] = fallback_score
                     diagnostics["detector_metrics"][detector_name] = {
-                        "n_samples": n_valid,
-                        "status": "under_sampled",
-                        "metric_type": "abs_correlation",
-                        "metric_value": 0.0
+                        "status": "error",
+                        "error": str(e),
+                        "metric_type": "prior_only",
+                        "metric_value": 0.0,
+                        "prior": prior,
+                        "final_score": float(fallback_score)
                     }
-                    continue
-                
-                det_clean = detector_signal[mask]
-                fused_clean = fused_signal[mask]
-                
-                corr, p_value = pearsonr(det_clean, fused_clean)
-                corr_f = float(np.asarray(corr, dtype=float).item())
-                p_val_f = float(np.asarray(p_value, dtype=float).item())
-                correlations[detector_name] = abs(corr_f) if np.isfinite(corr_f) else 0.0
-                
-                diagnostics["detector_metrics"][detector_name] = {
-                    "pearson_r": corr_f,
-                    "abs_r": float(abs(corr_f)),
-                    "p_value": p_val_f,
-                    "n_samples": n_valid,
-                    "status": "ok",
-                    "metric_type": "abs_correlation",
-                    "metric_value": float(abs(corr_f))
-                }
-            except Exception as e:
-                Console.warn(f"{detector_name}: correlation failed - {e}", component="TUNE", detector=detector_name, method="correlation", error_type=type(e).__name__, error=str(e)[:200])
-                correlations[detector_name] = 0.0
-                diagnostics["detector_metrics"][detector_name] = {
-                    "status": "error",
-                    "error": str(e),
-                    "metric_type": "abs_correlation",
-                    "metric_value": 0.0
-                }
+
+            if not quality_scores:
+                diagnostics["reason"] = "no_valid_quality_scores"
+                return current_weights, diagnostics
+
+            # BUGFIX v11.1.5: Numerically stable softmax (subtract max before exp)
+            # Prevents overflow when quality scores are large relative to temperature
+            score_array = np.array(list(quality_scores.values()), dtype=np.float64)
+            scaled_scores = score_array / temperature
+            shifted_scores = scaled_scores - np.max(scaled_scores)  # Stability: max becomes 0
+            exp_scores = np.exp(shifted_scores)
+            softmax_weights = exp_scores / np.sum(exp_scores)
+
+            raw_weights = {}
+            for i, detector_name in enumerate(quality_scores.keys()):
+                weight_val = float(softmax_weights[i])
+                raw_weights[detector_name] = weight_val
+                diagnostics["raw_weights"][detector_name] = weight_val
+    
+        else:
+            # Legacy correlation method removed in v11.2 - was circular and deprecated
+            # If someone explicitly configures method=correlation, fall back to episode_separability
+            Console.error("Correlation tuning method removed. Using episode_separability instead.", component="TUNE")
+            diagnostics["reason"] = "correlation_method_removed"
+            return current_weights, diagnostics
+    
+        # ANA-01: Capture pre_tune_weights before any modifications
+        diagnostics["pre_tune_weights"] = dict(current_weights)
+    
+        # Blend with existing weights using learning rate
+        tuned_weights = {}
+        for detector_name in streams.keys():
+            old_weight = current_weights.get(detector_name, 0.0)
+            new_weight = raw_weights.get(detector_name, 0.0)
         
-        if not correlations:
-            return current_weights, {**diagnostics, "reason": "no_valid_correlations"}
+            # Exponential moving average
+            blended = (1 - learning_rate) * old_weight + learning_rate * new_weight
         
-        # BUGFIX v11.1.5: Numerically stable softmax (subtract max before exp)
-        corr_array = np.array(list(correlations.values()))
-        scaled_corr = corr_array / temperature
-        shifted_corr = scaled_corr - np.max(scaled_corr)  # Stability: max becomes 0
-        exp_corr = np.exp(shifted_corr)
-        softmax_weights = exp_corr / np.sum(exp_corr)
-        
-        raw_weights = {}
-        for i, detector_name in enumerate(correlations.keys()):
-            raw_weights[detector_name] = float(softmax_weights[i])
-            diagnostics["raw_weights"][detector_name] = float(softmax_weights[i])
+            # Enforce minimum weight
+            tuned_weights[detector_name] = max(blended, min_weight)
     
-    # ANA-01: Capture pre_tune_weights before any modifications
-    diagnostics["pre_tune_weights"] = dict(current_weights)
+        # ANA-01: Capture pre-normalization weights (ANA-04)
+        diagnostics["pre_renorm_weights"] = dict(tuned_weights)
     
-    # Blend with existing weights using learning rate
-    tuned_weights = {}
-    for detector_name in streams.keys():
-        old_weight = current_weights.get(detector_name, 0.0)
-        new_weight = raw_weights.get(detector_name, 0.0)
-        
-        # Exponential moving average
-        blended = (1 - learning_rate) * old_weight + learning_rate * new_weight
-        
-        # Enforce minimum weight
-        tuned_weights[detector_name] = max(blended, min_weight)
+        # Normalize to sum to 1.0
+        total = sum(tuned_weights.values())
+        if total > 0:
+            tuned_weights = {k: v / total for k, v in tuned_weights.items()}
     
-    # ANA-01: Capture pre-normalization weights (ANA-04)
-    diagnostics["pre_renorm_weights"] = dict(tuned_weights)
+        # ANA-01: Capture final post-tune weights after normalization
+        diagnostics["post_tune_weights"] = dict(tuned_weights)
+        diagnostics["tuned_weights"] = tuned_weights  # Keep for backward compatibility
     
-    # Normalize to sum to 1.0
-    total = sum(tuned_weights.values())
-    if total > 0:
-        tuned_weights = {k: v / total for k, v in tuned_weights.items()}
+        # Log tuning results
+        Console.info(f"Detector weight auto-tuning ({tuning_method}):", component="TUNE")
+        for detector_name in sorted(tuned_weights.keys()):
+            old = current_weights.get(detector_name, 0.0)
+            new = tuned_weights[detector_name]
+            delta = new - old
+            det_diag = diagnostics["detector_metrics"].get(detector_name, {})
+            metric_type = det_diag.get("metric_type", "n/a")
+            metric_val = det_diag.get("metric_value", 0.0)
+            Console.info(
+                f"  {detector_name:15s}: {old:.3f} -> {new:.3f} (Delta{delta:+.3f}, {metric_type}={metric_val:.3f})"
+            )
     
-    # ANA-01: Capture final post-tune weights after normalization
-    diagnostics["post_tune_weights"] = dict(tuned_weights)
-    diagnostics["tuned_weights"] = tuned_weights  # Keep for backward compatibility
-    
-    # Log tuning results
-    Console.info(f"Detector weight auto-tuning ({tuning_method}):", component="TUNE")
-    for detector_name in sorted(tuned_weights.keys()):
-        old = current_weights.get(detector_name, 0.0)
-        new = tuned_weights[detector_name]
-        delta = new - old
-        det_diag = diagnostics["detector_metrics"].get(detector_name, {})
-        metric_type = det_diag.get("metric_type", "n/a")
-        metric_val = det_diag.get("metric_value", 0.0)
-        Console.info(
-            f"  {detector_name:15s}: {old:.3f} -> {new:.3f} (Delta{delta:+.3f}, {metric_type}={metric_val:.3f})"
-        )
-    
-    return tuned_weights, diagnostics
+        return tuned_weights, diagnostics
 
 
 class ScoreCalibrator:
@@ -852,8 +795,9 @@ class Fuser:
             sd = mad * 1.4826  # Scale MAD to std-equivalent
             if not np.isfinite(sd) or sd <= 1e-9:
                 sd = 1.0
-            k = self.ep.k_sigma * sd
-            h = self.ep.h_sigma * sd
+            # NOTE: k_sigma/h_sigma are retained in EpisodeParams for potential future CUSUM mode,
+            # but current implementation uses hysteresis (z_on/z_off) exclusively.
+            # Hysteresis is preferred for rotary equipment where full fault envelope matters.
             
             # P0-FIX (v11.1.6): Proper hysteresis-based episode detection
             # Episode semantics for rotary equipment:
@@ -1141,88 +1085,410 @@ def combine(streams: Dict[str, np.ndarray], weights: Dict[str, float], cfg: Dict
         # FUSE-06: Auto-tune k_sigma and h_sigma based on training data statistics
         auto_tune_cfg = cpd.get("auto_tune", {})
         auto_tune_enabled = auto_tune_cfg.get("enabled", False)
+        
+        base_k_sigma = float(cpd.get("k_sigma", 0.5))
+        base_h_sigma = float(cpd.get("h_sigma", 5.0))
     
-    base_k_sigma = float(cpd.get("k_sigma", 0.5))
-    base_h_sigma = float(cpd.get("h_sigma", 5.0))
+        k_sigma = base_k_sigma
+        h_sigma = base_h_sigma
     
-    k_sigma = base_k_sigma
-    h_sigma = base_h_sigma
-    
-    min_len = int(epcfg.get("min_len", 3))
-    gap_merge = int(epcfg.get("gap_merge", 5))
-    min_duration_s = float(epcfg.get("min_duration_s", 60.0))
+        min_len = int(epcfg.get("min_len", 3))
+        gap_merge = int(epcfg.get("gap_merge", 5))
+        min_duration_s = float(epcfg.get("min_duration_s", 60.0))
 
-    if auto_tune_enabled:
-        try:
-            # PERF-OPT: Skip preview fusion - compute statistics directly from streams
-            # The preview was only used to get std/p50/p95 which can be computed from streams directly
-            stats_source = "detectors"
-            all_values = []
-            for stream in streams.values():
-                finite_mask = np.isfinite(stream)
-                if finite_mask.any():
-                    all_values.append(stream[finite_mask])
+        if auto_tune_enabled:
+            try:
+                # PERF-OPT: Skip preview fusion - compute statistics directly from streams
+                # The preview was only used to get std/p50/p95 which can be computed from streams directly
+                stats_source = "detectors"
+                all_values = []
+                for stream in streams.values():
+                    finite_mask = np.isfinite(stream)
+                    if finite_mask.any():
+                        all_values.append(stream[finite_mask])
             
-            if all_values:
-                statistic_vals = np.concatenate(all_values)
-            else:
-                statistic_vals = np.array([], dtype=float)
+                if all_values:
+                    statistic_vals = np.concatenate(all_values)
+                else:
+                    statistic_vals = np.array([], dtype=float)
 
-            if statistic_vals.size:
-                # v11.1.3: Use MAD * 1.4826 instead of std for robustness
-                statistic_median = float(np.nanmedian(statistic_vals))
-                statistic_mad = float(np.nanmedian(np.abs(statistic_vals - statistic_median)))
-                std = statistic_mad * 1.4826  # Scale MAD to be consistent with std
-                std = max(std, 1e-3)
-                p50 = float(np.nanpercentile(statistic_vals, 50))
-                p95 = float(np.nanpercentile(statistic_vals, 95))
-                spread = max(p95 - p50, 1e-3)
+                if statistic_vals.size:
+                    # v11.1.3: Use MAD * 1.4826 instead of std for robustness
+                    statistic_median = float(np.nanmedian(statistic_vals))
+                    statistic_mad = float(np.nanmedian(np.abs(statistic_vals - statistic_median)))
+                    std = statistic_mad * 1.4826  # Scale MAD to be consistent with std
+                    std = max(std, 1e-3)
+                    p50 = float(np.nanpercentile(statistic_vals, 50))
+                    p95 = float(np.nanpercentile(statistic_vals, 95))
+                    spread = max(p95 - p50, 1e-3)
 
-                # P0-FIX (v11.1.6): k_factor and h_factor ARE the dimensionless multipliers
-                # DO NOT multiply by std or spread - detect_episodes() will do that
-                # This fixes the units² bug where thresholds scaled incorrectly
-                k_factor = float(auto_tune_cfg.get("k_factor", 0.5))
-                h_factor = float(auto_tune_cfg.get("h_factor", 5.0))
-                k_min = float(auto_tune_cfg.get("k_min", 0.25))
-                k_max = float(auto_tune_cfg.get("k_max", max(base_k_sigma, 2.0)))
-                h_min = float(auto_tune_cfg.get("h_min", 3.0))
-                h_max = float(auto_tune_cfg.get("h_max", max(base_h_sigma, 10.0)))
+                    # P0-FIX (v11.1.6): k_factor and h_factor ARE the dimensionless multipliers
+                    # DO NOT multiply by std or spread - detect_episodes() will do that
+                    # This fixes the units² bug where thresholds scaled incorrectly
+                    k_factor = float(auto_tune_cfg.get("k_factor", 0.5))
+                    h_factor = float(auto_tune_cfg.get("h_factor", 5.0))
+                    k_min = float(auto_tune_cfg.get("k_min", 0.25))
+                    k_max = float(auto_tune_cfg.get("k_max", max(base_k_sigma, 2.0)))
+                    h_min = float(auto_tune_cfg.get("h_min", 3.0))
+                    h_max = float(auto_tune_cfg.get("h_max", max(base_h_sigma, 10.0)))
 
-                # Adaptive multiplier based on data spread characteristics
-                # If spread is large relative to std, increase h_factor slightly
-                spread_ratio = spread / std if std > 1e-6 else 1.0
-                adaptive_h_factor = h_factor * min(1.5, max(0.8, spread_ratio / 2.0))
+                    # Adaptive multiplier based on data spread characteristics
+                    # If spread is large relative to std, increase h_factor slightly
+                    spread_ratio = spread / std if std > 1e-6 else 1.0
+                    adaptive_h_factor = h_factor * min(1.5, max(0.8, spread_ratio / 2.0))
                 
-                # Clip to valid ranges - these are MULTIPLIERS, not absolute values
-                k_sigma = float(np.clip(k_factor, k_min, k_max))
-                h_sigma = float(np.clip(adaptive_h_factor, h_min, h_max))
+                    # Clip to valid ranges - these are MULTIPLIERS, not absolute values
+                    k_sigma = float(np.clip(k_factor, k_min, k_max))
+                    h_sigma = float(np.clip(adaptive_h_factor, h_min, h_max))
 
-                Console.info("Auto-tuned CUSUM parameters (source=%s):" % stats_source, component="FUSE")
-                Console.info(f"  k_sigma: {base_k_sigma:.3f} -> {k_sigma:.3f} (dimensionless multiplier)", component="FUSE")
-                Console.info(f"  h_sigma: {base_h_sigma:.3f} -> {h_sigma:.3f} (spread_ratio={spread_ratio:.2f})", component="FUSE")
+                    Console.info("Auto-tuned CUSUM parameters (source=%s):" % stats_source, component="FUSE")
+                    Console.info(f"  k_sigma: {base_k_sigma:.3f} -> {k_sigma:.3f} (dimensionless multiplier)", component="FUSE")
+                    Console.info(f"  h_sigma: {base_h_sigma:.3f} -> {h_sigma:.3f} (spread_ratio={spread_ratio:.2f})", component="FUSE")
+                else:
+                    Console.warn("Auto-tune skipped: insufficient data for statistics", component="FUSE", stats_source=stats_source, n_samples=sum(len(v) for v in all_values) if all_values else 0)
+            except Exception as tune_e:
+                Console.warn(f"Auto-tune failed: {tune_e}", component="FUSE", error_type=type(tune_e).__name__, error=str(tune_e)[:200])
+    
+        # v11.1.6: Read hysteresis parameters from config
+        z_on = float(epcfg.get("z_on", 2.0))
+        z_off = float(epcfg.get("z_off", 1.0))
+        min_onset = int(epcfg.get("min_onset", 2))
+        min_release = int(epcfg.get("min_release", 3))
+    
+        params = EpisodeParams(
+            k_sigma=k_sigma,
+            h_sigma=h_sigma,
+            min_len=min_len,
+            gap_merge=gap_merge,
+            min_duration_s=min_duration_s,
+            z_on=z_on,
+            z_off=z_off,
+            min_onset=min_onset,
+            min_release=min_release,
+        )
+        fuser = Fuser(weights=weights, ep=params)
+        fused = fuser.fuse(streams, original_features)
+        episodes = fuser.detect_episodes(fused, streams, original_features, regime_labels=regime_labels)
+        return fused, episodes
+
+
+# ============================================================================
+# Episode Schema Normalization (moved from acm_main.py v11.2)
+# ============================================================================
+
+def normalize_episodes_schema(
+    episodes: pd.DataFrame,
+    frame: pd.DataFrame,
+    equip: str = "",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Normalize episodes DataFrame schema for report/export.
+    
+    This helper ensures episodes have consistent columns and computes:
+    - episode_id (if missing)
+    - start_ts/end_ts from frame index
+    - regime labels (majority vote per episode)
+    - regime_state (majority state per episode)
+    - severity (based on regime_state)
+    - duration_s and duration_hours
+    
+    Args:
+        episodes: Raw episodes DataFrame from fusion
+        frame: Scored frame DataFrame with datetime index
+        equip: Equipment name for logging
+        
+    Returns:
+        Tuple of (normalized_episodes, sorted_frame)
+    """
+    from utils.timestamp_utils import nearest_indexer
+    
+    # Create defensive copy to avoid modifying caller's data
+    episodes = episodes.copy()
+    
+    # Ensure required columns exist
+    if "episode_id" not in episodes.columns:
+        episodes.insert(0, "episode_id", np.arange(1, len(episodes) + 1, dtype=int))
+    if "severity" not in episodes.columns:
+        episodes["severity"] = "info"
+    if "regime" not in episodes.columns:
+        episodes["regime"] = ""
+    if "start_ts" not in episodes.columns:
+        episodes["start_ts"] = pd.NaT
+    if "end_ts" not in episodes.columns:
+        episodes["end_ts"] = pd.NaT
+    
+    # Get index series from episodes
+    start_idx_series = episodes.get("start")
+    end_idx_series = episodes.get("end")
+    
+    # Ensure frame is sorted before any indexing operations
+    if not frame.index.is_monotonic_increasing:
+        Console.warn("Sorting frame index for timestamp mapping", component="EPISODE",
+                     equip=equip)
+        frame = frame.sort_index()
+    idx_array = frame.index.to_numpy()
+
+    # Prefer nearest mapping; preserve NaT (avoid clip-to-zero artefacts)
+    if start_idx_series is None:
+        # Deduplicate frame index before episode mapping to prevent aggregation errors
+        if not frame.index.is_unique:
+            Console.warn(f"Deduplicating {len(frame)} - {frame.index.nunique()} = {len(frame) - frame.index.nunique()} duplicate timestamps", component="EPISODES",
+                         equip=equip)
+            frame = frame.groupby(frame.index).first()
+            idx_array = frame.index.to_numpy()
+
+        start_positions = nearest_indexer(frame.index, episodes["start_ts"], label="EPISODE.start")
+        start_idx_series = pd.Series(start_positions, index=episodes.index, dtype="int64")
+    if end_idx_series is None:
+        end_positions = nearest_indexer(frame.index, episodes["end_ts"], label="EPISODE.end")
+        end_idx_series = pd.Series(end_positions, index=episodes.index, dtype="int64")
+    
+    start_idx_series = start_idx_series.fillna(-1).astype(int)
+    end_idx_series = end_idx_series.fillna(-1).astype(int)
+    
+    if len(idx_array):
+        start_idx = start_idx_series.clip(-1, len(idx_array) - 1).to_numpy()
+        end_idx = end_idx_series.clip(-1, len(idx_array) - 1).to_numpy()
+        s_idx_safe = np.where(start_idx >= 0, start_idx, 0)
+        e_idx_safe = np.where(end_idx >= 0, end_idx, 0)
+        # Create datetime arrays, use pd.NaT for invalid indices
+        start_times = idx_array[s_idx_safe]
+        end_times = idx_array[e_idx_safe]
+        episodes["start_ts"] = pd.Series(start_times, index=episodes.index, dtype='datetime64[ns]')
+        episodes["end_ts"] = pd.Series(end_times, index=episodes.index, dtype='datetime64[ns]')
+        # Set NaT for invalid indices
+        episodes.loc[start_idx < 0, "start_ts"] = pd.NaT
+        episodes.loc[end_idx < 0, "end_ts"] = pd.NaT
+    else:
+        start_idx = np.zeros(len(episodes), dtype=int)
+        end_idx = np.zeros(len(episodes), dtype=int)
+        episodes["start_ts"] = pd.NaT
+        episodes["end_ts"] = pd.NaT
+
+    # Map regime labels to episodes (majority vote)
+    label_series = frame.get("regime_label")
+    state_series = frame.get("regime_state")
+    if label_series is not None:
+        label_array = label_series.to_numpy()
+        state_array = state_series.to_numpy() if state_series is not None else None
+        regime_vals: List[Any] = []
+        regime_states: List[str] = []
+        for s_idx, e_idx in zip(start_idx, end_idx):
+            if len(label_array) == 0:
+                regime_vals.append(-1)
+                regime_states.append("unknown")
+                continue
+            s_clamped = int(np.clip(s_idx, 0, len(label_array) - 1))
+            e_clamped = int(np.clip(e_idx, 0, len(label_array) - 1))
+            if e_clamped < s_clamped:
+                e_clamped = s_clamped
+            slice_labels = label_array[s_clamped:e_clamped + 1]
+            if slice_labels.size:
+                # Filter out negative labels (UNKNOWN regime = -1) for bincount
+                valid_labels = slice_labels[slice_labels >= 0]
+                if valid_labels.size > 0:
+                    counts = np.bincount(valid_labels.astype(int))
+                    majority_label = int(np.argmax(counts))
+                else:
+                    # All labels are UNKNOWN (-1)
+                    majority_label = -1
             else:
-                Console.warn("Auto-tune skipped: insufficient data for statistics", component="FUSE", stats_source=stats_source if 'stats_source' in dir() else "unknown", n_samples=n_total if 'n_total' in dir() else 0)
-        except Exception as tune_e:
-            Console.warn(f"Auto-tune failed: {tune_e}", component="FUSE", error_type=type(tune_e).__name__, error=str(tune_e)[:200])
+                majority_label = -1
+            regime_vals.append(majority_label)
+            if state_array is not None and slice_labels.size:
+                slice_states = state_array[s_clamped:e_clamped + 1]
+                values, counts_arr = np.unique(slice_states, return_counts=True)
+                majority_state = str(values[np.argmax(counts_arr)])
+            else:
+                majority_state = "unknown"
+            regime_states.append(majority_state)
+        episodes["regime"] = regime_vals
+        episodes["regime_state"] = regime_states
+    else:
+        episodes["regime_state"] = "unknown"
+
+    # Map regime_state to severity
+    severity_map = {"critical": "critical", "suspect": "warning", "warning": "warning"}
+    severity_override = episodes["regime_state"].map(lambda s: severity_map.get(str(s)))
+    episodes["severity"] = severity_override.fillna(episodes["severity"])
+
+    # Calculate duration
+    start_ts = pd.to_datetime(episodes["start_ts"], errors="coerce")
+    end_ts = pd.to_datetime(episodes["end_ts"], errors="coerce")
+    episodes["duration_s"] = (end_ts - start_ts).dt.total_seconds()
+    try:
+        episodes["duration_hours"] = episodes["duration_s"].astype(float) / 3600.0
+    except Exception:
+        episodes["duration_hours"] = np.where(
+            pd.notna(episodes.get("duration_s")),
+            episodes.get("duration_s").astype(float) / 3600.0,
+            0.0
+        )
     
-    # v11.1.6: Read hysteresis parameters from config
-    z_on = float(epcfg.get("z_on", 2.0))
-    z_off = float(epcfg.get("z_off", 1.0))
-    min_onset = int(epcfg.get("min_onset", 2))
-    min_release = int(epcfg.get("min_release", 3))
+    # Sort and finalize
+    episodes = episodes.sort_values(["start_ts", "end_ts", "episode_id"]).reset_index(drop=True)
+    episodes["regime"] = episodes["regime"].astype(str)
     
-    params = EpisodeParams(
-        k_sigma=k_sigma,
-        h_sigma=h_sigma,
-        min_len=min_len,
-        gap_merge=gap_merge,
-        min_duration_s=min_duration_s,
-        z_on=z_on,
-        z_off=z_off,
-        min_onset=min_onset,
-        min_release=min_release,
+    return episodes, frame
+
+
+# ============================================================================
+# Fusion Pipeline Orchestration (v11.2)
+# ============================================================================
+
+@dataclass
+class FusionResult:
+    """Result of fusion pipeline execution."""
+    fused_scores: np.ndarray
+    episodes: pd.DataFrame
+    weights_used: Dict[str, float]
+    auto_tuned: bool
+    tuning_diagnostics: Optional[Dict[str, Any]] = None
+    train_fused: Optional[np.ndarray] = None
+
+
+DEFAULT_WEIGHTS = {
+    "pca_spe_z": 0.30,
+    "pca_t2_z": 0.20,
+    "ar1_z": 0.20,
+    "iforest_z": 0.15,
+    "gmm_z": 0.05,
+    "omr_z": 0.10,
+}
+
+
+def prepare_fusion_inputs(
+    frame: pd.DataFrame,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, float], List[str]]:
+    """
+    Prepare and validate fusion inputs.
+    
+    Returns:
+        (present_streams, normalized_weights, missing_detectors)
+    """
+    weights = (cfg or {}).get("fusion", {}).get("weights", DEFAULT_WEIGHTS)
+    
+    # Validate weight keys
+    invalid_keys = [k for k in weights.keys() if not k.endswith('_z')]
+    if invalid_keys:
+        raise ValueError(f"Invalid detector keys in fusion.weights: {invalid_keys}")
+    
+    # Find available streams
+    avail = set(frame.columns)
+    missing = [k for k in weights.keys() if k not in avail]
+    present = {k: frame[k].to_numpy(copy=False) for k in weights.keys() if k in avail}
+    
+    if not present:
+        raise RuntimeError("No valid input streams for fusion")
+    
+    # Renormalize weights for present streams only
+    if missing:
+        present_weights = {k: weights[k] for k in present.keys()}
+        total = sum(present_weights.values())
+        if total > 0:
+            weights = {k: v / total for k, v in present_weights.items()}
+        else:
+            weights = {k: 1.0 / len(present) for k in present.keys()}
+    
+    return present, dict(weights), missing
+
+
+def run_fusion_pipeline(
+    frame: pd.DataFrame,
+    train_frame: Optional[pd.DataFrame],
+    score_data: pd.DataFrame,
+    train_data: Optional[pd.DataFrame],
+    cfg: Optional[Dict[str, Any]],
+    score_regime_labels: Optional[np.ndarray] = None,
+    train_regime_labels: Optional[np.ndarray] = None,
+    output_manager: Optional[Any] = None,
+    previous_weights: Optional[Dict[str, float]] = None,
+    equip: str = "",
+) -> FusionResult:
+    """
+    Execute complete fusion pipeline: validate → auto-tune → fuse → detect episodes.
+    
+    Args:
+        frame: Score data with detector z-score columns
+        train_frame: Train data with detector z-score columns (for threshold calc)
+        score_data: Original score features
+        train_data: Original train features
+        cfg: Configuration
+        score_regime_labels: Regime labels for score data
+        train_regime_labels: Regime labels for train data
+        output_manager: For writing fusion metrics
+        previous_weights: Previous run's weights for comparison
+        equip: Equipment name for logging
+    
+    Returns:
+        FusionResult with fused scores, episodes, weights used, and diagnostics
+    """
+    # 1. Prepare inputs
+    present, weights, missing = prepare_fusion_inputs(frame, cfg)
+    if missing:
+        Console.warn(f"Missing streams: {missing}", component="FUSE", equip=equip)
+    
+    # 2. Auto-tune weights (optional)
+    auto_tuned = False
+    tuning_diagnostics = None
+    try:
+        fused_baseline, _ = combine(present, weights, cfg, original_features=score_data, regime_labels=None)
+        fused_baseline_np = np.asarray(fused_baseline, dtype=np.float32).reshape(-1)
+        
+        tuned, diagnostics = tune_detector_weights(
+            streams=present, fused=fused_baseline_np,
+            current_weights=weights, cfg=cfg
+        )
+        
+        if diagnostics.get("enabled"):
+            weights = tuned
+            auto_tuned = True
+            tuning_diagnostics = diagnostics
+            
+            if output_manager:
+                output_manager.write_fusion_metrics(
+                    fusion_weights=weights,
+                    tuning_diagnostics=diagnostics,
+                    previous_weights=previous_weights,
+                )
+    except Exception as e:
+        Console.warn(f"Auto-tuning failed: {e}", component="FUSE", equip=equip)
+    
+    # 3. Calculate fusion on train data (for threshold baseline)
+    train_fused = None
+    if train_frame is not None and train_data is not None and not train_data.empty:
+        train_present = {k: train_frame[k].to_numpy(copy=False) 
+                        for k in present.keys() if k in train_frame.columns}
+        if train_present:
+            try:
+                train_fused_series, _ = combine(
+                    train_present, weights, cfg,
+                    original_features=train_data, regime_labels=train_regime_labels
+                )
+                train_fused = np.asarray(train_fused_series, dtype=np.float32).reshape(-1)
+            except Exception as e:
+                Console.warn(f"Train fusion failed: {e}", component="FUSE", equip=equip)
+    
+    # 4. Final fusion on score data
+    fused, episodes = combine(
+        present, weights, cfg,
+        original_features=score_data, regime_labels=score_regime_labels
     )
-    fuser = Fuser(weights=weights, ep=params)
-    fused = fuser.fuse(streams, original_features)
-    episodes = fuser.detect_episodes(fused, streams, original_features, regime_labels=regime_labels)
-    return fused, episodes
+    fused_np = np.asarray(fused, dtype=np.float32).reshape(-1)
+    
+    if fused_np.shape[0] != len(frame.index):
+        raise RuntimeError(f"Fused length {fused_np.shape[0]} != frame length {len(frame.index)}")
+    
+    Console.info(
+        f"Fusion: detectors={len(present)} | episodes={len(episodes)} | auto_tuned={auto_tuned}",
+        component="FUSE"
+    )
+    
+    return FusionResult(
+        fused_scores=fused_np,
+        episodes=episodes,
+        weights_used=weights,
+        auto_tuned=auto_tuned,
+        tuning_diagnostics=tuning_diagnostics,
+        train_fused=train_fused,
+    )
