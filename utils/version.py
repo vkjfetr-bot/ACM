@@ -17,9 +17,23 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.1.6"
-__version_date__ = "2026-01-02"
+__version__ = "11.2.0"
+__version_date__ = "2026-01-03"
 __version_author__ = "ACM Development Team"
+# v11.2.0: GHOSTBUSTERS - Pipeline Phase Criticality & Silent Corruption Prevention
+# - NEW: PhaseCriticality enum (CRITICAL, REQUIRED, DEGRADED, OPTIONAL)
+# - NEW: PhaseResult contract for standardized phase execution
+# - NEW: PipelineState dataclass - all mutable state in single typed container
+# - NEW: run_phase() wrapper with precondition validation
+# - NEW: Frame column contracts per phase (FRAME_CONTRACTS)
+# - NEW: PreconditionError for missing phase inputs
+# - FIX: Eliminated 10+ bare `except: pass` blocks
+# - FIX: Replaced "STATE_LOADED" string sentinel with RegimeModelContext
+# - FIX: All 36 phases classified by criticality level
+# - FIX: CRITICAL phase failures now abort immediately (no silent corruption)
+# - FIX: All degradations tracked in structured list
+# Building on v11.1.6 regime analytical correctness fixes
+
 # v11.1.6: REGIME ANALYTICAL CORRECTNESS - Critical clustering fixes from expert audit
 # - REGIME_MODEL_VERSION bumped to "3.0" (breaking change in model serialization)
 # - FIX #1 (P0): Created tag taxonomy (OPERATING_TAG_KEYWORDS, CONDITION_TAG_KEYWORDS)
