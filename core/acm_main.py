@@ -1058,26 +1058,16 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         raw_train = train.copy()
         raw_score = score.copy()
 
-        # ===== Feature construction =====
+        # ===== Feature construction (CRITICAL - detectors need features) =====
         with T.section("features.build"):
-            result, ok = safe_step(
-                lambda: _build_features(train, score, cfg, equip),
-                "feature_build", "FEAT", equip, run_id,
-                degradations=degradations
-            )
-            if ok and result is not None:
-                train, score = result
-                T.log("feature_engineering_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
+            train, score = _build_features(train, score, cfg, equip)
+            Console.info(f"Features built: train={train.shape}, score={score.shape}", component="FEAT")
 
-        # ===== Impute missing values in feature space =====
+        # ===== Impute missing values in feature space (CRITICAL - detectors need clean data) =====
         with T.section("features.impute"):
-            result, ok = safe_step(
-                lambda: fast_features.impute_features(train, score, low_var_threshold, output_manager, run_id, equip_id, equip),
-                "feature_impute", "FEAT", equip, run_id,
-                degradations=degradations
+            train, score, _ = fast_features.impute_features(
+                train, score, low_var_threshold, output_manager, run_id, equip_id, equip
             )
-            if ok and result is not None:
-                train, score, _ = result
 
         current_train_columns = list(train.columns)
         with T.section("features.hash"):
@@ -1093,6 +1083,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         regime_model = None
         regime_state = None
         regime_state_version = 0
+        regime_loaded_from_state = False  # v11.2: Boolean flag replaces "STATE_LOADED" string sentinel
         col_meds = None
         det_flags = get_detector_enable_flags(cfg)
         use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested and not force_retraining
@@ -1141,7 +1132,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     regime_state = load_regime_state(equip=equip, equip_id=equip_id, sql_client=sql_client)
                     if regime_state is not None and regime_state.quality_ok:
                         regime_state_version = regime_state.state_version
-                        regime_model = "STATE_LOADED"
+                        regime_loaded_from_state = True  # v11.2: Use boolean instead of string sentinel
                         Console.info(f"Regime loaded from state_v{regime_state_version} | K={regime_state.n_clusters}", component="REGIME")
                 except Exception as e:
                     Console.warn(f"Failed to load regime state: {e}", component="REGIME")
@@ -1188,9 +1179,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             Console.error(f"Detector initialization failed: {missing}", component="MODEL", equip=equip)
             raise RuntimeError(f"Required detector initialization failed: {missing}")
 
-        # ===== 3) Build Regime Feature Basis =====
-        def _build_regime_basis():
-            """Build regime feature basis and compute schema hash."""
+        # ===== 3) Build Regime Feature Basis (REQUIRED for regime labeling) =====
+        # Build regime basis inline - failures here should degrade the run, not abort
+        regime_basis_train = None
+        regime_basis_score = None
+        regime_basis_meta = {}
+        regime_basis_hash = None
+        
+        try:
             basis_train, basis_score, basis_meta = regimes.build_feature_basis(
                 train_features=train, score_features=score,
                 raw_train=raw_train, raw_score=raw_score,
@@ -1199,20 +1195,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             # Schema hash ensures regimes are STATIC once discovered
             regime_cfg_str = str(cfg.get("regimes", {}))
             schema_str = ",".join(sorted(basis_train.columns)) + "|" + regime_cfg_str
-            basis_hash = int(hashlib.sha256(schema_str.encode()).hexdigest()[:15], 16)
-            return basis_train, basis_score, basis_meta, basis_hash
-        
-        regime_basis_result, ok = safe_step(
-            _build_regime_basis,
-            "regime_feature_basis", "REGIME", equip, run_id,
-            degradations=degradations
-        )
-        if ok and regime_basis_result:
-            regime_basis_train, regime_basis_score, regime_basis_meta, regime_basis_hash = regime_basis_result
-        else:
-            regime_basis_train = regime_basis_score = None
-            regime_basis_meta = {}
-            regime_basis_hash = None
+            regime_basis_hash = int(hashlib.sha256(schema_str.encode()).hexdigest()[:15], 16)
+            regime_basis_train = basis_train
+            regime_basis_score = basis_score
+            regime_basis_meta = basis_meta
+        except Exception as e:
+            Console.warn(f"Regime basis build failed (regimes will be unavailable): {e}", 
+                        component="REGIME", equip=equip, error=str(e)[:200])
+            degradations.append("regime_feature_basis")
 
         if regime_model is not None:
             # v11.1.1 FIX: Only check feature column match - NOT data hash
@@ -1253,7 +1243,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         with T.section("regimes.label"):
             # REGIME-STATE-02: Reconstruct model from loaded state if available
             regime_state_action = "none"
-            if regime_model == "STATE_LOADED" and regime_state is not None and regime_basis_train is not None:
+            if regime_loaded_from_state and regime_state is not None and regime_basis_train is not None:
                 try:
                     regime_model = regimes.regime_state_to_model(
                         state=regime_state,
@@ -1266,12 +1256,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     Console.warn(f"Failed to reconstruct model from state: {e}", component="REGIME_STATE",
                                  equip=equip, state_version=regime_state.state_version, error=str(e)[:200])
                     regime_model = None
+                    regime_loaded_from_state = False  # Reset flag on reconstruction failure
             
             regime_ctx: Dict[str, Any] = {
                 "regime_basis_train": regime_basis_train,
                 "regime_basis_score": regime_basis_score,
                 "basis_meta": regime_basis_meta,
-                "regime_model": regime_model if regime_model != "STATE_LOADED" else None,
+                "regime_model": regime_model,  # v11.2: No more string sentinel check needed
                 "regime_basis_hash": regime_basis_hash,
                 "X_train": train,
                 "allow_discovery": ALLOWS_REGIME_DISCOVERY,  # V11: ONLINE mode sets False
@@ -2063,22 +2054,16 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         
         # SQL-only persistence
         with T.section("persist"):
-            # Use unified OutputManager for persistence
+            # CRITICAL: Core outputs must succeed - pipeline fails if these don't work
             with T.section("persist.write_scores"):
-                safe_step(
-                    lambda: output_manager.write_scores(frame),
-                    "write_scores", "IO", equip, run_id,
-                    degradations=degradations
-                )
+                rows_written = output_manager.write_scores(frame)
+                Console.info(f"Scores written: {rows_written} rows", component="IO")
 
             with T.section("persist.write_episodes"):
-                safe_step(
-                    lambda: output_manager.write_episodes(episodes),
-                    "write_episodes", "IO", equip, run_id,
-                    degradations=degradations
-                )
-                if episodes:
+                episode_rows = output_manager.write_episodes(episodes)
+                if episodes is not None and len(episodes) > 0:
                     record_episode(equip, count=len(episodes), severity="info")
+                    Console.info(f"Episodes written: {episode_rows} rows", component="IO")
 
             # Culprits now handled via SQL in OutputManager
             
