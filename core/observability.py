@@ -649,6 +649,8 @@ def shutdown() -> None:
     if _pyroscope_enabled and _pyroscope_pusher is not None:
         try:
             _pyroscope_pusher.stop_and_push()
+        except KeyboardInterrupt:
+            pass  # Graceful exit on Ctrl+C during shutdown
         except Exception:
             pass  # Best effort
         _pyroscope_enabled = False
@@ -2198,6 +2200,8 @@ class _PyroscopePusher:
                             profile_type="alloc_space",
                             units="bytes",
                         )
+            except KeyboardInterrupt:
+                pass  # Graceful exit on Ctrl+C during memory profiling
             except Exception as e:
                 Console.warn(f"Failed to push memory profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
     

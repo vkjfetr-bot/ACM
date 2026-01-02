@@ -264,49 +264,75 @@ class UnifiedAttribution:
         raw_data: pd.DataFrame,
         sensor_cols: List[str]
     ) -> List[SensorContribution]:
-        """Compute contributions for each sensor."""
-        contributions = []
+        """Compute contributions for each sensor (vectorized)."""
+        # Filter to valid columns
+        valid_cols = [c for c in sensor_cols if c in raw_data.columns]
+        if not valid_cols:
+            return []
         
-        for col in sensor_cols:
-            if col not in raw_data.columns:
-                continue
-            
-            value = raw_data[col].iloc[-1]
-            if pd.isna(value):
-                continue
-            
-            # Compute z-score using baseline statistics if available
-            if self.normalizer is not None:
+        # Get latest values for all sensors at once
+        latest_values = raw_data[valid_cols].iloc[-1]
+        valid_mask = latest_values.notna()
+        valid_cols = [c for c, valid in zip(valid_cols, valid_mask) if valid]
+        if not valid_cols:
+            return []
+        
+        latest_values = latest_values[valid_cols]
+        
+        # Compute z-scores vectorized
+        if self.normalizer is not None:
+            # Try to get stats from normalizer, fall back to column stats
+            z_scores = pd.Series(index=valid_cols, dtype=float)
+            cols_with_stats = []
+            cols_without_stats = []
+            for col in valid_cols:
                 stats = self.normalizer.get_sensor_stats(col)
                 if stats is not None:
-                    z = stats.compute_z_score(value)
+                    z_scores[col] = stats.compute_z_score(latest_values[col])
+                    cols_with_stats.append(col)
                 else:
-                    # No baseline stats for this sensor, use column stats
-                    col_mean = raw_data[col].mean()
-                    col_std = raw_data[col].std()
-                    z = (value - col_mean) / (col_std + 1e-10)
-            else:
-                # No normalizer, use column-level stats
-                col_mean = raw_data[col].mean()
-                col_std = raw_data[col].std()
-                z = (value - col_mean) / (col_std + 1e-10)
+                    cols_without_stats.append(col)
             
-            # Determine direction
-            direction = self._determine_direction(z)
-            
-            contributions.append(SensorContribution(
-                sensor_name=col,
-                contribution_pct=0.0,  # Filled below
-                z_score=float(z),
-                direction=direction,
-                baseline_deviation=abs(z)
-            ))
+            # For columns without stats, compute using ROBUST column statistics
+            if cols_without_stats:
+                col_data = raw_data[cols_without_stats]
+                # ROBUST: Use median instead of mean
+                col_medians = col_data.median()
+                # ROBUST: Use MAD instead of std
+                col_mads = (col_data - col_medians).abs().median()
+                col_stds = (col_mads * 1.4826).replace(0.0, 1e-10) + 1e-10
+                z_scores[cols_without_stats] = (latest_values[cols_without_stats] - col_medians) / col_stds
+        else:
+            # No normalizer, use column-level ROBUST stats (vectorized)
+            col_data = raw_data[valid_cols]
+            # ROBUST: Use median instead of mean
+            col_medians = col_data.median()
+            # ROBUST: Use MAD instead of std
+            col_mads = (col_data - col_medians).abs().median()
+            col_stds = (col_mads * 1.4826).replace(0.0, 1e-10) + 1e-10
+            z_scores = (latest_values - col_medians) / col_stds
+        
+        # Compute baseline deviations (abs z)
+        baseline_deviations = z_scores.abs()
+        total_deviation = baseline_deviations.sum()
         
         # Compute contribution percentages
-        total_deviation = sum(c.baseline_deviation for c in contributions)
         if total_deviation > 0:
-            for c in contributions:
-                c.contribution_pct = (c.baseline_deviation / total_deviation) * 100
+            contribution_pcts = (baseline_deviations / total_deviation) * 100
+        else:
+            contribution_pcts = pd.Series(0.0, index=valid_cols)
+        
+        # Build contribution objects
+        contributions = []
+        for col in valid_cols:
+            z = float(z_scores[col])
+            contributions.append(SensorContribution(
+                sensor_name=col,
+                contribution_pct=float(contribution_pcts[col]),
+                z_score=z,
+                direction=self._determine_direction(z),
+                baseline_deviation=float(baseline_deviations[col])
+            ))
         
         return contributions
     
@@ -465,16 +491,17 @@ class SensorAttributor:
                 Console.warn("No sensor hotspots found", component="SENSOR_ATTR", equip_id=equip_id, run_id=run_id)
                 return []
             
-            # Convert DataFrame to SensorAttribution objects
-            attributions = []
-            for idx, row in df.iterrows():
-                attributions.append(SensorAttribution(
+            # Convert DataFrame to SensorAttribution objects using to_dict (faster than iterrows)
+            attributions = [
+                SensorAttribution(
                     sensor_name=str(row["SensorName"]),
                     failure_contribution=float(row["FailureContribution"]),
                     z_score_at_failure=float(row["ZScoreAtFailure"]),
                     alert_count=int(row["AlertCount"]),
                     rank=idx + 1  # 1-indexed rank
-                ))
+                )
+                for idx, row in enumerate(df.to_dict('records'))
+            ]
             
             Console.info(f"Loaded {len(attributions)} sensor attributions from SQL", component="SENSOR_ATTR")
             return attributions

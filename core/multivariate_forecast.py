@@ -189,62 +189,75 @@ class MultivariateSensorForecaster:
         max_lag: int = 24
     ) -> List[SensorCorrelation]:
         """
-        Detect lead-lag relationships using cross-correlation.
+        Detect lead-lag relationships using cross-correlation (vectorized).
         
         Returns list of SensorCorrelation with optimal lag and Granger causality.
         """
+        from scipy.signal import correlate
+        
         relationships = []
         sensors = list(df.columns)
+        n_sensors = len(sensors)
         
-        for i, sensor_a in enumerate(sensors):
-            for sensor_b in sensors[i+1:]:
+        if n_sensors < 2:
+            return relationships
+        
+        # Precompute standardized arrays for all sensors using ROBUST statistics
+        # v11.1.2: Use median and MAD instead of mean/std for robustness
+        data_matrix = df.values  # (n_samples, n_sensors)
+        medians = np.nanmedian(data_matrix, axis=0)
+        mads = np.nanmedian(np.abs(data_matrix - medians), axis=0)
+        robust_stds = mads * 1.4826 + 1e-10  # Scale MAD to be consistent with std
+        standardized = (data_matrix - medians) / robust_stds  # (n_samples, n_sensors)
+        
+        # Replace NaNs with 0 for correlation
+        standardized = np.nan_to_num(standardized, nan=0.0)
+        n_samples = standardized.shape[0]
+        
+        # For each sensor pair
+        for i in range(n_sensors):
+            for j in range(i + 1, n_sensors):
                 try:
-                    series_a = df[sensor_a].values
-                    series_b = df[sensor_b].values
+                    series_a = standardized[:, i]
+                    series_b = standardized[:, j]
                     
-                    # Cross-correlation at different lags
-                    best_corr = 0.0
-                    best_lag = 0
+                    # Use scipy correlate for efficient cross-correlation
+                    full_corr = correlate(series_a, series_b, mode='full')
+                    # Normalize by length
+                    lags = np.arange(-n_samples + 1, n_samples)
+                    norm_factor = np.minimum(n_samples - np.abs(lags), n_samples)
+                    full_corr = full_corr / np.maximum(norm_factor, 1)
                     
-                    for lag in range(-max_lag, max_lag + 1):
-                        if lag < 0:
-                            corr = np.corrcoef(series_a[-lag:], series_b[:lag])[0, 1]
-                        elif lag > 0:
-                            corr = np.corrcoef(series_a[:-lag], series_b[lag:])[0, 1]
-                        else:
-                            corr = np.corrcoef(series_a, series_b)[0, 1]
-                        
-                        if np.isfinite(corr) and abs(corr) > abs(best_corr):
-                            best_corr = corr
-                            best_lag = lag
+                    # Limit to max_lag range
+                    center = n_samples - 1
+                    lag_range = slice(center - max_lag, center + max_lag + 1)
+                    corr_window = full_corr[lag_range]
+                    lag_values = lags[lag_range]
+                    
+                    # Find best correlation
+                    best_idx = np.argmax(np.abs(corr_window))
+                    best_corr = corr_window[best_idx]
+                    best_lag = int(lag_values[best_idx])
                     
                     # Determine lead sensor based on lag sign
+                    sensor_a = sensors[i]
+                    sensor_b = sensors[j]
                     lead_sensor = sensor_a if best_lag > 0 else (sensor_b if best_lag < 0 else None)
                     
-                    # Granger causality test (if statsmodels available)
+                    # Skip Granger test for performance - it's optional and slow
                     granger_pvalue = None
-                    try:
-                        from statsmodels.tsa.stattools import grangercausalitytests
-                        if abs(best_lag) > 0:
-                            test_data = pd.DataFrame({sensor_a: series_a, sensor_b: series_b})
-                            result = grangercausalitytests(test_data[[sensor_b, sensor_a]], maxlag=min(4, abs(best_lag)), verbose=False)
-                            # Get p-value from F-test at optimal lag
-                            test_lag = min(max(1, abs(best_lag)), 4)
-                            granger_pvalue = result[test_lag][0]['ssr_ftest'][1]
-                    except Exception:
-                        pass  # Granger test optional
                     
                     relationships.append(SensorCorrelation(
                         sensor_a=sensor_a,
                         sensor_b=sensor_b,
-                        correlation=best_corr,
+                        correlation=float(best_corr),
                         optimal_lag=best_lag,
                         granger_pvalue=granger_pvalue,
                         lead_sensor=lead_sensor
                     ))
                     
                 except Exception as e:
-                    Console.warn(f"[MultivariateForecast] Lead-lag detection failed for {sensor_a}/{sensor_b}: {e}")
+                    Console.warn(f"[MultivariateForecast] Lead-lag detection failed for {sensors[i]}/{sensors[j]}: {e}")
         
         # Sort by absolute correlation (strongest relationships first)
         relationships.sort(key=lambda r: abs(r.correlation), reverse=True)
@@ -518,39 +531,38 @@ def save_sensor_correlations(
         return 0
     
     try:
-        records = []
-        for corr in correlations:
-            records.append({
-                'EquipID': equip_id,
-                'RunID': run_id,
-                'SensorA': corr.sensor_a,
-                'SensorB': corr.sensor_b,
-                'Correlation': corr.correlation,
-                'OptimalLag': corr.optimal_lag,
-                'GrangerPValue': corr.granger_pvalue,
-                'LeadSensor': corr.lead_sensor,
-                'CreatedAt': datetime.now()
-            })
+        # Build records directly as tuples (no DataFrame conversion needed)
+        created_at = datetime.now()
+        records = [
+            (
+                equip_id,
+                run_id,
+                corr.sensor_a,
+                corr.sensor_b,
+                corr.correlation,
+                corr.optimal_lag,
+                corr.granger_pvalue,
+                corr.lead_sensor,
+                created_at
+            )
+            for corr in correlations
+        ]
         
-        df = pd.DataFrame(records)
+        # Use bulk executemany with fast_executemany for performance
+        insert_sql = """
+            INSERT INTO ACM_SensorCorrelations 
+            (EquipID, RunID, SensorA, SensorB, Correlation, OptimalLag, GrangerPValue, LeadSensor, CreatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
         
-        # Use bulk insert if available
         with sql_client.get_cursor() as cur:
-            for _, row in df.iterrows():
-                cur.execute("""
-                    INSERT INTO ACM_SensorCorrelations 
-                    (EquipID, RunID, SensorA, SensorB, Correlation, OptimalLag, GrangerPValue, LeadSensor, CreatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    row['EquipID'], row['RunID'], row['SensorA'], row['SensorB'],
-                    row['Correlation'], row['OptimalLag'], row['GrangerPValue'],
-                    row['LeadSensor'], row['CreatedAt']
-                ))
+            cur.fast_executemany = True
+            cur.executemany(insert_sql, records)
             sql_client.connection.commit()
         
-        Console.info(f"[MultivariateForecast] Saved {len(records)} sensor correlations")
+        Console.info(f"Saved {len(records)} sensor correlations", component="MV_FORECAST")
         return len(records)
         
     except Exception as e:
-        Console.error(f"[MultivariateForecast] Failed to save correlations: {e}")
+        Console.error(f"Failed to save correlations: {e}", component="MV_FORECAST", error=str(e)[:200])
         return 0

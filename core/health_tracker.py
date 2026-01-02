@@ -107,12 +107,12 @@ class HealthTimeline:
         )
         df, quality = tracker.load_from_sql()
         if quality != HealthQuality.OK:
-            Console.warn(f"Poor data quality: {quality.value}")
+            Console.warn(f"Poor data quality: {quality.value}", component="HEALTH")
             return
         
         # Use DataSummary for ForecastEngine consumption
         summary = tracker.get_data_summary(df)
-        print(f"dt_hours={summary.dt_hours}, n_samples={summary.n_samples}")
+        Console.info(f"dt_hours={summary.dt_hours}, n_samples={summary.n_samples}", component="HEALTH")
         
         stats = tracker.get_statistics(df)
         shift_detected = tracker.detect_regime_shift(df, prev_health_df)
@@ -257,7 +257,7 @@ class HealthTimeline:
             return df, quality
             
         except Exception as e:
-            Console.warn(f"[HealthTracker] Failed to load health timeline from SQL: {e}")
+            Console.warn(f"Failed to load health timeline from SQL: {e}", component="HEALTH")
             return None, HealthQuality.MISSING
     
     def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -291,8 +291,9 @@ class HealthTimeline:
             return df
         
         Console.warn(
-            f"[HealthTracker] Health timeline has {len(df)} rows (limit={self.max_timeline_rows}); "
-            f"downsampling to {self.downsample_freq}"
+            f"Health timeline has {len(df)} rows (limit={self.max_timeline_rows}); "
+            f"downsampling to {self.downsample_freq}",
+            component="HEALTH"
         )
         
         df = df.set_index("Timestamp").resample(self.downsample_freq).mean().dropna().reset_index()
@@ -537,12 +538,13 @@ class HealthTimeline:
             
             if shift_detected:
                 Console.info(
-                    f"[HealthTracker] Regime shift detected: KS statistic={statistic:.3f}, "
-                    f"p-value={p_value:.4f} (threshold={alpha})"
+                    f"Regime shift detected: KS statistic={statistic:.3f}, "
+                    f"p-value={p_value:.4f} (threshold={alpha})",
+                    component="HEALTH"
                 )
             
             return shift_detected
             
         except Exception as e:
-            Console.warn(f"[HealthTracker] Regime shift detection failed: {e}")
+            Console.warn(f"Regime shift detection failed: {e}", component="HEALTH")
             return False

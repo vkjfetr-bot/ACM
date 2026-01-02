@@ -11,7 +11,7 @@ from typing import Any, Dict, Tuple, List, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.decomposition import PCA
 
 try:
@@ -22,35 +22,39 @@ except ImportError as e:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Robust StandardScaler with variance floor
+# Robust Scaler with scale floor
 # ──────────────────────────────────────────────────────────────────────────────
-class RobustStandardScaler(StandardScaler):
-    """StandardScaler with variance floor to prevent division-by-zero explosions.
+class RobustStandardScaler(RobustScaler):
+    """RobustScaler (median/IQR) with scale floor to prevent division-by-zero.
     
-    Prevents catastrophic Z-score spikes (±100σ) when batch variance collapses.
+    v11.1.2: Changed from StandardScaler (mean/std) to RobustScaler (median/IQR).
+    RobustScaler is robust to outliers in training data, which is critical when
+    the historical data may contain faults.
+    
+    Prevents catastrophic Z-score spikes when batch variance collapses.
     Critical fix for batch continuity: per-batch standardization on narrow slices
-    can create near-zero variance, exploding Z-scores at batch boundaries.
+    can create near-zero scale, exploding Z-scores at batch boundaries.
     
     Parameters
     ----------
     epsilon : float, default=1e-6
-        Minimum allowed standard deviation. Values below this are clamped.
+        Minimum allowed scale. Values below this are clamped.
+    with_centering : bool, default=True
+        If True, center the data before scaling (subtract median).
+    with_scaling : bool, default=True
+        If True, scale the data to IQR (divide by IQR).
     """
-    def __init__(self, epsilon=1e-6, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, epsilon: float = 1e-6, with_centering: bool = True, 
+                 with_scaling: bool = True, **kwargs):
+        # Use RobustScaler's native parameter names (with_centering, with_scaling)
+        super().__init__(with_centering=with_centering, with_scaling=with_scaling, **kwargs)
         self.epsilon = epsilon
     
-    def fit(self, X, y=None, sample_weight=None):
-        super().fit(X, y, sample_weight)
-        if self.with_std and hasattr(self, 'scale_') and self.scale_ is not None:  # type: ignore[attr-defined]
-            # Floor scale_ to prevent division by near-zero variance
-            # This prevents Z-scores >100 when variance collapses
-            self.scale_ = np.maximum(self.scale_, self.epsilon)
-        return self
-    
-    def partial_fit(self, X, y=None, sample_weight=None):
-        super().partial_fit(X, y, sample_weight)
-        if self.with_std and hasattr(self, 'scale_') and self.scale_ is not None:  # type: ignore[attr-defined]
+    def fit(self, X, y=None):
+        super().fit(X, y)
+        if self.with_scaling and hasattr(self, 'scale_') and self.scale_ is not None:
+            # Floor scale_ to prevent division by near-zero IQR
+            # This prevents Z-scores >100 when scale collapses
             self.scale_ = np.maximum(self.scale_, self.epsilon)
         return self
 
@@ -67,38 +71,57 @@ class PCASubspaceDetector:
     def __init__(self, pca_cfg: Dict[str, Any] | None = None):
         self.cfg: Dict[str, Any] = (pca_cfg or {})
         # Use RobustStandardScaler to prevent variance collapse
-        self.scaler = RobustStandardScaler(epsilon=1e-6, with_mean=True, with_std=True)
+        # Note: RobustScaler uses with_centering/with_scaling (not with_mean/with_std)
+        self.scaler = RobustStandardScaler(epsilon=1e-6, with_centering=True, with_scaling=True)
         self.pca: Optional[PCA] | Any = None  # Allow IncrementalPCA too
 
         self.keep_cols: List[str] = []
         self.col_medians: Optional[pd.Series] = None
 
     def fit(self, X: pd.DataFrame) -> "PCASubspaceDetector":
-        """Fit scaler + PCA on TRAIN safely."""
+        """Fit scaler + PCA on TRAIN safely. Memory-optimized."""
         with Span("fit.pca", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
             from core.observability import Console
             Console.info(f"Fit start: train shape={X.shape}", component="PCA")
-            df = X.copy()
             
-            # Drop fully non-finite columns, then near-constants
-            df = df.replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
-            std = df.astype("float64").std(axis=0)
-            df = df.loc[:, std > 1e-6]
-            # If everything got dropped, inject a safe dummy feature
-            if df.shape[1] == 0:
-                df = pd.DataFrame({"_dummy": np.zeros(len(df), dtype=np.float64)}, index=df.index)
-
-            # Impute + clip (guard wild magnitudes)
-            self.col_medians = df.median()
-            df = df.fillna(self.col_medians).clip(lower=-1e6, upper=1e6)
-
-            self.keep_cols = list(df.columns)
+            # MEMORY OPT: Work with numpy arrays directly, avoid DataFrame copies
+            # First, identify columns to keep (non-constant, finite)
+            arr = X.values.astype(np.float64, copy=True)  # Need copy for in-place ops
+            arr = np.where(np.isinf(arr), np.nan, arr)
+            
+            # Find columns with non-NaN values and variance > epsilon
+            col_mask = ~np.all(np.isnan(arr), axis=0)  # Has at least one finite value
+            col_std = np.nanstd(arr[:, col_mask], axis=0) if col_mask.any() else np.array([])
+            var_mask = col_std > 1e-6
+            
+            # Build final keep_cols list
+            orig_cols = X.columns.tolist()
+            kept_indices = np.where(col_mask)[0][var_mask]
+            self.keep_cols = [orig_cols[i] for i in kept_indices]
+            
+            # If everything got dropped, use dummy
+            if len(self.keep_cols) == 0:
+                self.keep_cols = ["_dummy"]
+                arr = np.zeros((len(X), 1), dtype=np.float64)
+            else:
+                arr = arr[:, kept_indices]
+            
+            # Compute medians for kept columns and impute in-place
+            self.col_medians = pd.Series(np.nanmedian(arr, axis=0), index=self.keep_cols)
+            np.nan_to_num(arr, copy=False, nan=0.0)  # Fill NaN with 0 temporarily
+            for i, med in enumerate(self.col_medians.values):
+                col = arr[:, i]
+                mask = col == 0.0
+                col[mask] = med
+            # Clip in-place
+            np.clip(arr, -1e6, 1e6, out=arr)
             
             # COR-02: Guard against insufficient samples for PCA after feature filtering
             # PCA requires at least 2 samples to compute meaningful components
-            if df.shape[0] < 2:
+            n_samples, n_features = arr.shape
+            if n_samples < 2:
                 Console.warn(
-                    f"Insufficient samples after feature filtering (n={df.shape[0]}). "
+                    f"Insufficient samples after feature filtering (n={n_samples}). "
                     f"Skipping PCA fit - score() will return zeros.", component="PCA"
                 )
                 # Set PCA to None to signal fallback mode
@@ -106,12 +129,11 @@ class PCASubspaceDetector:
                 self.keep_cols = []
                 return self
 
-            # Scale
-            data_float = df.values.astype(np.float64, copy=False)
-            Xs = self.scaler.fit_transform(data_float)
+            # Scale - fit_transform modifies in-place when possible
+            Xs = self.scaler.fit_transform(arr)
+            del arr  # Free original array
 
             # Choose a safe n_components
-            n_samples, n_features = Xs.shape
             user_nc = self.cfg.get("n_components", 5)
             try:
                 user_nc = int(user_nc)
@@ -140,22 +162,77 @@ class PCASubspaceDetector:
             return self
 
     def score(self, X: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (SPE, T²) as float32 arrays."""
+        """Return (SPE, T²) as float32 arrays. Memory-optimized."""
         with Span("score.pca", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            n = len(X)
             if self.pca is None or self.col_medians is None:
-                n = len(X)
                 return np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)
-            # Align columns, impute with TRAIN medians
-            df = X.copy().reindex(columns=self.keep_cols)
-            df = df.replace([np.inf, -np.inf], np.nan).fillna(self.col_medians)
-            Xs = self.scaler.transform(df.values.astype(np.float64, copy=False))
+            
+            # MEMORY OPT: Work with numpy arrays, avoid DataFrame copies
+            # Reindex to keep_cols by extracting only needed columns
+            keep_set = set(self.keep_cols)
+            col_indices = [X.columns.get_loc(c) for c in self.keep_cols if c in X.columns]
+            
+            if len(col_indices) == len(self.keep_cols):
+                # Fast path: all columns present
+                arr = X.values[:, col_indices].astype(np.float64, copy=True)
+            else:
+                # Slow path: need to build array with missing columns filled
+                arr = np.empty((n, len(self.keep_cols)), dtype=np.float64)
+                for i, c in enumerate(self.keep_cols):
+                    if c in X.columns:
+                        arr[:, i] = X[c].values
+                    else:
+                        arr[:, i] = self.col_medians.iloc[i]
+            
+            # Replace inf with nan, then fill with medians (in-place)
+            arr[np.isinf(arr)] = np.nan
+            for i, med in enumerate(self.col_medians.values):
+                col = arr[:, i]
+                mask = np.isnan(col)
+                col[mask] = med
+            
+            # Scale
+            Xs = self.scaler.transform(arr)
+            del arr  # Free input array
 
-            # Project → reconstruct → SPE
+            # Project to latent space
             Z = self.pca.transform(Xs)
-            X_hat = self.pca.inverse_transform(Z)
-            spe = np.sum((Xs - X_hat) ** 2, axis=1)
-            # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
-            spe = np.clip(spe, 0.0, 1e6)
+            
+            # MEMORY OPT: Compute SPE without storing full reconstruction
+            # SPE = ||Xs - Xs_reconstructed||^2 = ||Xs||^2 - ||Z||^2 (for orthonormal basis)
+            # But sklearn PCA may not be orthonormal after scaling, so we compute in chunks
+            # Actually: SPE = sum((Xs - PC @ Z.T).T ** 2) - use einsum for memory efficiency
+            components = self.pca.components_  # (k, n_features)
+            
+            # Reconstruct: X_hat = Z @ components + mean (in PCA space)
+            # But we need Xs - X_hat where Xs is already centered by scaler
+            # X_hat = Z @ components (since PCA is fitted on scaled data which is centered)
+            # SPE = sum((Xs - Z @ components) ** 2, axis=1)
+            # Use einsum to avoid materializing full X_hat matrix
+            # SPE = sum(Xs**2) - 2*sum(Xs*(Z@comp)) + sum((Z@comp)**2)
+            # Simpler: compute in blocks if data is large
+            
+            if n > 10000:
+                # Block processing for large data
+                spe = np.zeros(n, dtype=np.float64)
+                block_size = 5000
+                for start in range(0, n, block_size):
+                    end = min(start + block_size, n)
+                    X_hat_block = Z[start:end] @ components
+                    diff = Xs[start:end] - X_hat_block
+                    spe[start:end] = np.sum(diff ** 2, axis=1)
+                    del X_hat_block, diff
+            else:
+                # Small data: direct computation
+                X_hat = Z @ components
+                spe = np.sum((Xs - X_hat) ** 2, axis=1)
+                del X_hat
+            
+            del Xs  # Free scaled data
+            
+            # Clip SPE
+            np.clip(spe, 0.0, 1e6, out=spe)
 
             # Hotelling T² (guard tiny eigenvalues)
             ev = getattr(self.pca, "explained_variance_", None)
@@ -163,16 +240,18 @@ class PCASubspaceDetector:
                 t2 = np.sum(Z ** 2, axis=1)
             else:
                 ev = np.maximum(np.asarray(ev, dtype=np.float64), 1e-12)
-                # Compute per-component then clamp to avoid huge-but-finite spikes
-                t2_comp = (Z ** 2) / ev
-                # CAL-FIX-01: Reduced clip from 1e9 to 1e6
-                t2_comp = np.clip(t2_comp, 0.0, 1e6)
-                t2 = np.sum(t2_comp, axis=1)
+                # MEMORY OPT: In-place operations
+                Z_sq = Z ** 2  # (n, k) - small since k is typically 5
+                Z_sq /= ev  # In-place divide
+                np.clip(Z_sq, 0.0, 1e6, out=Z_sq)
+                t2 = np.sum(Z_sq, axis=1)
+                del Z_sq
+            
+            del Z  # Free latent projections
 
-            # Final sanitization and clamp before float32 cast
-            # CAL-FIX-01: Reduced clip from 1e9 to 1e6 to prevent calibrator extreme thresholds
-            spe = np.nan_to_num(spe, nan=0.0, posinf=1e6, neginf=0.0)
-            t2  = np.nan_to_num(t2,  nan=0.0, posinf=1e6, neginf=0.0)
-            t2  = np.clip(t2, 0.0, 1e6)
+            # Final sanitization
+            np.nan_to_num(spe, copy=False, nan=0.0, posinf=1e6, neginf=0.0)
+            np.nan_to_num(t2, copy=False, nan=0.0, posinf=1e6, neginf=0.0)
+            np.clip(t2, 0.0, 1e6, out=t2)
 
             return spe.astype(np.float32, copy=False), t2.astype(np.float32, copy=False)

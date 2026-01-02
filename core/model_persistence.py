@@ -15,7 +15,7 @@ Models persisted:
 - PCA: fitted model (sklearn.decomposition.PCA)
 - IForest: fitted model (sklearn.ensemble.IsolationForest)
 - GMM: fitted model (sklearn.mixture.GaussianMixture)
-- Regimes: KMeans model (sklearn.cluster.KMeans)
+- Regimes: HDBSCAN or GMM model (v11.1.0: K-Means removed)
 - Scalers: StandardScaler for each detector
 - Feature medians: Imputation values
 
@@ -802,7 +802,7 @@ class ModelVersionManager:
             if entry_datetime:
                 manifest["entry_datetime"] = str(entry_datetime)
             
-            Console.info(f"✓ Loaded {len(models)}/{len(rows)} models from SQL ModelRegistry v{version}", component="MODEL-SQL")
+            Console.info(f"[OK] Loaded {len(models)}/{len(rows)} models from SQL ModelRegistry v{version}", component="MODEL-SQL")
             return models, manifest
             
         except Exception as e:
@@ -860,7 +860,7 @@ class ModelVersionManager:
                 sql_models, sql_manifest = result
                 if span_context:
                     span_context._span.set_attribute("acm.models_loaded", len(sql_models))
-                Console.info(f"✓ Loaded from SQL ModelRegistry successfully", component="MODEL")
+                Console.info(f"[OK] Loaded from SQL ModelRegistry successfully", component="MODEL")
                 return sql_models, sql_manifest
             else:
                 Console.warn(f"Failed to load models from SQL ModelRegistry", component="MODEL", equipment=self.equip, equip_id=self.equip_id, version=version)
@@ -932,11 +932,10 @@ class ModelVersionManager:
             
             updated_models["scalers"] = updated_scalers
         
-        # Note: PCA, IsolationForest, GMM, and KMeans don't support incremental updates
+        # Note: PCA, IsolationForest, GMM, and HDBSCAN don't support incremental updates
         # They would require full retraining or replacement with incremental variants:
         # - IncrementalPCA for PCA
-        # - MiniBatchKMeans for KMeans
-        # - No incremental equivalent for IsolationForest or GMM
+        # - No incremental equivalent for IsolationForest, GMM, or HDBSCAN
         
         if updated_count > 0:
             Console.info(f"Successfully updated {updated_count} model components", component="MODEL")
@@ -1175,8 +1174,27 @@ def create_model_metadata(
     # Regime metadata with enhanced quality metrics
     if "regime_model" in models_dict and models_dict["regime_model"]:
         regime = models_dict["regime_model"]
+        
+        # Handle different types of regime models
+        # Could be RegimeModel dataclass (has n_clusters property) or raw model (HDBSCAN/GMM)
+        n_clusters = 0
+        if hasattr(regime, 'n_clusters'):
+            # RegimeModel dataclass
+            if callable(getattr(regime, 'n_clusters', None)):
+                n_clusters = regime.n_clusters()  # In case it's a method
+            else:
+                n_clusters = regime.n_clusters  # Property or attribute
+        elif hasattr(regime, 'n_components'):
+            # GMM
+            n_clusters = regime.n_components
+        elif hasattr(regime, 'labels_'):
+            # HDBSCAN - count unique non-noise labels
+            labels = regime.labels_
+            unique_labels = np.unique(labels)
+            n_clusters = len(unique_labels[unique_labels >= 0])
+        
         regime_meta = {
-            "n_clusters": regime.n_clusters,
+            "n_clusters": int(n_clusters),
             "quality": regime_quality or {}
         }
         

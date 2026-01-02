@@ -1126,11 +1126,17 @@ def main() -> int:
                         help="Resume from last successful batch")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without running")
-    parser.add_argument("--mode", choices=["online", "offline"], default=None,
-                        help="Pipeline mode: online (scoring only), offline (full training). "
-                             "Default: auto-detect based on cached model availability")
+    parser.add_argument("--mode", choices=["online", "offline", "auto"], default=None,
+                        help="Pipeline mode: online (scoring only), offline (full training), "
+                             "auto (detect based on cached models). Default: auto-detect")
 
     args = parser.parse_args()
+
+    # Validate contradictory flags
+    if args.mode == "online" and args.start_from_beginning:
+        parser.error("--mode online cannot be used with --start-from-beginning. "
+                     "Online mode requires cached models, but --start-from-beginning deletes them. "
+                     "Use --mode offline or --mode auto for fresh starts.")
 
     # Build SQL connection string (login timeout is controlled via pyodbc.connect timeout)
     sql_conn_string = (

@@ -170,12 +170,13 @@ class LinearTrendModel(BaseDegradationModel):
         
         Process:
         1. Detect and handle outliers (robust median imputation)
-        2. Compute time intervals (dt_hours)
-        3. Detect flatline/low-variance signals
-        4. Initialize level and trend
-        5. Adaptive alpha/beta tuning (if enabled and sufficient samples)
-        6. Forward pass: update level and trend with exponential smoothing
-        7. Compute residual standard error for uncertainty quantification
+        2. **v11.1.4: Detect health jumps (maintenance resets) and use post-jump data only**
+        3. Compute time intervals (dt_hours)
+        4. Detect flatline/low-variance signals
+        5. Initialize level and trend
+        6. Adaptive alpha/beta tuning (if enabled and sufficient samples)
+        7. Forward pass: update level and trend with exponential smoothing
+        8. Compute residual standard error for uncertainty quantification
         
         Args:
             health_series: Time-indexed health values (pd.Series with DatetimeIndex)
@@ -183,6 +184,11 @@ class LinearTrendModel(BaseDegradationModel):
         if health_series is None or len(health_series) == 0:
             Console.warn("Empty health series provided", component="DEGRADE")
             return
+        
+        # v11.1.4: HEALTH-JUMP FIX - Detect maintenance resets before fitting
+        # A health jump is a sudden increase in health (>15% in one period)
+        # This indicates maintenance was performed, so we should only use post-jump data
+        health_series = self._detect_and_handle_health_jumps(health_series)
         
         # Prepare series (robust median imputation)
         health_values = health_series.copy().astype(float)
@@ -258,8 +264,14 @@ class LinearTrendModel(BaseDegradationModel):
             self.trend_history = [0.0] * len(self.trend_history)
             self.residuals = [0.0]
         
-        # Compute residual standard error
-        self.std_error = float(np.std(self.residuals)) if len(self.residuals) > 0 else 1.0
+        # Compute residual standard error using ROBUST statistics (MAD * 1.4826)
+        # v11.1.2: Use MAD instead of std to be robust to outliers in training data
+        if len(self.residuals) > 0:
+            residual_median = float(np.median(self.residuals))
+            residual_mad = float(np.median(np.abs(np.array(self.residuals) - residual_median)))
+            self.std_error = residual_mad * 1.4826  # Scale MAD to be consistent with std
+        else:
+            self.std_error = 1.0
         if not np.isfinite(self.std_error) or self.std_error < 1e-6:
             self.std_error = 1.0
         
@@ -403,9 +415,13 @@ class LinearTrendModel(BaseDegradationModel):
         forecast_error = new_observation - (prev_level + prev_trend)
         self.residuals.append(forecast_error)
         
-        # Update std_error (exponential moving average)
+        # Update std_error using ROBUST statistics (MAD * 1.4826)
+        # v11.1.2: Use MAD instead of std to be robust to outliers
         if len(self.residuals) > 0:
-            self.std_error = float(np.std(self.residuals[-100:]))  # Use last 100 residuals
+            recent_residuals = np.array(self.residuals[-100:])  # Use last 100 residuals
+            residual_median = float(np.median(recent_residuals))
+            residual_mad = float(np.median(np.abs(recent_residuals - residual_median)))
+            self.std_error = residual_mad * 1.4826  # Scale MAD to be consistent with std
             if not np.isfinite(self.std_error) or self.std_error < 1e-6:
                 self.std_error = 1.0
         
@@ -440,26 +456,132 @@ class LinearTrendModel(BaseDegradationModel):
         )
     
     def _detect_and_remove_outliers(self, series: pd.Series, n_std: float = 3.0) -> pd.Series:
-        """Detect and remove outliers via z-score (n_std standard deviations)"""
+        """
+        Detect and remove outliers using ROBUST statistics (median/MAD).
+        
+        v11.1.1 FIX: Uses Median Absolute Deviation (MAD) instead of std.
+        MAD is robust to outliers in the training data, which is critical when
+        the historical data may contain faults. This allows ACM to work even when
+        training data is contaminated with anomalies.
+        
+        Modified Z-score = 0.6745 * (x - median) / MAD
+        (0.6745 is the consistency constant for normal distribution)
+        """
         if len(series) < 10:
             return series  # Too few samples for robust outlier detection
         
-        mean = series.mean()
-        std = series.std()
+        # v11.1.1: Use median and MAD (robust estimators) instead of mean/std
+        median = series.median()
+        mad = np.median(np.abs(series - median))  # Median Absolute Deviation
         
-        if std < 1e-6:
-            return series  # Near-constant signal
+        if mad < 1e-6:
+            # Near-constant signal - fall back to std-based check
+            std = series.std()
+            if std < 1e-6:
+                return series  # Near-constant, no outliers
+            z_scores = np.abs((series - series.mean()) / std)
+        else:
+            # Modified Z-score using MAD (robust to contaminated data)
+            # Scale factor 0.6745 makes MAD comparable to std for normal distribution
+            z_scores = 0.6745 * np.abs(series - median) / mad
         
-        z_scores = np.abs((series - mean) / std)
         outliers = z_scores > n_std
         
         if outliers.sum() > 0:
-            Console.info(f"Detected {outliers.sum()} outliers (z > {n_std})", component="DEGRADE")
+            Console.info(f"Detected {outliers.sum()} outliers (robust z > {n_std})", component="DEGRADE")
             series = series.copy()
             series[outliers] = np.nan
         
         return series
     
+    def _detect_and_handle_health_jumps(
+        self,
+        health_series: pd.Series,
+        jump_threshold: float = 15.0,
+        min_post_jump_samples: int = 10
+    ) -> pd.Series:
+        """
+        v11.1.4: Detect maintenance resets (sudden health improvements) and reset forecast baseline.
+        
+        ANALYTICAL PRINCIPLE:
+        Degradation models assume monotonic decline. After maintenance:
+        - Health jumps from 70% to 95% 
+        - If we don't detect this, the model uses stale declining trend
+        - RUL predictions become unreliable (false alarms)
+        
+        A "health jump" is defined as:
+        - Health increase > jump_threshold (default 15%) in one time period
+        - This indicates external intervention (maintenance, repair, replacement)
+        
+        When detected:
+        - Use only post-jump data for trend fitting
+        - This gives accurate degradation rate for current equipment state
+        
+        Args:
+            health_series: Time-indexed health values
+            jump_threshold: Minimum health increase (%) to be considered a jump
+            min_post_jump_samples: Minimum samples required after jump for fitting
+        
+        Returns:
+            pd.Series: Truncated to post-jump data, or original if no jumps detected
+        """
+        if len(health_series) < min_post_jump_samples + 2:
+            return health_series  # Too few samples to detect jumps
+        
+        # Calculate period-over-period health changes
+        health_diff = health_series.diff()
+        
+        # Find positive jumps (health improvements) above threshold
+        jump_mask = health_diff > jump_threshold
+        jump_indices = health_series.index[jump_mask]
+        
+        if len(jump_indices) == 0:
+            return health_series  # No jumps detected
+        
+        # Use the LAST jump (most recent maintenance)
+        last_jump_idx = jump_indices[-1]
+        last_jump_loc = health_series.index.get_loc(last_jump_idx)
+        
+        # Check if we have enough post-jump samples
+        post_jump_samples = len(health_series) - last_jump_loc - 1
+        
+        if post_jump_samples < min_post_jump_samples:
+            # Not enough post-jump data, use second-to-last jump or full data
+            if len(jump_indices) > 1:
+                # Try second-to-last jump
+                second_last_jump_idx = jump_indices[-2]
+                second_last_loc = health_series.index.get_loc(second_last_jump_idx)
+                post_second_samples = len(health_series) - second_last_loc - 1
+                if post_second_samples >= min_post_jump_samples:
+                    Console.info(
+                        f"HEALTH-JUMP: Using second-to-last jump at {second_last_jump_idx} "
+                        f"({post_second_samples} post-jump samples)",
+                        component="DEGRADE"
+                    )
+                    return health_series.iloc[second_last_loc + 1:]
+            
+            Console.warn(
+                f"HEALTH-JUMP: Jump detected at {last_jump_idx} but only {post_jump_samples} "
+                f"post-jump samples (need {min_post_jump_samples}). Using full data.",
+                component="DEGRADE"
+            )
+            return health_series
+        
+        # Log the detected jump
+        pre_jump_health = float(health_series.iloc[last_jump_loc - 1]) if last_jump_loc > 0 else 0.0
+        post_jump_health = float(health_series.iloc[last_jump_loc])
+        jump_magnitude = post_jump_health - pre_jump_health
+        
+        Console.info(
+            f"HEALTH-JUMP: Maintenance reset detected at {last_jump_idx}. "
+            f"Health jumped {pre_jump_health:.1f}% -> {post_jump_health:.1f}% (+{jump_magnitude:.1f}%). "
+            f"Using {post_jump_samples} post-jump samples for trend fitting.",
+            component="DEGRADE"
+        )
+        
+        # Return only post-jump data
+        return health_series.iloc[last_jump_loc + 1:]
+
     def _adaptive_smoothing(self, health_values: pd.Series) -> Tuple[float, float]:
         """
         Adaptive alpha/beta tuning via expanding-window time-series cross-validation.

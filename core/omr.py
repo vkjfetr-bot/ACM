@@ -461,6 +461,9 @@ class OMRDetector:
         """
         Compute OMR z-scores (reconstruction error normalized by training std).
         
+        Memory-optimized version v11.0.3: Uses in-place operations and explicit
+        cleanup to minimize peak memory usage.
+        
         Args:
             X: Scoring data (n_samples, n_features)
             return_contributions: If True, also return per-sensor contributions
@@ -470,97 +473,125 @@ class OMRDetector:
             contributions: Optional DataFrame of per-sensor squared residuals (n_samples, n_features)
         """
         from core.observability import Console, Span
+        import gc
         
         with Span("score.omr", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            n_samples = len(X)
+            
             if not self._is_fitted or self.model is None:
-                zeros = np.zeros(len(X), dtype=np.float32)
+                zeros = np.zeros(n_samples, dtype=np.float32)
                 if return_contributions:
                     empty_contrib = pd.DataFrame(
-                        np.zeros((len(X), len(X.columns))),
+                        np.zeros((n_samples, len(X.columns)), dtype=np.float32),
                         index=X.index,
                         columns=X.columns
                     )
                     return zeros, empty_contrib
                 return zeros
             
-            # Validate and prepare data
+            # Validate input
             is_valid, _ = self._validate_input(X)
             if not is_valid:
-                zeros = np.zeros(len(X), dtype=np.float32)
+                zeros = np.zeros(n_samples, dtype=np.float32)
                 if return_contributions:
                     empty_contrib = pd.DataFrame(
-                        np.zeros((len(X), len(X.columns))),
+                        np.zeros((n_samples, len(X.columns)), dtype=np.float32),
                         index=X.index,
                         columns=X.columns
                     )
                     return zeros, empty_contrib
                 return zeros
             
+            # Store index for later use
+            X_index = X.index
+            feature_names = self.model.feature_names
+            
             # Align columns to training feature order and mask
-            if self.model.feature_names:
-                X = X.reindex(self.model.feature_names, axis=1)
+            if feature_names:
+                X = X.reindex(feature_names, axis=1)
             X_clean, _ = self._prepare_data(
                 X,
-                medians=pd.Series(self.model.train_medians, index=self.model.feature_names) if self.model.train_medians is not None else None,
+                medians=pd.Series(self.model.train_medians, index=feature_names) if self.model.train_medians is not None else None,
                 var_mask=self.model.var_mask
             )
-                
-            # Scale
+            # Free X since we have X_clean now
+            del X
+            
+            # Scale directly (returns a view or copy depending on sklearn)
             X_scaled = self.model.scaler.transform(X_clean)
+            del X_clean  # Free cleaned data
             
             # Reconstruct
             try:
                 X_recon = self._reconstruct_data(X_scaled)
-                    
             except Exception as e:
                 Console.error(f"Reconstruction failed: {e}", component="OMR")
-                zeros = np.zeros(len(X), dtype=np.float32)
+                del X_scaled
+                gc.collect()
+                zeros = np.zeros(n_samples, dtype=np.float32)
                 if return_contributions:
                     empty_contrib = pd.DataFrame(
-                        np.zeros((len(X), len(X.columns))),
-                        index=X.index,
-                        columns=X.columns
+                        np.zeros((n_samples, len(feature_names)), dtype=np.float32),
+                        index=X_index,
+                        columns=feature_names
                     )
                     return zeros, empty_contrib
                 return zeros
             
-            # Compute residuals
-            residuals = X_scaled - X_recon
+            # Compute residuals IN-PLACE by subtracting reconstruction from scaled
+            # This avoids allocating a separate residuals array
+            X_scaled -= X_recon
+            del X_recon  # Free reconstruction immediately
             
-            # Per-sensor squared contributions (for root cause analysis)
-            squared_residuals = residuals ** 2
+            # Now X_scaled contains residuals
+            residuals = X_scaled  # Just an alias, no copy
             
-            # v10.1.0: Normalize contributions by feature variance for fair comparison
-            # AND downweight kurtosis/skewness features which naturally dominate
+            # Compute z-scores and contributions
             if return_contributions:
-                # Compute variance of each feature's squared residuals for normalization
-                feature_variances = np.var(squared_residuals, axis=0) + 1e-9
-                normalized_contributions = squared_residuals / feature_variances
+                # Need squared residuals for contributions - compute in-place
+                squared_residuals = np.square(residuals)  # residuals ** 2
                 
-                # Apply weight reduction for hyper-sensitive statistical features
-                # Kurtosis (4th moment) and skewness (3rd moment) are overly reactive to outliers
-                kurt_skew_weight = 0.25  # Reduce _kurt and _skew contributions to 25%
-                for i, feature_name in enumerate(self.model.feature_names):
-                    if feature_name.endswith('_kurt') or feature_name.endswith('_skew'):
-                        normalized_contributions[:, i] *= kurt_skew_weight
-            
-            # Overall residual norm (L2)
-            residual_norm = np.linalg.norm(residuals, axis=1)
+                # L2 norm from squared residuals (sum then sqrt)
+                residual_norm = np.sqrt(np.sum(squared_residuals, axis=1))
+                
+                # Normalize contributions by feature variance
+                feature_variances = np.var(squared_residuals, axis=0) + 1e-9
+                np.divide(squared_residuals, feature_variances, out=squared_residuals)
+                
+                # Apply weight reduction for kurtosis/skewness features
+                kurt_skew_weight = 0.25
+                for i, fname in enumerate(feature_names):
+                    if fname.endswith('_kurt') or fname.endswith('_skew'):
+                        squared_residuals[:, i] *= kurt_skew_weight
+                
+                # Free residuals (X_scaled) now that we have squared_residuals
+                del residuals, X_scaled
+                
+                # Convert to DataFrame (uses normalized squared residuals)
+                contrib_df = pd.DataFrame(
+                    squared_residuals.astype(np.float32, copy=False),
+                    index=X_index,
+                    columns=feature_names
+                )
+                del squared_residuals
+            else:
+                # Just need L2 norm - no need to store squared residuals
+                residual_norm = np.linalg.norm(residuals, axis=1)
+                del residuals, X_scaled
             
             # Normalize by training std to get z-score
             omr_z = residual_norm / self.model.train_residual_std
+            del residual_norm
             
             # Clip z-scores to prevent extreme values
-            omr_z = np.clip(omr_z, -self.max_z_score, self.max_z_score)
-            omr_z = omr_z.astype(np.float32)
+            np.clip(omr_z, -self.max_z_score, self.max_z_score, out=omr_z)
+            omr_z = omr_z.astype(np.float32, copy=False)
+            
+            # Force garbage collection for large datasets
+            if n_samples > 50000:
+                gc.collect()
             
             if return_contributions:
-                # Return normalized per-sensor contributions
-                contrib_df = pd.DataFrame(
-                    normalized_contributions,
-                    index=X.index,
-                    columns=self.model.feature_names
-                )
                 return omr_z, contrib_df
             
             return omr_z

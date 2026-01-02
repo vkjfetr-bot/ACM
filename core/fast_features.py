@@ -1148,15 +1148,20 @@ class ConfidenceGatedNormalizer:
         self._sensor_cols = valid_cols
         numeric_df = df[valid_cols].apply(pd.to_numeric, errors='coerce')
         
-        mean = numeric_df.mean()
-        std = numeric_df.std().replace(0.0, np.nan).fillna(self.epsilon)
+        # ROBUST STATISTICS: Use median/MAD instead of mean/std
+        # This makes normalization robust to training data containing faults
+        # MAD * 1.4826 approximates std for normal distributions
+        median = numeric_df.median()
+        mad = (numeric_df - median).abs().median()
+        # Convert MAD to std-equivalent scale (for normal distribution)
+        robust_std = (mad * 1.4826).replace(0.0, np.nan).fillna(self.epsilon)
         p05 = numeric_df.quantile(0.05)
         p95 = numeric_df.quantile(0.95)
         
         self._global_stats = RegimeNormStats(
             regime_label=self.GLOBAL_LABEL,
-            mean=mean,
-            std=std,
+            mean=median,  # Use median as robust center
+            std=robust_std,  # Use MAD-based std
             p05=p05,
             p95=p95,
             sample_count=len(df)
@@ -1205,15 +1210,18 @@ class ConfidenceGatedNormalizer:
         
         numeric_df = df[valid_cols].apply(pd.to_numeric, errors='coerce')
         
-        mean = numeric_df.mean()
-        std = numeric_df.std().replace(0.0, np.nan).fillna(self.epsilon)
+        # ROBUST STATISTICS: Use median/MAD instead of mean/std
+        # This makes normalization robust to training data containing faults
+        median = numeric_df.median()
+        mad = (numeric_df - median).abs().median()
+        robust_std = (mad * 1.4826).replace(0.0, np.nan).fillna(self.epsilon)
         p05 = numeric_df.quantile(0.05)
         p95 = numeric_df.quantile(0.95)
         
         self._regime_stats[regime_label] = RegimeNormStats(
             regime_label=regime_label,
-            mean=mean,
-            std=std,
+            mean=median,  # Use median as robust center
+            std=robust_std,  # Use MAD-based std
             p05=p05,
             p95=p95,
             sample_count=len(df)

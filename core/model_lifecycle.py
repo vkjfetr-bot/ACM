@@ -324,6 +324,8 @@ def update_model_state_from_run(
 def get_active_model_dict(
     state: ModelState,
     regime_version: Optional[int] = None,
+    threshold_version: Optional[int] = None,
+    forecast_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Get dict suitable for write_active_models in output_manager.
@@ -331,6 +333,8 @@ def get_active_model_dict(
     Args:
         state: Current model state
         regime_version: Regime state version (if different from model version)
+        threshold_version: Active threshold version (default: use regime version)
+        forecast_version: Active forecast model version (default: use regime version)
         
     Returns:
         Dict for ACM_ActiveModels table
@@ -349,13 +353,16 @@ def get_active_model_dict(
         consecutive_runs=state.consecutive_runs,
     )
     
+    # Use regime version as default for threshold/forecast if not specified
+    effective_regime_version = regime_version or state.version
+    
     # Return only columns that exist in ACM_ActiveModels table
     return {
-        'ActiveRegimeVersion': regime_version or state.version,
+        'ActiveRegimeVersion': effective_regime_version,
         'RegimeMaturityState': str(state.maturity),
         'RegimePromotedAt': state.promoted_at,
-        'ActiveThresholdVersion': None,  # Future: threshold versioning
-        'ActiveForecastVersion': None,   # Future: forecast model versioning
+        'ActiveThresholdVersion': threshold_version or effective_regime_version,
+        'ActiveForecastVersion': forecast_version or effective_regime_version,
     }
 
 

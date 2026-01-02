@@ -1214,9 +1214,12 @@ class ForecastEngine:
                         # Generate forecast
                         forecast = fitted_model.forecast(steps=n_steps)
                         
-                        # Calculate confidence intervals using residual std
+                        # Calculate confidence intervals using residual std (robust MAD)
+                        # v11.1.2: Use MAD * 1.4826 instead of std for robustness
                         residuals = series - fitted_model.fittedvalues
-                        residual_std = residuals.std()
+                        residual_median = float(residuals.median())
+                        residual_mad = float((residuals - residual_median).abs().median())
+                        residual_std = residual_mad * 1.4826  # Scale MAD to be consistent with std
                     else:
                         # Simple fallback: linear trend with moving average smoothing
                         # Calculate trend using last 168 hours (7 days)
@@ -1228,10 +1231,13 @@ class ForecastEngine:
                         y = recent_series.values
                         slope, intercept = np.polyfit(x, y, 1)
                         
-                        # Calculate residual std for confidence intervals
+                        # Calculate residual std for confidence intervals (robust MAD)
+                        # v11.1.2: Use MAD * 1.4826 instead of std for robustness
                         trend_line = slope * x + intercept
                         residuals = y - trend_line
-                        residual_std = np.std(residuals)
+                        residual_median = float(np.median(residuals))
+                        residual_mad = float(np.median(np.abs(residuals - residual_median)))
+                        residual_std = residual_mad * 1.4826  # Scale MAD to be consistent with std
                         
                         # Generate forecast using linear extrapolation
                         last_x = len(recent_series) - 1
@@ -1256,23 +1262,29 @@ class ForecastEngine:
                     else:
                         trend_direction = 'Unknown'
                     
-                    # Build forecast records
+                    # Build forecast records - VECTORIZED for performance
                     last_timestamp = series.index[-1]
-                    for i in range(n_steps):
-                        forecast_timestamp = last_timestamp + timedelta(hours=dt_hours * (i + 1))
-                        forecast_records.append({
-                            'EquipID': self.equip_id,
-                            'RunID': self.run_id,
-                            'Timestamp': forecast_timestamp,
-                            'SensorName': sensor_name,
-                            'ForecastValue': float(forecast.iloc[i]),
-                            'CiLower': float(forecast_lower.iloc[i]),
-                            'CiUpper': float(forecast_upper.iloc[i]),
-                            'ForecastStd': residual_std,  # Use actual schema column
-                            'Method': 'SimpleLinearTrend' if not USE_EXPONENTIAL_SMOOTHING else 'ExponentialSmoothing',
-                            'RegimeLabel': 0,  # Default regime
-                            'CreatedAt': datetime.now()
-                        })
+                    method_name = 'SimpleLinearTrend' if not USE_EXPONENTIAL_SMOOTHING else 'ExponentialSmoothing'
+                    now_ts = datetime.now()
+                    
+                    # Create timestamps array
+                    forecast_timestamps = [last_timestamp + timedelta(hours=dt_hours * (i + 1)) for i in range(n_steps)]
+                    
+                    # Build DataFrame directly instead of appending dicts
+                    sensor_forecast_df = pd.DataFrame({
+                        'EquipID': self.equip_id,
+                        'RunID': self.run_id,
+                        'Timestamp': forecast_timestamps,
+                        'SensorName': sensor_name,
+                        'ForecastValue': forecast.values[:n_steps],
+                        'CiLower': forecast_lower.values[:n_steps],
+                        'CiUpper': forecast_upper.values[:n_steps],
+                        'ForecastStd': residual_std,
+                        'Method': method_name,
+                        'RegimeLabel': 0,
+                        'CreatedAt': now_ts
+                    })
+                    forecast_records.extend(sensor_forecast_df.to_dict('records'))
                     
                 except Exception as e:
                     Console.warn(f"Failed to forecast sensor {sensor_name}: {e}",
@@ -1536,9 +1548,12 @@ class RegimeConditionedForecaster:
                     degradation_rate_upper = 0.0
                     degradation_r_squared = 0.0
                 
-                # Health statistics
-                health_mean = float(regime_df['HealthIndex'].mean())
-                health_std = float(regime_df['HealthIndex'].std())
+                # Health statistics using ROBUST estimators
+                # v11.1.2: Use median and MAD instead of mean/std
+                health_median = float(regime_df['HealthIndex'].median())
+                health_mad = float((regime_df['HealthIndex'] - health_median).abs().median())
+                health_mean = health_median  # For backward compatibility, use median as "mean"
+                health_std = health_mad * 1.4826  # Scale MAD to be consistent with std
                 
                 # Dwell fraction
                 total_points = len(df)

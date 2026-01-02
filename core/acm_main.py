@@ -1,6 +1,7 @@
 # core/acm_main.py
 from __future__ import annotations
 
+import gc
 import hashlib
 import argparse
 import sys
@@ -1654,7 +1655,7 @@ def _save_trained_models(
         # Create metadata
         regime_quality_metrics = {
             "quality_ok": regime_quality_ok,
-            "n_regimes": regime_model.model.n_clusters if regime_model and hasattr(regime_model, 'model') else 0
+            "n_regimes": regime_model.n_clusters if regime_model else 0  # v11.1.0: Property handles HDBSCAN/GMM
         }
         
         with T.section("models.persistence.metadata"):
@@ -2628,6 +2629,7 @@ def _seed_baseline(
     equip_id: int,
     cfg: Dict[str, Any],
     equip: str = "",
+    is_coldstart: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str]]:
     """
     Seed training baseline when insufficient data available (batch mode).
@@ -2647,6 +2649,7 @@ def _seed_baseline(
         equip_id: Equipment ID
         cfg: Config dict with runtime.baseline settings
         equip: Equipment name for logging
+        is_coldstart: If True, train/score already split from coldstart - skip re-seeding
         
     Returns:
         Tuple of (train, score, source_used) where source_used describes origin
@@ -2654,6 +2657,13 @@ def _seed_baseline(
     baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
     min_points = int(baseline_cfg.get("min_points", 300))
     train_rows = len(train) if isinstance(train, pd.DataFrame) else 0
+    
+    # FIX: If this is a coldstart run and train already has data from coldstart split,
+    # don't re-seed from score - that would cause overlap/data leakage!
+    if is_coldstart and train_rows > 0:
+        Console.info(f"Coldstart mode: using train data from coldstart split ({train_rows} rows)", 
+                    component="BASELINE", equip=equip)
+        return train, score, None
     
     # If train already has enough rows, no seeding needed
     if train_rows >= min_points:
@@ -3199,14 +3209,14 @@ def _write_sql_artifacts(
     """
     rows_written = 0
     
-    # DriftTS
-    with T.section("sql.drift"):
+    # DriftSeries
+    with T.section("sql.drift_series"):
         try:
             df_drift = _build_drift_ts(frame, equip_id, run_id, cfg)
             if df_drift is not None:
-                rows_written += output_manager.write_drift_ts(df_drift, run_id or "")
+                rows_written += output_manager.write_drift_series(df_drift)
         except Exception as e:
-            Console.warn(f"DriftTS write skipped: {e}", component="SQL",
+            Console.warn(f"DriftSeries write skipped: {e}", component="SQL",
                          equip=equip, run_id=run_id, error=str(e)[:200])
 
     # AnomalyEvents
@@ -3821,6 +3831,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         with T.section("baseline.seed"):
             Console.status(f"Seeding baseline for {equip}...")
             try:
+                # FIX: Pass is_coldstart=True when coldstart just completed to prevent
+                # re-seeding from score which causes overlap/data leakage warnings
                 train_numeric, score_numeric, baseline_source = _seed_baseline(
                     train_numeric, 
                     score_numeric, 
@@ -3828,6 +3840,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     equip_id,
                     cfg,
                     equip=equip,
+                    is_coldstart=coldstart_complete,  # True after successful coldstart split
                 )
                 if baseline_source:
                     train = train_numeric.copy()
@@ -3879,6 +3892,15 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 train_numeric = train_adj
                                 score_numeric = score_adj
                                 
+                                # v11.1.4 BUG FIX (SEASON-EP): ALSO update the main train/score dataframes
+                                # CRITICAL: Without this, seasonally adjusted data never reaches feature engineering!
+                                # The train_numeric/score_numeric were updated but train/score (used by _build_features) were not
+                                for col in sensor_cols:
+                                    if col in train.columns and col in train_adj.columns:
+                                        train[col] = train_adj[col].values
+                                    if col in score.columns and col in score_adj.columns:
+                                        score[col] = score_adj[col].values
+                                
                                 Console.info(f"Applied seasonal adjustment to {len(seasonal_patterns)} sensors",
                                             component="SEASON", equip=equip, adjusted_sensors=len(seasonal_patterns))
             except Exception as se:
@@ -3898,12 +3920,17 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 # True overlap is when score START is strictly BEFORE train END (data leakage)
                 # Contiguous windows (score starts AT train end) are fine - expected in coldstart splits
                 # and in normal batch mode where train ends at T and score starts at T+1
-                if tr_end is not None and sc_start is not None and sc_start < tr_end:
-                    Console.warn(
-                        f"[DATA] Batch window OVERLAPS baseline (data leakage risk):"
-                        f" batch_start={sc_start} < baseline_end={tr_end}",
-                        component="DATA", equip=equip, batch_start=str(sc_start), baseline_end=str(tr_end)
-                    )
+                # FIX: Use <= check but with tolerance for timestamps that are effectively equal
+                if tr_end is not None and sc_start is not None:
+                    overlap_seconds = (tr_end - sc_start).total_seconds()
+                    # Only warn if score starts MORE than 1 minute before train ends (true overlap)
+                    # Tolerance handles floating point and rounding in timestamp comparisons
+                    if overlap_seconds > 60:  # 1 minute tolerance
+                        Console.warn(
+                            f"Batch window OVERLAPS baseline (data leakage risk):"
+                            f" batch_start={sc_start} < baseline_end={tr_end} (overlap={overlap_seconds:.0f}s)",
+                            component="DATA", equip=equip, batch_start=str(sc_start), baseline_end=str(tr_end)
+                        )
 
                 # 2) Low-variance sensor detection on BASELINE
                 # FEAT-04: Increased threshold from 1e-6 to 1e-4 to catch more near-constant sensors
@@ -3917,7 +3944,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         low_var_features = list(low_var.index)
                         preview = ", ".join(low_var_features[:10])
                         Console.warn(
-                            f"[DATA] {len(low_var)} low-variance sensor(s) in TRAIN (std<{low_var_threshold:g}): {preview}",
+                            f"{len(low_var)} low-variance sensor(s) in TRAIN (std<{low_var_threshold:g}): {preview}",
                             component="DATA", equip=equip, low_var_count=len(low_var), threshold=low_var_threshold
                         )
                     
@@ -4125,7 +4152,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 # Fallback to old joblib persistence
                 regime_model = regimes.load_regime_model(stable_models_dir)
                 if regime_model is not None:
-                    Console.info(f"Loaded cached regime model (legacy): K={regime_model.kmeans.n_clusters}, hash={regime_model.train_hash}", component="REGIME")
+                    Console.info(f"Loaded cached regime model (legacy): K={regime_model.n_clusters}, hash={regime_model.train_hash}", component="REGIME")
         except Exception as e:
             Console.warn(f"Failed to load cached regime state/model: {e}", component="REGIME",
                          equip=equip, error_type=type(e).__name__, error=str(e)[:200])
@@ -4366,7 +4393,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 pca_detector=pca_detector,
                 cfg=cfg,
             )
-            regime_basis_hash = int(pd.util.hash_pandas_object(regime_basis_train, index=True).sum())
+            # v11.1.1 FIX: Use SCHEMA hash (feature column names + regime config), not DATA hash
+            # This ensures regimes are STATIC once discovered - the same equipment with same sensors
+            # should always have the same regimes regardless of which time window is being processed.
+            # Previously used: pd.util.hash_pandas_object(regime_basis_train) which changed every batch!
+            regime_cfg_str = str(cfg.get("regimes", {}))
+            schema_str = ",".join(sorted(regime_basis_train.columns)) + "|" + regime_cfg_str
+            regime_basis_hash = int(hashlib.sha256(schema_str.encode()).hexdigest()[:15], 16)
         
         safe_step(
             _do_build_regime_basis,
@@ -4375,13 +4408,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         )
 
         if regime_model is not None:
+            # v11.1.1 FIX: Only check feature column match - NOT data hash
+            # Regimes should be STATIC once discovered for equipment
+            # Only refit if:
+            # 1. Feature columns changed (new sensors added/removed)
+            # 2. Regime config changed (schema hash includes config)
             if (
                 regime_basis_train is None
                 or regime_model.feature_columns != list(regime_basis_train.columns)
-                or (regime_basis_hash is not None and regime_model.train_hash != regime_basis_hash)
             ):
-                Console.warn("Cached regime model mismatch; will refit.", component="REGIME",
-                             equip=equip)
+                Console.warn("Cached regime model has different feature columns; will refit.", component="REGIME",
+                             equip=equip,
+                             cached_cols=regime_model.feature_columns[:5] if regime_model.feature_columns else [],
+                             current_cols=list(regime_basis_train.columns)[:5] if regime_basis_train is not None else [])
                 regime_model = None
 
         # ===== 3) Score on SCORE =====
@@ -4495,20 +4534,30 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     regime_state_version = new_state.state_version
                     Console.info(f"Saved state v{regime_state_version}: K={new_state.n_clusters}, quality_ok={new_state.quality_ok}", component="REGIME_STATE")
                     
-                    # v11: Write regime definitions to ACM_RegimeDefinitions
-                    if output_manager and hasattr(regime_model, 'kmeans') and regime_model.kmeans is not None:
+                    # v11.1.0: Write regime definitions to ACM_RegimeDefinitions (HDBSCAN/GMM)
+                    if output_manager and regime_model is not None and regime_model.model is not None:
                         try:
                             import json as _json
                             regime_defs = []
-                            centroids = regime_model.kmeans.cluster_centers_
-                            labels = regime_model.kmeans.labels_ if hasattr(regime_model.kmeans, 'labels_') else []
+                            # v11.1.0: Property handles HDBSCAN and GMM models
+                            centroids = regime_model.cluster_centers_  # Property handles all model types
+                            # Get labels - different models store labels differently
+                            if hasattr(regime_model.model, 'labels_'):
+                                labels = regime_model.model.labels_  # HDBSCAN (GMM doesn't have labels_)
+                            else:
+                                labels = []  # GMM doesn't store labels_
+                            # For HDBSCAN, filter out noise labels (-1)
+                            unique_labels = np.unique(labels)
+                            valid_labels = unique_labels[unique_labels >= 0]
                             for i, centroid in enumerate(centroids):
+                                # Map centroid index to actual regime label (important for HDBSCAN)
+                                regime_id = int(valid_labels[i]) if i < len(valid_labels) else i
                                 regime_defs.append({
-                                    'RegimeID': i,
-                                    'RegimeName': f'Regime_{i}',
+                                    'RegimeID': regime_id,
+                                    'RegimeName': f'Regime_{regime_id}',
                                     'CentroidJSON': _json.dumps(centroid.tolist()),
                                     'FeatureColumns': _json.dumps(regime_model.feature_cols if hasattr(regime_model, 'feature_cols') else []),
-                                    'DataPointCount': int(np.sum(np.array(labels) == i)) if len(labels) > 0 else 0,
+                                    'DataPointCount': int(np.sum(np.array(labels) == regime_id)) if len(labels) > 0 else 0,
                                     'MaturityState': new_state.maturity_state if hasattr(new_state, 'maturity_state') else 'LEARNING',
                                 })
                             output_manager.write_regime_definitions(regime_defs, version=regime_state_version)
@@ -4521,6 +4570,55 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         
         score_out = regime_out
         regime_quality_ok = bool(regime_out.get("regime_quality_ok", True))
+
+        # ===== ORPHAN-FIX: Write regime occupancy and transitions =====
+        with T.section("regimes.occupancy"):
+            try:
+                if score_regime_labels is not None and len(score_regime_labels) > 0 and output_manager:
+                    # Compute regime occupancy (time spent in each regime)
+                    regime_series = pd.Series(score_regime_labels)
+                    regime_counts = regime_series.value_counts()
+                    total_points = len(score_regime_labels)
+                    # Estimate sampling interval from score data
+                    sampling_interval_h = 1.0  # Default 1 hour
+                    if 'Timestamp' in frame.columns and len(frame) > 1:
+                        try:
+                            ts_diff = pd.to_datetime(frame['Timestamp']).diff().dropna()
+                            if len(ts_diff) > 0:
+                                sampling_interval_h = ts_diff.median().total_seconds() / 3600.0
+                        except Exception:
+                            pass
+                    
+                    occupancy_data = []
+                    for regime_id, count in regime_counts.items():
+                        occupancy_data.append({
+                            'RegimeLabel': str(regime_id),
+                            'DwellTimeHours': float(count * sampling_interval_h),
+                            'DwellFraction': float(count / total_points) if total_points > 0 else 0.0,
+                            'PointCount': int(count),
+                        })
+                    if occupancy_data:
+                        rows = output_manager.write_regime_occupancy(occupancy_data)
+                        if rows > 0:
+                            Console.info(f"Wrote {rows} regime occupancy records", component="REGIME")
+                    
+                    # Compute regime transitions (how often regime changes)
+                    if len(score_regime_labels) > 1:
+                        transitions: Dict[str, Dict[str, int]] = {}
+                        for i in range(1, len(score_regime_labels)):
+                            from_r = str(score_regime_labels[i-1])
+                            to_r = str(score_regime_labels[i])
+                            if from_r != to_r:  # Only count actual transitions
+                                if from_r not in transitions:
+                                    transitions[from_r] = {}
+                                transitions[from_r][to_r] = transitions[from_r].get(to_r, 0) + 1
+                        if transitions:
+                            rows = output_manager.write_regime_transitions(transitions)
+                            if rows > 0:
+                                Console.info(f"Wrote {rows} regime transition records", component="REGIME")
+            except Exception as e:
+                Console.warn(f"Regime occupancy/transitions write failed: {e}", component="REGIME",
+                             equip=equip, error=str(e)[:200])
 
         # ===== Model Quality Assessment: Check if retraining needed =====
         # This happens AFTER first scoring so we can evaluate cached model performance
@@ -4711,8 +4809,28 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             if model_state.maturity == MaturityState.LEARNING:
                                 eligible, unmet = check_promotion_eligibility(model_state)
                                 if eligible:
+                                    old_maturity = model_state.maturity.value
                                     model_state = promote_model(model_state)
                                     Console.ok(f"Model promoted to CONVERGED", component="LIFECYCLE")
+                                    
+                                    # ===== ORPHAN-FIX: Write regime promotion log =====
+                                    try:
+                                        promotion_record = [{
+                                            'RegimeLabel': 'ALL',  # Model-level promotion
+                                            'FromState': old_maturity,
+                                            'ToState': model_state.maturity.value,
+                                            'Reason': 'met_promotion_criteria',
+                                            'PromotedAt': datetime.now(),
+                                            'Version': model_state.version,
+                                            'ConsecutiveRuns': model_state.consecutive_runs,
+                                            'TotalDays': model_state.total_days,
+                                        }]
+                                        rows = output_manager.write_regime_promotion_log(promotion_record)
+                                        if rows > 0:
+                                            Console.info(f"Logged regime promotion", component="LIFECYCLE")
+                                    except Exception as e:
+                                        Console.warn(f"Regime promotion log write failed: {e}", component="LIFECYCLE",
+                                                     equip=equip, error=str(e)[:200])
                                 else:
                                     Console.info(f"Model not yet eligible for promotion: {unmet}", component="LIFECYCLE")
                         
@@ -4895,6 +5013,26 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 # Pass logical artifact name instead of file path
                 output_manager.write_dataframe(thresholds_df, "acm_thresholds")
                 Console.info(f"Wrote thresholds table with {len(threshold_rows)} rows -> acm_thresholds", component="CAL")
+
+            # ===== ORPHAN-FIX: Write calibration summary =====
+            try:
+                if output_manager and calibrators:
+                    calibration_summary = []
+                    for detector_name, calibrator in calibrators:
+                        calibration_summary.append({
+                            'DetectorType': detector_name,
+                            'CalibrationScore': float(calibrator.q_z) if hasattr(calibrator, 'q_z') else 0.0,
+                            'Median': float(calibrator.med) if hasattr(calibrator, 'med') else 0.0,
+                            'Scale': float(calibrator.scale) if hasattr(calibrator, 'scale') else 0.0,
+                            'NumRegimes': len(calibrator.regime_thresh_) if hasattr(calibrator, 'regime_thresh_') else 0,
+                        })
+                    if calibration_summary:
+                        rows = output_manager.write_calibration_summary(calibration_summary)
+                        if rows > 0:
+                            Console.info(f"Wrote {rows} calibration summary records", component="CAL")
+            except Exception as e:
+                Console.warn(f"Calibration summary write failed: {e}", component="CAL",
+                             equip=equip, error=str(e)[:200])
 
         # ===== 6) Fusion + episodes =====
         with T.section("fusion"): # type: ignore
@@ -5283,6 +5421,29 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             equip=equip,
         )
 
+        # ===== ORPHAN-FIX: Write drift controller state =====
+        with T.section("drift.controller"):
+            try:
+                if output_manager:
+                    drift_state = score_out.get('drift_state', {})
+                    if not drift_state:
+                        # Build drift state from frame if available
+                        drift_mode = frame.get('drift_mode', ['STABLE'])[-1] if 'drift_mode' in frame.columns else 'STABLE'
+                        drift_z = frame.get('drift_z', [0.0])
+                        drift_state = {
+                            'ControllerState': str(drift_mode) if isinstance(drift_mode, str) else 'STABLE',
+                            'CurrentDriftZ': float(drift_z.iloc[-1]) if hasattr(drift_z, 'iloc') else 0.0,
+                            'Threshold': float(cfg.get('drift', {}).get('threshold', 3.0)),
+                            'Sensitivity': float(cfg.get('drift', {}).get('sensitivity', 1.0)),
+                        }
+                    if drift_state:
+                        rows = output_manager.write_drift_controller(drift_state)
+                        if rows > 0:
+                            Console.info(f"Wrote drift controller state", component="DRIFT")
+            except Exception as e:
+                Console.warn(f"Drift controller write failed: {e}", component="DRIFT",
+                             equip=equip, error=str(e)[:200])
+
         # --- Normalize episodes schema for report/export ------------
         # REFACTOR v11: Extracted to _normalize_episodes_schema() helper
         episodes, frame = _normalize_episodes_schema(
@@ -5321,24 +5482,25 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     if common_cols:
                         train_baseline = train_numeric[common_cols].copy()
                         score_baseline = score_numeric[common_cols].copy()
-                        train_mean = train_baseline.mean()
-                        # CRITICAL FIX #5: Prevent division by zero with safe epsilon fallback
-                        train_std = train_baseline.std()
-                        train_std = train_std.replace(0.0, np.nan).fillna(1e-10)  # Safe fallback
+                        # ROBUST: Use median instead of mean for baseline
+                        train_median = train_baseline.median()
+                        # ROBUST: Use MAD instead of std for scale
+                        train_mad = (train_baseline - train_median).abs().median()
+                        train_std = (train_mad * 1.4826).replace(0.0, np.nan).fillna(1e-10)  # MAD to std-equivalent
                         valid_cols = train_std[train_std > 1e-10].index.tolist()  # Only truly valid columns
                         if valid_cols:
-                            train_mean = train_mean[valid_cols]
+                            train_median = train_median[valid_cols]
                             train_std = train_std[valid_cols]
                             score_baseline = score_baseline[valid_cols]
                             score_aligned = score_baseline.reindex(frame.index)
                             score_aligned = score_aligned.apply(pd.to_numeric, errors="coerce")
-                            sensor_z = (score_aligned - train_mean) / train_std
+                            sensor_z = (score_aligned - train_median) / train_std
                             sensor_z = sensor_z.replace([np.inf, -np.inf], np.nan)
                             # Ensure alignment with scoring frame for downstream joins
                             sensor_context = {
                                 "values": score_aligned,
                                 "z_scores": sensor_z,
-                                "train_mean": train_mean,
+                                "train_mean": train_median,  # Note: Using median but keeping key name for compatibility
                                 "train_std": train_std,
                                 "train_p95": train_baseline[valid_cols].quantile(0.95),
                                 "train_p05": train_baseline[valid_cols].quantile(0.05),
@@ -5361,9 +5523,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     sensor_cols = [c for c in train_numeric.columns 
                                    if train_numeric[c].dtype in ['float64', 'float32', 'int64', 'int32']]
                     if sensor_cols:
-                        # Compute sensor statistics
-                        sensor_means = {c: float(train_numeric[c].mean()) for c in sensor_cols if not pd.isna(train_numeric[c].mean())}
-                        sensor_stds = {c: float(train_numeric[c].std()) for c in sensor_cols if not pd.isna(train_numeric[c].std())}
+                        # ROBUST: Compute sensor statistics using median/MAD
+                        sensor_medians = {c: float(train_numeric[c].median()) for c in sensor_cols if not pd.isna(train_numeric[c].median())}
+                        sensor_mads = {c: float((train_numeric[c] - train_numeric[c].median()).abs().median() * 1.4826) 
+                                      for c in sensor_cols if not pd.isna(train_numeric[c].median())}
+                        # Use robust stats but keep variable names for compatibility
+                        sensor_means = sensor_medians
+                        sensor_stds = sensor_mads
                         # Calculate data hours from index
                         data_hours = 0.0
                         if hasattr(train_numeric.index, 'min') and hasattr(train_numeric.index, 'max'):
@@ -5376,10 +5542,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         # Get regime count from regime model if available
                         regime_count = 0
                         if regime_model is not None:  # V11: regime_model initialized at function scope
-                            if hasattr(regime_model, 'kmeans') and regime_model.kmeans is not None:
-                                regime_count = regime_model.kmeans.n_clusters
-                            elif hasattr(regime_model, 'model') and regime_model.model is not None:
-                                regime_count = getattr(regime_model.model, 'n_clusters', 0)
+                            # v11.1.0: n_clusters property handles HDBSCAN and GMM
+                            regime_count = regime_model.n_clusters if hasattr(regime_model, 'n_clusters') else 0
                         # Build profile
                         asset_profile = AssetProfile(
                             equip_id=equip_id,
@@ -5396,6 +5560,84 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             except Exception as pe:
                 Console.debug(f"Asset profile building skipped: {pe}", component="PROFILE",
                              equip=equip, error=str(pe)[:200])
+
+        # ===== ORPHAN-FIX: Write contribution timeline =====
+        with T.section("contribution.timeline"):
+            try:
+                if output_manager and 'Timestamp' in frame.columns:
+                    # Compute detector contributions from z-scores and fusion weights
+                    detector_cols = ['ar1_z', 'pca_spe_z', 'pca_t2_z', 'iforest_z', 'gmm_z', 'omr_z']
+                    avail_cols = [c for c in detector_cols if c in frame.columns]
+                    if avail_cols and fusion_weights_used:
+                        # VECTORIZED: Build contribution timeline without iterrows
+                        # Filter valid timestamps
+                        valid_mask = frame['Timestamp'].notna()
+                        valid_frame = frame.loc[valid_mask, ['Timestamp'] + avail_cols].copy()
+                        
+                        if len(valid_frame) > 0:
+                            # Build weight array for available columns
+                            weights = np.array([fusion_weights_used.get(c, 0.0) for c in avail_cols])
+                            
+                            # Extract z-values as numpy array and take absolute
+                            z_matrix = valid_frame[avail_cols].fillna(0.0).abs().values  # (n_rows, n_detectors)
+                            
+                            # Compute weighted values: z * weight for each detector
+                            weighted_matrix = z_matrix * weights[np.newaxis, :]  # broadcast weights
+                            
+                            # Total weighted sum per row
+                            total_weighted = weighted_matrix.sum(axis=1, keepdims=True)  # (n_rows, 1)
+                            
+                            # Contribution percentages: (weighted / total) * 100, avoid div by zero
+                            with np.errstate(divide='ignore', invalid='ignore'):
+                                pct_matrix = np.where(total_weighted > 0, 
+                                                      weighted_matrix / total_weighted * 100.0, 
+                                                      0.0)
+                            
+                            # FIX A3: TRULY VECTORIZED using pd.melt() - O(1) pandas ops vs O(n*m) Python loops
+                            # Build DataFrames for RawZ and ContributionPct matrices
+                            timestamps = valid_frame['Timestamp'].values
+                            
+                            # Create wide DataFrames then melt to long format
+                            z_df = pd.DataFrame(z_matrix, columns=avail_cols)
+                            z_df['Timestamp'] = timestamps
+                            pct_df = pd.DataFrame(pct_matrix, columns=avail_cols)
+                            pct_df['Timestamp'] = timestamps
+                            
+                            # Melt RawZ to long format
+                            z_long = z_df.melt(
+                                id_vars='Timestamp', 
+                                value_vars=avail_cols,
+                                var_name='DetectorCol', 
+                                value_name='RawZ'
+                            )
+                            
+                            # Melt ContributionPct to long format
+                            pct_long = pct_df.melt(
+                                id_vars='Timestamp',
+                                value_vars=avail_cols,
+                                var_name='DetectorCol',
+                                value_name='ContributionPct'
+                            )
+                            
+                            # Merge and add detector name (strip _z suffix)
+                            contrib_df = z_long.copy()
+                            contrib_df['ContributionPct'] = pct_long['ContributionPct']
+                            contrib_df['DetectorType'] = contrib_df['DetectorCol'].str.replace('_z', '', regex=False)
+                            
+                            # Add weights - vectorized lookup
+                            weight_map = {col: weights[i] for i, col in enumerate(avail_cols)}
+                            contrib_df['Weight'] = contrib_df['DetectorCol'].map(weight_map)
+                            
+                            # Select final columns
+                            contrib_df = contrib_df[['Timestamp', 'DetectorType', 'ContributionPct', 'RawZ', 'Weight']]
+                            
+                            if len(contrib_df) > 0:
+                                rows = output_manager.write_contribution_timeline(contrib_df)
+                                if rows > 0:
+                                    Console.info(f"Wrote {rows} contribution timeline records", component="CONTRIB")
+            except Exception as e:
+                Console.warn(f"Contribution timeline write failed: {e}", component="CONTRIB",
+                             equip=equip, error=str(e)[:200])
 
         # ===== 8) Persist artifacts / Finalize (SQL-only) =====
         rows_read = int(score.shape[0])
@@ -5443,12 +5685,18 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     Console.debug(f"Detector correlation write skipped: {e}", component="PERSIST",
                                   equip=equip, run_id=run_id, error=str(e)[:200])
             
-            # Sensor Correlation Matrix (from train data)
+            # Sensor Correlation Matrix (from raw sensor data, not feature matrix)
             with T.section("persist.sensor_correlation"):
                 try:
-                    if train is not None and hasattr(train, 'corr') and train.shape[1] >= 2:
-                        sensor_corr = train.corr(method='pearson')
-                        output_manager.write_sensor_correlations(sensor_corr, corr_type='pearson')
+                    # Use score_numeric (raw sensors) not train (feature-engineered matrix)
+                    raw_sensor_df = score_numeric if score_numeric is not None else score
+                    if raw_sensor_df is not None and hasattr(raw_sensor_df, 'corr') and raw_sensor_df.shape[1] >= 2:
+                        # Only compute correlation for actual numeric sensor columns
+                        sensor_cols = [c for c in raw_sensor_df.columns 
+                                      if raw_sensor_df[c].dtype in ['float64', 'float32', 'int64', 'int32']]
+                        if len(sensor_cols) >= 2:
+                            sensor_corr = raw_sensor_df[sensor_cols].corr(method='pearson')
+                            output_manager.write_sensor_correlations(sensor_corr, corr_type='pearson')
                 except Exception as e:
                     Console.debug(f"Sensor correlation write skipped: {e}", component="PERSIST",
                                   equip=equip, run_id=run_id, error=str(e)[:200])
@@ -5464,13 +5712,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         sensor_cols = [c for c in raw_sensor_df.columns 
                                       if raw_sensor_df[c].dtype in ['float64', 'float32', 'int64', 'int32']]
                         if sensor_cols:
-                            # Subsample if too many rows (>10k) to avoid DB bloat
+                            # Calculate target max rows: 10K total (not 10K timestamps × N sensors!)
+                            # With N sensors, we can have at most 10000/N timestamps
+                            max_total_rows = 10000
+                            max_timestamps = max(100, max_total_rows // len(sensor_cols))
+                            
                             sample_frame = raw_sensor_df
-                            if len(raw_sensor_df) > 10000:
-                                sample_frame = raw_sensor_df.iloc[::max(1, len(raw_sensor_df) // 10000)]
+                            if len(raw_sensor_df) > max_timestamps:
+                                step = max(1, len(raw_sensor_df) // max_timestamps)
+                                sample_frame = raw_sensor_df.iloc[::step]
+                            
                             rows_written = output_manager.write_sensor_normalized_ts(sample_frame, sensor_cols)
                             if rows_written > 0:
-                                Console.debug(f"Wrote {rows_written} sensor normalized TS rows ({len(sensor_cols)} sensors)", 
+                                Console.debug(f"Wrote {rows_written} sensor normalized TS rows ({len(sample_frame)} timestamps x {len(sensor_cols)} sensors)", 
                                             component="PERSIST")
                 except Exception as e:
                     Console.debug(f"Sensor normalized TS write skipped: {e}", component="PERSIST",
@@ -5525,16 +5779,24 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     Console.debug(f"Asset profile write skipped: {e}", component="PERSIST",
                                   equip=equip, run_id=run_id, error=str(e)[:200])
 
-                if cache_payload:
-                    with T.section("persist.cache_detectors"):
-                        _, success = safe_step(
-                            lambda: joblib.dump(cache_payload, model_cache_path),
-                            "cache_detectors", "MODEL", equip, run_id,
-                            degradations=degradations,
-                            cache_path=str(model_cache_path)
-                        )
-                        if success:
-                            Console.info(f"Cached detectors to {model_cache_path}", component="MODEL")
+            # ===== MEMORY CLEANUP: Free large objects no longer needed =====
+            # After persist, we no longer need raw sensor data or training matrices
+            # Free train_numeric, score_numeric but KEEP detector references for _write_sql_artifacts
+            try:
+                del train_numeric, score_numeric
+            except NameError:
+                pass  # Already deleted or never created
+            try:
+                # Free detector model internals (keep thin wrappers for reference)
+                # NOTE: Do NOT set detectors to None - they're still needed by _write_sql_artifacts
+                if iforest_detector is not None and hasattr(iforest_detector, 'model'):
+                    iforest_detector.model = None  # IForest models are large (100+ trees)
+                if omr_detector is not None and hasattr(omr_detector, 'model'):
+                    omr_detector.model = None  # OMR models can be large
+                # Keep pca_detector intact - it's needed for PCA loadings in _write_sql_artifacts
+            except Exception:
+                pass
+            gc.collect()  # Force garbage collection
 
             # === COMPREHENSIVE ANALYTICS GENERATION ===
             # Run in ALL modes to ensure SQL tables (HealthTimeline, RegimeTimeline) are populated
@@ -5652,6 +5914,17 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         Console.error(f"RUL estimation skipped - ForecastEngine must be fixed", component="FORECAST",
                                       equip=equip, run_id=run_id)
                         degradations.append("forecast_engine_exception")
+                        
+                # ===== MEMORY CLEANUP: Free sensor context after forecasting =====
+                # After forecasting, we only need frame for final SQL writes
+                try:
+                    if sensor_context is not None:
+                        sensor_context.clear() if hasattr(sensor_context, 'clear') else None
+                        sensor_context = None
+                except Exception:
+                    pass
+                gc.collect()
+                        
             except Exception as e:
                 Console.warn(f"Output generation failed: {e}", component="OUTPUTS",
                              equip=equip, run_id=run_id, error_type=type(e).__name__, error=str(e)[:500])

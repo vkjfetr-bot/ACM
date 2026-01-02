@@ -114,7 +114,7 @@ class StateManager:
             cur.close()
             
             if row is None:
-                Console.info(f"[StateManager] No previous state for EquipID={equip_id}; starting fresh")
+                Console.info(f"No previous state for EquipID={equip_id}; starting fresh", component="STATE")
                 return None
             
             # Parse JSON fields
@@ -137,8 +137,9 @@ class StateManager:
             )
             
             Console.info(
-                f"[StateManager] Loaded state: EquipID={equip_id}, StateVersion={state.state_version}, "
-                f"DataVolume={state.data_volume_analyzed}"
+                f"Loaded state: EquipID={equip_id}, StateVersion={state.state_version}, "
+                f"DataVolume={state.data_volume_analyzed}",
+                component="STATE"
             )
             
             return state
@@ -259,7 +260,7 @@ class StateManager:
                 
                 cur.close()
                 
-                Console.info(f"[StateManager] Saved state for EquipID={state.equip_id}")
+                Console.info(f"Saved state for EquipID={state.equip_id}", component="STATE")
                 return True
                 
             except Exception as e:
@@ -506,7 +507,7 @@ class AdaptiveConfigManager:
             
             cur.close()
             
-            Console.info(f"[AdaptiveConfigManager] Updated config: EquipID={equip_id}, {key}={value}")
+            Console.info(f"Updated config: EquipID={equip_id}, {key}={value}", component="CONFIG")
             return True
             
         except Exception as e:

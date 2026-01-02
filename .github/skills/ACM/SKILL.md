@@ -879,6 +879,289 @@ pytest tests/test_progress_tracking.py
 
 ---
 
+## 📝 Output Manager Best Practices (v11.0.3+)
+
+### CRITICAL: Write Method Contract
+
+Every table in `ALLOWED_TABLES` MUST have:
+1. **A write method** in `output_manager.py`
+2. **A call to that method** in the appropriate pipeline phase in `acm_main.py`
+3. **Proper column schema** matching the SQL table definition
+
+**When adding a new table:**
+```python
+# 1. Add to ALLOWED_TABLES in output_manager.py (line ~95)
+ALLOWED_TABLES = {
+    ...
+    'ACM_NewTable',  # Add here with tier comment
+}
+
+# 2. Create write method in output_manager.py
+def write_new_table(self, data: pd.DataFrame) -> int:
+    """Write to ACM_NewTable.
+    
+    Schema: ID, RunID, EquipID, <your columns>, CreatedAt
+    """
+    if not self._check_sql_health() or data is None or data.empty:
+        return 0
+    try:
+        df = data.copy()
+        df['RunID'] = self.run_id
+        df['EquipID'] = self.equip_id or 0
+        return self.write_table('ACM_NewTable', df, delete_existing=True)
+    except Exception as e:
+        Console.warn(f"write_new_table failed: {e}", component="OUTPUT")
+        return 0
+
+# 3. Call from acm_main.py at appropriate pipeline phase
+with T.section("persist.new_table"):
+    rows = output_manager.write_new_table(my_dataframe)
+    Console.info(f"Wrote {rows} rows to ACM_NewTable", component="OUTPUT")
+```
+
+### Table Write Location Reference
+
+| Table | Write Method | Pipeline Phase | Line in acm_main.py |
+|-------|--------------|----------------|---------------------|
+| ACM_Scores_Wide | `write_scores()` | persist | ~5530 |
+| ACM_HealthTimeline | `_generate_health_timeline()` | outputs.comprehensive_analytics | ~5650 |
+| ACM_RegimeTimeline | `_generate_regime_timeline()` | outputs.comprehensive_analytics | ~5650 |
+| ACM_Anomaly_Events | `write_anomaly_events()` | persist.episodes | ~5560 |
+| ACM_CalibrationSummary | `write_calibration_summary()` | calibrate | ~4955 |
+| ACM_RegimeOccupancy | `write_regime_occupancy()` | regimes.occupancy | ~4530 |
+| ACM_RegimeTransitions | `write_regime_transitions()` | regimes.occupancy | ~4545 |
+| ACM_RegimePromotionLog | `write_regime_promotion_log()` | models.lifecycle | ~4780 |
+| ACM_DriftController | `write_drift_controller()` | drift.controller | ~5365 |
+| ACM_ContributionTimeline | `write_contribution_timeline()` | contribution.timeline | ~5510 |
+| ACM_RUL | `ForecastEngine.run_forecast()` | outputs.forecasting | ~5800 |
+
+### Column Naming Standards (MANDATORY)
+
+**Timestamp Columns:**
+- `Timestamp` - For all time-series fact tables (HealthTimeline, Scores, etc.)
+- `StartTime` / `EndTime` - For interval events (Episodes, Anomaly_Events)
+- `CreatedAt` - For record insertion timestamp (auto-generated)
+- `ModifiedAt` - For record update timestamp (if UPSERT supported)
+
+**NEVER use:**
+- `EntryDateTime` (legacy, migrate to `Timestamp`)
+- `start_ts` / `end_ts` (snake_case mixed with PascalCase)
+- `ValidatedAt`, `LoggedAt`, `DroppedAt` (use `CreatedAt`)
+
+**ID Columns:**
+- Always `RunID`, `EquipID` (PascalCase, NEVER snake_case)
+- `LastUpdatedByRunID` (not `LastUpdatedBy`)
+
+**Column Casing:**
+- **ALL columns MUST be PascalCase** (e.g., `HealthIndex`, `RegimeLabel`)
+- **NEVER use snake_case** for SQL columns (e.g., NOT `health_index`)
+
+### Tables Written by Different Modules
+
+Not all ALLOWED_TABLES writes are in output_manager.py:
+
+**acm_main.py direct writes:**
+- `ACM_Runs` - Run start/completion metadata
+- `ACM_HealthTimeline` - Via `_generate_health_timeline()`
+- `ACM_RegimeTimeline` - Via `_generate_regime_timeline()`
+- `ACM_SensorDefects` - Via `_generate_sensor_defects()`
+- `ACM_SensorHotspots` - Via `_generate_sensor_hotspots()`
+
+**forecast_engine.py writes:**
+- `ACM_RUL` - Via `run_forecast()`
+- `ACM_HealthForecast` - Via `run_forecast()`
+- `ACM_FailureForecast` - Via `run_forecast()`
+- `ACM_SensorForecast` - Via `run_forecast()`
+
+**Reference-only tables (written by external processes):**
+- `ACM_Config` - Written by `populate_acm_config.py`
+- `ACM_HistorianData` - Populated by data import process
+- `ACM_BaselineBuffer` - Populated by baseline seeding
+
+---
+
+## 📊 Grafana Dashboard Best Practices (v11.0.3+)
+
+### Dashboard Structure Pattern
+
+All ACM dashboards should follow this structure:
+```json
+{
+  "templating": {
+    "list": [
+      { "name": "datasource", "type": "datasource", "query": "mssql" },
+      { "name": "equipment", "type": "query", "query": "SELECT EquipCode AS __text, EquipID AS __value FROM Equipment WHERE EquipID IN (SELECT DISTINCT EquipID FROM <primary_table>) ORDER BY EquipCode" }
+    ]
+  },
+  "time": { "from": "now-7d", "to": "now" },
+  "tags": ["acm", "v11", "<category>"]
+}
+```
+
+### Time Series Query Pattern (MANDATORY)
+
+```sql
+-- ✅ CORRECT: Raw DATETIME, proper ORDER, time filter
+SELECT 
+    Timestamp AS time,           -- Raw datetime, NOT formatted
+    HealthIndex AS 'Health %'    -- Alias for legend
+FROM ACM_HealthTimeline
+WHERE EquipID = $equipment
+  AND Timestamp BETWEEN $__timeFrom() AND $__timeTo()  -- Always filter!
+ORDER BY Timestamp ASC           -- MUST be ASC for time series
+
+-- ❌ WRONG patterns that break dashboards:
+SELECT FORMAT(Timestamp, 'yyyy-MM-dd') AS time  -- Breaks time axis
+SELECT * ORDER BY Timestamp DESC                 -- Breaks rendering
+SELECT * -- No time filter!                      -- Performance disaster
+```
+
+### Panel Type Selection
+
+| Data Type | Panel Type | Key Settings |
+|-----------|------------|--------------|
+| Continuous metrics | Time Series | `spanNulls: 3600000` (disconnect on 1h gap) |
+| Latest value | Stat | `reduceOptions.calcs: ["lastNotNull"]` |
+| Health gauge | Gauge | `max: 100`, thresholds at 50/70/85 |
+| Category data | Pie Chart | `pieType: "donut"` |
+| Tabular data | Table | Enable pagination |
+| Severity/Status | Stat with mappings | Color mappings for GOOD/WATCH/ALERT/CRITICAL |
+
+### Threshold Color Standards
+
+Use consistent colors across all dashboards:
+```json
+{
+  "thresholds": {
+    "mode": "absolute",
+    "steps": [
+      { "color": "#C4162A", "value": null },    // Red (Critical/Bad)
+      { "color": "#FF9830", "value": 50 },      // Orange (Warning)
+      { "color": "#FADE2A", "value": 70 },      // Yellow (Watch)
+      { "color": "#73BF69", "value": 85 }       // Green (Good)
+    ]
+  }
+}
+```
+
+For inverted scales (where low is good, like RUL hours):
+```json
+{
+  "thresholds": {
+    "steps": [
+      { "color": "#C4162A", "value": null },    // Red (< 24h)
+      { "color": "#FF9830", "value": 24 },      // Orange (< 72h)
+      { "color": "#FADE2A", "value": 72 },      // Yellow (< 168h)
+      { "color": "#73BF69", "value": 168 }      // Green (> 1 week)
+    ]
+  }
+}
+```
+
+### Value Mappings for Status Fields
+
+```json
+{
+  "mappings": [
+    { "options": { "GOOD": { "color": "green", "index": 0 } }, "type": "value" },
+    { "options": { "WATCH": { "color": "yellow", "index": 1 } }, "type": "value" },
+    { "options": { "ALERT": { "color": "orange", "index": 2 } }, "type": "value" },
+    { "options": { "CRITICAL": { "color": "red", "index": 3 } }, "type": "value" }
+  ]
+}
+```
+
+### Equipment Variable Query Pattern
+
+Always include existence check in variable query:
+```sql
+-- Shows only equipment that has data in the relevant table
+SELECT EquipCode AS __text, EquipID AS __value 
+FROM Equipment 
+WHERE EquipID IN (SELECT DISTINCT EquipID FROM ACM_HealthTimeline)
+ORDER BY EquipCode
+```
+
+### Dashboard File Naming
+
+- `acm_v11_<category>.json` - Standard V11 dashboards
+- Categories: `executive`, `diagnostics`, `forecasting`, `operations`, `detectors`, `regimes`
+
+---
+
+## ⚡ Performance Optimization (CRITICAL)
+
+### NEVER Use Python Loops for DataFrame Operations
+
+**Problem Example (v11.0.2 bug)**:
+```python
+# ❌ CATASTROPHIC - 1000+ seconds for 17k rows × 50 sensors
+long_rows = []
+for col in sensor_cols:
+    for i, (ts, val) in enumerate(zip(timestamps, values)):
+        long_rows.append({'Timestamp': ts, 'SensorName': col, 'Value': val})
+df = pd.DataFrame(long_rows)
+```
+
+**Fixed (vectorized)**:
+```python
+# ✅ 1-2 seconds for same data (100-1000x faster)
+long_df = df[['Timestamp'] + sensor_cols].melt(
+    id_vars=['Timestamp'],
+    value_vars=sensor_cols,
+    var_name='SensorName',
+    value_name='NormalizedValue'
+)
+long_df = long_df.dropna(subset=['NormalizedValue'])
+```
+
+### Vectorization Patterns
+
+| Operation | Wrong (Python loop) | Right (Vectorized) |
+|-----------|---------------------|---------------------|
+| Wide→Long | `for col... for row...` | `pd.melt()` |
+| Filter NaN | `if pd.notna(val)` | `df.dropna(subset=[col])` |
+| Add column | `for row: row['x'] = val` | `df['x'] = val` |
+| Upper tri | `for i... for j... if i<=j` | `np.triu()` + `np.where()` |
+| Correlation | Loop over `.loc[s1, s2]` | `df.values[rows_idx, cols_idx]` |
+
+### SQL Write Performance
+
+Use pyodbc `fast_executemany`:
+```python
+cur = self.sql_client.cursor()
+cur.fast_executemany = True  # CRITICAL - 10-100x faster
+cur.executemany(insert_sql, batch)
+```
+
+### Acceptable Batch Timings
+
+| Phase | Target | Concern | Critical |
+|-------|--------|---------|----------|
+| load_data | < 30s | > 60s | > 120s |
+| features.build | < 30s | > 60s | > 120s |
+| persist.sensor_normalized_ts | < 30s | > 60s | > 120s |
+| persist.sensor_correlation | < 10s | > 30s | > 60s |
+| outputs.forecasting | < 120s | > 300s | > 600s |
+| **total_run** | < 300s | > 600s | > 1200s |
+
+If any phase exceeds "Critical" threshold, investigate immediately.
+
+### Testing Equipment Selection
+
+**ALWAYS test with the equipment that has the LEAST data:**
+```sql
+-- Check data volumes before testing
+SELECT 'GAS_TURBINE' as Equipment, COUNT(*) as Rows FROM GAS_TURBINE_Data
+UNION ALL
+SELECT 'FD_FAN', COUNT(*) FROM FD_FAN_Data
+ORDER BY Rows ASC
+```
+
+Use the smallest dataset for development/testing to catch performance issues early.
+
+---
+
 ## V11.0.2 Implementation Details
 
 ### GMM Clustering for Operating Regimes
@@ -935,17 +1218,224 @@ transfer_result = similarity_engine.transfer_baseline(
 
 ### Correlation-Aware Detector Fusion
 
-V11.0.2 addresses FLAW-4 (PCA-SPE and PCA-T² 80% correlated):
+V11.1.4 addresses FLAW-4 (detector inter-correlation):
 
 **Implementation** (`core/fuse.py` in `Fuser.fuse()` method):
 ```python
-# Detect PCA detector correlation and discount weights
-if "pca_spe_z" in keys and "pca_t2_z" in keys:
-    corr, _ = pearsonr(spe_arr, t2_arr)
-    if corr > 0.5:
-        discount = min(0.5, (corr - 0.5))  # 0-50% discount
-        w_raw["pca_spe_z"] *= (1 - discount)
-        w_raw["pca_t2_z"] *= (1 - discount)
+# GENERALIZED correlation adjustment for ALL detector pairs
+# Not just PCA-SPE/T² but any pair with correlation > 0.5
+for i, k1 in enumerate(sorted_keys):
+    for k2 in sorted_keys[i+1:]:
+        corr, _ = pearsonr(arr1[valid_mask], arr2[valid_mask])
+        if abs(corr) > 0.5:
+            discount_factor = min(0.3, (abs(corr) - 0.5) * 0.5)
+            detector_corr_adjustments[k1] *= (1 - discount_factor)
+            detector_corr_adjustments[k2] *= (1 - discount_factor)
 ```
 
-**Effect**: At 80% correlation, each PCA detector weight is reduced by ~30%, preventing PCA from dominating the fused score.
+**Effect**: Any correlated detector pair has weights automatically reduced to prevent double-counting of the same information.
+
+---
+
+## ⚠️ Analytical Correctness Rules (v11.1.4+)
+
+### CRITICAL: Lessons Learned from Bug Hunting
+
+These are MANDATORY rules for any statistical/ML code in ACM. Violations of these principles caused subtle but critical bugs in production.
+
+---
+
+### Rule 1: Data Pipeline Flow Must Be Traced End-to-End
+
+**Bug Found (SEASON-EP)**: Seasonal adjustment updated `train_numeric` but feature engineering used `train`:
+```python
+# BUG: train_numeric was adjusted but train (used in _build_features) was not
+train_numeric = train_adj  # ❌ Only updated derivative, not source
+score_numeric = score_adj
+
+# FIX: Also update the source dataframes
+for col in sensor_cols:
+    if col in train.columns:
+        train[col] = train_adj[col].values  # ✅ Update actual source
+```
+
+**Rule**: When transforming data, ALWAYS verify:
+1. Which variable is the TRUE source used by downstream functions?
+2. Are you updating a derivative or the actual source?
+3. Trace the variable name through ALL downstream calls.
+
+---
+
+### Rule 2: Correlated Variables Must Be Decorrelated Before Fusion
+
+**Bug Found (FUSE-CORR)**: Simple weighted sum of detector scores ignores inter-correlation:
+```python
+# BUG: Naive fusion double-counts correlated information
+fused = w["pca_spe_z"] * spe + w["pca_t2_z"] * t2  # ❌ If corr=0.8, PCA gets 2x influence
+
+# FIX: Discount weights based on pairwise correlation
+if corr > 0.5:
+    discount = min(0.3, (abs(corr) - 0.5) * 0.5)
+    w["pca_spe_z"] *= (1 - discount)  # ✅ Reduce double-counting
+    w["pca_t2_z"] *= (1 - discount)
+```
+
+**Rule**: When fusing multiple signals:
+1. Always check pairwise correlation BEFORE fusion
+2. Discount correlated pairs proportionally to their correlation
+3. Statistical basis: Effective df = n / (1 + avg_corr)
+
+---
+
+### Rule 3: Trend Models Must Handle Level Shifts
+
+**Bug Found (HEALTH-JUMP)**: Degradation model fit ENTIRE history, including maintenance resets:
+```python
+# BUG: Fitting on health history with maintenance jumps
+model.fit(health_series)  # ❌ Jumps from 40% → 95% corrupt the trend
+
+# FIX: Detect jumps and use only post-jump data
+def _detect_and_handle_health_jumps(health_series, jump_threshold=15.0):
+    diffs = health_series.diff()
+    last_jump = (diffs > jump_threshold).iloc[::-1].idxmax()  # Find last jump
+    return health_series[last_jump:]  # ✅ Use only post-maintenance data
+```
+
+**Rule**: Before fitting ANY trend model:
+1. Check for level shifts (sudden jumps > X%)
+2. Maintenance resets are POSITIVE jumps in health
+3. Use only post-jump data for trend fitting
+4. Log maintenance events for audit trail
+
+---
+
+### Rule 4: Model State Must Flow to ALL Consumers
+
+**Bug Found (STATE-SYNC)**: ForecastEngine didn't receive model_state from acm_main:
+```python
+# BUG: Model state computed but not passed to forecasting
+model_state = load_model_state_from_sql(...)
+forecast_engine = ForecastEngine(sql_client=...)  # ❌ model_state missing!
+
+# FIX: Pass model_state via constructor
+forecast_engine = ForecastEngine(
+    sql_client=...,
+    model_state=model_state  # ✅ Now ForecastEngine knows model maturity
+)
+```
+
+**Rule**: When adding new pipeline state:
+1. Trace EVERY consumer that needs it
+2. Pass via constructor, NOT global state
+3. Verify with grep: `grep -n "TheClass(" *.py` to find all instantiations
+
+---
+
+### Rule 5: Use Robust Statistics (Median/MAD, Not Mean/Std)
+
+**Constant (v11.1.3)**: MAD to σ conversion factor = 1.4826
+
+```python
+# BUG: Mean/std corrupted by outliers in baseline
+mu = np.nanmean(x)
+sd = np.nanstd(x)  # ❌ One outlier can corrupt threshold
+
+# FIX: Median/MAD is 50% breakdown point robust
+mu = np.nanmedian(x)
+mad = np.nanmedian(np.abs(x - mu))
+sd = mad * 1.4826  # ✅ Consistent with σ under normality, robust to outliers
+```
+
+**Rule**: In anomaly detection, ALWAYS use:
+1. **Median** instead of mean for central tendency
+2. **MAD × 1.4826** instead of std for spread
+3. **Percentiles** instead of mean±k*std for thresholds
+4. **Breakdown point**: Mean = 0%, Median = 50%
+
+---
+
+### Rule 6: Variable Initialization Must Precede All Access Paths
+
+**Bug Found (INIT-SCOPE)**: Variables accessed before initialization in some code paths:
+```python
+# BUG: regime_state_version used before any path initializes it
+if use_hdbscan:
+    # ... code that might skip initialization
+    regime_state_version = ...  # ❌ Not initialized if exception occurs
+
+# FIX: Initialize at scope start, before any conditional logic
+regime_state_version: int = 0  # ✅ Default at function scope
+train_start = pd.Timestamp.min
+train_end = pd.Timestamp.max
+
+try:
+    if use_hdbscan:
+        ...
+```
+
+**Rule**: For any variable used in finally/except/downstream:
+1. Initialize with safe default at function scope top
+2. Don't rely on conditional branches to initialize
+3. Use type hints to catch uninitialized usage
+
+---
+
+### Rule 7: Monotonicity Assumptions Must Be Validated
+
+**Principle**: Many degradation models assume monotonic decline. Real systems don't follow this.
+
+**Non-Monotonic Events**:
+1. **Maintenance resets** - Health jumps from 40% → 95%
+2. **Seasonal variations** - Health varies with load cycles
+3. **Intermittent faults** - Fault appears, disappears, reappears
+4. **Regime changes** - Different operating modes have different "healthy" baselines
+
+**Rule**: Before using any trend/degradation model:
+1. Plot the data - does it actually decline?
+2. Test for level shifts using changepoint detection
+3. Consider piecewise models for multi-regime data
+4. Document the monotonicity assumption and its validity
+
+---
+
+### Statistical Constants Reference
+
+| Constant | Value | Formula | Usage |
+|----------|-------|---------|-------|
+| MAD to σ | 1.4826 | 1/Φ⁻¹(0.75) | `std_robust = mad * 1.4826` |
+| Median breakdown | 50% | — | Median is robust to 50% contamination |
+| Mean breakdown | 0% | — | Single outlier corrupts mean |
+| Silhouette range | [-1, 1] | — | >0.5 = good clustering |
+| HDBSCAN min_cluster_size | 5% of n | — | `max(10, n // 20)` |
+| Correlation discount threshold | 0.5 | — | Pairs with |r| > 0.5 get weight reduction |
+| Health jump threshold | 15% | — | Positive jumps > 15% = maintenance reset |
+
+---
+
+### Code Review Checklist for Analytical Code
+
+Before approving any PR with statistical/ML code:
+
+- [ ] **Data Flow**: Is transformed data flowing to the correct consumers?
+- [ ] **Correlation**: Are fused/combined signals checked for correlation?
+- [ ] **Robustness**: Using median/MAD instead of mean/std?
+- [ ] **Initialization**: All variables initialized before conditional logic?
+- [ ] **State Passthrough**: Is pipeline state reaching ALL consumers?
+- [ ] **Monotonicity**: Does the model assume monotonic trends? Is that valid?
+- [ ] **Level Shifts**: Are jumps/resets handled appropriately?
+- [ ] **Edge Cases**: What happens with empty/NaN/constant data?
+
+---
+
+### Bug Taxonomy for ACM
+
+| Bug ID | Category | Root Cause | Prevention |
+|--------|----------|------------|------------|
+| SEASON-EP | Data Flow | Transform updates derivative, not source | Trace variable through pipeline |
+| FUSE-CORR | Statistical | Ignored inter-detector correlation | Pairwise correlation check |
+| HEALTH-JUMP | Temporal | No level shift detection | Changepoint detection |
+| STATE-SYNC | Integration | State not passed to consumer | Constructor injection |
+| INIT-SCOPE | Control Flow | Variable used before init | Scope-level defaults |
+| ROBUST-STAT | Statistical | Mean/std corrupted by outliers | Median/MAD always |
+
+---

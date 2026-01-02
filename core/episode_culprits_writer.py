@@ -296,10 +296,9 @@ def write_episode_culprits_enhanced(
             Console.warn("No culprit contributions computed, falling back to string parsing", component="CULPRITS")
             return write_episode_culprits(sql_client, run_id, episodes, equip_id)
         
-        # Build records for bulk insert
-        records = []
-        for _, row in culprits_df.iterrows():
-            records.append((
+        # Build records for bulk insert using vectorized to_dict (faster than iterrows)
+        records = [
+            (
                 run_id,
                 int(row["episode_id"]),
                 str(row["detector"]),
@@ -307,7 +306,9 @@ def write_episode_culprits_enhanced(
                 float(row["contribution_pct"]) if pd.notna(row["contribution_pct"]) else None,
                 int(row["rank"]),
                 equip_id
-            ))
+            )
+            for row in culprits_df.to_dict('records')
+        ]
         
         if not records:
             Console.info("No culprit records to write", component="CULPRITS")

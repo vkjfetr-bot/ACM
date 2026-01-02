@@ -45,8 +45,12 @@ class CUSUMDetector:
         self.sum_neg = 0.0
 
     def fit(self, x: np.ndarray) -> "CUSUMDetector":
-        self.mean = np.nanmean(x)
-        self.std = np.nanstd(x)
+        # v11.1.2: Use robust statistics (median/MAD) for CUSUM baseline
+        # This allows CUSUM to work correctly even when training data contains faults
+        self.mean = float(np.nanmedian(x))
+        mad = float(np.nanmedian(np.abs(x - self.mean)))
+        self.std = mad * 1.4826  # Scale MAD to be consistent with std for normal distribution
+        
         # DRIFT-AUDIT-01: Guard against non-finite mean (e.g., all-NaN input)
         if not np.isfinite(self.mean):
             self.mean = 0.0
@@ -79,10 +83,18 @@ def compute(score_df: pd.DataFrame, score_out: Dict[str, Any], cfg: Dict[str, An
     # CUSUM detector for online change-point detection
     drift_cfg = cfg.get("drift", {}) or {}
     cusum_cfg = (drift_cfg.get("cusum", {}) or {})
+    
+    # BUGFIX v11.1.5: Split calibration and scoring to avoid data leakage
+    # Fit CUSUM on first 50% of data, score on all data
+    # This prevents the detector from "seeing" future data during calibration
+    n = len(fused_score)
+    calibration_end = max(10, n // 2)  # At least 10 points for calibration
+    calibration_window = fused_score[:calibration_end]
+    
     detector = CUSUMDetector(
         threshold=float(cusum_cfg.get("threshold", 2.0)),
         drift=float(cusum_cfg.get("drift", 0.1)),
-    ).fit(fused_score)  # self-calibrates on the entire series for now
+    ).fit(calibration_window)  # Calibrate on first half only
 
     frame["cusum_raw"] = detector.score(fused_score)
 

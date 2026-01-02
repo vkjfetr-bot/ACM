@@ -235,14 +235,17 @@ class AssetSimilarity:
         excluded = {"Timestamp", "EquipID", "EntryDateTime", "RunID", "RowNumber"}
         sensor_cols = [c for c in data.columns if c not in excluded]
         
-        # Compute sensor statistics
-        sensor_means = {}
-        sensor_stds = {}
+        # Compute sensor statistics (vectorized, ROBUST)
+        sensor_data = data[sensor_cols]
+        # ROBUST: Use median instead of mean
+        medians_series = sensor_data.median()
+        # ROBUST: Use MAD instead of std (scaled to std-equivalent)
+        mads_series = (sensor_data - medians_series).abs().median() * 1.4826
         
-        for col in sensor_cols:
-            if col in data.columns and data[col].notna().any():
-                sensor_means[col] = float(data[col].mean())
-                sensor_stds[col] = float(data[col].std())
+        # Filter to columns with valid data
+        valid_mask = medians_series.notna()
+        sensor_means = medians_series[valid_mask].to_dict()  # Keep name for compatibility
+        sensor_stds = mads_series[valid_mask].to_dict()
         
         # Compute regime count
         regime_count = 0
