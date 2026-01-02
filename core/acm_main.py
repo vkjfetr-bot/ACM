@@ -543,70 +543,9 @@ def _build_features(
 # _fit_all_detectors -> detector_orchestrator.py
 # _get_detector_enable_flags -> detector_orchestrator.py
 
-
-def safe_step(
-    operation: Callable[[], Any],
-    step_name: str,
-    component: str,
-    equip: str,
-    run_id: Optional[str],
-    log_level: str = "warn",
-    default: Any = None,
-    critical: bool = False,
-    degradations: Optional[List[str]] = None,
-    **extra_context,
-) -> Tuple[Any, bool]:
-    """Execute an operation with standardized error handling.
-
-    Consolidates micro try/except blocks into a single pattern that:
-    - Logs failures consistently with equip/run_id context
-    - Tracks degradations for partial failure reporting
-    - Returns (result, success) tuple for caller decisions
-
-    Args:
-        operation: Zero-arg callable to execute
-        step_name: Human-readable step name for logging
-        component: Log component (e.g., "PERSIST", "ANALYTICS")
-        equip: Equipment name for log context
-        run_id: Run ID for log context
-        log_level: "warn", "debug", or "error"
-        default: Value to return on failure
-        critical: If True, re-raises exception after logging
-        degradations: Optional list to append step_name on failure
-        **extra_context: Additional key=value pairs for structured logging
-
-    Returns:
-        Tuple of (result, success_bool)
-        On failure: (default, False)
-        On success: (operation_result, True)
-    """
-    try:
-        result = operation()
-        return result, True
-    except Exception as e:
-        err_msg = f"{step_name} failed: {e}"
-        log_kwargs = dict(
-            component=component,
-            equip=equip,
-            run_id=run_id,
-            step=step_name,
-            error_type=type(e).__name__,
-            error=str(e)[:300],
-            **extra_context,
-        )
-
-        if log_level == "error":
-            Console.error(err_msg, **log_kwargs)
-        else:
-            Console.warn(err_msg, **log_kwargs)
-
-        if degradations is not None:
-            degradations.append(step_name)
-
-        if critical:
-            raise
-
-        return default, False
+# NOTE: safe_step() was removed in v11.2.0 (GhostBusters).
+# Critical phases now fail naturally without try/except wrappers.
+# See docs/GhostBusters_1.md for rationale.
 
 """
 -------------------------------------------------------------------------------------------
