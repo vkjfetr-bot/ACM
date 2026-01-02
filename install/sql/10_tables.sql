@@ -1606,3 +1606,97 @@ BEGIN
     );
 END
 GO
+-- ============================================================================
+-- v11.0.0 NEW TABLES
+-- ============================================================================
+
+-- ACM_ActiveModels - Single source of truth for active model versions
+IF OBJECT_ID('dbo.[ACM_ActiveModels]','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.[ACM_ActiveModels] (
+        [EquipID] INT NOT NULL PRIMARY KEY,
+        [ActiveRegimeVersion] INT NULL,
+        [RegimeMaturityState] NVARCHAR(20) DEFAULT 'INITIALIZING',
+        [RegimePromotedAt] DATETIME2(7) NULL,
+        [ActiveThresholdVersion] INT NULL,
+        [ThresholdPromotedAt] DATETIME2(7) NULL,
+        [ActiveForecastVersion] INT NULL,
+        [ForecastPromotedAt] DATETIME2(7) NULL,
+        [LastUpdatedAt] DATETIME2(7) DEFAULT GETDATE(),
+        [LastUpdatedBy] NVARCHAR(100) NULL
+    );
+END
+GO
+
+-- ACM_RegimeDefinitions - Persisted regime centroids and metadata
+IF OBJECT_ID('dbo.[ACM_RegimeDefinitions]','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.[ACM_RegimeDefinitions] (
+        [EquipID] INT NOT NULL,
+        [RegimeVersion] INT NOT NULL,
+        [RegimeID] INT NOT NULL,
+        [RegimeName] NVARCHAR(50) NOT NULL,
+        [CentroidJSON] NVARCHAR(MAX) NOT NULL,
+        [FeatureColumns] NVARCHAR(MAX) NOT NULL,
+        [DataPointCount] INT NOT NULL,
+        [SilhouetteScore] FLOAT NULL,
+        [CreatedAt] DATETIME2(7) DEFAULT GETDATE(),
+        [CreatedByRunID] UNIQUEIDENTIFIER NULL,
+        CONSTRAINT [PK_RegimeDefinitions] PRIMARY KEY CLUSTERED ([EquipID], [RegimeVersion], [RegimeID])
+    );
+END
+GO
+
+-- ACM_DataContractValidation - Contract validation history
+IF OBJECT_ID('dbo.[ACM_DataContractValidation]','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.[ACM_DataContractValidation] (
+        [ID] BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [RunID] UNIQUEIDENTIFIER NOT NULL,
+        [EquipID] INT NOT NULL,
+        [Passed] BIT NOT NULL,
+        [RowsValidated] INT NOT NULL,
+        [ColumnsValidated] INT NOT NULL,
+        [IssuesJSON] NVARCHAR(MAX) NULL,
+        [WarningsJSON] NVARCHAR(MAX) NULL,
+        [ContractSignature] NVARCHAR(20) NULL,
+        [ValidatedAt] DATETIME2(7) DEFAULT GETDATE()
+    );
+END
+GO
+
+-- ACM_SeasonalPatterns - Detected seasonal patterns
+IF OBJECT_ID('dbo.[ACM_SeasonalPatterns]','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.[ACM_SeasonalPatterns] (
+        [ID] BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [EquipID] INT NOT NULL,
+        [SensorName] NVARCHAR(100) NOT NULL,
+        [PatternType] NVARCHAR(20) NOT NULL,
+        [PeriodHours] FLOAT NOT NULL,
+        [Amplitude] FLOAT NOT NULL,
+        [PhaseShift] FLOAT NOT NULL,
+        [Confidence] FLOAT NOT NULL,
+        [DetectedAt] DATETIME2(7) DEFAULT GETDATE(),
+        [DetectedByRunID] UNIQUEIDENTIFIER NULL
+    );
+END
+GO
+
+-- ACM_AssetProfiles - Asset similarity profiles for cold-start transfer
+IF OBJECT_ID('dbo.[ACM_AssetProfiles]','U') IS NULL
+BEGIN
+    CREATE TABLE dbo.[ACM_AssetProfiles] (
+        [EquipID] INT NOT NULL PRIMARY KEY,
+        [EquipType] NVARCHAR(50) NOT NULL,
+        [SensorNamesJSON] NVARCHAR(MAX) NOT NULL,
+        [SensorMeansJSON] NVARCHAR(MAX) NOT NULL,
+        [SensorStdsJSON] NVARCHAR(MAX) NOT NULL,
+        [RegimeCount] INT NOT NULL,
+        [TypicalHealth] FLOAT NOT NULL,
+        [DataHours] FLOAT NOT NULL,
+        [LastUpdatedAt] DATETIME2(7) DEFAULT GETDATE(),
+        [LastUpdatedByRunID] UNIQUEIDENTIFIER NULL
+    );
+END
+GO

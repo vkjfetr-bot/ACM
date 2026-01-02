@@ -14,7 +14,7 @@ import re
 from typing import List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
-from core.observability import Console, Heartbeat
+from core.observability import Console
 from utils.detector_labels import get_detector_label, format_culprit_label
 
 
@@ -296,10 +296,9 @@ def write_episode_culprits_enhanced(
             Console.warn("No culprit contributions computed, falling back to string parsing", component="CULPRITS")
             return write_episode_culprits(sql_client, run_id, episodes, equip_id)
         
-        # Build records for bulk insert
-        records = []
-        for _, row in culprits_df.iterrows():
-            records.append((
+        # Build records for bulk insert using vectorized to_dict (faster than iterrows)
+        records = [
+            (
                 run_id,
                 int(row["episode_id"]),
                 str(row["detector"]),
@@ -307,7 +306,9 @@ def write_episode_culprits_enhanced(
                 float(row["contribution_pct"]) if pd.notna(row["contribution_pct"]) else None,
                 int(row["rank"]),
                 equip_id
-            ))
+            )
+            for row in culprits_df.to_dict('records')
+        ]
         
         if not records:
             Console.info("No culprit records to write", component="CULPRITS")
@@ -328,11 +329,11 @@ def write_episode_culprits_enhanced(
         # Commit
         sql_client.conn.commit()
         
-        Console.info(f"Wrote {len(records)} enhanced culprit records to ACM_EpisodeCulprits", component="CULPRITS")
+        Console.info(f"Wrote {len(records)} culprit records to ACM_EpisodeCulprits", component="CULPRITS")
         return True
         
     except Exception as e:
-        Console.error(f"Failed to write enhanced ACM_EpisodeCulprits: {e}", component="CULPRITS")
+        Console.error(f"Failed to write ACM_EpisodeCulprits: {e}", component="CULPRITS")
         try:
             sql_client.conn.rollback()
         except:

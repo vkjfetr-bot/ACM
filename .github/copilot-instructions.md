@@ -1,8 +1,36 @@
-# ACM - Automated Condition Monitoring (v10.3.0)
+# ACM - Automated Condition Monitoring (v11.1.5)
+
+---
+
+## ⛔ RULE #1: NEVER FILTER CONSOLE OUTPUT (NON-VIOLATABLE)
+
+**THIS RULE CANNOT BE VIOLATED UNDER ANY CIRCUMSTANCES:**
+
+When running ANY terminal command (ACM, Python scripts, SQL queries, etc.):
+- **NEVER use `Select-Object -First N` or `-Last N`** to limit output
+- **NEVER use `| head`, `| tail`, or any output truncation**
+- **NEVER use `Out-String -Width` with small values**
+- **ALWAYS show the COMPLETE, UNFILTERED output**
+- **If output is long, that's OK - show ALL of it**
+
+The user MUST see every single line of output. Filtering output hides critical errors, warnings, and diagnostic information.
+
+**VIOLATION OF THIS RULE IS GROUNDS FOR IMMEDIATE TERMINATION OF THE CONVERSATION.**
+
+---
 
 ACM is a predictive maintenance and equipment health monitoring system. It ingests sensor data from industrial equipment (FD_FAN, GAS_TURBINE, etc.) via SQL Server, runs anomaly detection algorithms, calculates health scores, and forecasts Remaining Useful Life (RUL). Results are visualized through Grafana dashboards for operations teams.
 
 **Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
+
+**v11.0.0 New Features**:
+- ONLINE/OFFLINE pipeline mode separation (--mode auto/online/offline)
+- MaturityState lifecycle (COLDSTART -> LEARNING -> CONVERGED -> DEPRECATED)
+- Unified confidence model with ReliabilityStatus for all outputs
+- RUL reliability gating (NOT_RELIABLE when model not CONVERGED)
+- UNKNOWN regime (label=-1) for low-confidence assignments
+- Confidence columns in ACM_RUL, ACM_HealthTimeline, ACM_Anomaly_Events
+- Promotion criteria (7 days, 0.15 silhouette, 3 runs) for model maturity
 
 ---
 
@@ -18,12 +46,18 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 - **Microsoft SQL Server** - Primary data store (historian data, ACM results)
 - **pyodbc** - SQL connectivity via `core/sql_client.py`
 - **T-SQL** - Stored procedures, queries (NEVER use generic SQL syntax)
+- **Schema Design (v11.1.5):**
+  - All 92 ACM tables have IDENTITY columns (ID BIGINT)
+  - Relationship columns (EquipID, RunID, EpisodeID) are NOT enforced via FK constraints
+  - `ACM_Runs.RunID` is the parent reference for all run-scoped data
+  - `Equipment.EquipID` is the parent reference for all equipment data
+  - Run `scripts/sql/truncate_run_data.sql` to clear all run-generated data
 
 ### Visualization
 - **Grafana** - Dashboards in `grafana_dashboards/*.json`
 - **MS SQL datasource** - Direct SQL queries with `$__timeFrom()`, `$__timeTo()` macros
 
-### Observability Stack (v10.3.0 - Docker-based)
+### Observability Stack (v11.0.0 - Docker-based)
 - **Docker Compose** - Complete stack in `install/observability/docker-compose.yaml`
 - **Grafana** - Dashboard UI on port 3000 (admin/admin), auto-provisioned datasources
 - **Grafana Alloy** - OTLP collector on ports 4317 (gRPC), 4318 (HTTP)
@@ -45,23 +79,22 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 ACM/
 +-- .github/              # Copilot instructions (this file)
 +-- configs/              # config_table.csv, sql_connection.ini
-+-- core/                 # Main codebase
-|   +-- acm_main.py       # Pipeline orchestrator (entry point)
-|   +-- output_manager.py # All CSV/PNG/SQL writes (ALLOWED_TABLES)
++-- core/                 # Main codebase (see Module Relationships below)
+|   +-- acm_main.py       # Pipeline orchestrator (6000+ lines)
+|   +-- output_manager.py # All SQL writes (respects ALLOWED_TABLES)
 |   +-- sql_client.py     # SQL Server connectivity
-|   +-- observability.py  # Unified observability (Console, Span, Metrics, log_timer)
-|   +-- omr.py            # Overall Model Residual detector
-|   +-- correlation.py    # Correlation-based detector
-|   +-- outliers.py       # Statistical outlier detection
+|   +-- observability.py  # Console, Span, Metrics classes
 |   +-- fast_features.py  # Feature engineering (pandas/Polars)
 |   +-- fuse.py           # Multi-detector fusion
 |   +-- regimes.py        # Operating regime detection
-|   +-- drift.py          # Concept drift monitoring
 |   +-- forecast_engine.py # RUL and health forecasting
-|   +-- model_persistence.py  # SQL-only model storage
-|   +-- episode_culprits_writer.py  # Episode diagnostics
+|   +-- model_persistence.py  # SQL ModelRegistry storage
+|   +-- model_lifecycle.py    # MaturityState, PromotionCriteria
+|   +-- confidence.py         # Unified confidence model
+|   +-- pipeline_types.py     # DataContract, PipelineMode
+|   +-- seasonality.py        # Diurnal/weekly pattern detection
 +-- scripts/              # Operational scripts
-|   +-- sql_batch_runner.py   # Batch processing
+|   +-- sql_batch_runner.py   # Production batch processing
 |   +-- sql/              # SQL utilities, schema export
 +-- docs/                 # All documentation (NEVER create docs in root)
 |   +-- archive/          # Historical/archived docs
@@ -72,6 +105,268 @@ ACM/
 +-- artifacts/            # gitignored - runtime outputs
 +-- data/                 # gitignored - sample CSVs for file-mode
 +-- logs/                 # gitignored - runtime logs
+```
+
+---
+
+## Script Relationships & Entry Points
+
+### Entry Points Hierarchy
+
+```
+1. scripts/sql_batch_runner.py (PRODUCTION - Primary entry point)
+   |
+   +-> core/acm_main.py::run_acm() (called via subprocess)
+       |
+       +-> All pipeline phases (see Pipeline Phase Sequence below)
+
+2. python -m core.acm_main --equip EQUIPMENT (TESTING - Single run)
+   |
+   +-> core/acm_main.py::run_acm() (direct call)
+       |
+       +-> All pipeline phases
+
+3. core/acm.py (ALTERNATIVE - Mode-aware router)
+   |
+   +-> Parses --mode (auto/online/offline)
+   +-> Detects mode based on cached models if auto
+   +-> Calls core/acm_main.py::run_acm() with mode
+```
+
+### Script Relationships
+
+```
+sql_batch_runner.py
+├── Purpose: Continuous batch processing, coldstart management, multi-equipment
+├── Calls: core/acm_main.py via subprocess (python -m core.acm_main)
+├── Manages: Coldstart state, batch windows, resume from last run
+├── SQL Tables: Reads ACM_ColdstartState, writes ACM_Runs
+└── Arguments:
+    --equip FD_FAN GAS_TURBINE  # Multiple equipment
+    --tick-minutes 1440          # Batch window size
+    --max-workers 2              # Parallel equipment processing
+    --start-from-beginning       # Full reset (coldstart)
+    --resume                     # Continue from last run
+    --max-batches 1              # Limit batches (testing)
+
+core/acm_main.py
+├── Purpose: Single pipeline run (train/score/forecast)
+├── Imports: All core modules (see Module Call Sequence)
+├── Manages: Model training, scoring, persistence
+└── Arguments:
+    --equip FD_FAN               # Single equipment
+    --start-time "2024-01-01T00:00:00"
+    --end-time "2024-01-31T23:59:59"
+    --mode offline|online|auto   # Pipeline mode
+
+scripts/sql/verify_acm_connection.py
+├── Purpose: Test SQL Server connectivity
+├── Calls: core/sql_client.SQLClient
+└── Output: Connection test result
+
+scripts/sql/export_comprehensive_schema.py
+├── Purpose: Export SQL schema to markdown
+├── Calls: SQL INFORMATION_SCHEMA
+└── Output: docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md
+
+scripts/sql/populate_acm_config.py
+├── Purpose: Sync config_table.csv to SQL ACM_Config
+├── Reads: configs/config_table.csv
+└── Writes: SQL ACM_Config table
+```
+
+---
+
+## Pipeline Phase Sequence (acm_main.py)
+
+The main pipeline executes in this order. Each phase corresponds to a timed section in the output:
+
+```
+PHASE 1: INITIALIZATION (startup)
+├── Parse CLI arguments (--equip, --start-time, --end-time, --mode)
+├── Load config from SQL (ConfigDict)
+├── Determine PipelineMode (ONLINE/OFFLINE/AUTO)
+├── Initialize OutputManager with SQL client
+└── Create RunID for this execution
+
+PHASE 2: DATA CONTRACT VALIDATION (data.contract)
+├── DataContract.validate(raw_data)
+├── Check sensor coverage (min 70% required)
+├── Write ACM_DataContractValidation
+└── Fail fast if validation fails
+
+PHASE 3: DATA LOADING (load_data)
+├── Load historian data from SQL (stored procedure)
+├── Apply coldstart split (60% train / 40% score)
+├── Validate timestamp column and cadence
+└── Output: train DataFrame, score DataFrame
+
+PHASE 4: BASELINE SEEDING (baseline.seed)
+├── Load baseline from ACM_BaselineBuffer
+├── Check for overlap with score data
+└── Apply baseline for normalization
+
+PHASE 5: SEASONALITY DETECTION (seasonality.detect)
+├── SeasonalityHandler.detect_patterns()
+├── Detect DAILY/WEEKLY cycles using FFT
+├── Apply seasonal adjustment if enabled (v11)
+└── Write ACM_SeasonalPatterns
+
+PHASE 6: DATA QUALITY GUARDRAILS (data.guardrails)
+├── Check train/score overlap
+├── Validate variance and coverage
+├── Write ACM_DataQuality
+└── Output quality metrics
+
+PHASE 7: FEATURE ENGINEERING (features.build + features.impute)
+├── fast_features.compute_all_features()
+├── Build rolling stats, lag features, z-scores
+├── Impute missing values from train medians
+├── Compute feature hash for caching
+└── Output: Feature matrices (train_features, score_features)
+
+PHASE 8: MODEL LOADING/TRAINING (train.detector_fit)
+├── Check for cached models in ModelRegistry
+├── If OFFLINE or models missing:
+│   ├── Fit AR1 detector (ar1_detector.py)
+│   ├── Fit PCA detector (pca via sklearn)
+│   ├── Fit IForest detector (sklearn.ensemble)
+│   ├── Fit GMM detector (sklearn.mixture)
+│   └── Fit OMR detector (omr.py)
+├── If ONLINE: Load all detectors from cache
+└── Output: Trained detector objects
+
+PHASE 10: DETECTOR SCORING (score.detector_score)
+├── Score all detectors on score data
+├── Compute z-scores per detector
+├── Output: scores_wide DataFrame with detector columns
+└── Columns: ar1_z, pca_spe_z, pca_t2_z, iforest_z, gmm_z, omr_z
+
+PHASE 11: REGIME LABELING (regimes.label)
+├── regimes.label() with regime context
+├── Auto-k selection (silhouette score)
+├── K-Means clustering on raw sensor values
+├── UNKNOWN regime (-1) for low-confidence assignments
+├── Write ACM_RegimeDefinitions
+└── Output: Regime labels per row
+
+PHASE 12: MODEL PERSISTENCE (models.persistence.save)
+├── Save all models to SQL ModelRegistry
+├── Increment model version
+└── Write metadata to ACM_ModelHistory
+
+PHASE 13: MODEL LIFECYCLE (v11)
+├── load_model_state_from_sql()
+├── Update model state with run metrics
+├── Check promotion criteria (LEARNING -> CONVERGED)
+├── Write ACM_ActiveModels
+└── Output: MaturityState (COLDSTART/LEARNING/CONVERGED/DEPRECATED)
+
+PHASE 14: CALIBRATION (calibrate)
+├── Score TRAIN data for calibration baseline
+├── Compute adaptive clip_z from P99
+├── Self-tune thresholds for target FP rate
+└── Write ACM_Thresholds
+
+PHASE 15: DETECTOR FUSION (fusion.auto_tune + fusion)
+├── Auto-tune detector weights (episode separability)
+├── Compute fused_z (weighted combination)
+├── CUSUM parameter tuning (k_sigma, h_sigma)
+├── Detect anomaly episodes
+└── Output: fused_alert, episode markers
+
+PHASE 16: ADAPTIVE THRESHOLDS (thresholds.adaptive)
+├── Calculate per-regime thresholds
+├── Global thresholds: alert=3.0, warn=1.5
+└── Write to SQL
+
+PHASE 17: TRANSIENT DETECTION (regimes.transient_detection)
+├── Detect state transitions (startup, trip, steady)
+├── Label transient periods
+└── Output: Transient state per row
+
+PHASE 18: DRIFT MONITORING (drift)
+├── Compute drift metrics (CUSUM trend)
+└── Classify: STABLE, DRIFTING, FAULT
+
+PHASE 19: OUTPUT GENERATION (persist.*)
+├── write_scores_wide() -> ACM_Scores_Wide
+├── write_anomaly_events() -> ACM_Anomaly_Events
+├── write_detector_correlation() -> ACM_DetectorCorrelation
+├── write_sensor_correlation() -> ACM_SensorCorrelations
+├── write_sensor_normalized_ts() -> ACM_SensorNormalized_TS
+└── write_seasonal_patterns() -> ACM_SeasonalPatterns
+
+PHASE 20: ANALYTICS GENERATION (outputs.comprehensive_analytics)
+├── _generate_health_timeline() -> ACM_HealthTimeline
+├── _generate_regime_timeline() -> ACM_RegimeTimeline
+├── _generate_sensor_defects() -> ACM_SensorDefects
+├── _generate_sensor_hotspots() -> ACM_SensorHotspots
+└── Compute confidence values (v11)
+
+PHASE 21: FORECASTING (outputs.forecasting)
+├── ForecastEngine.run_forecast()
+│   ├── Load health history from ACM_HealthTimeline
+│   ├── Fit degradation model (Holt-Winters)
+│   ├── Generate health forecast -> ACM_HealthForecast
+│   ├── Generate failure forecast -> ACM_FailureForecast
+│   ├── Compute RUL with Monte Carlo -> ACM_RUL
+│   ├── Compute confidence and reliability (v11)
+│   └── Generate sensor forecasts -> ACM_SensorForecast
+└── Write forecast tables
+
+PHASE 22: RUN FINALIZATION (sql.run_stats)
+├── Write PCA loadings -> ACM_PCA_Loadings
+├── Write run statistics -> ACM_Run_Stats
+├── Write run metadata -> ACM_Runs
+└── Commit all pending SQL writes
+```
+
+---
+
+## Module Dependency Graph
+
+```
+sql_batch_runner.py
+    └── subprocess calls: core/acm_main.py
+
+core/acm_main.py (MAIN ORCHESTRATOR)
+    ├── utils/config_dict.py (ConfigDict)
+    ├── core/sql_client.py (SQLClient)
+    ├── core/output_manager.py (OutputManager)
+    ├── core/observability.py (Console, Span, Metrics, T)
+    ├── core/pipeline_types.py (DataContract, PipelineMode)
+    ├── core/fast_features.py (compute_all_features)
+    ├── core/ar1_detector.py (AR1Detector)
+    ├── core/omr.py (OMRDetector)
+    ├── core/regimes.py (label, detect_transient_states)
+    ├── core/fuse.py (compute_fusion, detect_episodes)
+    ├── core/adaptive_thresholds.py (calculate_thresholds)
+    ├── core/drift.py (compute_drift_metrics)
+    ├── core/model_persistence.py (save_models, load_models)
+    ├── core/model_lifecycle.py (ModelState, promote_model)
+    ├── core/confidence.py (compute_*_confidence)
+    ├── core/seasonality.py (SeasonalityHandler)
+    ├── core/forecast_engine.py (ForecastEngine)
+    └── core/health_tracker.py (HealthTracker)
+
+core/output_manager.py
+    ├── core/sql_client.py (SQLClient)
+    ├── core/observability.py (Console)
+    └── core/confidence.py (compute_*_confidence)
+
+core/forecast_engine.py
+    ├── core/sql_client.py (SQLClient)
+    ├── core/degradation_model.py (fit_degradation)
+    ├── core/rul_estimator.py (estimate_rul)
+    ├── core/confidence.py (compute_rul_confidence)
+    ├── core/model_lifecycle.py (load_model_state_from_sql)
+    └── core/health_tracker.py (HealthTracker)
+
+core/regimes.py
+    ├── sklearn.cluster (KMeans)
+    ├── sklearn.metrics (silhouette_score)
+    └── core/observability.py (Console)
 ```
 
 ---
@@ -183,7 +478,52 @@ python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIV
 
 # Sync config to SQL
 python scripts/sql/populate_acm_config.py
+
+# Create/update dashboard views (13 views for Grafana)
+sqlcmd -S "localhost\INSTANCE" -d ACM -E -i "scripts/sql/create_acm_views.sql"
+
+# Data Retention Cleanup (run regularly to prevent DB bloat)
+sqlcmd -S "localhost\INSTANCE" -d ACM -E -Q "EXEC dbo.usp_ACM_DataRetention @DryRun = 1"  -- Preview
+sqlcmd -S "localhost\INSTANCE" -d ACM -E -Q "EXEC dbo.usp_ACM_DataRetention @DryRun = 0"  -- Execute
 ```
+
+### Dashboard Views (v11.1.5)
+ACM provides 13 pre-built SQL views optimized for Grafana dashboards:
+
+| View | Purpose | Grafana Panel Type |
+|------|---------|-------------------|
+| vw_ACM_CurrentHealth | Current health per equipment | Stat, Gauge |
+| vw_ACM_HealthHistory | Health time series | Time series |
+| vw_ACM_ActiveDefects | Active sensor defects | Table |
+| vw_ACM_TopSensorContributors | Top anomaly contributors | Bar chart |
+| vw_ACM_RecentEpisodes | Recent anomaly episodes | Table, Timeline |
+| vw_ACM_RULSummary | Remaining useful life | Stat, Table |
+| vw_ACM_DetectorScores | Detector scores time series | Time series |
+| vw_ACM_RegimeAnalysis | Operating regime analysis | Pie, Bar chart |
+| vw_ACM_DriftStatus | Drift detection status | Status indicators |
+| vw_ACM_RunHistory | ACM run history | Table |
+| vw_ACM_EquipmentOverview | Complete equipment summary | Table (main dashboard) |
+| vw_ACM_SensorForecasts | Sensor value forecasts | Time series |
+| vw_ACM_HealthForecasts | Health trajectory forecasts | Time series |
+
+**Usage**: `SELECT * FROM vw_ACM_EquipmentOverview WHERE EquipCode = 'FD_FAN'`
+
+### Data Retention Policy (v11.0.3+)
+ACM implements automatic data retention to prevent unbounded database growth:
+
+| Table | Retention | Rationale |
+|-------|-----------|-----------|
+| ACM_SensorNormalized_TS | 30 days | Only needed for sensor forecasting lookback |
+| ACM_SensorCorrelations | Latest run/equip | Only current correlations are useful |
+| ACM_Scores_Wide | 90 days | Core analytics time series |
+| ACM_HealthTimeline | 90 days | Health trending dashboards |
+| ACM_RegimeTimeline | 90 days | Regime analysis |
+| ACM_RunTimers | 30 days | Performance metrics |
+| ACM_RunLogs | 14 days | Debugging only |
+| ACM_PCA_Loadings | Last 5 runs/equip | Keep recent model history |
+| ACM_FeatureDropLog | 30 days | Feature engineering diagnostics |
+
+**Schedule**: Run `usp_ACM_DataRetention` daily via SQL Agent job or scheduled task.
 
 ### Observability Stack (Docker-based)
 ```powershell
@@ -331,6 +671,93 @@ pytest tests/test_observability.py
 **Removed Detectors**:
 - `mhal_z` (Mahalanobis): Removed - redundant with PCA-T2
 - `river_hst_z` (River HST): Removed - not implemented, streaming detector not needed
+
+---
+
+## Analytical Correctness Rules (v11.1.4+)
+
+**CRITICAL: These statistical principles must be followed in ALL ML/analytics code.**
+
+### Rule 1: Data Flow Traceability
+When transforming data, update the SOURCE variable, not just derivatives:
+```python
+# ❌ BUG: train_numeric updated but train (used downstream) unchanged
+train_numeric = adjusted_data
+
+# ✅ FIX: Update the actual source used by downstream functions
+for col in adjusted_cols:
+    train[col] = adjusted_data[col].values
+```
+
+### Rule 2: Robust Statistics (Median/MAD, not Mean/Std)
+```python
+# ❌ BUG: Mean/std corrupted by outliers
+mu, sd = np.mean(x), np.std(x)
+
+# ✅ FIX: Median/MAD robust to 50% contamination
+mu = np.nanmedian(x)
+sd = np.nanmedian(np.abs(x - mu)) * 1.4826  # MAD → σ conversion
+```
+**Constant**: MAD to σ = **1.4826** = 1/Φ⁻¹(0.75)
+
+### Rule 3: Correlation-Aware Fusion
+Before fusing multiple signals, check pairwise correlation:
+```python
+# ❌ BUG: Naive sum double-counts correlated info
+fused = w1 * signal1 + w2 * signal2  # If corr=0.8, combined gets 2x influence
+
+# ✅ FIX: Discount correlated pairs
+if abs(corr) > 0.5:
+    discount = min(0.3, (abs(corr) - 0.5) * 0.5)
+    w1 *= (1 - discount)
+    w2 *= (1 - discount)
+```
+
+### Rule 4: Level Shift Detection for Trend Models
+Maintenance resets create positive health jumps that corrupt trend fits:
+```python
+# ❌ BUG: Fitting entire history including maintenance resets
+model.fit(health_series)  # Jump from 40% → 95% corrupts trend
+
+# ✅ FIX: Use only post-maintenance data (jumps > 15%)
+diffs = health_series.diff()
+last_jump_idx = (diffs > 15.0).iloc[::-1].idxmax()
+model.fit(health_series[last_jump_idx:])
+```
+
+### Rule 5: State Passthrough via Constructor
+Pipeline state must flow to ALL consumers:
+```python
+# ❌ BUG: State computed but not passed
+model_state = load_model_state()
+engine = ForecastEngine(sql_client=client)  # model_state missing!
+
+# ✅ FIX: Pass via constructor
+engine = ForecastEngine(sql_client=client, model_state=model_state)
+```
+
+### Rule 6: Scope-Level Variable Initialization
+Initialize all variables BEFORE conditional logic:
+```python
+# ❌ BUG: Variable used before init if exception occurs
+if condition:
+    my_var = compute_value()  # May not execute
+result = my_var * 2  # UnboundLocalError
+
+# ✅ FIX: Initialize at function scope top
+my_var: float = 0.0  # Safe default
+if condition:
+    my_var = compute_value()
+result = my_var * 2  # Always safe
+```
+
+### Statistical Constants Reference
+| Constant | Value | Usage |
+|----------|-------|-------|
+| MAD to σ | 1.4826 | `std = mad * 1.4826` |
+| Correlation threshold | 0.5 | Discount pairs with \|r\| > 0.5 |
+| Health jump threshold | 15% | Positive jumps > 15% = maintenance |
+| HDBSCAN min_cluster | 5% of n | `max(10, n // 20)` |
 
 ---
 
@@ -545,6 +972,49 @@ queries:
 | RUL queries | `ORDER BY RUL_Hours ASC` | `ORDER BY CreatedAt DESC` |
 | Grafana tags | `value: ''` with `${__span.tags["key"]}` | `value: alias` with `${__span.tags.alias}` |
 | Grafana tags | `${__span.tags["acm.equipment"]}` | Map `key: acm.equipment, value: equipment` then use `${__span.tags.equipment}` |
+
+---
+
+## Output Manager & Table Integrity (v11.0.3+)
+
+### CRITICAL: Never Create Write Methods Without Calling Them
+
+When adding a new table or write method to `output_manager.py`:
+1. **ALWAYS wire it up** in `acm_main.py` at the appropriate pipeline phase
+2. **Test with a batch run** to verify rows are written
+3. **Document in audit** - see `docs/sql/ACM_TABLE_AUDIT_V11.md`
+
+### Table Write Location Reference
+
+| Table | Write Method | Pipeline Phase | Location in acm_main.py |
+|-------|--------------|----------------|-------------------------|
+| ACM_Scores_Wide | `write_scores()` | persist | ~5530 |
+| ACM_HealthTimeline | (via comprehensive_analytics) | outputs | ~5650+ |
+| ACM_RegimeTimeline | (via comprehensive_analytics) | outputs | ~5650+ |
+| ACM_CalibrationSummary | `write_calibration_summary()` | calibrate | ~4955 |
+| ACM_RegimeOccupancy | `write_regime_occupancy()` | regimes.label | ~4530 |
+| ACM_RegimeTransitions | `write_regime_transitions()` | regimes.label | ~4545 |
+| ACM_RegimePromotionLog | `write_regime_promotion_log()` | models.lifecycle | ~4780 |
+| ACM_DriftController | `write_drift_controller()` | drift | ~5365 |
+| ACM_ContributionTimeline | `write_contribution_timeline()` | contribution.timeline | ~5510 |
+
+### Audit Process for Empty Tables
+
+When a table in ALLOWED_TABLES has 0 rows:
+1. **Check if write method exists** in output_manager.py
+2. **Search for method calls** in acm_main.py (grep for method name)
+3. If NOT called → **FIX by adding call** at appropriate pipeline phase
+4. If called but 0 rows → Check if data conditions are met (e.g., no drift detected)
+
+### Timestamp Column Standards
+
+| Column Name | Purpose | When to Use |
+|-------------|---------|-------------|
+| `CreatedAt` | Record insertion time | All non-time-series tables |
+| `ModifiedAt` | Record update time | Tables supporting UPSERT |
+| `Timestamp` | Measurement time | Time-series data only |
+
+**Avoid**: ValidatedAt, CalculatedAt, DroppedAt, LoggedAt (rename to CreatedAt)
 
 ---
 

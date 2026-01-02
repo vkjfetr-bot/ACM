@@ -1,10 +1,30 @@
-# ACM V10 - System Handbook
+# ACM V11 - System Handbook
 
-This handbook is a complete, implementation-level walkthrough of ACM V10 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
+This handbook is a complete, implementation-level walkthrough of ACM V11 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
 
-**Current Version:** v10.3.0 - Consolidated Observability Stack
+**Current Version:** v11.0.0 - Production Release (Typed Contracts & Maturity Lifecycle)
 
-### Recent Deltas (Dec 2025)
+### V11.0.0 Production Release (Dec 27, 2025)
+All V11 features are now production-ready and verified:
+- **DataContract Validation**: 3 validation records in ACM_DataContractValidation
+- **Seasonality Detection**: 7 daily patterns detected in ACM_SeasonalPatterns
+- **Asset Profiles**: 1 profile in ACM_AssetProfiles for cold-start transfer
+- **Regime Definitions**: 4 versioned regimes in ACM_RegimeDefinitions
+- **Active Models**: 1 model pointer in ACM_ActiveModels
+- **Feature Drop Logging**: 9 low-variance features logged to ACM_FeatureDropLog
+- **Refactoring Complete**: 43 helper functions extracted from acm_main.py
+
+### V11 Architecture (Implemented)
+- **DataContract Validation**: Entry-point validation via `core/pipeline_types.py` ensures data quality before processing
+- **MaturityState Lifecycle**: Regime models have explicit states (INITIALIZING → LEARNING → CONVERGED → DEPRECATED)
+- **FeatureMatrix Schema**: Standardized feature representation with schema enforcement in `core/feature_matrix.py`
+- **DetectorProtocol ABC**: Unified detector interface in `core/detector_protocol.py` for all anomaly detectors
+- **Seasonality Detection**: Diurnal/weekly pattern detection and adjustment in `core/seasonality.py`
+- **Asset Similarity**: Cold-start transfer learning using similar equipment in `core/asset_similarity.py`
+- **SQL Performance**: Deprecated ACM_Scores_Long (~44K rows/batch savings), batched DELETEs
+- **Grafana Dashboards**: 9 production dashboards including comprehensive equipment health monitoring
+
+### v10 Deltas (Dec 2025)
 - **v10.3.0**: Consolidated observability stack with unified `core/observability.py`:
   - Removed legacy loggers: `utils/logger.py`, `utils/acm_logger.py`, `core/sql_logger.py`, `core/sql_logger_v2.py`
   - Unified Console API: `Console.info/warn/error/ok/status/header` for all logging
@@ -471,18 +491,15 @@ EquipID,Category,ParamPath,ParamValue,ValueType
 0,models,pca.n_components,5,int
 0,models,iforest.contamination,0.001,float
 0,fusion,weights,"{""pca_spe_z"":0.25,""pca_t2_z"":0.25,""iforest_z"":0.2,""gmm_z"":0.15,""omr_z"":0.15}",json
-0,output,dual_mode,false,bool
 ```
 
-**SQL mode row (config_table.csv)**
+**Equipment-specific overrides (config_table.csv)**
 ```
 EquipID,Category,ParamPath,ParamValue,ValueType
-1,data,storage_backend,sql,string
 1,data,timestamp_col,EntryDateTime,string
 1,data,sampling_secs,60,int
 1,models,pca.incremental,true,bool
 1,runtime,reuse_model_fit,false,bool
-1,output,dual_mode,true,bool
 ```
 
 **SQL connection (configs/sql_connection.ini)**

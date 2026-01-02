@@ -13,7 +13,7 @@ Called at the end of every ACM run (success or failure).
 from datetime import datetime, timezone
 from typing import Optional
 import pandas as pd
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 def write_run_metadata(
@@ -388,80 +388,4 @@ def write_retrain_metadata(
         return False
 
 
-def write_timer_stats(
-    sql_client,
-    run_id: str,
-    equip_id: int,
-    batch_num: int,
-    timings: dict
-) -> bool:
-    """
-    Write detailed timer stats to ACM_RunTimers table.
-    
-    Args:
-        sql_client: Active SQL client
-        run_id: Current RunID
-        equip_id: Equipment ID
-        batch_num: Current batch number
-        timings: Dictionary of {section_name: duration_seconds}
-        
-    Returns:
-        bool: True if successful
-    """
-    if not sql_client or not timings:
-        return False
-        
-    try:
-        # Create table if not exists (Lazy migration)
-        # In prod, this should be a migration script, but for dev speed we do it here
-        create_table_sql = """
-        IF OBJECT_ID('dbo.ACM_RunTimers', 'U') IS NULL
-        BEGIN
-            CREATE TABLE dbo.ACM_RunTimers (
-                TimerID INT IDENTITY(1,1) PRIMARY KEY,
-                RunID VARCHAR(50) NOT NULL,
-                EquipID INT NOT NULL,
-                BatchNum INT DEFAULT 0,
-                Section VARCHAR(100) NOT NULL,
-                DurationSeconds FLOAT NOT NULL,
-                CreatedAt DATETIME DEFAULT GETUTCDATE(),
-                INDEX IX_ACM_RunTimers_RunID (RunID),
-                INDEX IX_ACM_RunTimers_EquipID (EquipID)
-            )
-        END
-        """
-        
-        insert_sql = """
-        INSERT INTO dbo.ACM_RunTimers (RunID, EquipID, BatchNum, Section, DurationSeconds)
-        VALUES (?, ?, ?, ?, ?)
-        """
-        
-        # Flatten timings to list of tuples
-        # T.timings values might be floats or tuples, usually floats in this system
-        rows = []
-        for name, duration in timings.items():
-            # Handle if duration is complex object (unlikely in simple Timer)
-            try:
-                val = float(duration)
-                rows.append((run_id, int(equip_id), int(batch_num), str(name), val))
-            except (ValueError, TypeError):
-                continue
-                
-        if not rows:
-            return False
-            
-        with sql_client.cursor() as cur:
-            # check/create table first
-            cur.execute(create_table_sql)
-            
-            # fast insert
-            cur.fast_executemany = True
-            cur.executemany(insert_sql, rows)
-            
-        sql_client.conn.commit()
-        Console.debug(f"Wrote {len(rows)} timer records to ACM_RunTimers", component="PERF")
-        return True
-        
-    except Exception as e:
-        Console.warn(f"Failed to write timer stats: {e}", component="PERF", run_id=run_id, equip_id=equip_id, batch_num=batch_num, timer_count=len(timings), error_type=type(e).__name__, error=str(e)[:200])
-        return False
+

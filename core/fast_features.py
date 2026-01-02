@@ -9,12 +9,12 @@ existing pipeline. We'll extend it iteratively.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple, Literal, Dict
+from typing import Any, List, Optional, Tuple, Literal, Dict
 import inspect
 import numpy as np
 import pandas as pd
 from utils.timer import Timer
-from core.observability import Span
+from core.observability import Span, Console
 
 # Try polars
 try:
@@ -121,6 +121,76 @@ def _apply_fill(df, method: FillMethod = "median", fill_values: Optional[dict] =
         return pdf.interpolate(limit_direction="both")
     return pdf
 
+
+# ========================================================================
+# Data Utilities (moved from acm_main.py)
+# ========================================================================
+
+def ensure_local_index(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure the DataFrame index is a timezone-naive local DatetimeIndex.
+
+    Simplified policy: treat all timestamps as local time and drop any tz info.
+    This is the canonical function for normalizing timestamp indices throughout ACM.
+    
+    Args:
+        df: DataFrame with any index type
+        
+    Returns:
+        DataFrame with timezone-naive DatetimeIndex
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors="coerce")
+    else:
+        # If timezone-aware, strip tz information and keep local wall-clock times
+        try:
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+        except Exception:
+            # Fallback: coerce to naive datetimes
+            df.index = pd.to_datetime(df.index, errors="coerce")
+    return df
+
+
+def deduplicate_index(
+    df: pd.DataFrame,
+    name: str,
+    equip: str = "",
+) -> Tuple[pd.DataFrame, int]:
+    """
+    Remove duplicate timestamps from DataFrame index, keeping the last occurrence.
+    
+    Args:
+        df: DataFrame with potentially duplicate index
+        name: Dataset name for logging (e.g., "TRAIN", "SCORE")
+        equip: Equipment name for logging context
+    
+    Returns:
+        Tuple of (deduplicated DataFrame, count of duplicates removed)
+    
+    Raises:
+        RuntimeError: If duplicates remain after deduplication (should never happen)
+    """
+    dup_count = df.index.duplicated(keep='last').sum()
+    
+    if dup_count > 0:
+        Console.warn(
+            f"Removing {dup_count} duplicate timestamps from {name} data",
+            component="DATA",
+            equip=equip,
+            duplicates=dup_count,
+            dataset=name,
+        )
+        df = df[~df.index.duplicated(keep='last')].sort_index()
+    
+    # Assert uniqueness after deduplication
+    if not df.index.is_unique:
+        raise RuntimeError(
+            f"[DATA] {name} data still has duplicate timestamps after deduplication! "
+            f"Total: {len(df)}, Unique: {df.index.nunique()}"
+        )
+    
+    return df, dup_count
 
 
 def rolling_median(df: pd.DataFrame, window: int, cols: Optional[List[str]] = None, min_periods: int = 1,
@@ -942,16 +1012,23 @@ def compute_basic_features(pdf: pd.DataFrame, window: int = 3, cols: Optional[Li
     """
     with Span("features.compute", n_samples=len(pdf), n_features=pdf.shape[1] if len(pdf) > 0 else 0, window=window):
         # =================================================================================
-        # OPTIMIZATION: Delegate to the much faster Polars-native implementation if possible.
-        # The `compute_basic_features_pl` function is designed for this. By checking for
-        # Polars and a Polars DataFrame input, we can short-circuit the slow pandas path.
+        # OPTIMIZATION: Use Polars-native implementation for all inputs when available.
+        # Auto-convert pandas to Polars for significant performance gains (5-10x faster).
         # =================================================================================
-        if HAS_POLARS and isinstance(pdf, pl.DataFrame):
-            features_pl = compute_basic_features_pl(pdf, window=window, cols=cols)
-            # The original function is expected to return a pandas DataFrame, so we convert back.
-            return features_pl.to_pandas()
+        if HAS_POLARS:
+            # Convert pandas to Polars if needed
+            if isinstance(pdf, pd.DataFrame):
+                try:
+                    pdf_pl = pl.from_pandas(pdf)
+                    features_pl = compute_basic_features_pl(pdf_pl, window=window, cols=cols)
+                    return features_pl.to_pandas()
+                except Exception:
+                    pass  # Fall through to pandas implementation
+            elif isinstance(pdf, pl.DataFrame):
+                features_pl = compute_basic_features_pl(pdf, window=window, cols=cols)
+                return features_pl.to_pandas()
 
-        # --- Fallback to original pandas implementation if not using Polars ---
+        # --- Fallback to pandas implementation if Polars unavailable or failed ---
         pdf = _to_pandas(pdf)
         if cols is None:
             cols = list(pdf.columns)
@@ -1002,3 +1079,572 @@ def compute_basic_features(pdf: pd.DataFrame, window: int = 3, cols: Optional[Li
         out = out.replace([np.inf, -np.inf], np.nan)
         out = out.fillna(0.0)
         return out
+
+
+# =============================================================================
+# P2.11: CONFIDENCE-GATED NORMALIZATION
+# =============================================================================
+#
+# This module provides regime-conditioned normalization with confidence gating.
+# When regime assignment confidence is below threshold, falls back to global
+# normalization to avoid unstable regime-specific statistics.
+#
+# Usage:
+#   normalizer = ConfidenceGatedNormalizer(confidence_threshold=0.7)
+#   normalizer.fit_global(train_df, sensor_cols)
+#   normalizer.fit_regime(regime_label=0, train_subset_df, sensor_cols)
+#   z_scores = normalizer.normalize(score_df, regime_labels, confidences)
+# =============================================================================
+
+from dataclasses import dataclass, field
+from typing import Dict, Any
+
+
+@dataclass
+class RegimeNormStats:
+    """Normalization statistics for a single regime."""
+    regime_label: int
+    mean: pd.Series
+    std: pd.Series
+    p05: pd.Series
+    p95: pd.Series
+    sample_count: int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "regime_label": self.regime_label,
+            "mean": self.mean.to_dict(),
+            "std": self.std.to_dict(),
+            "p05": self.p05.to_dict(),
+            "p95": self.p95.to_dict(),
+            "sample_count": self.sample_count
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RegimeNormStats":
+        """Create from dictionary."""
+        return cls(
+            regime_label=data["regime_label"],
+            mean=pd.Series(data["mean"]),
+            std=pd.Series(data["std"]),
+            p05=pd.Series(data["p05"]),
+            p95=pd.Series(data["p95"]),
+            sample_count=data["sample_count"]
+        )
+
+
+@dataclass
+class NormalizationResult:
+    """Result of confidence-gated normalization."""
+    z_scores: pd.DataFrame
+    method_used: pd.Series  # 'global' or 'regime_{label}'
+    confidence_values: pd.Series
+    regime_labels: pd.Series
+
+
+class ConfidenceGatedNormalizer:
+    """
+    Confidence-gated normalization with regime conditioning.
+    
+    When regime assignment confidence is below threshold, falls back to global
+    normalization. Otherwise uses regime-specific statistics.
+    
+    Parameters
+    ----------
+    confidence_threshold : float
+        Minimum confidence required to use regime-specific normalization.
+        Default is 0.7 (70% confidence).
+    min_regime_samples : int
+        Minimum samples required for a regime to have valid statistics.
+        Default is 50.
+    epsilon : float
+        Small constant to prevent division by zero.
+        Default is 1e-10.
+    
+    Example
+    -------
+    >>> normalizer = ConfidenceGatedNormalizer(confidence_threshold=0.7)
+    >>> normalizer.fit_global(train_df, sensor_cols=['temp', 'pressure'])
+    >>> normalizer.fit_regime(0, train_regime_0, sensor_cols)
+    >>> normalizer.fit_regime(1, train_regime_1, sensor_cols)
+    >>> result = normalizer.normalize(score_df, regime_labels, confidences)
+    >>> z_scores = result.z_scores  # Confidence-gated z-scores
+    """
+    
+    GLOBAL_LABEL = -1  # Special label for global statistics
+    
+    def __init__(
+        self,
+        confidence_threshold: float = 0.7,
+        min_regime_samples: int = 50,
+        epsilon: float = 1e-10
+    ):
+        self.confidence_threshold = confidence_threshold
+        self.min_regime_samples = min_regime_samples
+        self.epsilon = epsilon
+        
+        # Statistics storage
+        self._global_stats: Optional[RegimeNormStats] = None
+        self._regime_stats: Dict[int, RegimeNormStats] = {}
+        self._sensor_cols: List[str] = []
+        self._is_fitted = False
+    
+    def fit_global(self, df: pd.DataFrame, sensor_cols: List[str]) -> "ConfidenceGatedNormalizer":
+        """
+        Fit global normalization statistics from training data.
+        
+        This must be called before fit_regime() and normalize().
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Training data with sensor columns.
+        sensor_cols : list of str
+            Column names to compute statistics for.
+        
+        Returns
+        -------
+        self
+            For method chaining.
+        """
+        if df.empty:
+            raise ValueError("Cannot fit on empty DataFrame")
+        
+        valid_cols = [c for c in sensor_cols if c in df.columns]
+        if not valid_cols:
+            raise ValueError(f"No valid sensor columns found. Expected: {sensor_cols}")
+        
+        self._sensor_cols = valid_cols
+        numeric_df = df[valid_cols].apply(pd.to_numeric, errors='coerce')
+        
+        # ROBUST STATISTICS: Use median/MAD instead of mean/std
+        # This makes normalization robust to training data containing faults
+        # MAD * 1.4826 approximates std for normal distributions
+        median = numeric_df.median()
+        mad = (numeric_df - median).abs().median()
+        # Convert MAD to std-equivalent scale (for normal distribution)
+        robust_std = (mad * 1.4826).replace(0.0, np.nan).fillna(self.epsilon)
+        p05 = numeric_df.quantile(0.05)
+        p95 = numeric_df.quantile(0.95)
+        
+        self._global_stats = RegimeNormStats(
+            regime_label=self.GLOBAL_LABEL,
+            mean=median,  # Use median as robust center
+            std=robust_std,  # Use MAD-based std
+            p05=p05,
+            p95=p95,
+            sample_count=len(df)
+        )
+        self._is_fitted = True
+        
+        return self
+    
+    def fit_regime(
+        self,
+        regime_label: int,
+        df: pd.DataFrame,
+        sensor_cols: Optional[List[str]] = None
+    ) -> "ConfidenceGatedNormalizer":
+        """
+        Fit normalization statistics for a specific regime.
+        
+        fit_global() must be called first.
+        
+        Parameters
+        ----------
+        regime_label : int
+            Regime cluster label (0, 1, 2, ...).
+        df : pd.DataFrame
+            Training data subset for this regime.
+        sensor_cols : list of str, optional
+            Column names. If None, uses columns from fit_global().
+        
+        Returns
+        -------
+        self
+            For method chaining.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Must call fit_global() before fit_regime()")
+        
+        if regime_label < 0:
+            raise ValueError(f"Regime label must be non-negative, got {regime_label}")
+        
+        cols = sensor_cols or self._sensor_cols
+        valid_cols = [c for c in cols if c in df.columns]
+        
+        if len(df) < self.min_regime_samples:
+            # Insufficient samples - skip this regime, will fall back to global
+            return self
+        
+        numeric_df = df[valid_cols].apply(pd.to_numeric, errors='coerce')
+        
+        # ROBUST STATISTICS: Use median/MAD instead of mean/std
+        # This makes normalization robust to training data containing faults
+        median = numeric_df.median()
+        mad = (numeric_df - median).abs().median()
+        robust_std = (mad * 1.4826).replace(0.0, np.nan).fillna(self.epsilon)
+        p05 = numeric_df.quantile(0.05)
+        p95 = numeric_df.quantile(0.95)
+        
+        self._regime_stats[regime_label] = RegimeNormStats(
+            regime_label=regime_label,
+            mean=median,  # Use median as robust center
+            std=robust_std,  # Use MAD-based std
+            p05=p05,
+            p95=p95,
+            sample_count=len(df)
+        )
+        
+        return self
+    
+    def has_regime_stats(self, regime_label: int) -> bool:
+        """Check if regime-specific statistics are available."""
+        return regime_label in self._regime_stats
+    
+    def normalize(
+        self,
+        df: pd.DataFrame,
+        regime_labels: pd.Series,
+        confidences: pd.Series
+    ) -> NormalizationResult:
+        """
+        Normalize sensor values with confidence-gated regime conditioning.
+        
+        For each row:
+        - If confidence < threshold OR regime stats unavailable: use global stats
+        - Otherwise: use regime-specific stats
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Data to normalize with sensor columns.
+        regime_labels : pd.Series
+            Regime assignment for each row (aligned with df index).
+        confidences : pd.Series
+            Assignment confidence for each row (0.0 to 1.0).
+        
+        Returns
+        -------
+        NormalizationResult
+            Contains z_scores DataFrame, method_used Series, and input metadata.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Normalizer not fitted. Call fit_global() first.")
+        
+        if df.empty:
+            return NormalizationResult(
+                z_scores=pd.DataFrame(columns=self._sensor_cols),
+                method_used=pd.Series(dtype=str),
+                confidence_values=pd.Series(dtype=float),
+                regime_labels=pd.Series(dtype=int)
+            )
+        
+        # Ensure alignment
+        regime_labels = regime_labels.reindex(df.index).fillna(-1).astype(int)
+        confidences = confidences.reindex(df.index).fillna(0.0)
+        
+        valid_cols = [c for c in self._sensor_cols if c in df.columns]
+        numeric_df = df[valid_cols].apply(pd.to_numeric, errors='coerce')
+        
+        # Initialize output
+        z_scores = pd.DataFrame(index=df.index, columns=valid_cols, dtype=float)
+        method_used = pd.Series(index=df.index, dtype=str)
+        
+        # Determine which rows use regime vs global normalization
+        use_regime_mask = (
+            (confidences >= self.confidence_threshold) &
+            (regime_labels >= 0) &
+            (regime_labels.isin(self._regime_stats.keys()))
+        )
+        
+        # Global normalization for low-confidence or unknown regime rows
+        global_mask = ~use_regime_mask
+        if global_mask.any():
+            global_stats = self._global_stats
+            for col in valid_cols:
+                mean_val = global_stats.mean.get(col, 0.0)
+                std_val = global_stats.std.get(col, self.epsilon)
+                z_scores.loc[global_mask, col] = (
+                    (numeric_df.loc[global_mask, col] - mean_val) / std_val
+                )
+            method_used.loc[global_mask] = 'global'
+        
+        # Regime-specific normalization for high-confidence rows
+        for regime_label in regime_labels[use_regime_mask].unique():
+            if regime_label not in self._regime_stats:
+                continue
+            
+            regime_mask = use_regime_mask & (regime_labels == regime_label)
+            if not regime_mask.any():
+                continue
+            
+            regime_stats = self._regime_stats[regime_label]
+            for col in valid_cols:
+                mean_val = regime_stats.mean.get(col, 0.0)
+                std_val = regime_stats.std.get(col, self.epsilon)
+                z_scores.loc[regime_mask, col] = (
+                    (numeric_df.loc[regime_mask, col] - mean_val) / std_val
+                )
+            method_used.loc[regime_mask] = f'regime_{regime_label}'
+        
+        # Clean up infinities and NaNs
+        z_scores = z_scores.replace([np.inf, -np.inf], np.nan)
+        
+        return NormalizationResult(
+            z_scores=z_scores,
+            method_used=method_used,
+            confidence_values=confidences,
+            regime_labels=regime_labels
+        )
+    
+    def get_stats_summary(self) -> Dict[str, Any]:
+        """Get summary of fitted statistics for logging/debugging."""
+        summary = {
+            "is_fitted": self._is_fitted,
+            "confidence_threshold": self.confidence_threshold,
+            "min_regime_samples": self.min_regime_samples,
+            "sensor_cols": self._sensor_cols,
+            "global_samples": self._global_stats.sample_count if self._global_stats else 0,
+            "regime_count": len(self._regime_stats),
+            "regime_samples": {
+                k: v.sample_count for k, v in self._regime_stats.items()
+            }
+        }
+        return summary
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize normalizer for persistence."""
+        return {
+            "confidence_threshold": self.confidence_threshold,
+            "min_regime_samples": self.min_regime_samples,
+            "epsilon": self.epsilon,
+            "sensor_cols": self._sensor_cols,
+            "global_stats": self._global_stats.to_dict() if self._global_stats else None,
+            "regime_stats": {k: v.to_dict() for k, v in self._regime_stats.items()},
+            "is_fitted": self._is_fitted
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ConfidenceGatedNormalizer":
+        """Deserialize normalizer from persistence."""
+        normalizer = cls(
+            confidence_threshold=data["confidence_threshold"],
+            min_regime_samples=data["min_regime_samples"],
+            epsilon=data.get("epsilon", 1e-10)
+        )
+        normalizer._sensor_cols = data["sensor_cols"]
+        normalizer._is_fitted = data["is_fitted"]
+        
+        if data["global_stats"]:
+            normalizer._global_stats = RegimeNormStats.from_dict(data["global_stats"])
+        
+        normalizer._regime_stats = {
+            int(k): RegimeNormStats.from_dict(v)
+            for k, v in data["regime_stats"].items()
+        }
+        
+        return normalizer
+
+
+def normalize_with_confidence_gating(
+    df: pd.DataFrame,
+    sensor_cols: List[str],
+    regime_labels: pd.Series,
+    confidences: pd.Series,
+    global_mean: pd.Series,
+    global_std: pd.Series,
+    regime_means: Optional[Dict[int, pd.Series]] = None,
+    regime_stds: Optional[Dict[int, pd.Series]] = None,
+    confidence_threshold: float = 0.7
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    Convenience function for one-shot confidence-gated normalization.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Data to normalize.
+    sensor_cols : list of str
+        Columns to normalize.
+    regime_labels : pd.Series
+        Regime assignment per row.
+    confidences : pd.Series
+        Assignment confidence per row.
+    global_mean : pd.Series
+        Global mean for each sensor.
+    global_std : pd.Series
+        Global std for each sensor.
+    regime_means : dict, optional
+        Regime-specific means: {regime_label: pd.Series}.
+    regime_stds : dict, optional
+        Regime-specific stds: {regime_label: pd.Series}.
+    confidence_threshold : float
+        Minimum confidence for regime-specific normalization.
+    
+    Returns
+    -------
+    z_scores : pd.DataFrame
+        Normalized z-scores.
+    method_used : pd.Series
+        'global' or 'regime_{label}' for each row.
+    
+    Example
+    -------
+    >>> z_scores, methods = normalize_with_confidence_gating(
+    ...     score_df, sensor_cols, regime_labels, confidences,
+    ...     global_mean, global_std,
+    ...     regime_means={0: r0_mean, 1: r1_mean},
+    ...     regime_stds={0: r0_std, 1: r1_std}
+    ... )
+    """
+    epsilon = 1e-10
+    regime_means = regime_means or {}
+    regime_stds = regime_stds or {}
+    
+    if df.empty:
+        return pd.DataFrame(columns=sensor_cols), pd.Series(dtype=str)
+    
+    # Ensure alignment
+    regime_labels = regime_labels.reindex(df.index).fillna(-1).astype(int)
+    confidences = confidences.reindex(df.index).fillna(0.0)
+    
+    valid_cols = [c for c in sensor_cols if c in df.columns]
+    numeric_df = df[valid_cols].apply(pd.to_numeric, errors='coerce')
+    
+    # Initialize output
+    z_scores = pd.DataFrame(index=df.index, columns=valid_cols, dtype=float)
+    method_used = pd.Series(index=df.index, dtype=str)
+    
+    # Determine which rows use regime vs global normalization
+    use_regime_mask = (
+        (confidences >= confidence_threshold) &
+        (regime_labels >= 0) &
+        (regime_labels.isin(regime_means.keys()))
+    )
+    
+    # Global normalization
+    global_mask = ~use_regime_mask
+    if global_mask.any():
+        for col in valid_cols:
+            mean_val = global_mean.get(col, 0.0)
+            std_val = max(global_std.get(col, epsilon), epsilon)
+            z_scores.loc[global_mask, col] = (
+                (numeric_df.loc[global_mask, col] - mean_val) / std_val
+            )
+        method_used.loc[global_mask] = 'global'
+    
+    # Regime-specific normalization
+    for regime_label in regime_labels[use_regime_mask].unique():
+        if regime_label not in regime_means:
+            continue
+        
+        regime_mask = use_regime_mask & (regime_labels == regime_label)
+        if not regime_mask.any():
+            continue
+        
+        r_mean = regime_means[regime_label]
+        r_std = regime_stds.get(regime_label, global_std)
+        
+        for col in valid_cols:
+            mean_val = r_mean.get(col, 0.0)
+            std_val = max(r_std.get(col, epsilon), epsilon)
+            z_scores.loc[regime_mask, col] = (
+                (numeric_df.loc[regime_mask, col] - mean_val) / std_val
+            )
+        method_used.loc[regime_mask] = f'regime_{regime_label}'
+    
+    # Clean up
+    z_scores = z_scores.replace([np.inf, -np.inf], np.nan)
+    
+    return z_scores, method_used
+
+
+# =============================================================================
+# P4.1: FEATURE IMPUTATION (moved from acm_main.py)
+# =============================================================================
+
+def impute_features(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    low_var_threshold: float,
+    output_manager: Optional[Any] = None,
+    run_id: Optional[str] = None,
+    equip_id: int = 0,
+    equip: str = "",
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
+    """
+    Impute missing values and drop unusable columns from feature DataFrames.
+    
+    Handles:
+    - Replace inf with NaN
+    - Fill NaN with train column medians
+    - Align score columns to train columns
+    - Drop all-NaN and low-variance columns
+    - Log dropped features via output_manager
+    
+    Args:
+        train: Training features DataFrame
+        score: Scoring features DataFrame
+        low_var_threshold: Minimum std deviation to keep a column
+        output_manager: OutputManager instance for logging dropped features
+        run_id: Run identifier
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        
+    Returns:
+        Tuple of (train_imputed, score_imputed, dropped_cols)
+    """
+    # Replace inf with NaN
+    train = train.copy()
+    score = score.copy()
+    train.replace([np.inf, -np.inf], np.nan, inplace=True)
+    score.replace([np.inf, -np.inf], np.nan, inplace=True)
+    
+    col_meds = train.median(numeric_only=True)
+    train.fillna(col_meds, inplace=True)
+    
+    # Align score to train columns
+    score = score.reindex(columns=train.columns)
+    score.fillna(col_meds, inplace=True)
+    
+    # Fill remaining NaNs with score medians
+    nan_cols = score.columns[score.isna().any()].tolist()
+    for c in nan_cols:
+        if score[c].dtype.kind in "if":
+            score[c].fillna(score[c].median(), inplace=True)
+    
+    # Find columns to drop: all-NaN or low-variance
+    all_nan_cols = [c for c in train.columns if pd.isna(col_meds.get(c))]
+    feat_stds = train.std(numeric_only=True)
+    low_var_cols = list(feat_stds[feat_stds < low_var_threshold].index)
+    cols_to_drop = list(set(all_nan_cols + low_var_cols))
+    
+    if cols_to_drop:
+        Console.warn(
+            f"Dropping {len(cols_to_drop)} columns ({len(all_nan_cols)} NaN, {len(low_var_cols)} low-var)",
+            component="FEAT", equip=equip, dropped=len(cols_to_drop)
+        )
+        train = train.drop(columns=cols_to_drop)
+        score = score.drop(columns=cols_to_drop)
+        
+        # Log to SQL via output_manager
+        if output_manager:
+            drop_records = []
+            for col in cols_to_drop:
+                reason = "all_NaN" if col in all_nan_cols else "low_variance"
+                std_val = feat_stds.get(col) if col in feat_stds.index else None
+                drop_value = float(std_val) if std_val is not None and not pd.isna(std_val) else None
+                drop_records.append({
+                    "FeatureName": str(col),
+                    "DropReason": reason,
+                    "DropValue": drop_value,
+                    "Threshold": None
+                })
+            output_manager.write_feature_drop_log(drop_records)
+    
+    if train.shape[1] == 0:
+        raise RuntimeError("[FEAT] No usable feature columns after imputation")
+    
+    return train, score, cols_to_drop

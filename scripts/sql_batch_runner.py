@@ -62,7 +62,8 @@ class SQLBatchRunner:
                  tick_minutes: int = 240,
                  max_coldstart_attempts: int = 10,
                  max_batches: Optional[int] = None,
-                 start_from_beginning: bool = False):
+                 start_from_beginning: bool = False,
+                 mode: Optional[str] = None):
         """Initialize batch runner.
         
         Args:
@@ -70,6 +71,7 @@ class SQLBatchRunner:
             artifact_root: Root directory for artifacts
             tick_minutes: Window size in minutes (default: 30)
             max_coldstart_attempts: Max attempts to complete coldstart (default: 10)
+            mode: Pipeline mode: 'online', 'offline', or None for auto-detect
         """
         self.sql_conn_string = sql_conn_string
         self.artifact_root = artifact_root
@@ -78,6 +80,7 @@ class SQLBatchRunner:
         self.progress_file = artifact_root / ".sql_batch_progress.json"
         self.max_batches = max_batches
         self.start_from_beginning = start_from_beginning
+        self.mode = mode  # V11: Pipeline mode (online/offline/None)
 
     def _log_historian_overview(self, equip_name: str) -> bool:
         """Preflight: Log historian table coverage and return True when data exists.
@@ -623,8 +626,8 @@ class SQLBatchRunner:
                 Console.info(f"{equip_name}: Detected existing models in ModelRegistry (count={model_count})", component="COLDSTART", equipment=equip_name, model_count=model_count)
                 return True, 0, 0
             
-            # Determine required rows: prefer ColdstartState.RequiredRows, else config runtime.coldstart_min_rows (default 50)
-            min_required = self._get_config_int(equip_id, 'runtime.coldstart_min_rows', 50)
+            # Determine required rows: prefer ColdstartState.RequiredRows, else config data.min_train_samples (default 500)
+            min_required = self._get_config_int(equip_id, 'data.min_train_samples', 500)
             if row:
                 status, accum_rows, req_rows = row
                 required = req_rows or min_required
@@ -640,9 +643,9 @@ class SQLBatchRunner:
             
         except Exception as e:
             Console.warn(f"Could not check coldstart status: {e}", component="COLDSTART", equipment=equip_name, error=str(e), error_type=type(e).__name__)
-            return False, 0, 50
+            return False, 0, 200  # Default minimum when SQL check fails
     
-    def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False, batch_num: int = 0) -> tuple[bool, str]:
+    def _run_acm_batch(self, equip_name: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, *, dry_run: bool = False, batch_num: int = 0, is_post_coldstart: bool = False) -> tuple[bool, str]:
         """Run single ACM batch for equipment.
         
         Args:
@@ -651,6 +654,7 @@ class SQLBatchRunner:
             end_time: Optional end time override
             dry_run: If True, print command without running
             batch_num: Current batch number (for frequency control)
+            is_post_coldstart: If True, coldstart already completed (don't show coldstart messages)
             
         Returns:
             Tuple of (success, outcome) where outcome is 'OK', 'NOOP', or 'FAIL'
@@ -665,19 +669,18 @@ class SQLBatchRunner:
         if end_time:
             cmd.extend(["--end-time", end_time.isoformat()])
         
+        # V11: Pass pipeline mode if specified
+        if self.mode is not None:
+            cmd.extend(["--mode", self.mode])
+        
         printable = " ".join(cmd)
         if dry_run:
             Console.info(f"{printable}", mode="dry-run", component="DRY")
             return True, "OK"
         
         Console.info(f"{printable}", component="RUN", command=printable)
-        # Force SQL mode in acm_main so that SQL historian + stored procedures
-        # are used instead of legacy CSV/file mode, regardless of older config.
-        # Also set ACM_BATCH_MODE to enable continuous learning mode detection
-        # Pass batch number for threshold update frequency control
+        # Environment variables for ACM subprocess
         env = dict(os.environ)
-        env["ACM_FORCE_SQL_MODE"] = "1"
-        env["ACM_BATCH_MODE"] = "1"
         
         # Propagate trace context to subprocess for end-to-end trace correlation
         # This allows child process logs to be linked to the parent batch runner trace
@@ -690,15 +693,13 @@ class SQLBatchRunner:
         # Propagate start-from-beginning intent to forecasting layer (used to force full-history model init)
         # Note: batch_num is 0-indexed internally; display as 1-indexed for users
         display_batch = batch_num + 1
-        if self.start_from_beginning and batch_num == 0:
+        # Only show coldstart message if this is truly a coldstart batch (not after coldstart already complete)
+        is_coldstart_batch = self.start_from_beginning and batch_num == 0 and not is_post_coldstart
+        if is_coldstart_batch:
             env["ACM_FORECAST_FULL_HISTORY_MODE"] = "1"
-            Console.info(f"{equip_name}: First batch (start-from-beginning) - will perform coldstart split and train fresh models", component="BATCH", equipment=equip_name, batch_num=display_batch)
+            Console.info(f"{equip_name}: Coldstart batch - training fresh models", component="BATCH", equipment=equip_name, batch_num=display_batch)
         else:
-            Console.info(f"{equip_name}: Batch {display_batch} - will load existing models and evolve incrementally", component="BATCH", equipment=equip_name, batch_num=display_batch)
-        env["ACM_BATCH_NUM"] = str(batch_num)
-        # Pass total batches info (if known) so acm_main can display "batch X/Y"
-        if hasattr(self, '_current_total_batches'):
-            env["ACM_BATCH_TOTAL"] = str(self._current_total_batches)
+            Console.info(f"{equip_name}: Batch {display_batch} - scoring with existing models", component="BATCH", equipment=equip_name, batch_num=display_batch)
 
         # Track batch start time for metrics
         batch_start_time = time.time()
@@ -920,7 +921,8 @@ class SQLBatchRunner:
             
             # Run ACM (it will automatically use the current batch window from SQL)
             # Pass batches_completed (total count including previous runs) for frequency control
-            success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run, batch_num=batches_completed)
+            # is_post_coldstart=True since _process_batches is called after coldstart completes
+            success, outcome = self._run_acm_batch(equip_name, start_time=current_ts, end_time=next_ts, dry_run=dry_run, batch_num=batches_completed, is_post_coldstart=True)
             
             if not success:
                 Console.error(f"{equip_name}: Batch {batch_num} FAILED", component="BATCH", equipment=equip_name, batch=batch_num)
@@ -1045,9 +1047,10 @@ class SQLBatchRunner:
         # If we just completed coldstart during this run, start the batch phase
         # immediately after the coldstart window to avoid reprocessing the same window.
         start_from_ts: Optional[datetime] = None
+        coldstart_ran_this_session = not (resume and coldstart_complete)
         try:
             # Only honor coldstart_last_end when we executed coldstart above and not in resume-fast path
-            if not (resume and coldstart_complete) and 'coldstart_last_end' in locals() and coldstart_last_end is not None:
+            if coldstart_ran_this_session and 'coldstart_last_end' in locals() and coldstart_last_end is not None:
                 start_from_ts = coldstart_last_end + timedelta(seconds=1)
         except Exception:
             start_from_ts = None
@@ -1060,6 +1063,12 @@ class SQLBatchRunner:
         
         if batches > 0:
             Console.ok(f"{equip_name}: Completed - {batches} batch(es) processed", component="BATCH", equipment=equip_name, batches=batches)
+            Console.info(f"{equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", component="TIMING", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
+            return True
+        elif coldstart_ran_this_session:
+            # Coldstart consumed all available data - this is OK when using --max-batches 1
+            # The processing was successful even though there's nothing left for batch phase
+            Console.ok(f"{equip_name}: Completed via coldstart (no additional batches needed)", component="BATCH", equipment=equip_name)
             Console.info(f"{equip_name}: Total time = {elapsed_minutes}m {elapsed_seconds}s", component="TIMING", equipment=equip_name, minutes=elapsed_minutes, seconds=elapsed_seconds)
             return True
         else:
@@ -1112,8 +1121,17 @@ def main() -> int:
                         help="Resume from last successful batch")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without running")
+    parser.add_argument("--mode", choices=["online", "offline", "auto"], default=None,
+                        help="Pipeline mode: online (scoring only), offline (full training), "
+                             "auto (detect based on cached models). Default: auto-detect")
 
     args = parser.parse_args()
+
+    # Validate contradictory flags
+    if args.mode == "online" and args.start_from_beginning:
+        parser.error("--mode online cannot be used with --start-from-beginning. "
+                     "Online mode requires cached models, but --start-from-beginning deletes them. "
+                     "Use --mode offline or --mode auto for fresh starts.")
 
     # Build SQL connection string (login timeout is controlled via pyodbc.connect timeout)
     sql_conn_string = (
@@ -1155,7 +1173,8 @@ def main() -> int:
         tick_minutes=args.tick_minutes,
         max_coldstart_attempts=args.max_coldstart_attempts,
         max_batches=args.max_batches,
-        start_from_beginning=args.start_from_beginning
+        start_from_beginning=args.start_from_beginning,
+        mode=args.mode,  # V11: Pipeline mode (online/offline/None)
     )
 
     max_workers = max(1, args.max_workers)
@@ -1168,6 +1187,7 @@ def main() -> int:
     Console.info(f"Max Workers: {max_workers}", component="MAIN", max_workers=max_workers)
     Console.info(f"Resume: {args.resume}", component="MAIN", resume=args.resume)
     Console.info(f"Dry Run: {args.dry_run}", component="MAIN", dry_run=args.dry_run)
+    Console.info(f"Pipeline Mode: {args.mode or 'auto'}", component="MAIN", mode=args.mode or "auto")
     Console.status("="*60)
 
     import time

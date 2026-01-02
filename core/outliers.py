@@ -2,6 +2,9 @@
 """
 Outlier detection module.
 Implements density-based anomaly detectors like Isolation Forest and GMM.
+
+v11.1.1: Uses RobustScaler (median/IQR) instead of StandardScaler (mean/std)
+to handle training data that may contain faults.
 """
 from __future__ import annotations
 
@@ -9,26 +12,21 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.mixture import GaussianMixture
-from sklearn.preprocessing import StandardScaler
-from core.observability import Console, Heartbeat, Span
+from sklearn.preprocessing import RobustScaler  # ROBUST: Use RobustScaler instead of StandardScaler
+from core.observability import Console, Span
 from typing import Any, Dict, Optional, List
 
 
 def _finite_impute(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
         return df
-    # Per-column median imputation for non-finites
-    out = df.copy()
-    for c in out.columns:
-        s = out[c]
-        mask = ~np.isfinite(s.to_numpy(dtype=float, copy=False))
-        if mask.any():
-            med = np.nanmedian(s.astype(float))
-            if not np.isfinite(med):
-                med = 0.0
-            s = s.astype(float)
-            s[mask] = med
-            out[c] = s
+    # Vectorized median imputation for non-finites
+    out = df.astype(float)
+    # Replace inf/-inf with NaN, then fill with column medians
+    out = out.replace([np.inf, -np.inf], np.nan)
+    medians = out.median()
+    medians = medians.fillna(0.0)  # For all-NaN columns
+    out = out.fillna(medians)
     return out
 
 class IsolationForestDetector:
@@ -139,7 +137,9 @@ class GMMDetector:
 
         self._user_k = _coerce_int(self.gmm_cfg.get("n_components", 5), 5)
         self.model = None
-        self.scaler = StandardScaler(with_mean=True, with_std=True)
+        # ROBUST: Use RobustScaler (median/IQR) instead of StandardScaler (mean/std)
+        # This makes GMM robust to training data containing faults
+        self.scaler = RobustScaler(with_centering=True, with_scaling=True)
         self._is_fitted = False
         self._fitted_params = {}
         self._var_mask = None
@@ -215,10 +215,12 @@ class GMMDetector:
                         self._is_fitted = True
                         self._fitted_params = dict(k=k, **params)
                         Console.info(f"Fitted k={k}, cov={params['covariance_type']}, reg={params['reg_covar']}", component="GMM")
-                        # Calibrate scores on training set for z-score decision_function
+                        # ROBUST: Calibrate scores using median/MAD instead of mean/std
+                        # This makes z-score normalization robust to training outliers
                         tr_scores = -gm.score_samples(Xs)
-                        self._score_mu_ = float(np.mean(tr_scores))
-                        self._score_sd_ = float(np.std(tr_scores) + 1e-9)
+                        self._score_mu_ = float(np.median(tr_scores))  # Use median
+                        score_mad = float(np.median(np.abs(tr_scores - self._score_mu_)))
+                        self._score_sd_ = float(score_mad * 1.4826 + 1e-9)  # MAD to std scale
                         return self
                     except Exception as e:
                         last_err = e
@@ -233,18 +235,45 @@ class GMMDetector:
         """
         Calculates the negative log-likelihood for each sample.
         Higher scores indicate a higher likelihood of being an anomaly.
+        
+        Memory-optimized v11.0.3: Explicit cleanup of intermediate arrays.
         """
+        import gc
         with Span("score.gmm", n_samples=len(X), n_features=X.shape[1] if len(X) > 0 else 0):
+            n_samples = len(X)
             if not self._is_fitted or self.model is None or self._var_mask is None:
-                return np.zeros(len(X), dtype=np.float32)
+                return np.zeros(n_samples, dtype=np.float32)
+            
             Xc = _finite_impute(X)
+            del X  # Free original DataFrame early
+            
             if self._columns_ is not None:
                 Xc = Xc.reindex(self._columns_, axis=1)
+            
+            # Extract numpy array and immediately delete DataFrame
             Xn = Xc.to_numpy(dtype=np.float64, copy=False)
+            del Xc
+            
+            # Apply variance mask
             Xn = Xn[:, self._var_mask]
+            
+            # Scale in place (sklearn returns a new array anyway)
             Xs = self.scaler.transform(Xn).astype(np.float64, copy=False)
+            del Xn
+            
+            # Score samples (this is where sklearn allocates memory internally)
             scores = -self.model.score_samples(Xs)
-            return scores.astype(np.float32, copy=False)
+            del Xs
+            
+            # Convert to float32 for memory efficiency
+            result = scores.astype(np.float32, copy=False)
+            del scores
+            
+            # Force GC for large datasets
+            if n_samples > 50000:
+                gc.collect()
+            
+            return result
 
     def decision_function(self, X: pd.DataFrame) -> np.ndarray:
         raw = self.score(X).astype(np.float64, copy=False)

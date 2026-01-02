@@ -9,7 +9,7 @@ COMPONENTS:
 - OpenTelemetry: Traces to Tempo, Metrics to Prometheus, Logs to Loki
 
 API:
-    from core.observability import log, Console, Span, traced, Progress, init
+    from core.observability import log, Console, Span, traced, init
 
     # Initialize at startup (optional - works without init for basic logging)
     init(equipment="FD_FAN", equip_id=1, run_id="abc-123")
@@ -22,12 +22,6 @@ API:
     # Console - backwards compatible wrapper
     Console.info("Loaded 5000 rows", component="DATA")
     Console.warn("Warning message", component="MODEL")
-
-    # Progress - uses rich.progress (replaces Heartbeat)
-    with Progress("Loading data") as p:
-        for i in range(100):
-            # work
-            p.advance()
 
     # Spans - OpenTelemetry traces
     with Span("fit.pca"):
@@ -186,8 +180,6 @@ class _Config:
     equipment: str = ""
     equip_id: int = 0
     run_id: str = ""
-    batch_num: int = 0
-    batch_total: int = 0
 
 _config = _Config()
 _tracer: Optional[Any] = None
@@ -201,66 +193,12 @@ _sql_sink: Optional["_SqlLogSink"] = None
 _metrics: Dict[str, Any] = {}
 _init_lock = threading.Lock()
 
-# Phase-specific tracers for Tempo coloring (v10.3.0)
-# Each phase gets a unique color in Tempo waterfall view because each has a different service name
-_phase_tracers: Dict[str, Any] = {}
-
-# Map span prefixes to phase service names for Tempo coloring
-# Using "acm-{phase}" naming so they group together visually
-_PHASE_SERVICE_MAP = {
-    # acm-startup: Initialization phase (purple in most themes)
-    "startup": "acm-startup",
-    "acm": "acm-startup",
-    "config": "acm-startup",
-    
-    # acm-data: Data loading/processing (blue)
-    "load": "acm-data",
-    "load_data": "acm-data",
-    "data": "acm-data",
-    "baseline": "acm-data",
-    
-    # acm-features: Feature engineering (orange)
-    "features": "acm-features",
-    "sensor": "acm-features",
-    "normalize": "acm-features",
-    "impute": "acm-features",
-    "hash": "acm-features",
-    
-    # acm-models: Model training/fitting (green)  
-    "fit": "acm-models",
-    "train": "acm-models",
-    "models": "acm-models",
-    "calibrate": "acm-models",
-    
-    # acm-score: Inference/scoring (cyan)
-    "score": "acm-score",
-    "regimes": "acm-score",
-    "compute": "acm-score",
-    
-    # acm-fusion: Anomaly fusion/episodes (yellow)
-    "fusion": "acm-fusion",
-    "thresholds": "acm-fusion",
-    "episodes": "acm-fusion",
-    "culprits": "acm-fusion",
-    
-    # acm-forecast: RUL/health forecasting (magenta)
-    "forecast": "acm-forecast",
-    "analytics": "acm-forecast",
-    
-    # acm-persist: SQL writes/persistence (red)
-    "persist": "acm-persist",
-    "sql": "acm-persist",
-    "write": "acm-persist",
-    "outputs": "acm-persist",
-    
-    # acm-monitor: Drift monitoring (teal)
-    "drift": "acm-monitor",
-    "adaptive": "acm-monitor",
-    
-    # acm-finalize: Cleanup/shutdown (gray)
-    "finalize": "acm-finalize",
-    "shutdown": "acm-finalize",
-}
+# NOTE: Phase-specific tracers removed in v11.1.6
+# Having multiple service.name values per process is semantically wrong:
+# - Fragments telemetry (many 'services' that are one process)
+# - Breaks service-level dashboards (latency/throughput/error rate)
+# - Complicates correlation with logs/profiles
+# Instead, use span attributes: acm.phase = "features"|"models"|... for Tempo filtering/coloring
 
 
 # =============================================================================
@@ -415,11 +353,9 @@ def init(
         
         resource = Resource.create({SERVICE_NAME: service_name})
         
-        # Tracing via OTLP with phase-specific tracers for Tempo coloring
+        # Tracing via OTLP - single tracer provider (v11.1.6: removed multi-service hack)
         if enable_tracing:
-            global _phase_tracers
-            
-            # Create the main tracer provider (for default/fallback tracer)
+            # Create the single tracer provider with consistent service identity
             trace_provider = TracerProvider(resource=resource)
             span_processor = BatchSpanProcessor(
                 OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
@@ -428,20 +364,7 @@ def init(
             otel_trace.set_tracer_provider(trace_provider)
             _tracer = otel_trace.get_tracer(service_name)
             
-            # Create phase-specific tracers for colored spans in Tempo
-            # Each phase gets its own service name = different color in Tempo waterfall
-            phase_services = set(_PHASE_SERVICE_MAP.values())
-            for phase_service in phase_services:
-                phase_resource = Resource.create({SERVICE_NAME: phase_service})
-                phase_provider = TracerProvider(resource=phase_resource)
-                phase_provider.add_span_processor(
-                    BatchSpanProcessor(
-                        OTLPSpanExporter(endpoint=f"{otlp_endpoint}/v1/traces")
-                    )
-                )
-                _phase_tracers[phase_service] = phase_provider.get_tracer(phase_service)
-            
-            Console.ok(f"Traces -> {otlp_endpoint}/v1/traces ({len(phase_services)} phase colors)", component="OTEL")
+            Console.ok(f"Traces -> {otlp_endpoint}/v1/traces", component="OTEL")
         
         # Metrics via OTLP
         if enable_metrics:
@@ -655,6 +578,8 @@ def shutdown() -> None:
     if _pyroscope_enabled and _pyroscope_pusher is not None:
         try:
             _pyroscope_pusher.stop_and_push()
+        except KeyboardInterrupt:
+            pass  # Graceful exit on Ctrl+C during shutdown
         except Exception:
             pass  # Best effort
         _pyroscope_enabled = False
@@ -787,8 +712,6 @@ def set_context(
     equipment: Optional[str] = None,
     equip_id: Optional[int] = None,
     run_id: Optional[str] = None,
-    batch_num: Optional[int] = None,
-    batch_total: Optional[int] = None,
 ) -> None:
     """Update context for all subsequent logs, traces, and profiles."""
     global _pyroscope_pusher
@@ -799,18 +722,12 @@ def set_context(
         _config.equip_id = equip_id
     if run_id is not None:
         _config.run_id = run_id
-    if batch_num is not None:
-        _config.batch_num = batch_num
-    if batch_total is not None:
-        _config.batch_total = batch_total
     
     # Update structlog context
     structlog.contextvars.bind_contextvars(
         equipment=_config.equipment,
         equip_id=_config.equip_id,
         run_id=_config.run_id,
-        batch_num=_config.batch_num,
-        batch_total=_config.batch_total,
     )
     
     # Update Pyroscope pusher tags with new context
@@ -870,7 +787,7 @@ class Console:
         else:
             comp_tag = ""
         
-        print(f"{timestamp} {level_tag} {comp_tag}{_Colors.MSG}{message}{_Colors.RESET}")
+        print(f"{timestamp} {level_tag} {comp_tag}{_Colors.MSG}{message}{_Colors.RESET}", flush=True)
     
     @staticmethod
     def _send_to_loki(level: str, message: str, component: Optional[str] = None, **kwargs) -> None:
@@ -933,7 +850,7 @@ class Console:
             Console.status("="*60)  # Section divider
         """
         date, time_str = Console._format_timestamp()
-        print(f"{_Colors.DATE}[{date}{_Colors.RESET} {_Colors.TIME}{time_str}]{_Colors.RESET} {_Colors.STATUS}>>>{_Colors.RESET} {_Colors.MSG}{message}{_Colors.RESET}")
+        print(f"{_Colors.DATE}[{date}{_Colors.RESET} {_Colors.TIME}{time_str}]{_Colors.RESET} {_Colors.STATUS}>>>{_Colors.RESET} {_Colors.MSG}{message}{_Colors.RESET}", flush=True)
         # Intentionally NO Loki push - console only
     
     @staticmethod
@@ -963,42 +880,6 @@ class Console:
             >>> --- Starting coldstart ---
         """
         Console.status(f"--- {title} ---")
-
-
-# =============================================================================
-# PROGRESS / HEARTBEAT - Complete No-Op
-# =============================================================================
-
-class Progress:
-    """
-    No-op progress indicator. All methods are stubs for backward compatibility.
-    """
-    
-    def __init__(self, description: str = "", *args, **kwargs):
-        pass
-    
-    def __enter__(self) -> "Progress":
-        return self
-    
-    def __exit__(self, *args) -> None:
-        pass
-    
-    def start(self) -> "Progress":
-        return self
-    
-    def stop(self) -> None:
-        pass
-    
-    def advance(self, amount: float = 1) -> None:
-        pass
-    
-    def track(self, iterable, total: Optional[int] = None):
-        yield from iterable
-
-
-# Backwards compatibility alias
-Heartbeat = Progress
-
 
 # =============================================================================
 # SPANS - OpenTelemetry Tracing
@@ -1151,16 +1032,12 @@ class Span:
         return getattr(SpanKind, kind_str, SpanKind.INTERNAL)
     
     def _get_phase_tracer(self) -> Any:
-        """Get phase-specific tracer for Tempo coloring.
+        """Get tracer for this span.
         
-        Returns tracer with service name matching this span's phase.
-        Falls back to global tracer if phase not mapped.
+        v11.1.6: Simplified - always returns global tracer.
+        Phase identification is via span attributes (acm.phase), not service.name.
         """
-        prefix = self.name.split(".")[0]
-        phase_service = _PHASE_SERVICE_MAP.get(prefix)
-        if phase_service and phase_service in _phase_tracers:
-            return _phase_tracers[phase_service]
-        return _tracer  # Fallback to default tracer
+        return _tracer
     
     def __enter__(self) -> "Span":
         self._start_time = time.perf_counter()
@@ -1234,12 +1111,8 @@ class Span:
             phase = phase_map.get(category, category)
             self._span.set_attribute("acm.phase", phase)
             
-            # Set VIRTUAL SERVICE NAME for Tempo coloring (v10.3.0)
-            # Each major phase appears as a different "service" with distinct color
-            # Format: "acm-{phase}" e.g., "acm-features", "acm-fit", "acm-forecast"
-            virtual_service = f"acm-{phase}"
-            self._span.set_attribute("service.name", virtual_service)
-            
+            # v11.1.6: Removed "virtual service.name" hack - was setting different service.name
+            # per span which is semantically wrong. Use acm.phase attribute for Tempo filtering.
             # Keep parent service reference for correlation
             self._span.set_attribute("acm.service", _config.service_name)  # Always "acm-pipeline"
             if _config.equipment:
@@ -1248,12 +1121,6 @@ class Span:
                 self._span.set_attribute("acm.equip_id", _config.equip_id)
             if _config.run_id:
                 self._span.set_attribute("acm.run_id", _config.run_id)
-            
-            # Add batch context for batch runs (NEW in v10.3.0)
-            if _config.batch_num > 0:
-                self._span.set_attribute("acm.batch_num", _config.batch_num)
-            if _config.batch_total > 0:
-                self._span.set_attribute("acm.batch_total", _config.batch_total)
             
             # Add custom attributes from caller
             for key, value in self.attributes.items():
@@ -2240,6 +2107,8 @@ class _PyroscopePusher:
                             profile_type="alloc_space",
                             units="bytes",
                         )
+            except KeyboardInterrupt:
+                pass  # Graceful exit on Ctrl+C during memory profiling
             except Exception as e:
                 Console.warn(f"Failed to push memory profile: {e}", component="PROFILE", endpoint=self._endpoint, error_type=type(e).__name__, error=str(e)[:200])
     
@@ -2541,7 +2410,10 @@ class _PyroscopePusher:
 # =============================================================================
 
 class _SqlLogSink:
-    """Batched SQL log sink for ACM_RunLogs table."""
+    """Batched SQL log sink for ACM_RunLogs table.
+    
+    v11.1.6: Fixed context serialization (now JSON) and error handling.
+    """
     
     def __init__(self, sql_client, run_id: str, equip_id: int, batch_size: int = 50):
         self._sql_client = sql_client
@@ -2551,6 +2423,8 @@ class _SqlLogSink:
         self._queue: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._written = 0
+        self._failures = 0  # v11.1.6: Track insert failures
+        self._last_failure_warn = 0.0  # Rate-limit warnings
         
         # Background flush thread
         self._thread = threading.Thread(target=self._flush_loop, daemon=True)
@@ -2590,7 +2464,9 @@ class _SqlLogSink:
         self._flush_batch()  # Final flush
     
     def _flush_batch(self) -> None:
-        """Flush queued logs to SQL."""
+        """Flush queued logs to SQL with proper JSON serialization."""
+        import json
+        
         batch = []
         while len(batch) < self._batch_size:
             try:
@@ -2611,6 +2487,12 @@ class _SqlLogSink:
                     if record.get("span_id"):
                         ctx["span_id"] = record["span_id"]
                     
+                    # v11.1.6: Serialize as JSON, not str() - enables proper parsing/querying
+                    try:
+                        ctx_json = json.dumps(ctx, ensure_ascii=False, default=str)[:4000]
+                    except Exception:
+                        ctx_json = "{}"
+                    
                     cur.execute(
                         """INSERT INTO ACM_RunLogs 
                            (RunID, EquipID, LoggedAt, Level, Message, Context)
@@ -2621,12 +2503,23 @@ class _SqlLogSink:
                             record["timestamp"],
                             record["level"],
                             record["message"],
-                            str(ctx),
+                            ctx_json,
                         )
                     )
             self._written += len(batch)
-        except Exception:
-            pass  # Don't crash on log failures
+        except Exception as e:
+            # v11.1.6: Don't silently swallow - track failures and warn periodically
+            self._failures += len(batch)
+            now = time.time()
+            # Rate-limit warnings to once per 30 seconds
+            if now - self._last_failure_warn > 30.0:
+                Console.warn(
+                    f"SQL log sink: {self._failures} total failures (latest: {e})", 
+                    component="LOG",
+                    error_type=type(e).__name__,
+                    total_failures=self._failures,
+                )
+                self._last_failure_warn = now
     
     def close(self) -> None:
         """Stop background thread and flush remaining logs."""
@@ -2646,8 +2539,6 @@ __all__ = [
     "get_trace_context",  # Utility to get current trace_id/span_id
     "log",
     "Console",
-    "Progress",
-    "Heartbeat",  # Alias for Progress
     "Span",
     "traced",
     "record_batch",

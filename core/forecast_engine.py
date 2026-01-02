@@ -66,7 +66,16 @@ from core.sensor_attribution import SensorAttributor
 from core.metrics import compute_comprehensive_metrics, log_metrics_summary, compute_forecast_diagnostics, log_forecast_diagnostics
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
+# V11: Reliability gating for RUL predictions
+from core.confidence import (
+    ReliabilityStatus,
+    compute_rul_confidence,
+    check_rul_reliability,
+)
+# V11 CRITICAL-1: Only import MaturityState, NOT load_model_state_from_sql
+# Model state is passed from acm_main to avoid race conditions
+from core.model_lifecycle import MaturityState
 
 
 # ========================================================================
@@ -139,7 +148,8 @@ class ForecastEngine:
         output_manager: OutputManager,
         equip_id: int,
         run_id: str,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        model_state: Optional[Any] = None
     ):
         """
         Initialize forecast engine.
@@ -150,12 +160,14 @@ class ForecastEngine:
             equip_id: Equipment ID
             run_id: ACM run identifier
             config: Configuration dictionary (optional, uses ACM_AdaptiveConfig if None)
+            model_state: Pre-loaded ModelState from acm_main (avoids race condition with SQL)
         """
         self.sql_client = sql_client
         self.output_manager = output_manager
         self.equip_id = equip_id
         self.run_id = run_id
         self.config = config or {}
+        self._model_state = model_state  # V11 CRITICAL-1: Use cached state to avoid race condition
         
         # Initialize managers
         self.state_mgr = StateManager(sql_client=sql_client)
@@ -205,12 +217,16 @@ class ForecastEngine:
                         'data_quality': 'NONE'
                     }
                 
-                # M3.2 + M14: Early quality gating before expensive operations
-                # Allow GAPPY data (historical replay) but block SPARSE/FLAT/NOISY
-                if data_quality in [HealthQuality.SPARSE, HealthQuality.FLAT, HealthQuality.NOISY]:
-                    # M14: Friendly message for coldstart/quality issues (not fatal)
+                # V11: Check model maturity BEFORE data quality gating
+                # During COLDSTART/LEARNING, we allow sparse data and mark as NOT_RELIABLE
+                maturity_state, _, _ = self._get_model_maturity_state()
+                is_early_maturity = maturity_state in ('COLDSTART', 'LEARNING')
+                
+                # M3.2 + M14 + V11: Quality gating with maturity awareness
+                # FLAT/NOISY are always blockers (can't forecast constant or erratic data)
+                # SPARSE is allowed during early maturity (will be marked NOT_RELIABLE)
+                if data_quality in [HealthQuality.FLAT, HealthQuality.NOISY]:
                     quality_messages = {
-                        HealthQuality.SPARSE: "Insufficient data samples - need more historical data for reliable forecast",
                         HealthQuality.FLAT: "Health data shows no variance - equipment may be in steady state",
                         HealthQuality.NOISY: "Health data has excessive noise - consider smoothing or filtering"
                     }
@@ -223,6 +239,27 @@ class ForecastEngine:
                         'error': friendly_msg,
                         'data_quality': data_quality.value
                     }
+                
+                # V11: SPARSE data handling depends on maturity
+                if data_quality == HealthQuality.SPARSE:
+                    if is_early_maturity:
+                        # During coldstart/learning, proceed with sparse data but warn
+                        Console.warn(
+                            f"SPARSE data during {maturity_state} phase - proceeding with limited confidence",
+                            component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                            quality=data_quality.value, n_samples=len(health_df) if health_df is not None else 0
+                        )
+                    else:
+                        # If model is CONVERGED but data is sparse, this indicates a data pipeline issue
+                        friendly_msg = "Insufficient data samples - need more historical data for reliable forecast"
+                        Console.warn(f"{friendly_msg}; skipping forecast (not fatal)",
+                                     component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                                     quality=data_quality.value)
+                        return {
+                            'success': False,
+                            'error': friendly_msg,
+                            'data_quality': data_quality.value
+                        }
                 
                 if data_quality == HealthQuality.GAPPY:
                     Console.warn("GAPPY data detected - proceeding with available data (historical replay mode)",
@@ -539,6 +576,38 @@ class ForecastEngine:
             'failure_prob_horizon': rul_estimate.failure_probability
         }
     
+    def _get_model_maturity_state(self) -> Tuple[str, int, float]:
+        """
+        Get model maturity state for RUL reliability gating.
+        
+        V11 Rule #10: RUL must be gated or suppressed when model not CONVERGED.
+        
+        V11 CRITICAL-1 FIX: Use ONLY the cached model_state from constructor.
+        NEVER fallback to SQL - that creates a race condition where acm_main
+        updates state but ForecastEngine reads stale SQL data.
+        
+        Returns:
+            Tuple of (maturity_state, training_rows, training_days)
+        """
+        # V11 CRITICAL-1: Use ONLY cached state from constructor
+        # If model_state is None, we're in COLDSTART (no models exist yet)
+        model_state = self._model_state
+        
+        if model_state is None:
+            # First run or no model exists - use conservative COLDSTART defaults
+            return 'COLDSTART', 0, 0.0
+        
+        try:
+            return (
+                str(model_state.maturity.value),
+                model_state.training_rows,
+                model_state.training_days,
+            )
+        except Exception as e:
+            Console.warn(f"Could not extract model maturity: {e}",
+                         component="FORECAST", equip_id=self.equip_id)
+            return 'LEARNING', 0, 0.0  # Conservative default
+    
     def _load_sensor_attributions(self) -> list:
         """Load sensor attributions from ACM_SensorHotspots"""
         attributor = SensorAttributor(sql_client=self.sql_client)
@@ -690,13 +759,24 @@ class ForecastEngine:
             rul_hours = forecast_results['rul_p50']
             predicted_failure_time = current_time + timedelta(hours=float(rul_hours))
             
-            # Calculate confidence based on data quality and variance
-            # Higher confidence with more data and lower variance
-            confidence = 0.8 if forecast_results.get('data_points', 0) > 1000 else 0.6
-            if forecast_results.get('rul_std', 0) > 0:
-                # Reduce confidence if variance is high relative to mean
-                cv = forecast_results['rul_std'] / max(forecast_results['rul_mean'], 1.0)
-                confidence = confidence * (1.0 - min(cv * 0.5, 0.4))
+            # V11: Get model maturity state for reliability gating
+            maturity_state, training_rows, training_days = self._get_model_maturity_state()
+            
+            # V11: Compute RUL confidence with reliability gate
+            confidence, reliability_status, reliability_reason = compute_rul_confidence(
+                p10=forecast_results['rul_p10'],
+                p50=forecast_results['rul_p50'],
+                p90=forecast_results['rul_p90'],
+                maturity_state=maturity_state,
+                training_rows=training_rows,
+                training_days=training_days,
+            )
+            
+            # Log reliability status
+            if reliability_status != ReliabilityStatus.RELIABLE:
+                Console.warn(f"RUL reliability: {reliability_status.value} - {reliability_reason}",
+                             component="FORECAST", equip_id=self.equip_id,
+                             status=reliability_status.value, maturity=maturity_state)
             
             # M13: Derive operator context fields
             current_health = forecast_results['current_health']
@@ -748,7 +828,8 @@ class ForecastEngine:
                 'MTTF_Hours': [forecast_results['mttf_hours']],
                 'FailureProbability': [forecast_results['failure_prob_horizon']],
                 'CurrentHealth': [current_health],
-                'Confidence': [float(confidence)],  # FIX: Add confidence score
+                'Confidence': [float(confidence)],  # V11: Proper confidence from reliability gate
+                'RUL_Status': [reliability_status.value],  # V11: RELIABLE, NOT_RELIABLE, LEARNING, INSUFFICIENT_DATA
                 'FailureTime': [predicted_failure_time],  # FIX: Add predicted failure timestamp
                 'NumSimulations': [1000],  # FIX: Monte Carlo simulation count
                 'Method': ['Multipath'],  # FIX: Add forecasting method
@@ -757,6 +838,8 @@ class ForecastEngine:
                 'TrendSlope': [float(trend_slope)],
                 'DataQuality': [data_quality],
                 'ForecastStd': [float(forecast_std) if not np.isnan(forecast_std) else 0.0],
+                # V11: Model maturity context
+                'MaturityState': [maturity_state],
                 # Sensor attributions
                 'TopSensor1': [top3_sensors[0].sensor_name if len(top3_sensors) > 0 else None],
                 'TopSensor1Contribution': [top3_sensors[0].failure_contribution if len(top3_sensors) > 0 else None],
@@ -1009,15 +1092,31 @@ class ForecastEngine:
                              component="FORECAST", equip_id=self.equip_id)
                 return None
             
-            # Load recent sensor data from ACM_SensorNormalized_TS (contains SensorName, NormValue, ZScore)
+            # Load recent sensor data from ACM_SensorNormalized_TS (contains SensorName, NormalizedValue)
+            # Use data-relative lookback to handle batch/historical runs (not just datetime.now())
             lookback_hours = 720  # 30 days of history
-            cutoff_time = datetime.now() - timedelta(hours=lookback_hours)
+            
+            # First, get the max timestamp from the sensor data to anchor our lookback
+            try:
+                with self.sql_client.get_cursor() as cur:
+                    cur.execute("""
+                        SELECT MAX(Timestamp) FROM ACM_SensorNormalized_TS WHERE EquipID = ?
+                    """, (self.equip_id,))
+                    max_ts_row = cur.fetchone()
+                    if max_ts_row and max_ts_row[0]:
+                        data_anchor = pd.to_datetime(max_ts_row[0])
+                    else:
+                        data_anchor = datetime.now()
+            except Exception:
+                data_anchor = datetime.now()
+            
+            cutoff_time = data_anchor - timedelta(hours=lookback_hours)
             
             query = """
             SELECT 
                 sn.Timestamp,
                 sn.SensorName,
-                sn.ZScore
+                sn.NormalizedValue
             FROM ACM_SensorNormalized_TS sn
             WHERE sn.EquipID = ?
               AND sn.Timestamp >= ?
@@ -1027,16 +1126,25 @@ class ForecastEngine:
             
             sensor_names = [s.sensor_name for s in top_sensors]
             
+            # Debug: Log query parameters
+            Console.debug(f"Sensor forecast query: equip={self.equip_id}, cutoff={cutoff_time}, sensors={sensor_names[:3]}...",
+                         component="FORECAST")
+            
             cursor = self.sql_client.cursor()
             cursor.execute(query, [self.equip_id, cutoff_time] + sensor_names)
             rows = cursor.fetchall()
             cursor.close()
             
+            Console.debug(f"Sensor forecast query returned {len(rows)} rows",
+                         component="FORECAST")
+            
             if not rows:
-                # Silent return - early check at function start should prevent this path
+                # Debug: Log why we're returning None
+                Console.warn(f"No sensor history found for forecasting (cutoff={cutoff_time}, sensors={len(sensor_names)})",
+                            component="FORECAST", equip_id=self.equip_id)
                 return None
             
-            # Convert to DataFrame - use ZScore as the value to forecast
+            # Convert to DataFrame - use NormalizedValue (stored as 'Score') for forecasting
             sensor_history = pd.DataFrame(
                 [{'Timestamp': r[0], 'SensorName': r[1], 'Score': r[2]} for r in rows]
             )
@@ -1070,6 +1178,26 @@ class ForecastEngine:
                 
                 try:
                     if USE_EXPONENTIAL_SMOOTHING:
+                        # V11 FIX: Set explicit frequency to suppress statsmodels warning
+                        # "No frequency information was provided, so inferred frequency X will be used"
+                        # Infer frequency from data cadence or use 30min as default (ACM standard)
+                        if series.index.freq is None:
+                            inferred_freq = pd.infer_freq(series.index)
+                            if inferred_freq:
+                                series = series.asfreq(inferred_freq)
+                            else:
+                                # Fallback: calculate median time delta and round to nearest standard freq
+                                time_diffs = series.index.to_series().diff().dropna()
+                                if len(time_diffs) > 0:
+                                    median_diff = time_diffs.median()
+                                    # Round to nearest standard frequency (30min, 1h, etc.)
+                                    if median_diff <= pd.Timedelta(minutes=45):
+                                        series = series.asfreq('30min')
+                                    elif median_diff <= pd.Timedelta(hours=1.5):
+                                        series = series.asfreq('1h')
+                                    else:
+                                        series = series.asfreq('1h')  # Default fallback
+                        
                         # Fit exponential smoothing with trend (Holt's method)
                         model = ExponentialSmoothing(
                             series,
@@ -1086,9 +1214,12 @@ class ForecastEngine:
                         # Generate forecast
                         forecast = fitted_model.forecast(steps=n_steps)
                         
-                        # Calculate confidence intervals using residual std
+                        # Calculate confidence intervals using residual std (robust MAD)
+                        # v11.1.2: Use MAD * 1.4826 instead of std for robustness
                         residuals = series - fitted_model.fittedvalues
-                        residual_std = residuals.std()
+                        residual_median = float(residuals.median())
+                        residual_mad = float((residuals - residual_median).abs().median())
+                        residual_std = residual_mad * 1.4826  # Scale MAD to be consistent with std
                     else:
                         # Simple fallback: linear trend with moving average smoothing
                         # Calculate trend using last 168 hours (7 days)
@@ -1100,10 +1231,13 @@ class ForecastEngine:
                         y = recent_series.values
                         slope, intercept = np.polyfit(x, y, 1)
                         
-                        # Calculate residual std for confidence intervals
+                        # Calculate residual std for confidence intervals (robust MAD)
+                        # v11.1.2: Use MAD * 1.4826 instead of std for robustness
                         trend_line = slope * x + intercept
                         residuals = y - trend_line
-                        residual_std = np.std(residuals)
+                        residual_median = float(np.median(residuals))
+                        residual_mad = float(np.median(np.abs(residuals - residual_median)))
+                        residual_std = residual_mad * 1.4826  # Scale MAD to be consistent with std
                         
                         # Generate forecast using linear extrapolation
                         last_x = len(recent_series) - 1
@@ -1128,23 +1262,29 @@ class ForecastEngine:
                     else:
                         trend_direction = 'Unknown'
                     
-                    # Build forecast records
+                    # Build forecast records - VECTORIZED for performance
                     last_timestamp = series.index[-1]
-                    for i in range(n_steps):
-                        forecast_timestamp = last_timestamp + timedelta(hours=dt_hours * (i + 1))
-                        forecast_records.append({
-                            'EquipID': self.equip_id,
-                            'RunID': self.run_id,
-                            'Timestamp': forecast_timestamp,
-                            'SensorName': sensor_name,
-                            'ForecastValue': float(forecast.iloc[i]),
-                            'CiLower': float(forecast_lower.iloc[i]),
-                            'CiUpper': float(forecast_upper.iloc[i]),
-                            'ForecastStd': residual_std,  # Use actual schema column
-                            'Method': 'SimpleLinearTrend' if not USE_EXPONENTIAL_SMOOTHING else 'ExponentialSmoothing',
-                            'RegimeLabel': 0,  # Default regime
-                            'CreatedAt': datetime.now()
-                        })
+                    method_name = 'SimpleLinearTrend' if not USE_EXPONENTIAL_SMOOTHING else 'ExponentialSmoothing'
+                    now_ts = datetime.now()
+                    
+                    # Create timestamps array
+                    forecast_timestamps = [last_timestamp + timedelta(hours=dt_hours * (i + 1)) for i in range(n_steps)]
+                    
+                    # Build DataFrame directly instead of appending dicts
+                    sensor_forecast_df = pd.DataFrame({
+                        'EquipID': self.equip_id,
+                        'RunID': self.run_id,
+                        'Timestamp': forecast_timestamps,
+                        'SensorName': sensor_name,
+                        'ForecastValue': forecast.values[:n_steps],
+                        'CiLower': forecast_lower.values[:n_steps],
+                        'CiUpper': forecast_upper.values[:n_steps],
+                        'ForecastStd': residual_std,
+                        'Method': method_name,
+                        'RegimeLabel': 0,
+                        'CreatedAt': now_ts
+                    })
+                    forecast_records.extend(sensor_forecast_df.to_dict('records'))
                     
                 except Exception as e:
                     Console.warn(f"Failed to forecast sensor {sensor_name}: {e}",
@@ -1170,6 +1310,56 @@ class ForecastEngine:
                           component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
                           error_type=type(e).__name__, error_msg=str(e)[:500])
             return None
+
+    def _mann_kendall_trend(
+        self,
+        y: np.ndarray,
+        threshold_tau: float = 0.1,
+        alpha: float = 0.05
+    ) -> str:
+        """
+        Detect monotonic trend using Mann-Kendall test.
+        
+        Mann-Kendall is non-parametric and robust to:
+        - Non-normal distributions
+        - Outliers  
+        - Missing values
+        - Serial correlation (with variance correction)
+        
+        The test computes Kendall's tau correlation between data and time.
+        
+        Reference:
+        - Mann (1945): Nonparametric tests against trend
+        - Kendall (1975): Rank Correlation Methods
+        
+        Args:
+            y: Time series values (chronological order)
+            threshold_tau: Minimum |tau| for practical significance (default 0.1)
+            alpha: Significance level (default 0.05)
+        
+        Returns:
+            'Increasing', 'Decreasing', 'Stable', or 'Unknown'
+        """
+        n = len(y)
+        if n < 8:
+            return 'Unknown'
+        
+        try:
+            from scipy.stats import kendalltau
+            
+            x = np.arange(n)
+            result = kendalltau(x, y)
+            tau = float(result.statistic) if hasattr(result, 'statistic') else float(result[0])
+            p_value = float(result.pvalue) if hasattr(result, 'pvalue') else float(result[1])
+            
+            # Check both statistical AND practical significance
+            if p_value < alpha and abs(tau) > threshold_tau:
+                return 'Increasing' if tau > 0 else 'Decreasing'
+            else:
+                return 'Stable'
+                
+        except Exception:
+            return 'Unknown'
 
 
 # ========================================================================
@@ -1358,9 +1548,12 @@ class RegimeConditionedForecaster:
                     degradation_rate_upper = 0.0
                     degradation_r_squared = 0.0
                 
-                # Health statistics
-                health_mean = float(regime_df['HealthIndex'].mean())
-                health_std = float(regime_df['HealthIndex'].std())
+                # Health statistics using ROBUST estimators
+                # v11.1.2: Use median and MAD instead of mean/std
+                health_median = float(regime_df['HealthIndex'].median())
+                health_mad = float((regime_df['HealthIndex'] - health_median).abs().median())
+                health_mean = health_median  # For backward compatibility, use median as "mean"
+                health_std = health_mad * 1.4826  # Scale MAD to be consistent with std
                 
                 # Dwell fraction
                 total_points = len(df)
@@ -1740,51 +1933,19 @@ class RegimeConditionedForecaster:
         threshold_tau: float = 0.1,
         alpha: float = 0.05
     ) -> str:
-        """
-        Detect monotonic trend using Mann-Kendall test.
-        
-        Mann-Kendall is non-parametric and robust to:
-        - Non-normal distributions
-        - Outliers  
-        - Missing values
-        - Serial correlation (with variance correction)
-        
-        The test computes Kendall's tau correlation between data and time.
-        
-        Reference:
-        - Mann (1945): Nonparametric tests against trend
-        - Kendall (1975): Rank Correlation Methods
-        
-        Args:
-            y: Time series values (chronological order)
-            threshold_tau: Minimum |tau| for practical significance (default 0.1)
-            alpha: Significance level (default 0.05)
-        
-        Returns:
-            'Increasing', 'Decreasing', 'Stable', or 'Unknown'
-        """
+        """Detect monotonic trend using Mann-Kendall test (see ForecastEngine for full docs)."""
         n = len(y)
         if n < 8:
             return 'Unknown'
-        
         try:
             from scipy.stats import kendalltau
-            
             x = np.arange(n)
             result = kendalltau(x, y)
             tau = float(result.statistic) if hasattr(result, 'statistic') else float(result[0])
             p_value = float(result.pvalue) if hasattr(result, 'pvalue') else float(result[1])
-            
-            # Check both statistical AND practical significance
-            # This addresses the issue of tiny slopes being "statistically significant"
             if p_value < alpha and abs(tau) > threshold_tau:
-                if tau > 0:
-                    return 'Increasing' if 'health' not in str(type(self)).lower() else 'improving'
-                else:
-                    return 'Decreasing' if 'health' not in str(type(self)).lower() else 'degrading'
-            else:
-                return 'Stable'
-                
+                return 'improving' if tau > 0 else 'degrading'
+            return 'Stable'
         except Exception:
             return 'Unknown'
     

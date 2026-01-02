@@ -5,21 +5,69 @@ This module defines the current version of ACM and provides utilities for versio
 across logs, outputs, and database entries. Version follows semantic versioning (MAJOR.MINOR.PATCH).
 
 Versioning Strategy:
-- MAJOR: Significant architecture changes or breaking changes (e.g., v8→v9)
-- MINOR: New features, detector improvements, algorithm enhancements (e.g., v9.0→v9.1)
-- PATCH: Bug fixes, refinements, performance improvements (e.g., v9.0.0→v9.0.1)
+- MAJOR: Significant architecture changes or breaking changes (e.g., v10→v11)
+- MINOR: New features, detector improvements, algorithm enhancements (e.g., v11.0→v11.1)
+- PATCH: Bug fixes, refinements, performance improvements (e.g., v11.0.0→v11.0.1)
 
 Release Management:
-- All releases tagged with git annotated tags (e.g., v9.0.0)
+- All releases tagged with git annotated tags (e.g., v11.0.0)
 - Each tag includes comprehensive release notes
 - Feature branches use descriptive names: feature/*, fix/*, refactor/*, docs/*
 - Merges to main use --no-ff to preserve history
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "10.3.0"
-__version_date__ = "2025-12-17"  # v10.3.0: Consolidated Observability Stack (OpenTelemetry + structlog + Pyroscope)
+__version__ = "11.1.6"
+__version_date__ = "2026-01-02"
 __version_author__ = "ACM Development Team"
+# v11.1.6: REGIME ANALYTICAL CORRECTNESS - Critical clustering fixes from expert audit
+# - REGIME_MODEL_VERSION bumped to "3.0" (breaking change in model serialization)
+# - FIX #1 (P0): Created tag taxonomy (OPERATING_TAG_KEYWORDS, CONDITION_TAG_KEYWORDS)
+#   - Operating variables: speed, rpm, load, flow, pressure, power, stroke, valve, frequency
+#   - Condition indicators: bearing, winding, vibration, current, voltage, temp, lube, oil
+#   - Regime basis now EXCLUDES condition indicators (they measure health, not operating mode)
+# - FIX #2 (P0): Uniform scaling of entire basis
+#   - StandardScaler now applied to ENTIRE concatenated basis (PCA + raw)
+#   - Previously only raw columns were scaled; PCA columns had different variance scale
+# - FIX #3 (P0): Calibrated UNKNOWN threshold
+#   - Replaced arbitrary 1/k heuristic with training-derived P95 distance threshold
+#   - Added _compute_training_distances() function
+#   - UNKNOWN assignments now statistically meaningful (P95 acceptance region)
+# - FIX #4 (P0): Label mapping for stable regime labels
+#   - Added label_map_ to RegimeModel for explicit old→new label mapping
+#   - New apply_label_map() method on RegimeModel
+#   - align_regime_labels() now creates and stores proper mapping
+# - FIX #5 (P1): Transient detection on operating inputs only
+#   - detect_transient_states() now filters to operating variables only
+#   - Condition indicators (bearing temps, vibration) excluded from ROC calculation
+# - FIX #6 (P1): Time-based smoothing
+#   - smooth_labels() now accepts timestamps and window_seconds parameters
+#   - Derives window size from median sampling interval for consistent time spans
+# - FIX #7 (P2): Feature basis signature
+#   - Added _compute_basis_signature() for MD5 hash of basis configuration
+#   - Stored in model metadata for cache invalidation on basis changes
+# Building on v11.1.5 database integrity fixes
+
+# v11.1.5: DATABASE INTEGRITY FIXES - ID columns and relationship tracking
+
+# v11.1.4: ANALYTICAL CORRECTNESS FIXES - Critical ML/stats bug resolution
+# - fuse.py: GENERALIZED correlation adjustment for ALL detector pairs (not just PCA)
+#   - All pairs with correlation > 0.5 are now discounted proportionally
+#   - Prevents double-counting of correlated detector information
+# - degradation_model.py: Added _detect_and_handle_health_jumps() method
+#   - Detects maintenance resets (health jumps > 15%)
+#   - Uses only post-jump data for trend fitting
+#   - Logs maintenance events with magnitude for audit trail
+# - acm_main.py: Fixed seasonal adjustment data flow (CRITICAL BUG)
+#   - train_numeric/score_numeric were adjusted but train/score (used downstream) were not
+#   - Now properly updates train/score with adjusted sensor values
+# - SKILL.md: Added comprehensive Analytical Correctness Rules section
+#   - 7 mandatory rules with code examples
+#   - Statistical constants reference (MAD to σ = 1.4826)
+#   - Code review checklist for analytical code
+#   - Bug taxonomy for future prevention
+# - copilot-instructions.md: Added condensed analytical correctness rules
+# Building on v11.1.3 robust statistics fixes
 
 VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH = map(int, __version__.split("."))
 
@@ -87,6 +135,63 @@ def format_version_for_output(context=""):
         return f"{get_version_string()} [{context}]"
     return get_version_string()
 
+
+# v11.0.0 Release Notes (from v10.x) - UPDATED 2025-12-29
+RELEASE_NOTES_V11 = """
+ACM v11.0.0 - MAJOR RELEASE: Pipeline Mode Separation & Confidence Model (2025-12-29)
+
+V11 PHILOSOPHY IMPLEMENTED:
+  - ONLINE/OFFLINE pipeline mode separation
+  - Model lifecycle with maturity states (COLDSTART -> LEARNING -> CONVERGED)
+  - Unified confidence model for all outputs
+  - RUL reliability gating (V11 Rule #10)
+  - UNKNOWN regime support for low-confidence assignments
+
+PHASE IMPLEMENTATIONS:
+
+Phase 0 - Foundation (ecd979e):
+  - Added --mode CLI argument (online/offline/auto)
+  - ALLOWS_MODEL_REFIT and ALLOWS_REGIME_DISCOVERY gating flags
+  - core/acm.py single entry point with auto-detect
+
+Phase 1 - Model Lifecycle (01948eb):
+  - core/model_lifecycle.py: MaturityState enum, PromotionCriteria
+  - ACM_ActiveModels table for versioned model tracking
+  - Auto-promotion from LEARNING to CONVERGED when quality passes
+
+Phase 2 - ONLINE Pipeline (7111143):
+  - UNKNOWN_REGIME_LABEL = -1 for low-confidence regime assignments
+  - predict_regime_with_confidence() with distance-based thresholding
+  - regime_confidence and regime_unknown_count in output
+
+Phase 3 - Confidence and Reliability (8624597):
+  - NEW: core/confidence.py (~280 lines)
+    - ReliabilityStatus enum: RELIABLE, NOT_RELIABLE, LEARNING, INSUFFICIENT_DATA
+    - ConfidenceFactors dataclass with geometric mean computation
+    - compute_rul_confidence(), compute_health_confidence(), compute_episode_confidence()
+  - RUL_Status and MaturityState columns added to ACM_RUL
+  - Confidence column added to ACM_HealthTimeline and ACM_Anomaly_Events
+
+Phase 4 - Regime Stability (existing infrastructure):
+  - AssignmentConfidence added to ACM_RegimeTimeline output
+  - Regime versioning via model_persistence.py StateVersion
+  - ONLINE mode frozen regime models (ALLOWS_REGIME_DISCOVERY=False)
+
+Phase 5 - Single Entry Point (existing infrastructure):
+  - python -m core.acm --equip FD_FAN --mode auto
+  - Auto-detect mode routes to ONLINE if model exists, else OFFLINE
+
+CODE CLEANUP (from earlier v11 work):
+  - 23 unused modules deleted (21% codebase reduction)
+  - DataContract validation FAIL FAST on errors
+  - Validation results written to ACM_DataContractValidation table
+
+V11 RULES IMPLEMENTED:
+  #10: RUL gated/suppressed when model not CONVERGED
+  #14: UNKNOWN is valid regime label for low confidence
+  #17: Confidence always exposed (0-1 scale)
+  #20: NOT_RELIABLE status when prerequisites fail
+"""
 
 # v10.0.0 Release Notes (from v9.0.0)
 RELEASE_NOTES_V10 = """

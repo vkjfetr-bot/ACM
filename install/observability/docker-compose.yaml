@@ -24,12 +24,12 @@ services:
     command:
       - "run"
       - "/etc/alloy/config.alloy"
-      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--server.http.listen-addr=0.0.0.0:9099"
       - "--stability.level=generally-available"
     ports:
       - "4317:4317"   # OTLP gRPC
       - "4318:4318"   # OTLP HTTP
-      - "12345:12345" # Alloy UI/metrics
+      - "9099:9099"   # Alloy UI/metrics
     volumes:
       - ./config-docker.alloy:/etc/alloy/config.alloy:ro
     depends_on:
@@ -38,7 +38,7 @@ services:
       - prometheus
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:12345/-/ready || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9099/-/ready || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -60,6 +60,7 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/etc/grafana/dashboards:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

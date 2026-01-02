@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple, Literal, Optional
 import numpy as np
 import pandas as pd
-from core.observability import Console, Heartbeat, Span
+from core.observability import Console, Span
 
 # Minimum samples required for AR(1) model coefficient estimation
 MIN_AR1_SAMPLES = 3
@@ -84,17 +84,24 @@ class AR1Detector:
             x = col[finite]
             
             if x.size < MIN_AR1_SAMPLES:
-                mu = float(np.nanmean(col)) if x.size else 0.0
+                # ROBUST: Use median instead of mean for baseline
+                mu = float(np.nanmedian(col)) if x.size else 0.0
                 if not np.isfinite(mu):
                     mu = 0.0
                 phi = 0.0
                 self.phimap[c] = (phi, mu)
                 resid = (x - mu) if x.size else np.array([0.0], dtype=np.float32)
-                sd = float(np.std(resid)) if resid.size else self._sd_floor
+                # ROBUST: Use MAD instead of std
+                if resid.size > 0:
+                    mad = float(np.median(np.abs(resid - np.median(resid))))
+                    sd = mad * 1.4826 if mad > 0 else self._sd_floor
+                else:
+                    sd = self._sd_floor
                 self.sdmap[c] = max(sd, self._sd_floor)
                 continue
             
-            mu = float(np.nanmean(x))
+            # ROBUST: Use median instead of mean for baseline
+            mu = float(np.nanmedian(x))
             if not np.isfinite(mu):
                 mu = 0.0
             xc = x - mu
@@ -126,7 +133,10 @@ class AR1Detector:
             pred = (x_shift - mu) * phi + mu
             resid = x - pred
             resid_for_sd = resid[1:] if resid.size > 1 else resid
-            sd = float(np.std(resid_for_sd))
+            # ROBUST: Use MAD instead of std for residual normalization
+            # This makes AR1 scoring robust to training data containing faults
+            mad = float(np.median(np.abs(resid_for_sd - np.median(resid_for_sd))))
+            sd = mad * 1.4826 if mad > 0 else self._sd_floor
             self.sdmap[c] = max(sd, self._sd_floor)
         
         # Emit batched warnings (single SQL insert instead of 100s)
@@ -160,7 +170,6 @@ class AR1Detector:
             if not self._is_fitted:
                 return np.zeros(len(X), dtype=np.float32)
         
-        per_cols: Dict[str, np.ndarray] = {}
         n = len(X)
         
         if n == 0 or X.shape[1] == 0:
@@ -173,64 +182,62 @@ class AR1Detector:
             Console.warn(f"Early exit: {near_constant_count}/{total_count} columns near-constant (>{80}%) - returning zero scores to prevent hang", component="AR1")
             return (np.zeros(n, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(n, dtype=np.float32)
         
-        for c in X.columns:
-            series = X[c].to_numpy(copy=False, dtype=np.float32)
-            
-            # Data quality check: skip columns with >50% NaN
-            nan_count = np.isnan(series).sum()
-            nan_fraction = nan_count / len(series) if len(series) > 0 else 0.0
-            
-            if nan_fraction > 0.5:
-                Console.warn(f"Column '{c}': {nan_fraction*100:.1f}% NaN (>{50}%) - skipping column", component="AR1")
-                continue
-            
-            # Log high imputation rates for visibility
-            if nan_fraction > 0.2:
-                Console.warn(f"Column '{c}': {nan_fraction*100:.1f}% NaN - imputing to mu (high imputation rate)", component="AR1")
-            
-            # FOR-CODE-03: Renamed ph -> phi for clarity (autoregressive coefficient)
-            phi, mu = self.phimap.get(c, (0.0, float(np.nanmean(series))))
-            if not np.isfinite(mu):
-                mu = 0.0
-            
-            sd_train = self.sdmap.get(c, self._sd_floor)
-            if not np.isfinite(sd_train) or sd_train <= self._sd_floor:
-                sd_train = self._sd_floor
-            
-            # Impute NaNs to mu for prediction path
-            series_finite = series.copy()
-            if np.isnan(series_finite).any():
-                series_finite = np.where(np.isfinite(series_finite), series_finite, mu).astype(np.float32, copy=False)
-            
-            # One-step AR(1) prediction
-            pred = np.empty_like(series_finite, dtype=np.float32)
-            first_obs = series_finite[0] if series_finite.size else mu
-            pred[0] = first_obs if np.isfinite(first_obs) else mu
-            if n > 1:
-                pred[1:] = (series_finite[:-1] - mu) * phi + mu
-            
-            resid = series - pred  # Keep NaNs where original series had NaNs
-            z = np.abs(resid) / sd_train
-            per_cols[c] = z.astype(np.float32, copy=False)
-        
-        if not per_cols:
+        # Vectorized AR(1) scoring
+        # Filter columns that exist in phimap
+        valid_cols = [c for c in X.columns if c in self.phimap]
+        if not valid_cols:
             return (np.zeros(n, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(n, dtype=np.float32)
         
-        col_names = list(per_cols.keys())
-        matrix = np.column_stack([per_cols[name] for name in col_names]) if col_names else np.zeros((n, 0), dtype=np.float32)
+        # Check NaN fraction and filter high-NaN columns
+        X_valid = X[valid_cols].to_numpy(dtype=np.float32, copy=True)
+        nan_fractions = np.isnan(X_valid).sum(axis=0) / n
+        good_cols_mask = nan_fractions <= 0.5
         
+        # Warn about high-NaN columns
+        high_nan_cols = [c for c, frac, good in zip(valid_cols, nan_fractions, good_cols_mask) if not good]
+        if high_nan_cols:
+            Console.warn(f"{len(high_nan_cols)} columns with >50% NaN skipped", component="AR1")
+        
+        valid_cols = [c for c, good in zip(valid_cols, good_cols_mask) if good]
+        if not valid_cols:
+            return (np.zeros(n, dtype=np.float32), pd.DataFrame(index=X.index)) if return_per_sensor else np.zeros(n, dtype=np.float32)
+        
+        # Extract phi, mu, sd for valid columns (vectorized lookup)
+        phis = np.array([self.phimap[c][0] for c in valid_cols], dtype=np.float32)
+        mus = np.array([self.phimap[c][1] for c in valid_cols], dtype=np.float32)
+        sds = np.array([max(self.sdmap.get(c, self._sd_floor), self._sd_floor) for c in valid_cols], dtype=np.float32)
+        
+        # Get data matrix for valid columns
+        X_mat = X[valid_cols].to_numpy(dtype=np.float32, copy=True)  # (n, n_cols)
+        
+        # Impute NaNs to mu (vectorized: broadcast mus across rows)
+        nan_mask = np.isnan(X_mat)
+        X_mat = np.where(nan_mask, mus, X_mat)
+        
+        # Vectorized AR(1) prediction: pred[t] = (x[t-1] - mu) * phi + mu
+        pred = np.empty_like(X_mat, dtype=np.float32)
+        pred[0, :] = X_mat[0, :]  # First row: use actual values
+        if n > 1:
+            # (x[:-1] - mu) * phi + mu, broadcasting over columns
+            pred[1:, :] = (X_mat[:-1, :] - mus) * phis + mus
+        
+        # Compute residuals and z-scores
+        resid = X[valid_cols].to_numpy(dtype=np.float32) - pred  # Keep NaNs from original
+        z_matrix = np.abs(resid) / sds  # (n, n_cols), broadcasting sds over rows
+        
+        # Fuse across columns
         with np.errstate(all="ignore"):
             if self._fuse == "median":
-                fused = np.nanmedian(matrix, axis=1).astype(np.float32)
+                fused = np.nanmedian(z_matrix, axis=1).astype(np.float32)
             elif self._fuse == "p95":
-                fused = np.nanpercentile(matrix, 95, axis=1).astype(np.float32)
+                fused = np.nanpercentile(z_matrix, 95, axis=1).astype(np.float32)
             else:
-                fused = np.nanmean(matrix, axis=1).astype(np.float32)
+                fused = np.nanmean(z_matrix, axis=1).astype(np.float32)
         
-            if return_per_sensor:
-                Z = pd.DataFrame({name: matrix[:, i] for i, name in enumerate(col_names)}, index=X.index)
-                return fused, Z
-            return fused
+        if return_per_sensor:
+            Z = pd.DataFrame(z_matrix, index=X.index, columns=valid_cols)
+            return fused, Z
+        return fused
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize detector state for persistence."""

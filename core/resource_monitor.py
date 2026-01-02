@@ -467,7 +467,7 @@ class ResourceMonitor:
     
     def print_summary(self, top_n: int = 20):
         """Print a summary of resource usage to console."""
-        from core.observability import Console, Heartbeat
+        from core.observability import Console
         
         metrics = self.get_metrics()
         summary = self.get_summary()
@@ -542,7 +542,7 @@ class ResourceMonitor:
             )
             return True
         except Exception as e:
-            from core.observability import Console, Heartbeat
+            from core.observability import Console
             Console.warn(f"Failed to write metrics to SQL: {e}", component="RESOURCE", equip_id=equip_id, run_id=run_id, error_type=type(e).__name__, error=str(e)[:200])
             return False
     

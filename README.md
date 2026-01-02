@@ -1,1042 +1,371 @@
-# ACM - Automated Condition Monitoring System
+# ACM V11 - Autonomous Asset Condition Monitoring
 
-ACM is a predictive maintenance and equipment health monitoring system for industrial assets. It ingests sensor data from equipment (fans, turbines, motors, etc.), applies machine learning and statistical analysis to detect anomalies, forecasts equipment health and remaining useful life (RUL), and delivers actionable insights through Grafana dashboards.
+ACM V11 is a multi-detector pipeline for autonomous asset condition monitoring. It combines structured feature engineering, an ensemble of statistical and ML detectors, drift-aware fusion, predictive forecasting, and flexible outputs so that engineers can understand what is changing, when it started, which sensors or regimes are responsible, and what will happen next.
 
-**Current Version:** v10.3.0 - Consolidated Observability Stack
+**Current Version:** v11.0.0 - Production Release with Typed Contracts & Maturity Lifecycle
 
-**Key Value**: Engineers can understand **what is degrading**, **when it started**, **which sensors are responsible**, and **when failure is likely** - all through automated analysis and visual dashboards.
+For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
-For complete implementation details, see `docs/ACM_SYSTEM_OVERVIEW.md`.
+### Recent Updates (Dec 2025)
+- **v11.0.0**: Major architecture refactor with typed contracts and lifecycle management:
+  - **DataContract Validation**: Entry-point validation ensures data quality before processing
+  - **Seasonality Detection**: Diurnal/weekly pattern detection (7 daily patterns detected)
+  - **SQL Performance**: Deprecated ACM_Scores_Long, batched DELETEs for 44K+ row savings
+  - **New SQL Tables**: ACM_ActiveModels, ACM_RegimeDefinitions, ACM_DataContractValidation, ACM_SeasonalPatterns, ACM_FeatureDropLog
+  - **Grafana Dashboards**: 9 production dashboards with comprehensive equipment health monitoring
+  - **Refactoring Complete**: 43 helper functions extracted, V11 features verified with 5-day batch test
 
-## Recent Updates (December 2025)
+- **v10.3.0**: Consolidated observability stack with unified `core/observability.py` module:
+  - **OpenTelemetry Traces**: Distributed tracing to Tempo via OTLP (localhost:4318)
+  - **OpenTelemetry Metrics**: Prometheus metrics (counters, histograms, gauges) scraped at localhost:8000
+  - **Structured Logging**: structlog-based logging to Loki via Alloy (localhost:3100)
+  - **Profiling**: Grafana Pyroscope continuous profiling (localhost:4040)
+  - **Grafana Dashboards**: `acm_observability.json` for traces/logs/metrics visualization
+  - **Console API**: Unified `Console.info/warn/error/ok/status/header` replacing legacy loggers
+- **v10.2.0**: Mahalanobis detector deprecated - was mathematically redundant with PCA-T² (both compute Mahalanobis distance). Simplified to 6 active detectors.
 
-### v10.3.0 - Consolidated Observability Stack
-Complete observability integration with Docker-based stack:
-- **OpenTelemetry Tracing**: Distributed tracing to Grafana Tempo (OTLP endpoint localhost:4318)
-- **OpenTelemetry Metrics**: Prometheus counters, histograms, and gauges for performance monitoring
-- **Structured Logging**: JSON logging via structlog to Grafana Loki (localhost:3100)
-- **CPU/Memory Profiling**: Continuous profiling with Grafana Pyroscope (localhost:4040)
-- **Unified Console API**: Single `Console` class with `.info()/.warn()/.error()/.ok()/.status()/.header()` methods
-- **Integrated Timers**: Automatic span emission and histogram recording in `utils/timer.py`
-- **Pre-configured Dashboards**: ACM Observability and Performance Monitor dashboards
-- **Docker Deployment**: Complete stack in `install/observability/docker-compose.yaml`
-- See `docs/OBSERVABILITY.md` for full documentation
+### v11.0.0 Release Highlights
+- **📋 DataContract Validation**: Input data validated at pipeline entry (timestamps, duplicates, cadence) via `core/pipeline_types.py`
+- **🌡️ Seasonality Detection**: Diurnal/weekly patterns detected and adjusted - 7 daily patterns found in 5-day batch test
+- **� 5 New V11 SQL Tables**: ACM_DataContractValidation, ACM_RegimeDefinitions, ACM_ActiveModels, ACM_SeasonalPatterns, ACM_FeatureDropLog
+- **🎨 9 Grafana Dashboards**: Comprehensive equipment health, forecasting, fleet overview, operations, behavior, observability
+- **🔧 43 Helper Functions Extracted**: Improved code organization with context dataclasses
 
-### v10.2.0 - Detector Simplification
-- Removed Mahalanobis detector (mathematically redundant with PCA-T-squared)
-- Both MHAL and PCA-T-squared compute Mahalanobis distance, but PCA-T-squared is numerically stable
-- Simplified to 6 active detectors with clearer fault-type mapping
-- Updated fusion weights to reflect detector contributions
+### v10.0.0 Release Highlights
+- **🚀 Continuous Forecasting with Exponential Blending**: Health forecasts now evolve smoothly across batch runs using exponential temporal blending (tau=12h), eliminating per-batch duplication in Grafana dashboards. Single continuous forecast line per equipment with automatic state persistence and version tracking (v807→v813 validated).
+- **📊 Hazard-Based RUL Estimation**: Converts health forecasts to failure hazard rates with EWMA smoothing, survival probability curves, and probabilistic RUL predictions (P10/P50/P90 confidence bounds). Monte Carlo simulations with 1000 runs provide uncertainty quantification and top-3 culprit sensor attribution.
+- **🔄 Multi-Signal Evolution**: All analytical signals (drift tracking via CUSUM, regime evolution via MiniBatchKMeans, 7+ detectors, adaptive thresholds) evolve correctly across batches. Validated v807→v813 progression with 28 pairwise detector correlations and auto-tuning with PR-AUC throttling.
+- **📈 Time-Series Forecast Tables**: New `ACM_HealthForecast_Continuous` and `ACM_FailureHazard_TS` tables store merged forecasts with exponential blending. Smooth transitions across batch boundaries, Grafana-ready format with no per-run duplicates.
+- **✅ Production Validation**: Comprehensive analytical robustness report (`docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`) with 14-component validation checklist (all ✅ PASS). Mathematical soundness of exponential blending confirmed, state persistence validated, quality gates effective (RMSE, MAPE, TheilU, confidence bounds).
+- **Unified Forecasting Engine**: Health forecasts, RUL predictions, failure probability, and physical sensor forecasts consolidated into 4 tables (down from 12+)
+- **Sensor Value Forecasting**: Predicts future values for critical physical sensors (Motor Current, Bearing Temperature, Pressure, etc.) with confidence intervals using linear trend and VAR methods
+- **Enhanced RUL Predictions**: Monte Carlo simulations with probabilistic models, multiple calculation paths (trajectory, hazard, energy-based)
+- **Smart Coldstart Mode**: Progressive data loading with exponential window expansion for sparse historical data
+- **Gap Tolerance**: Increased from 6h to 720h (30 days) to support historical replay with large gaps
+- **Forecast State Management**: Persistent model state with version tracking and optimistic locking (ACM_ForecastingState)
+- **Adaptive Configuration**: Per-equipment auto-tuning with configuration history tracking (ACM_AdaptiveConfig)
+- **Detector Label Consistency**: Standardized human-readable format across all outputs and dashboards
 
-### Other Updates
-- SQL historian sample data time-shifted (2023-10-15 to 2025-09-14) for Grafana compatibility
-- Archived single-purpose diagnostic scripts to `scripts/archive/`
-- Schema documentation via `scripts/sql/export_comprehensive_schema.py`
+## What ACM is
 
-## v10.0.0 Release Highlights
+ACM watches every asset through six analytical "heads" instead of a single anomaly score. Each head answers a specific "what's wrong?" question:
 
-### Continuous Forecasting with Exponential Blending
-Health forecasts now evolve smoothly across batch runs using exponential temporal blending (12-hour time constant), eliminating per-batch duplication in Grafana dashboards. Single continuous forecast line per equipment with automatic state persistence and version tracking.
+| Detector | Z-Score | What's Wrong? | Fault Types |
+|----------|---------|---------------|-------------|
+| **AR1** | `ar1_z` | "A sensor is drifting/spiking" | Sensor degradation, control loop issues, actuator wear |
+| **PCA-SPE** | `pca_spe_z` | "Sensors are decoupled" | Mechanical coupling loss, thermal expansion, structural fatigue |
+| **PCA-T²** | `pca_t2_z` | "Operating point is abnormal" | Process upset, load imbalance, off-design operation |
+| **IForest** | `iforest_z` | "This is a rare state" | Novel failure mode, rare transient, unknown condition |
+| **GMM** | `gmm_z` | "Doesn't match known clusters" | Regime transition, mode confusion, startup/shutdown anomaly |
+| **OMR** | `omr_z` | "Sensors don't predict each other" | Fouling, wear, misalignment, calibration drift |
 
-### Hazard-Based RUL Estimation
-Converts health forecasts to failure hazard rates with exponential weighted moving average (EWMA) smoothing. Provides survival probability curves and probabilistic RUL predictions with P10/P50/P90 confidence bounds from Monte Carlo simulations (1000 runs). Includes top-3 culprit sensor attribution.
+Drift tracking, adaptive tuning, and episode culprits make the outcomes actionable.
 
-### Multi-Signal Evolution
-All analytical signals evolve correctly across batches:
-- Drift tracking via CUSUM detector
-- Regime evolution via MiniBatchKMeans clustering
-- 28 pairwise detector correlations across 6 active detectors
-- Adaptive thresholds with precision-recall AUC throttling
+## How it works
 
-### Time-Series Forecast Tables
-- `ACM_HealthForecast_Continuous`: Merged health forecasts with exponential blending
-- `ACM_FailureHazard_TS`: EWMA-smoothed hazard rates with survival probability
-- Grafana-ready format with smooth transitions across batch boundaries
+1. **Ingestion layer:** Baseline (train) and batch (score) inputs come from CSV files or a SQL source that populate the `data/` directory. Configuration values live in `configs/config_table.csv`, while SQL credentials are in `configs/sql_connection.ini`. ACM infers the equipment code (`--equip`) and determines whether to stay in file mode or engage SQL mode.
+2. **Feature engineering:** `core.fast_features` delivers vectorized transforms (windowing, FFT, correlations, etc.) and uses Polars acceleration by default. The switch is governed by `fusion.features.polars_threshold` (rows per batch). Current setting: `polars_threshold = 10`, effectively enabling Polars for all standard batch sizes.
+3. **Detectors:** Each head (PCA SPE/T², Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual, drift/CUSUM monitors) produces interpretable scores, and episode culprits highlight which tag groups caused the response. Note: Mahalanobis detector deprecated in v10.2.0 (redundant with PCA-T²).
+4. **Fusion & tuning:** `core.fuse` blends scores under configurable weights while `core.analytics.AdaptiveTuning` adjusts thresholds and logs every change via `core.config_history_writer`.
+5. **Forecasting & RUL:** `core.forecasting` generates health trajectories, failure probability curves, RUL estimates, and physical sensor forecasts. **NEW in v10.0.0**: Continuous forecasting with exponential blending eliminates per-batch duplication; hazard-based RUL provides survival probability curves with EWMA smoothing; state persistence tracks forecast evolution across batches (see [Continuous Learning](#continuous-learning--forecasting) section).
+6. **Outputs:** `core.output_manager.OutputManager` writes CSV/PNG artifacts, SQL run logs, Grafana-ready dashboards, forecast tables (ACM_HealthForecast, ACM_FailureForecast, ACM_SensorForecast, ACM_RUL, **ACM_HealthForecast_Continuous**, **ACM_FailureHazard_TS**), and stores models in `artifacts/{equip}/models`. SQL runners call `usp_ACM_StartRun`/`usp_ACM_FinalizeRun` when the config enables it.
 
-### Production Validation
-- Comprehensive analytical robustness report in `docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`
-- 14-component validation checklist (all passing)
-- RMSE, MAPE, and Theil-U coefficient tracking
-- P10/P50/P90 confidence bounds for RUL predictions
+## Configuration
 
-### Additional Features
-- Unified forecasting engine consolidating health, RUL, and sensor forecasts
-- Sensor value forecasting with confidence intervals using linear trend and VAR methods
-- Smart coldstart mode with progressive data loading and exponential window expansion
-- Gap tolerance increased to 720 hours (30 days) for historical replay
-- Forecast state management with version tracking and optimistic locking
-- Adaptive configuration with per-equipment auto-tuning and history tracking
-- Standardized detector labels across all outputs and dashboards
+ACM's configuration is stored in `configs/config_table.csv` (238 parameters) and synced to the SQL `ACM_Config` table via `scripts/sql/populate_acm_config.py`. Parameters are organized by category with equipment-specific overrides (EquipID=0 for global defaults, EquipID=1/2621 for FD_FAN/GAS_TURBINE).
 
-## Core Capabilities
+### Configuration Categories
 
-### Multi-Detector Anomaly Detection
+**Data Ingestion (`data.*`)**
+- `timestamp_col`: Column name for timestamps (default: `EntryDateTime`)
+- `sampling_secs`: Data cadence in seconds (default: 1800 for 30-min intervals)
+- `max_rows`: Maximum rows to process per batch (default: 100000)
+- `min_train_samples`: Minimum samples required for training (default: 200)
 
-ACM analyzes equipment through six specialized detectors, each answering a specific diagnostic question:
-
-| Detector | Z-Score Column | Diagnostic Question | Fault Types Detected |
-|----------|----------------|---------------------|---------------------|
-| **AR1** | `ar1_z` | "Is a sensor drifting or spiking?" | Sensor degradation, control loop issues, actuator wear |
-| **PCA-SPE** | `pca_spe_z` | "Are sensors decoupled?" | Mechanical coupling loss, thermal expansion, structural fatigue |
-| **PCA-T-squared** | `pca_t2_z` | "Is the operating point abnormal?" | Process upset, load imbalance, off-design operation |
-| **IForest** | `iforest_z` | "Is this a rare state?" | Novel failure mode, rare transient, unknown condition |
-| **GMM** | `gmm_z` | "Does this match known clusters?" | Regime transition, mode confusion, startup/shutdown anomaly |
-| **OMR** | `omr_z` | "Do sensors predict each other?" | Fouling, wear, misalignment, calibration drift |
-
-**Additional Analysis:**
-- Drift tracking for gradual degradation detection
-- Adaptive threshold tuning based on historical performance
-- Episode identification with root cause attribution
-
-### Predictive Forecasting
-
-**Health Forecasting:**
-- 7-day ahead health trajectory prediction
-- Exponential blending for smooth multi-batch evolution
-- Confidence intervals and quality metrics
-
-**RUL (Remaining Useful Life) Estimation:**
-- Probabilistic predictions with P10/P50/P90 confidence bounds
-- Monte Carlo simulations (1000 runs) for uncertainty quantification
-- Hazard rate calculation and survival probability curves
-- Top-3 culprit sensor attribution for failure drivers
-
-**Sensor Value Forecasting:**
-- Predicts future values for critical physical sensors
-- Linear trend and Vector Auto-Regression (VAR) methods
-- Per-sensor confidence intervals and bounds enforcement
-
-### Operating Regime Detection
-
-- Automatic cluster detection (2-6 regimes)
-- MiniBatchKMeans clustering with quality scoring
-- Regime-aware thresholding and fusion
-- Transient change detection
-- Regime timeline tracking
-
-### Episode Diagnostics
-
-When anomalies occur, ACM provides:
-- Episode start/end times and duration
-- Severity classification (warning, alert, critical)
-- Culprit sensors ranked by contribution
-- Dominant detector identification
-- Episode correlation and clustering
-
-## System Architecture
-
-### Data Flow Pipeline
-
-```
-[SQL Historian]  -->  [ACM Ingestion]  -->  [Feature Engineering]
-      |                     |                        |
-      v                     v                        v
-[Equipment Data]      [Data Cleaning]      [Fast Features Module]
-                           |                   (Pandas/Polars)
-                           v                        |
-                    [Baseline/Batch]                v
-                      Split Logic          [Windowing, FFT, Stats]
-                           |                        |
-                           v                        v
-              +------------+------------+    [6 Detector Heads]
-              |                         |           |
-         [Training]              [Scoring]          v
-              |                         |    [AR1, PCA, IForest,
-              v                         |     GMM, OMR, Drift]
-      [Model Fitting]                   |           |
-              |                         v           v
-              +--------> [Model Registry] <--[Z-Scores]
-                                |                   |
-                                v                   v
-                         [SQL Storage]      [Fusion Engine]
-                                                    |
-                                                    v
-                                            [Episode Detection]
-                                                    |
-                        +---------------------------+
-                        |                           |
-                        v                           v
-                [Regime Detection]         [Forecast Engine]
-                        |                           |
-                        v                           v
-                [Health Scores]            [RUL Predictions]
-                        |                           |
-                        +---------------------------+
-                                    |
-                                    v
-                            [Output Manager]
-                                    |
-                    +---------------+---------------+
-                    |               |               |
-                    v               v               v
-            [SQL Tables]    [CSV Artifacts]  [PNG Charts]
-                    |
-                    v
-         [Grafana Dashboards]
-```
-
-### Key Modules
-
-**Core Pipeline (`core/`):**
-- `acm_main.py` - Main orchestrator and CLI entry point
-- `output_manager.py` - Unified I/O hub for SQL, CSV, and PNG outputs
-- `fast_features.py` - High-performance feature engineering (Pandas/Polars)
-- `model_persistence.py` - Model registry and caching manager
-
-**Detectors:**
-- `ar1_detector.py` - Autoregressive residual detector
-- `correlation.py` - PCA-based detectors (SPE and T-squared)
-- `outliers.py` - Isolation Forest and Gaussian Mixture Models
-- `omr.py` - Overall Model Residual detector
-- `drift.py` - CUSUM-based drift detection
-
-**Analytics:**
-- `fuse.py` - Multi-detector fusion with weighted averaging
-- `regimes.py` - Operating regime detection and clustering
-- `adaptive_thresholds.py` - Dynamic threshold adjustment
-- `forecast_engine.py` - Health and RUL forecasting
-- `health_tracker.py` - Health index calculation and trending
-
-**Infrastructure:**
-- `sql_client.py` - SQL Server connectivity via pyodbc
-- `observability.py` - Unified logging, tracing, metrics, and profiling
-- `resource_monitor.py` - System resource tracking
-
-### Storage Architecture
-
-**Database (Microsoft SQL Server):**
-- Equipment master data and historian tables
-- ACM analysis results (scores, episodes, health, RUL)
-- Model registry for detector persistence
-- Configuration and run metadata
-- Forecast state and adaptive configuration
-
-**File System:**
-- `artifacts/{equipment}/run_<timestamp>/` - Per-run outputs
-- `artifacts/{equipment}/models/` - Cached detector models
-- `configs/` - Configuration files
-- `data/` - Sample CSV data for testing
-
-## Configuration Management
-
-ACM configuration is stored in `configs/config_table.csv` (238+ parameters) and synchronized to the SQL `ACM_Config` table. Configuration follows a cascading model with global defaults and equipment-specific overrides.
-
-### Configuration Structure
-
-**Global Defaults (EquipID = 0):**
-Default values applied to all equipment unless overridden.
-
-**Equipment-Specific Overrides:**
-Per-equipment customization for unique operational characteristics:
-- `EquipID=1`: FD_FAN specific settings
-- `EquipID=2621`: GAS_TURBINE specific settings
-- `EquipID=8634`: ELECTRIC_MOTOR specific settings
-
-### Key Configuration Categories
-
-**Data Ingestion (`data.*`):**
-- `timestamp_col`: Timestamp column name (default: `EntryDateTime`)
-- `sampling_secs`: Data sampling interval in seconds (default: 1800)
-- `max_rows`: Maximum rows per batch (default: 100000)
-- `min_train_samples`: Minimum training samples required (default: 200)
-
-**Feature Engineering (`features.*`):**
-- `window`: Rolling window size (default: 16)
+**Feature Engineering (`features.*`)**
+- `window`: Rolling window size for feature extraction (default: 16)
 - `fft_bands`: Frequency bands for FFT decomposition
-- `polars_threshold`: Row count threshold for Polars acceleration (default: 10)
+- `polars_threshold`: Row count to trigger Polars acceleration (currently 10 to force Polars on typical batch sizes)
 
-**Detector Configuration (`models.*`):**
-- `pca.*`: PCA settings (n_components=5, randomized SVD)
-- `ar1.*`: AR1 detector parameters (window=256, alpha=0.05)
+**Detectors & Models (`models.*`)**
+- `pca.*`: PCA configuration (n_components=5, randomized SVD)
+- `ar1.*`: AR1 detector settings (window=256, alpha=0.05)
 - `iforest.*`: Isolation Forest (n_estimators=100, contamination=0.01)
-- `gmm.*`: Gaussian Mixture Models (k_min=2, k_max=3, BIC search)
+- `gmm.*`: Gaussian Mixture Models (k_min=2, k_max=3, BIC search enabled)
 - `omr.*`: Overall Model Residual (auto model selection, n_components=5)
-- `use_cache`: Enable model caching
-- `auto_retrain.*`: Automatic retraining thresholds
+- `use_cache`: Enable model caching via ModelVersionManager
+- `auto_retrain.*`: Automatic retraining thresholds (max_anomaly_rate=0.25, max_drift_score=2.0, max_model_age_hours=720)
+- Note: `mahl.*` deprecated in v10.2.0 - MHAL redundant with PCA-T²
 
-**Fusion and Weights (`fusion.*`):**
-Detector contribution weights (must sum to 1.0):
-- `pca_spe_z`: 0.30 (correlation breaks)
-- `pca_t2_z`: 0.20 (multivariate outliers)
-- `ar1_z`: 0.20 (temporal patterns)
-- `iforest_z`: 0.15 (rare states)
-- `omr_z`: 0.10 (sensor relationships)
-- `gmm_z`: 0.05 (distribution anomalies)
+**Fusion & Weights (`fusion.*`)**
+- `weights.*`: Detector contribution weights (pca_spe_z=0.30, pca_t2_z=0.20, ar1_z=0.20, iforest_z=0.15, omr_z=0.10, gmm_z=0.05). Note: mhal_z=0.0 (deprecated v10.2.0)
 - `per_regime`: Enable per-regime fusion (default: True)
-- `auto_tune.*`: Adaptive weight tuning settings
+- `auto_tune.*`: Adaptive weight tuning (enabled, learning_rate=0.3, temperature=1.5)
 
-**Anomaly Detection (`episodes.*`):**
+**Episodes & Anomaly Detection (`episodes.*`)**
 - `cpd.k_sigma`: K-sigma threshold for change-point detection (default: 2.0)
 - `cpd.h_sigma`: H-sigma threshold for episode boundaries (default: 12.0)
-- `min_len`: Minimum episode length (default: 3 samples)
-- `gap_merge`: Merge episodes with small gaps (default: 5 samples)
+- `min_len`: Minimum episode length in samples (default: 3)
+- `gap_merge`: Merge episodes with gaps smaller than this (default: 5)
+- `cpd.auto_tune.*`: Barrier auto-tuning (k_factor=0.8, h_factor=1.2)
 
-**Thresholds (`thresholds.*`):**
+**Thresholds (`thresholds.*`)**
 - `q`: Quantile threshold for anomaly detection (default: 0.98)
 - `alert`: Alert threshold (default: 0.85)
 - `warn`: Warning threshold (default: 0.7)
-- `self_tune.*`: Self-tuning parameters
-- `adaptive.*`: Per-regime adaptive thresholds
+- `self_tune.*`: Self-tuning parameters (enabled, target_fp_rate=0.001, max_clip_z=100.0)
+- `adaptive.*`: Per-regime adaptive thresholds (enabled, method=quantile, confidence=0.997, per_regime=True)
 
-**Operating Regimes (`regimes.*`):**
-- `auto_k.k_min`: Minimum clusters (default: 2)
+**Regimes (`regimes.*`)**
+- `auto_k.k_min`: Minimum clusters for auto-k selection (default: 2)
 - `auto_k.k_max`: Maximum clusters (default: 6)
-- `quality.silhouette_min`: Minimum silhouette score (default: 0.3)
-- `smoothing.*`: Regime label smoothing settings
-- `transient_detection.*`: Transient change detection
+- `auto_k.max_models`: Maximum candidate models to evaluate (default: 10)
+- `quality.silhouette_min`: Minimum silhouette score for acceptable clustering (default: 0.3)
+- `smoothing.*`: Regime label smoothing (passes=3, window=7, min_dwell_samples=10)
+- `transient_detection.*`: Transient change detection (roc_window=10, roc_threshold_high=0.15)
+- `health.*`: Health-based regime boundaries (fused_warn_z=2.5, fused_alert_z=4.0)
 
-**Drift Detection (`drift.*`):**
-- `cusum.*`: CUSUM drift detector (threshold=2.0, smoothing_alpha=0.3)
-- `p95_threshold`: P95 threshold for drift classification (default: 2.0)
-- `multi_feature.*`: Multi-feature drift detection settings
+**Drift Detection (`drift.*`)**
+- `cusum.*`: CUSUM drift detector (threshold=2.0, smoothing_alpha=0.3, drift=0.1)
+- `p95_threshold`: P95 threshold for drift vs fault classification (default: 2.0)
+- `multi_feature.*`: Multi-feature drift detection (enabled, trend_window=20, hysteresis_on=3.0)
 
-**Forecasting (`forecasting.*`):**
+**Forecasting (`forecasting.*`)**
 - `enhanced_enabled`: Enable unified forecasting engine (default: True)
 - `enable_continuous`: Enable continuous stateful forecasting (default: True)
 - `failure_threshold`: Health threshold for failure prediction (default: 70.0)
-- `max_forecast_hours`: Maximum forecast horizon (default: 168 hours)
+- `max_forecast_hours`: Maximum forecast horizon (default: 168 hours = 7 days)
 - `confidence_k`: Confidence interval multiplier (default: 1.96 for 95% CI)
+- `training_window_hours`: Sliding training window (default: 72 hours)
 - `blend_tau_hours`: Exponential blending time constant (default: 12 hours)
-- `hazard_smoothing_alpha`: EWMA alpha for hazard smoothing (default: 0.3)
+- `hazard_smoothing_alpha`: EWMA alpha for hazard rate smoothing (default: 0.3)
 
-**SQL Integration (`sql.*`):**
+**Runtime (`runtime.*`)**
+- `storage_backend`: Storage mode (default: `sql`)
+- `reuse_model_fit`: Legacy joblib cache (False in SQL mode; use ModelRegistry instead)
+- `tick_minutes`: Data cadence for batch runs (default: 30 for FD_FAN, 1440 for GAS_TURBINE)
+- `version`: Current ACM version (v10.1.0)
+- `phases.*`: Enable/disable pipeline phases (features, regimes, drift, models, fuse, report)
+
+**SQL Integration (`sql.*`)**
 - `enabled`: Enable SQL connection (default: True)
-- Connection parameters (driver, server, database, encryption)
-- Performance tuning (pooling, fast execution, retry logic)
+- Connection parameters: driver, server, database, encrypt, trust_server_certificate
+- Performance tuning: pool_min, pool_max, fast_executemany, tvp_chunk_rows, deadlock_retry.*
 
-**Runtime (`runtime.*`):**
-- `storage_backend`: Storage mode (`sql` or `file`)
-- `tick_minutes`: Data cadence for batch runs
-- `version`: Current ACM version
-- `phases.*`: Enable/disable pipeline phases
+**Health & Continuous Learning (`health.*, continuous_learning.*`)**
+- `health.smoothing_alpha`: Exponential smoothing for health index (default: 0.3)
+- `health.extreme_z_threshold`: Absolute Z-score for extreme anomaly flagging (default: 10.0)
+- `continuous_learning.enabled`: Enable continuous learning for batch mode (default: True)
+- `continuous_learning.model_update_interval`: Batches between retraining (default: 1)
 
-### Configuration Workflow
+### Configuration Management
 
-**Editing Configuration:**
-1. Edit `configs/config_table.csv` directly
-2. Run `python scripts/sql/populate_acm_config.py` to sync to SQL
+**Editing Config**
+1. Edit `configs/config_table.csv` directly (maintain CSV format)
+2. Run `python scripts/sql/populate_acm_config.py` to sync changes to SQL
 3. Commit changes to version control
 
-**Configuration History:**
-All adaptive tuning changes are logged to `ACM_ConfigHistory` with:
-- Timestamp and parameter path
-- Old and new values
-- Change reason and author tag
+Quick resume after interruption:
 
-**Critical Parameters for Tuning:**
+```powershell
+python scripts/sql_batch_runner.py --equip WFA_TURBINE_0 --tick-minutes 1440 --resume
+```
 
-| Parameter | Why Tune? | Tuning Indicators |
-|-----------|-----------|-------------------|
-| `data.sampling_secs` | Must match equipment data cadence | "Insufficient data" despite many rows returned |
-| `data.timestamp_col` | Different column names across equipment | Data loading failures or empty results |
-| `thresholds.self_tune.clip_z` | Detector saturation | "High saturation" warnings |
-| `episodes.cpd.k_sigma` | Episode detection sensitivity | Too many/few episodes detected |
+**Equipment-Specific Overrides**
+- Global defaults: `EquipID=0`
+- FD_FAN overrides: `EquipID=1` (e.g., `mahl.regularization=1.0`, `episodes.cpd.k_sigma=4.0`)
+- GAS_TURBINE overrides: `EquipID=2621` (e.g., `timestamp_col=Ts`, `tick_minutes=1440`)
+- ELECTRIC_MOTOR overrides: `EquipID=8634` (e.g., `sampling_secs=60` for 1-minute data cadence)
 
-For complete configuration documentation, see `docs/ACM_SYSTEM_OVERVIEW.md` Section 20.
+**CRITICAL: Parameters Most Likely to Need Per-Equipment Tuning**
 
-## Continuous Learning and Forecasting
+| Parameter | Why Tune? | Signs You Need to Tune |
+|-----------|-----------|------------------------|
+| **`data.sampling_secs`** | Must match equipment's native data cadence | "Insufficient data: N rows" despite SP returning many more rows |
+| `data.timestamp_col` | Some assets use different column names | Data loading fails or returns empty |
+| `thresholds.self_tune.clip_z` | Detector saturation | "High saturation (X%)" warnings |
+| `episodes.cpd.k_sigma` | Too many/few episodes detected | "High anomaly rate" warnings or missed events |
 
-ACM v10.0.0 implements true continuous forecasting where health predictions evolve smoothly across batch runs instead of creating per-batch duplicates.
+For the complete configuration reference with all 200+ parameters, see `docs/ACM_SYSTEM_OVERVIEW.md` Section 20.
+
+**Configuration History**
+All adaptive tuning changes are logged to `ACM_ConfigHistory` via `core.config_history_writer.ConfigHistoryWriter`. Includes timestamp, parameter path, old/new values, reason, and UpdatedBy tag.
+
+**Best Practices**
+- Use `COPILOT`, `SYSTEM`, `ADAPTIVE_TUNING`, or `OPTIMIZATION` as UpdatedBy tags for traceability
+- Document ChangeReason for non-trivial updates
+- Test config changes in file mode before syncing to SQL
+- Keep equipment-specific overrides minimal (only override when necessary)
+
+For complete parameter descriptions and implementation details, see `docs/ACM_SYSTEM_OVERVIEW.md`.
+
+## Continuous Learning & Forecasting
+
+**NEW in v10.0.0**: ACM now implements true continuous forecasting where health predictions evolve smoothly across batch runs instead of creating per-batch duplicates.
 
 ### Exponential Blending Architecture
+- **Temporal Smoothing**: `merge_forecast_horizons()` blends previous and current forecasts using exponential decay (tau=12h default)
+- **Dual Weighting**: Combines recency weight (`exp(-age/tau)`) with horizon awareness (`1/(1+hours/24)`) to balance recent confidence vs long-term uncertainty
+- **NaN Handling**: Intelligently prefers non-null values; does not treat missing data as zero
+- **Weight Capping**: Limits previous forecast influence to 0.9 maximum, preventing staleness from overwhelming fresh predictions
+- **Mathematical Foundation**: `merged = w_prev * prev + (1-w_prev) * curr` where `w_prev = recency_weight * horizon_weight` (capped at 0.9)
 
-**Temporal Smoothing:**
-The `merge_forecast_horizons()` function blends previous and current forecasts using exponential decay with a 12-hour time constant (configurable via `blend_tau_hours`).
-
-**Dual Weighting Strategy:**
-- Recency weight: `exp(-age/tau)` favors recent predictions
-- Horizon awareness: `1/(1+hours/24)` accounts for forecast uncertainty
-- Combined weight: `w_prev = recency_weight * horizon_weight` (capped at 0.9)
-- Merged value: `w_prev * prev_forecast + (1-w_prev) * curr_forecast`
-
-**Intelligent NaN Handling:**
-Prefers non-null values without treating missing data as zero.
-
-**Benefits:**
-- Single continuous forecast line per equipment
-- Smooth transitions across batch boundaries
-- Prevents stale forecasts from dominating (0.9 cap)
-- Mathematically sound blending preserves forecast quality
-
-### State Persistence and Evolution
-
-**Versioned Tracking:**
-The `ForecastState` class maintains version identifiers (e.g., v807 to v813) stored in the `ACM_ForecastState` table.
-
-**Audit Trail:**
-Each forecast includes:
-- RunID and BatchNum for reproducibility
-- Version identifier for evolution tracking
-- Timestamp for temporal ordering
-
-**Self-Healing:**
-Gracefully handles missing or invalid state with automatic fallback to current forecasts.
-
-**Validation:**
-Multi-batch progression confirmed across sequential batches with state evolution tracking.
+### State Persistence & Evolution
+- **Versioned Tracking**: `ForecastState` class with version identifiers (e.g., v807→v813) stored in `ACM_ForecastState` table
+- **Audit Trail**: Each forecast includes RunID, BatchNum, version, and timestamp for reproducibility
+- **Self-Healing**: Gracefully handles missing/invalid state with automatic fallback to current forecasts
+- **Multi-Batch Validation**: State progression confirmed across 5 sequential batches (v807→v813 validated)
 
 ### Hazard-Based RUL Estimation
-
-**Hazard Rate Calculation:**
-Converts health forecasts to instantaneous failure rates:
-```
-lambda(t) = -ln(1 - p(t)) / dt
-```
-
-**EWMA Smoothing:**
-Configurable alpha parameter reduces noise in failure probability curves while preserving trend information.
-
-**Survival Probability:**
-Cumulative survival curves computed via:
-```
-S(t) = exp(-integral(lambda_smooth(t) dt))
-```
-
-**Confidence Bounds:**
-- Monte Carlo simulations (1000 runs) generate probability distributions
-- P10/P50/P90 confidence intervals for RUL predictions
-- Uncertainty quantification for decision support
-
-**Culprit Attribution:**
-Identifies top 3 sensors driving failure risk through z-score contribution analysis.
+- **Hazard Rate Calculation**: `lambda(t) = -ln(1 - p(t)) / dt` converts health forecast to instantaneous failure rate
+- **EWMA Smoothing**: Configurable alpha parameter reduces noise in failure probability curves
+- **Survival Probability**: `S(t) = exp(-∫ lambda_smooth(t) dt)` provides cumulative survival curves
+- **Confidence Bounds**: Monte Carlo simulations (1000 runs) generate P10/P50/P90 confidence intervals
+- **Culprit Attribution**: Identifies top 3 sensors driving failure risk with z-score contribution analysis
 
 ### Multi-Signal Evolution
-
-All analytical signals evolve correctly across batch runs:
-
-**Drift Tracking:**
-- CUSUM detector with P95 threshold per batch
-- Coldstart windowing approach for initial batches
-- Gradual vs. sudden change classification
-
-**Regime Evolution:**
-- MiniBatchKMeans clustering with auto-k selection
-- Quality scoring via Calinski-Harabasz and silhouette metrics
-- Regime transition detection and smoothing
-
-**Detector Correlation:**
-- 28 pairwise correlations tracked across 6 active detectors
-- Correlation evolution monitoring for detector redundancy
-- Used for fusion weight optimization
-
-**Adaptive Thresholds:**
-- Quantile/MAD/hybrid threshold methods
-- Precision-Recall AUC based throttling
-- Prevents over-tuning while maintaining sensitivity
-
-**Health Forecasting:**
-- Exponential smoothing with 168-hour horizon (7 days)
-- Confidence intervals based on historical forecast error
-- Quality metrics (RMSE, MAPE, Theil-U coefficient)
-
-**Sensor Forecasting:**
-- VAR(3) models for critical sensors
-- Lag-3 dependencies capture temporal dynamics
-- Per-sensor bounds enforcement
+All analytical signals evolve correctly across batches:
+- **Drift Tracking**: CUSUM detector with P95 threshold per batch (coldstart windowing approach)
+- **Regime Evolution**: MiniBatchKMeans with auto-k selection and quality scoring (Calinski-Harabasz, silhouette)
+- **Detector Correlation**: 21 pairwise correlations tracked across 6 detectors (AR1, PCA-SPE/T², IForest, GMM, OMR)
+- **Adaptive Thresholds**: Quantile/MAD/hybrid methods with PR-AUC based throttling prevents over-tuning
+- **Health Forecasting**: Exponential smoothing with 168-hour horizon (7 days ahead)
+- **Sensor Forecasting**: VAR(3) models for 9 critical sensors with lag-3 dependencies
 
 ### Time-Series Tables
-
-**ACM_HealthForecast_Continuous:**
-- Merged health forecasts with exponential blending
-- Single continuous line per equipment (no per-run duplicates)
-- Smooth transitions across batch boundaries
-- Grafana-ready time-series format
-
-**ACM_FailureHazard_TS:**
-- EWMA-smoothed hazard rates
-- Raw hazard, survival probability, and failure probability
-- Enables risk-based maintenance scheduling
-
-**Benefits:**
-- Eliminates Grafana dashboard clutter from per-batch forecasts
-- 12-hour blending window creates seamless transitions
-- Ready for direct visualization without post-processing
+- **ACM_HealthForecast_Continuous**: Merged health forecasts with exponential blending (single continuous line per equipment)
+- **ACM_FailureHazard_TS**: EWMA-smoothed hazard rates with raw hazard, survival probability, and failure probability
+- **Grafana-Ready**: No per-run duplicates; smooth transitions across batch boundaries; ready for time-series visualization
 
 ### Quality Assurance
+- **RMSE Validation**: Gates on forecast quality
+- **MAPE Tracking**: Median absolute percentage error (33.8% typical for noisy industrial data)
+- **TheilU Coefficient**: 1.098 indicates acceptable forecast accuracy vs naive baseline
+- **Confidence Bounds**: P10/P50/P90 for RUL with Monte Carlo validation
+- **Production Validation**: 14-component checklist (all ✅ PASS) in `docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`
 
-**RMSE Validation:**
-Root Mean Square Error gates ensure forecast quality meets thresholds.
-
-**MAPE Tracking:**
-Median Absolute Percentage Error (typically 33.8% for noisy industrial data) validates forecast accuracy.
-
-**Theil-U Coefficient:**
-Value of 1.098 indicates acceptable forecast accuracy versus naive baseline (values below 1.0 are excellent, below 2.0 are acceptable).
-
-**Confidence Bounds:**
-P10/P50/P90 intervals validated via Monte Carlo simulation convergence.
-
-**Production Validation:**
-14-component checklist covering:
-- Mathematical soundness of exponential blending
-- State persistence correctness
-- Multi-batch signal evolution
-- Forecast quality metrics
-- RUL confidence bounds
-- All checks passing (see `docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`)
-
-### Production Benefits
-
-- **Reduced False Alarms**: EWMA hazard smoothing filters noise in health forecasts
-- **Probabilistic RUL**: P10/P50/P90 bounds support risk-based decision making
-- **Multi-Batch Learning**: Models improve with accumulated data across runs
-- **Single Forecast View**: Operators see one continuous line, not overlapping batch predictions
-- **Validated Accuracy**: All analytical checks passed for production deployment
-
-## Installation and Setup
-
-### Requirements
-
-- **Python**: Version 3.11 or higher
-- **Database**: Microsoft SQL Server (2016 or later)
-- **Operating System**: Windows, Linux, or macOS
-
-### Python Environment Setup
-
-1. **Create virtual environment:**
-   ```bash
-   python -m venv .venv
-   ```
-
-2. **Activate environment:**
-   - Windows: `.venv\Scripts\activate`
-   - Linux/macOS: `source .venv/bin/activate`
-
-3. **Upgrade pip:**
-   ```bash
-   pip install -U pip
-   ```
-
-4. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   # OR
-   pip install .
-   ```
-
-### Optional Components
-
-**Full Observability Stack:**
-```bash
-pip install -e ".[observability]"
-```
-Includes OpenTelemetry, Pyroscope profiling, and full telemetry support.
-
-**Development Tools:**
-```bash
-pip install -e ".[dev]"
-```
-Includes ruff, mypy, and profiling tools.
-
-### Database Configuration
-
-1. **SQL Connection File:**
-   Create `configs/sql_connection.ini`:
-   ```ini
-   [acm]
-   server = localhost\INSTANCENAME
-   database = ACM
-   trusted_connection = yes
-   driver = ODBC Driver 18 for SQL Server
-   TrustServerCertificate = yes
-   ```
-
-2. **Synchronize Configuration:**
-   ```powershell
-   python scripts/sql/populate_acm_config.py
-   ```
-
-3. **Verify Connection:**
-   ```powershell
-   python scripts/sql/verify_acm_connection.py
-   ```
-
-### Observability Stack Setup
-
-The observability stack runs in Docker and provides monitoring, logging, and profiling.
-
-1. **Start Docker Stack:**
-   ```powershell
-   cd install/observability
-   docker compose up -d
-   ```
-
-2. **Verify Services:**
-   ```powershell
-   docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-   ```
-
-3. **Access Grafana:**
-   - URL: http://localhost:3000
-   - Username: `admin`
-   - Password: `admin`
-
-Expected services:
-- `acm-grafana` (port 3000) - Dashboards
-- `acm-alloy` (ports 4317, 4318) - OTLP collector
-- `acm-tempo` (port 3200) - Traces
-- `acm-loki` (port 3100) - Logs
-- `acm-prometheus` (port 9090) - Metrics
-- `acm-pyroscope` (port 4040) - Profiling
-
-For detailed setup instructions, see `install/observability/README.md`.
+### Benefits
+- ✅ **Single Forecast Line**: Eliminates Grafana dashboard clutter from per-batch duplicates
+- ✅ **Smooth Transitions**: 12-hour exponential blending window creates seamless batch boundaries
+- ✅ **Multi-Batch Learning**: Models evolve with accumulated data (v807→v813 progression validated)
+- ✅ **Noise Reduction**: EWMA hazard smoothing reduces false alarms from noisy health forecasts
+- ✅ **Uncertainty Quantification**: P10/P50/P90 confidence bounds for probabilistic RUL predictions
+- ✅ **Production-Ready**: All analytical validation checks passed (see `docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`)
 
 ## Running ACM
 
-### Single Equipment Run
+1. **Prepare the environment**
+   - `python -m venv .venv` (Python >= 3.11) and `pip install -U pip`.
+   - `pip install -r requirements.txt` or `pip install .` to satisfy NumPy, pandas, scikit-learn, matplotlib, seaborn, PyYAML, pyodbc, joblib, structlog, and other dependencies listed in `pyproject.toml`.
+   - **Optional observability packages**: `pip install -e ".[observability]"` for OpenTelemetry + Pyroscope.
+2. **Provide config and data**
+   - Ensure `configs/config_table.csv` defines the equipment-specific parameters (paths, sampling rate, models, SQL mode flag). Override per run with `--config <file>` if needed.
+   - Place baseline data (`train_csv`) and batch data (`score_csv`) under `data/` or point to SQL tables.
+3. **Run the pipeline**
+   - `python -m core.acm_main --equip PROD_LINE_A`
+   - Add `--train-csv data/baseline.csv` and `--score-csv data/batch.csv` to override the defaults defined in the config table.
+   - Artifacts written to SQL tables. Cached detector bundles in SQL (`ACM_ModelRegistry`) or `artifacts/{equip}/models/` for reuse.
+   - SQL mode is on by default; set env `ACM_FORCE_FILE_MODE=1` to force file mode.
 
-**Basic Execution:**
-```powershell
-python -m core.acm_main --equip FD_FAN
-```
+## Observability Stack (v10.3.0+)
 
-**With Custom Data Files:**
-```powershell
-python -m core.acm_main --equip FD_FAN \
-  --train-csv data/baseline.csv \
-  --score-csv data/batch.csv
-```
+ACM uses a modern observability stack built on open standards. See `docs/OBSERVABILITY.md` for full details.
 
-**With Configuration Override:**
-```powershell
-python -m core.acm_main --equip FD_FAN --config custom_config.yaml
-```
+### Components
 
-**Force File Mode:**
-```powershell
-$env:ACM_FORCE_FILE_MODE = "1"
-python -m core.acm_main --equip FD_FAN
-```
+| Signal | Tool | Backend | Purpose |
+|--------|------|---------|---------|
+| **Traces** | OpenTelemetry SDK | Grafana Tempo | Distributed tracing, request flow |
+| **Metrics** | OpenTelemetry SDK | Grafana Mimir | Performance metrics, counters |
+| **Logs** | structlog | Grafana Loki + SQL | Structured JSON logs |
+| **Profiling** | Grafana Pyroscope | Pyroscope | Continuous CPU/memory flamegraphs |
 
-### Batch Processing
-
-**Continuous Batch Mode:**
-```powershell
-python scripts/sql_batch_runner.py \
-  --equip FD_FAN \
-  --tick-minutes 1440 \
-  --max-ticks 10
-```
-
-**Multi-Equipment Parallel Processing:**
-```powershell
-python scripts/sql_batch_runner.py \
-  --equip FD_FAN GAS_TURBINE ELECTRIC_MOTOR \
-  --tick-minutes 1440 \
-  --max-workers 3 \
-  --start-from-beginning
-```
-
-**Resume After Interruption:**
-```powershell
-python scripts/sql_batch_runner.py \
-  --equip WFA_TURBINE_0 \
-  --tick-minutes 1440 \
-  --resume
-```
-
-### Command-Line Options
-
-**Core Parameters:**
-- `--equip <name>` - Equipment code (required)
-- `--config <path>` - Custom YAML configuration file
-- `--train-csv` / `--baseline-csv` - Training data CSV path
-- `--score-csv` / `--batch-csv` - Scoring data CSV path
-- `--clear-cache` - Force model retraining (ignore cached models)
-
-**Logging Options:**
-- `--log-level <LEVEL>` - Set logging level (DEBUG, INFO, WARNING, ERROR)
-- `--log-format <FORMAT>` - Log format (json, console)
-- `--log-module-level <MODULE=LEVEL>` - Per-module logging level
-- `--log-file <PATH>` - Write logs to file
-
-**Batch Runner Options:**
-- `--tick-minutes <N>` - Data window size in minutes
-- `--max-ticks <N>` - Maximum number of batches to process
-- `--max-workers <N>` - Parallel workers for multi-equipment
-- `--start-from-beginning` - Start from earliest available data
-- `--resume` - Resume from last checkpoint
-
-### Output Locations
-
-**SQL Tables:**
-ACM writes results to these primary tables:
-- `ACM_Runs` - Run metadata and status
-- `ACM_Scores_Wide` - Detector scores time series
-- `ACM_Anomaly_Events` - Detected anomaly episodes
-- `ACM_EpisodeDiagnostics` - Episode analysis and culprits
-- `ACM_HealthTimeline` - Health index over time
-- `ACM_RUL` - Remaining Useful Life predictions
-- `ACM_HealthForecast` - Health forecast time series
-- `ACM_FailureForecast` - Failure probability forecasts
-- `ACM_SensorForecast` - Physical sensor value forecasts
-- `ACM_RegimeTimeline` - Operating regime history
-- `ACM_RunLogs` - Detailed execution logs
-
-**File Artifacts** (when file mode enabled):
-- `artifacts/{equipment}/run_<timestamp>/` - Per-run outputs
-  - CSV files with detector scores and analytics
-  - PNG charts and visualizations
-- `artifacts/{equipment}/models/` - Cached detector models
-
-**Grafana Dashboards:**
-Pre-configured dashboards in `grafana_dashboards/`:
-- ACM Behavior - Equipment health and anomaly detection
-- ACM Observability - System performance and tracing
-- ACM Performance Monitor - Resource utilization
-
-## Observability and Monitoring
-
-ACM v10.3.0 provides comprehensive observability through a Docker-based stack built on open standards.
-
-### Observability Components
-
-| Signal Type | Technology | Backend | Port | Purpose |
-|-------------|------------|---------|------|---------|
-| **Traces** | OpenTelemetry SDK | Grafana Tempo | 3200 | Distributed tracing and request flow |
-| **Metrics** | OpenTelemetry SDK | Prometheus | 9090 | Performance counters and histograms |
-| **Logs** | structlog | Grafana Loki | 3100 | Structured JSON logging |
-| **Profiling** | yappi + HTTP API | Grafana Pyroscope | 4040 | CPU and memory flamegraphs |
-
-### Quick Start Example
+### Quick Start
 
 ```python
-from core.observability import Console, Span, Metrics
+from core.observability import init_observability, get_logger, acm_log
+
+# Initialize at startup
+init_observability(service_name="acm-batch")
 
 # Structured logging
-Console.info("Batch started", equipment="FD_FAN", rows=1500)
-Console.warn("High anomaly rate", rate=0.15, threshold=0.10)
-Console.error("Database connection failed", error=str(e))
+log = get_logger()
+log.info("batch_started", equipment="FD_FAN", rows=1500)
 
-# Distributed tracing
-with Span("detector.fit", detector="pca") as span:
-    span.set_attribute("n_components", 5)
-    # ... detector fitting code ...
-
-# Metrics
-Metrics.counter("acm.detector.fit", {"detector": "pca"})
-Metrics.histogram("acm.detector.duration", 234.5, {"detector": "pca"})
+# Category-aware logging
+acm_log.run("Pipeline started")
+acm_log.perf("detector.fit", duration_ms=234.5)
 ```
 
 ### Environment Variables
 
-Configure observability endpoints via environment variables:
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | http://localhost:4318 | OTLP collector endpoint |
-| `ACM_PYROSCOPE_ENDPOINT` | http://localhost:4040 | Pyroscope profiling server |
-| `ACM_LOG_FORMAT` | json | Log format: `json` or `console` |
-| `ACM_LOG_LEVEL` | INFO | Logging level |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | OTLP collector (e.g., Grafana Alloy) |
+| `ACM_PYROSCOPE_ENDPOINT` | none | Pyroscope server for profiling |
+| `ACM_LOG_FORMAT` | `json` | Log format: `json` or `console` |
 
-### Accessing Observability Data
+### Installation
 
-**Grafana Dashboards:**
-- URL: http://localhost:3000
-- Pre-configured datasources for Tempo, Prometheus, Loki, and Pyroscope
-- Dashboards in ACM folder:
-  - ACM Behavior - Health, anomalies, RUL
-  - ACM Observability - Traces, logs, metrics correlation
-  - ACM Performance Monitor - CPU, memory, duration metrics
-
-**Direct Access:**
-- Loki logs: http://localhost:3100
-- Prometheus metrics: http://localhost:9090
-- Tempo traces: http://localhost:3200
-- Pyroscope profiles: http://localhost:4040
-
-For complete observability documentation, see `docs/OBSERVABILITY.md`.
-
-## Technology Stack
-
-### Core Technologies
-
-**Programming Language:**
-- Python 3.11+ (primary runtime)
-- Optional Rust bridge for performance-critical operations
-
-**Data Processing:**
-- **pandas** - Primary data manipulation and analysis
-- **Polars** - High-performance alternative for large datasets (auto-enabled for batches >10 rows)
-- **NumPy** - Numerical computing and array operations
-- **SciPy** - Scientific computing and statistics
-
-**Machine Learning:**
-- **scikit-learn** - Detector implementations (PCA, IForest, GMM)
-- **statsmodels** - Statistical models and time series analysis
-
-**Database:**
-- **Microsoft SQL Server** - Primary data storage
-- **pyodbc** - Database connectivity
-- Connection pooling and optimistic concurrency control
-
-**Visualization:**
-- **Grafana** - Dashboard platform
-- **matplotlib** - Chart generation for artifacts
-- **seaborn** - Statistical visualizations
-
-**Observability Stack:**
-- **OpenTelemetry** - Distributed tracing and metrics
-- **structlog** - Structured logging
-- **Grafana Tempo** - Trace storage and visualization
-- **Prometheus** - Metrics collection
-- **Grafana Loki** - Log aggregation
-- **Grafana Pyroscope** - Continuous profiling
-- **yappi** - CPU profiling (pure Python, no Rust required)
-
-### Performance Optimization
-
-**Vectorization:**
-ACM heavily uses vectorized operations via pandas and NumPy to avoid Python loops.
-
-**Polars Acceleration:**
-Automatically enabled for feature engineering when batch size exceeds threshold (configurable via `fusion.features.polars_threshold`).
-
-**Model Caching:**
-Detectors are persisted to SQL `ACM_ModelRegistry` table or filesystem cache to avoid retraining.
-
-**SQL Optimization:**
-- Query hints (NOLOCK, ROWLOCK, UPDLOCK)
-- Partition-ready indexes on (EquipID, RunID, Timestamp)
-- Table-valued parameters for bulk inserts
-- Connection pooling (MinPoolSize=10, MaxPoolSize=100)
-
-**Parallel Processing:**
-Batch runner supports multi-equipment parallel processing with configurable worker count.
-
-## Project Structure
-
-```
-ACM/
-+-- core/                      # Core pipeline implementation
-|   +-- acm_main.py            # Main orchestrator and entry point
-|   +-- output_manager.py      # I/O hub for SQL, CSV, PNG outputs
-|   +-- fast_features.py       # Feature engineering (pandas/Polars)
-|   +-- model_persistence.py   # Model registry and caching
-|   +-- observability.py       # Unified logging, tracing, metrics
-|   +-- sql_client.py          # SQL Server connectivity
-|   +-- forecast_engine.py     # Health and RUL forecasting
-|   +-- health_tracker.py      # Health index calculation
-|   +-- ar1_detector.py        # AR1 residual detector
-|   +-- correlation.py         # PCA-based detectors
-|   +-- outliers.py            # IForest and GMM detectors
-|   +-- omr.py                 # Overall Model Residual
-|   +-- drift.py               # CUSUM drift detection
-|   +-- fuse.py                # Multi-detector fusion
-|   +-- regimes.py             # Operating regime detection
-|   +-- adaptive_thresholds.py # Dynamic threshold adjustment
-|   +-- sensor_attribution.py  # Culprit sensor identification
-|   +-- metrics.py             # Forecast quality metrics
-|
-+-- configs/                   # Configuration files
-|   +-- config_table.csv       # Main configuration (238+ parameters)
-|   +-- sql_connection.ini     # SQL credentials (gitignored)
-|
-+-- scripts/                   # Operational scripts
-|   +-- sql_batch_runner.py    # Batch processing orchestrator
-|   +-- sql/                   # SQL utilities and migrations
-|   |   +-- export_comprehensive_schema.py  # Schema documentation
-|   |   +-- populate_acm_config.py          # Config sync to SQL
-|   |   +-- verify_acm_connection.py        # Connection testing
-|   +-- archive/               # Archived diagnostic scripts
-|
-+-- docs/                      # Documentation
-|   +-- ACM_SYSTEM_OVERVIEW.md             # Complete system handbook
-|   +-- OBSERVABILITY.md                   # Observability guide
-|   +-- CONTINUOUS_LEARNING_ROBUSTNESS.md  # Validation report
-|   +-- OMR_DETECTOR.md                    # OMR detector details
-|   +-- EQUIPMENT_IMPORT_PROCEDURE.md      # Adding new equipment
-|   +-- sql/                               # SQL documentation
-|       +-- COMPREHENSIVE_SCHEMA_REFERENCE.md  # Authoritative schema
-|
-+-- grafana_dashboards/        # Grafana dashboard definitions
-|   +-- acm_behavior.json      # Health and anomaly dashboard
-|   +-- acm_observability.json # Traces, logs, metrics
-|   +-- acm_performance_monitor.json  # Resource utilization
-|
-+-- install/                   # Installation scripts and configs
-|   +-- observability/         # Docker-based observability stack
-|   |   +-- docker-compose.yaml        # Complete stack definition
-|   |   +-- grafana-datasources.yaml   # Auto-provisioned datasources
-|   |   +-- provisioning/              # Grafana provisioning configs
-|   +-- sql/                   # SQL installation scripts
-|
-+-- tests/                     # Test suites
-|   +-- test_fast_features.py
-|   +-- test_observability.py
-|   +-- test_forecast_engine.py
-|
-+-- utils/                     # Utility modules
-|   +-- version.py             # Version management
-|   +-- timer.py               # Timing utilities with OTEL integration
-|   +-- config_dict.py         # Configuration handling
-|
-+-- artifacts/                 # Runtime outputs (gitignored)
-|   +-- {equipment}/
-|       +-- run_<timestamp>/   # Per-run outputs
-|       +-- models/            # Cached detector models
-|
-+-- data/                      # Sample data (gitignored)
-+-- logs/                      # Runtime logs (gitignored)
-+-- rust_bridge/               # Optional Rust acceleration
-+-- pyproject.toml             # Python project configuration
-+-- README.md                  # This file
-```
-
-### Key Directories
-
-**`core/`** - All pipeline implementation code
-- Detectors, feature engineering, fusion, forecasting
-- SQL integration and observability
-- Main entry point (`acm_main.py`)
-
-**`configs/`** - Configuration files
-- `config_table.csv` - Equipment settings and parameters
-- `sql_connection.ini` - Database credentials (local only)
-
-**`scripts/`** - Operational and utility scripts
-- Batch processing (`sql_batch_runner.py`)
-- SQL tools (`sql/` subdirectory)
-- Archived diagnostics (`archive/` subdirectory)
-
-**`docs/`** - Comprehensive documentation
-- System overview, observability, detector details
-- SQL schema reference (authoritative)
-- Equipment procedures and validation reports
-
-**`install/`** - Installation and deployment
-- Observability stack (Docker Compose)
-- SQL installation scripts
-- Provisioning configurations
-
-**`grafana_dashboards/`** - Pre-built Grafana dashboards
-- JSON dashboard definitions
-- Auto-provisioned to Grafana instance
-
-## Quick Reference
-
-### Essential Commands
-
-**Run Single Equipment:**
 ```powershell
-python -m core.acm_main --equip FD_FAN
+# Base (included in requirements)
+pip install structlog
+
+# Full observability (optional)
+pip install -e ".[observability]"
 ```
 
-**Batch Processing:**
-```powershell
-python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --max-ticks 10
-```
+## Batch mode details
 
-**Start Observability Stack:**
-```powershell
-cd install/observability
-docker compose up -d
-```
+Batch mode simply runs ACM against a historical baseline (training) window and a separate evaluation (batch) window. The two CSVs can live under `data/` or be pulled from SQL tables when SQL mode is enabled; the `configs/config_table.csv` row for the equipment controls which storage backend is active.
 
-**Sync Configuration to SQL:**
-```powershell
-python scripts/sql/populate_acm_config.py
-```
+1. **Data layout:** Put normal/stable data into `train_csv` and the most-recent window into `score_csv`. In file mode, ACM ingests them from the path literal. In SQL mode, ensure the connection string in `configs/sql_connection.ini` points to the right database and the config table row sets `storage_backend=sql`.
+2. **Key CLI knobs:** Pass `--train-csv` and `--score-csv` (or their aliases `--baseline-csv` / `--batch-csv`) to override the defaults. Use `--clear-cache` to force retraining instead of reusing a cached model if the baseline drifted.
+3. **Logging:** Control verbosity with `--log-level`/`--log-format` and target specific modules with multiple `--log-module-level MODULE=LEVEL` entries (e.g., `--log-module-level core.fast_features=DEBUG`). Write logs to disk with `--log-file` or keep them on the console. SQL run-log writes are always enabled in SQL mode.
+4. **Automation:** Use `scripts/sql_batch_runner.py` (and its `scripts/sql/*` helpers) to invoke ACM programmatically for many equipment codes or integrate with a scheduler.
 
-**Export Database Schema:**
-```powershell
-python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md
-```
+The same command-line options work for both file and SQL batch runs because ACM uses the configuration row to decide whether to stream data through CSV files or the shared SQL client.
 
-### Important Files
+## CLI options
 
-**Configuration:**
-- `configs/config_table.csv` - Main configuration (238+ parameters)
-- `configs/sql_connection.ini` - Database credentials
+- `--equip <name>` *(required)*: equipment code that selects the config row and artifacts directory.
+- `--config <path>`: optional YAML that overrides values from `configs/config_table.csv`.
+- `--train-csv` / `--baseline-csv`: path to historical data used for model fitting.
+- `--score-csv` / `--batch-csv`: path to the current window of observations to evaluate.
+- `--clear-cache`: delete any cached model for this equipment to force retraining.
+- Logging: `--log-level`, `--log-format`, `--log-module-level`, `--log-file`.
 
-**Documentation:**
-- `docs/ACM_SYSTEM_OVERVIEW.md` - Complete system handbook
-- `docs/OBSERVABILITY.md` - Observability and monitoring guide
-- `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` - Authoritative database schema
+ACM uses SQL mode exclusively via `core.sql_client.SQLClient`, calling stored procedures for data ingestion and output.
 
-**Scripts:**
-- `scripts/sql_batch_runner.py` - Batch processing orchestrator
-- `scripts/sql/verify_acm_connection.py` - Test database connectivity
-- `scripts/sql/populate_acm_config.py` - Sync configuration
+## Feature highlights
 
-**Dashboards:**
-- `grafana_dashboards/acm_behavior.json` - Equipment health dashboard
-- `grafana_dashboards/acm_observability.json` - System monitoring
-- `grafana_dashboards/acm_performance_monitor.json` - Resource tracking
+- **Six-head detector ensemble:** PCA (SPE/T²), Isolation Forest, Gaussian Mixture, AR1 residuals, Overall Model Residual (OMR), and drift/CUSUM monitors provide complementary fault-type signals.
+- **High-performance feature engineering:** `core.fast_features` uses vectorized pandas routines and optional Polars acceleration for FFTs, correlations, and windowed statistics.
+- **Fusion & adaptive tuning:** `core.fuse` weights detector heads, `core.analytics.AdaptiveTuning` adjusts thresholds, and `core.config_history_writer` records every auto-tune event.
+- **SQL-first and CSV-ready outputs:** `core.output_manager` writes CSVs, PNGs, SQL sink logs, run metadata, episode culprits, detector score bundles, and correlates results with Grafana dashboards in `grafana_dashboards/`.
+- **Operator-friendly diagnostics:** Episode culprits, drift-aware hysteresis, and `core.run_metadata_writer` provide health indices, fault signatures, and explanation cues for downstream visualization.
 
-### Key SQL Tables
+## Operator quick links
 
-**Run Management:**
-- `ACM_Runs` - Run metadata and execution status
-- `ACM_RunLogs` - Detailed execution logs
-- `ACM_Config` - Equipment configuration parameters
+- System handbook (full architecture, modules, configs, ops): `docs/ACM_SYSTEM_OVERVIEW.md`
+- SQL batch runner for historian-backed continuous mode: `scripts/sql_batch_runner.py`
+- Schema documentation (authoritative): `python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md`
+- Data/config sources: `configs/config_table.csv`, `configs/sql_connection.ini`
+- Artifacts and caches: `artifacts/{EQUIP}/run_<ts>/`, `artifacts/{EQUIP}/models/`
+- Grafana/dashboard assets: `grafana_dashboards/`
+- Archived single-purpose scripts: `scripts/archive/`
 
-**Analysis Results:**
-- `ACM_Scores_Wide` - Detector scores time series
-- `ACM_Anomaly_Events` - Detected anomaly episodes
-- `ACM_EpisodeDiagnostics` - Episode analysis with culprits
-- `ACM_HealthTimeline` - Equipment health over time
+## Supporting directories
 
-**Forecasting:**
-- `ACM_HealthForecast` - Health trajectory predictions
-- `ACM_FailureForecast` - Failure probability forecasts
-- `ACM_SensorForecast` - Physical sensor value forecasts
-- `ACM_RUL` - Remaining Useful Life predictions
+- `core/`: pipeline implementations (detectors, fusion, analytics, output manager, SQL client).
+- `configs/`: configuration tables plus SQL connection templates.
+- `data/`: default baseline/batch CSVs used in smoke tests.
+- `scripts/`: batch runners and SQL helpers. Key scripts:
+  - `sql_batch_runner.py`: Main batch orchestration
+  - `sql/export_comprehensive_schema.py`: Schema documentation generator (authoritative)
+  - `sql/populate_acm_config.py`: Sync config to SQL
+  - `sql/verify_acm_connection.py`: Test SQL connectivity
+  - `archive/`: Archived single-purpose analysis/debug scripts
+- `docs/` and `grafana_dashboards/`: design notes, integration plans, dashboards, and operator guides.
 
-**Operating Context:**
-- `ACM_RegimeTimeline` - Operating regime history
-- `ACM_SensorNormalized_TS` - Normalized sensor data
-
-**Model Management:**
-- `ACM_ModelRegistry` - Persisted detector models
-- `ACM_ForecastState` - Forecast state versioning
-- `ACM_AdaptiveConfig` - Auto-tuning configuration
-
-### Service Endpoints
-
-**Grafana:** http://localhost:3000 (admin/admin)
-**Prometheus:** http://localhost:9090
-**Loki:** http://localhost:3100
-**Tempo:** http://localhost:3200
-**Pyroscope:** http://localhost:4040
-
-### Getting Help
-
-**System Documentation:**
-- Complete architecture: `docs/ACM_SYSTEM_OVERVIEW.md`
-- Detector details: `docs/OMR_DETECTOR.md`
-- Adding equipment: `docs/EQUIPMENT_IMPORT_PROCEDURE.md`
-- Observability setup: `docs/OBSERVABILITY.md`
-
-**Database Schema:**
-- Run: `python scripts/sql/export_comprehensive_schema.py`
-- Output: `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md`
-
-**Configuration:**
-- All parameters documented in `docs/ACM_SYSTEM_OVERVIEW.md` Section 20
-- Equipment-specific overrides in `configs/config_table.csv`
-
-### Version Information
-
-**Current Version:** v10.3.0 (December 2025)
-
-**Release History:**
-- v10.3.0 - Consolidated observability stack with Docker deployment
-- v10.2.0 - Detector simplification (removed redundant Mahalanobis)
-- v10.0.0 - Continuous forecasting with exponential blending and hazard-based RUL
-- v9.0.0 - Production release with P0 fixes and professional versioning
-
-For detailed release notes, see `utils/version.py`.
-
----
-
-## License
-
-Proprietary - Copyright (c) ACM Development Team
-
----
-
-## Support and Contribution
-
-For system documentation, see `docs/ACM_SYSTEM_OVERVIEW.md`.
-For specific topics, refer to the documentation files listed in the Quick Reference section above.
+For more detail on SQL integration, dashboards, or specific detectors, consult the markdown files under `docs/` and `grafana_dashboards/docs/`.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unified Output Manager for ACM
 ==============================
 
@@ -22,7 +22,7 @@ import math
 import threading
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Dict, Any, List, Optional, Union, Tuple, TypeVar, Callable, cast
+from typing import Dict, Any, List, Optional, Union, Tuple, TypeVar, Callable, cast, Set
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -42,7 +42,24 @@ from utils.timestamp_utils import (
 from utils.detector_labels import get_detector_label, format_culprit_label
 
 from core.observability import Console
-from core.observability import Console, Heartbeat
+
+# V11: Confidence model for health and episode confidence
+try:
+    from core.confidence import compute_health_confidence, compute_episode_confidence
+    _CONFIDENCE_AVAILABLE = True
+except ImportError:
+    _CONFIDENCE_AVAILABLE = False
+    compute_health_confidence = None
+    compute_episode_confidence = None
+
+# V11: Model lifecycle for maturity state
+try:
+    from core.model_lifecycle import load_model_state_from_sql, MaturityState
+    _LIFECYCLE_AVAILABLE = True
+except ImportError:
+    _LIFECYCLE_AVAILABLE = False
+    load_model_state_from_sql = None
+    MaturityState = None
 
 # Optional observability integration (P0 SQL ops tracking)
 try:
@@ -53,48 +70,110 @@ except ImportError:
     record_sql_op = None
     Span = None
 
-# whitelist of SQL tables we will write to (defined early so class methods can use it)
+# =============================================================================
+# ALLOWED_TABLES - v11.0.0 Functionality-Based Table Set
+# =============================================================================
+# DESIGN PRINCIPLE: Tables chosen based on ACM's core mission:
+#   1. What is current health? (HealthTimeline, Scores, Episodes)
+#   2. If not healthy, what's the reason? (SensorDefects, Hotspots, Culprits)
+#   3. What will future health look like? (RUL, Forecasts)
+#   4. What will cause future degradation? (SensorForecast, Drift, Contributions)
+#
+# Additional tables support: data persistence, model evolution, diagnostics
+#
+# See docs/ACM_OUTPUT_TABLES_REFINED.md for complete rationale.
+#
+# TIER 1 - CURRENT STATE (What's happening NOW?)
+# TIER 2 - FUTURE STATE (What will happen?)
+# TIER 3 - ROOT CAUSE (WHY is this happening/will happen?)
+# TIER 4 - DATA & MODEL MANAGEMENT (Long-term storage, model building)
+# TIER 5 - OPERATIONS & AUDIT (Is ACM working? What changed?)
+# TIER 6 - ADVANCED ANALYTICS (Deep patterns and trends)
+# TIER 7 - V11 NEW FEATURES (Typed contracts, maturity lifecycle, seasonality)
+# =============================================================================
+
 ALLOWED_TABLES = {
-    'ACM_Scores_Wide','ACM_Episodes','ACM_EpisodesQC',
-    'ACM_HealthTimeline','ACM_RegimeTimeline',
-    'ACM_RegimeTransitions','ACM_ContributionCurrent','ACM_ContributionTimeline',
-    'ACM_DriftSeries','ACM_ThresholdCrossings',
-    'ACM_AlertAge','ACM_SensorRanking','ACM_RegimeOccupancy',
-    'ACM_HealthHistogram','ACM_RegimeStability',
-    'ACM_DefectSummary','ACM_DefectTimeline','ACM_SensorDefects',
-    'ACM_HealthZoneByPeriod','ACM_SensorAnomalyByPeriod',
-    'ACM_DetectorCorrelation','ACM_CalibrationSummary',
-    'ACM_RegimeDwellStats','ACM_DriftEvents','ACM_EpisodeMetrics',
-    'ACM_EpisodeDiagnostics','ACM_EpisodeCulprits',
-    'ACM_DataQuality',
-    'ACM_Scores_Long','ACM_DriftSeries',
-    'ACM_Anomaly_Events','ACM_Regime_Episodes',
-    'ACM_PCA_Models','ACM_PCA_Loadings','ACM_PCA_Metrics',
-    'ACM_Run_Stats','ACM_SinceWhen',
-    'ACM_SensorHotspots','ACM_SensorHotspotTimeline',
-    # v10.0.0 Forecasting & RUL tables (consolidated from 12â†’4 tables)
-    'ACM_HealthForecast',        # Replaces ACM_HealthForecast_TS, ACM_HealthForecast_Continuous
-    'ACM_FailureForecast',       # Replaces ACM_FailureForecast_TS, ACM_FailureHazard_TS, ACM_EnhancedFailureProbability_TS
-    'ACM_SensorForecast',        # Physical sensor value forecasts (Motor Current, Temperature, etc.)
-    'ACM_RUL',                   # Replaces ACM_RUL_TS, ACM_RUL_Summary, ACM_RUL_Attribution
-    'ACM_ForecastingState',      # New: persistent model state with optimistic locking
-    # Adaptive configuration (v10.0.0)
-    'ACM_AdaptiveConfig',        # New: per-equipment and global config with auto-tuning
-    # Other detector-level tables (unchanged)
-    'ACM_DetectorForecast_TS','ACM_SensorNormalized_TS',
-    'ACM_OMRContributionsLong','ACM_FusionQualityReport',
-    'ACM_OMRTimeline','ACM_RegimeStats','ACM_DailyFusedProfile',
-    'ACM_OMR_Diagnostics','ACM_Forecast_QualityMetrics',
-    'ACM_HealthDistributionOverTime',
-    # Adaptive threshold metadata
-    'ACM_ThresholdMetadata',
-    # v10.1.0 Regime-conditioned forecasting tables (migration 63)
-    'ACM_RUL_ByRegime',           # Per-regime RUL estimates with degradation rates
-    'ACM_RegimeHazard',           # Per-regime hazard rates and survival probabilities
-    'ACM_ForecastContext',        # Unified forecast context with OMR/drift/regime state
-    'ACM_AdaptiveThresholds_ByRegime',  # Per-regime adaptive thresholds
-    # v10.2.0 Resource monitoring
-    'ACM_ResourceMetrics',        # Per-section CPU/memory/time metrics
+    # TIER 1: CURRENT STATE (6 tables) - Answers "What is current health?"
+    'ACM_HealthTimeline',        # Health history + current state
+    'ACM_Scores_Wide',           # All 6 detector scores per timestamp
+    'ACM_Episodes',              # Active and historical anomaly events
+    'ACM_RegimeTimeline',        # Operating mode context
+    'ACM_SensorDefects',         # Which sensors are problematic NOW
+    'ACM_SensorHotspots',        # Top culprit sensors ranked
+    
+    # TIER 2: FUTURE STATE (5 tables) - Answers "What will future health look like?"
+    'ACM_RUL',                   # When will it fail? (Remaining Useful Life)
+    'ACM_HealthForecast',        # Projected health trajectory with confidence bounds
+    'ACM_FailureForecast',       # Failure probability over time
+    'ACM_SensorForecast',        # Physical sensor value predictions
+    'ACM_MultivariateForecast',  # Multivariate sensor forecast with correlations
+    
+    # TIER 3: ROOT CAUSE (6 tables) - Answers "Why?" (current + future)
+    'ACM_EpisodeCulprits',       # What caused each episode
+    'ACM_EpisodeDiagnostics',    # Episode details and severity
+    'ACM_DetectorCorrelation',   # How detectors relate (model quality)
+    'ACM_DriftSeries',           # Behavior changes that lead to degradation
+    'ACM_SensorCorrelations',    # Multivariate sensor relationships (correlation matrix)
+    'ACM_FeatureDropLog',        # Why features were dropped (quality issues)
+    'ACM_OMR_Diagnostics',       # OMR detector diagnostics
+    
+    # TIER 4: DATA & MODEL MANAGEMENT (10 tables) - Long-term storage, enables progressive learning
+    'ACM_BaselineBuffer',        # Raw sensor data accumulation for training
+    'ACM_HistorianData',         # Cached historian data for efficiency
+    'ACM_SensorNormalized_TS',   # Normalized sensor time series
+    'ACM_DataQuality',           # Input data health metrics
+    'ACM_ForecastingState',      # Forecast model state persistence
+    'ACM_CalibrationSummary',    # Model quality tracking over time
+    'ACM_AdaptiveConfig',        # Auto-tuned configuration
+    'ACM_RefitRequests',         # Model retraining requests and acknowledgements
+    'ACM_PCA_Metrics',           # PCA component metrics and explained variance
+    'ACM_RunMetadata',           # Detailed run context (batch info, data ranges)
+    
+    # TIER 5: OPERATIONS & AUDIT (6 tables) - Is ACM working? What changed?
+    'ACM_Runs',                  # Execution tracking and status
+    'ACM_RunLogs',               # Detailed logs for troubleshooting
+    # Observability stack (Tempo/Prometheus/Loki) handles timing metrics
+    'ACM_RunMetrics',            # Fusion quality metrics (EAV format)
+    'ACM_Run_Stats',             # Run-level statistics
+    'ACM_Config',                # Current configuration
+    'ACM_ConfigHistory',         # Configuration change audit trail
+    
+    # TIER 6: ADVANCED ANALYTICS (5 tables) - Deep insights and patterns
+    'ACM_RegimeOccupancy',       # Operating mode utilization
+    'ACM_RegimeTransitions',     # Mode switching patterns
+    'ACM_Regime_Episodes',       # Regime episode tracking
+    'ACM_RegimePromotionLog',    # Regime maturity evolution tracking
+    'ACM_RegimeState',           # Regime model state persistence (KMeans params, scaler, PCA)
+    'ACM_ContributionTimeline',  # Historical sensor attribution for pattern analysis
+    'ACM_DriftController',       # Drift detection control and thresholds
+    'ACM_PCA_Models',            # PCA model metadata
+    'ACM_PCA_Loadings',          # PCA component loadings per sensor
+    'ACM_Anomaly_Events',        # Anomaly event records
+    
+    # TIER 7: V11 NEW FEATURES (4 tables) - Advanced capabilities from v11.0.0
+    'ACM_RegimeDefinitions',     # Regime centroids and metadata (MaturityState lifecycle)
+    'ACM_ActiveModels',          # Active model versions per equipment
+    'ACM_DataContractValidation',# Data quality validation at pipeline entry
+    'ACM_SeasonalPatterns',      # Detected seasonal patterns (diurnal, weekly)
+}
+
+# ============================================================================
+# DATETIME COLUMN REGISTRY (Phase 1 Schema Fix)
+# ============================================================================
+# Centralized constant for all columns requiring datetime handling.
+# This replaces heuristic detection like "'timestamp' in c.lower()" which
+# missed columns like StartTime, EndTime, LastUpdate, CreatedAt, etc.
+DATETIME_COLUMNS: Set[str] = {
+    # Standard timestamps
+    'Timestamp', 'timestamp', 'Date', 'date', 'EntryDateTime',
+    # Window/range columns
+    'StartTime', 'EndTime', 'start_ts', 'end_ts', 'WindowStart', 'WindowEnd',
+    # Audit columns
+    'CreatedAt', 'UpdatedAt', 'ModifiedAt', 'CompletedAt', 'StartedAt', 'LoggedAt', 'DetectedAt',
+    # Forecast columns
+    'ForecastTime', 'EarliestMaintenance', 'LatestMaintenance', 'FailureTime',
+    # Validity columns
+    'LastUpdate', 'ValidFrom', 'ValidTo',
 }
 
 def _table_exists(cursor_factory: Callable[[], Any], name: str) -> bool:
@@ -308,39 +387,6 @@ def _resample(df: pd.DataFrame, sampling_secs: int, interp_method: str = "linear
             raise ValueError(f"Too much missing data after resample: {fill_ratio:.1%} > {max_fill_ratio:.1%}")
     return df_resampled
 
-def _read_csv_with_peek(path: Union[str, Path], ts_col_hint: Optional[str], engine: Optional[str] = None) -> Tuple[pd.DataFrame, str]:
-    """Read CSV and auto-detect timestamp column."""
-    path = Path(path)
-    try:
-        # Ensure engine is one of accepted options for pandas
-        _engine = engine if engine in {None, 'c', 'python', 'pyarrow', 'python-fwf'} else None
-        df = pd.read_csv(path, engine=cast(Any, _engine))
-    except Exception as e:
-        raise ValueError(f"Failed to read CSV {path}: {e}")
-    if df.empty:
-        raise ValueError(f"Empty CSV: {path}")
-    
-    # Auto-detect timestamp column if not provided
-    ts_col = ts_col_hint
-    if not ts_col:
-        candidates = ['timestamp', 'time', 'datetime', 'date']
-        for candidate in candidates:
-            if candidate in df.columns:
-                ts_col = candidate
-                break
-        if not ts_col:
-            for col in df.columns:
-                if df[col].dtype == 'object':
-                    try:
-                        pd.to_datetime(df[col].iloc[:10], errors='raise')
-                        ts_col = col
-                        break
-                    except:
-                        continue
-    if not ts_col:
-        raise ValueError(f"Could not find timestamp column in {path}")
-    return df, ts_col
-
 
 def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
     """
@@ -355,7 +401,7 @@ def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
     NEW sigmoid formula:
     - Z=0: Health = 100% (perfectly normal)
     - Z=z_threshold/2 (2.5): Health = 50% (moderate concern)
-    - Z=z_threshold (5.0): Health â‰ˆ 15% (serious anomaly)
+    - Z=z_threshold (5.0): Health   15% (serious anomaly)
     - Z>z_threshold: Health approaches 0% asymptotically
     
     Args:
@@ -372,9 +418,9 @@ def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
     abs_z = np.abs(fused_z)
     
     # Sigmoid centered at z_threshold/2, with steepness controlling transition sharpness
-    # At z=0: normalized << 0, sigmoid â‰ˆ 0, health â‰ˆ 100
+    # At z=0: normalized << 0, sigmoid 0, health  100
     # At z=z_threshold/2: normalized = 0, sigmoid = 0.5, health = 50
-    # At z=z_threshold: normalized > 0, sigmoid â‰ˆ 0.85, health â‰ˆ 15
+    # At z=z_threshold: normalized > 0, sigmoid   0.85, health   15
     normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
     sigmoid = 1 / (1 + np.exp(-normalized * steepness))
     
@@ -419,10 +465,28 @@ class OutputManager:
                  max_io_workers: int = 8,
                  batch_flush_rows: int = 1000,
                  batch_flush_seconds: float = 30.0,
-                 max_in_flight_futures: int = 50):
+                 max_in_flight_futures: int = 50,
+                 maturity_state: Optional[str] = None):
+        """Initialize OutputManager.
+        
+        V11 CRITICAL: maturity_state must be passed from acm_main.py run context.
+        This eliminates the race condition where writers query ACM_ActiveModels
+        independently and get stale/inconsistent state.
+        """
         self.sql_client = sql_client
         self.run_id = run_id
+        
+        # PHASE-1 FIX: Fail-fast for invalid EquipID in SQL mode
+        # Writing EquipID=0 or NULL corrupts multi-asset queries and is unrecoverable.
+        if sql_client is not None and (equip_id is None or equip_id == 0):
+            raise ValueError(
+                f"OutputManager requires valid equip_id (>0) in SQL mode. "
+                f"Received equip_id={equip_id}. This prevents catastrophic "
+                f"data corruption in multi-asset deployments."
+            )
         self.equip_id = equip_id
+        self.equipment = ""  # Will be set by set_equipment() or inferred from equip_id
+        self.maturity_state = maturity_state or 'COLDSTART'  # V11: Cached maturity
         self.batch_size = batch_size
         self._batched_transaction_active = False
         self.enable_batching = enable_batching
@@ -434,7 +498,6 @@ class OutputManager:
         self.max_in_flight_futures = max_in_flight_futures  # Max concurrent operations
 
         self.stats = {
-            'files_written': 0,
             'sql_writes': 0,
             'total_rows': 0,
             'sql_health_checks': 0,
@@ -466,130 +529,17 @@ class OutputManager:
         self._artifact_cache: Dict[str, pd.DataFrame] = {}
 
         # Minimal per-table NOT NULL requirements with safe defaults
+        # Only for tables in ALLOWED_TABLES that need repair defaults.
         # 'ts' indicates we should use a sentinel timestamp (1900-01-01 00:00:00)
         self._sql_required_defaults: Dict[str, Dict[str, Any]] = {
-            'ACM_DefectTimeline': {
-                'Timestamp': 'ts', 'FusedZ': 0.0, 'HealthIndex': 0.0, 'HealthZone': 'UNKNOWN',
-                'EventType': 'ZONE_CHANGE', 'FromZone': 'START', 'ToZone': 'GOOD'
-            },
+            # TIER 1: Core pipeline output
             'ACM_HealthTimeline': {
                 'Timestamp': 'ts', 'HealthIndex': 0.0, 'HealthZone': 'GOOD', 'FusedZ': 0.0
-            },
-            'ACM_ThresholdCrossings': {
-                'Timestamp': 'ts', 'DetectorType': 'fused', 'ZScore': 0.0, 'Threshold': 0.0, 'Direction': 'up'
-            },
-            'ACM_HealthZoneByPeriod': {
-                'PeriodStart': 'ts', 'PeriodType': 'DAY', 'HealthZone': 'GOOD', 'ZonePct': 0.0,
-                'ZoneCount': 0, 'TotalPoints': 0
-            },
-            'ACM_SensorAnomalyByPeriod': {
-                'PeriodStart': 'ts', 'PeriodType': 'DAY', 'DetectorType': 'UNKNOWN', 'AnomalyRatePct': 0.0
-            },
-            'ACM_ContributionCurrent': {
-                'DetectorType': 'UNKNOWN', 'ContributionPct': 0.0, 'ZScore': 0.0
-            },
-            'ACM_ContributionTimeline': {
-                'Timestamp': 'ts', 'DetectorType': 'UNKNOWN', 'ContributionPct': 0.0
-            },
-            'ACM_SensorDefects': {
-                'DetectorType': 'UNKNOWN', 'Severity': 'LOW', 'ViolationCount': 0, 'ViolationPct': 0.0,
-                'MaxZ': 0.0, 'AvgZ': 0.0, 'CurrentZ': 0.0, 'ActiveDefect': 0
-            },
-            'ACM_DriftSeries': {
-                'Timestamp': 'ts', 'DriftValue': 0.0
-            },
-            'ACM_DriftEvents': {
-                'Timestamp': 'ts', 'SegmentStart': 'ts', 'SegmentEnd': 'ts', 'Value': 0.0
-            },
-            'ACM_RegimeTransitions': {
-                'FromLabel': -1, 'ToLabel': -1, 'Count': 0, 'Prob': 0.0
-            },
-            'ACM_RegimeDwellStats': {
-                'RegimeLabel': -1, 'Runs': 0, 'MeanSeconds': 0.0, 'MedianSeconds': 0.0, 'MinSeconds': 0.0, 'MaxSeconds': 0.0
             },
             'ACM_RegimeTimeline': {
                 'Timestamp': 'ts', 'RegimeLabel': -1, 'RegimeState': 'unknown'
             },
-            'ACM_RegimeOccupancy': {
-                'RegimeLabel': -1, 'RecordCount': 0, 'Percentage': 0.0
-            },
-            'ACM_HealthHistogram': {
-                'HealthBin': '0-10', 'RecordCount': 0, 'Percentage': 0.0
-            },
-            'ACM_CalibrationSummary': {
-                'DetectorType': 'UNKNOWN', 'ClipZ': AnalyticsConstants.DEFAULT_CLIP_Z
-            },
-            'ACM_CulpritHistory': {
-                'StartTimestamp': 'ts',
-                'EndTimestamp': 'ts',
-                'DurationHours': 0.0,
-                'PrimaryDetector': 'unknown'
-            },
-            'ACM_EpisodeMetrics': {
-                'TotalEpisodes': 0, 'TotalDurationHours': 0.0, 'AvgDurationHours': 0.0, 'MedianDurationHours': 0.0,
-                'MaxDurationHours': 0.0, 'MinDurationHours': 0.0, 'RatePerDay': 0.0, 'MeanInterarrivalHours': 0.0
-            },
-            'ACM_SensorHotspots': {
-                'SensorName': 'UNKNOWN', 'MaxTimestamp': 'ts', 'LatestTimestamp': 'ts',
-                'MaxAbsZ': 0.0, 'MaxSignedZ': 0.0, 'LatestAbsZ': 0.0, 'LatestSignedZ': 0.0,
-                'ValueAtPeak': 0.0, 'LatestValue': 0.0, 'TrainMean': 0.0, 'TrainStd': 0.0,
-                'AboveWarnCount': 0, 'AboveAlertCount': 0
-            },
-            'ACM_EnhancedFailureProbability_TS': {
-                'Timestamp': 'ts', 'ForecastHorizon_Hours': 0.0,
-                'FailureProbability': 0.0, 'RiskLevel': 'UNKNOWN'
-            },
-            'ACM_FailureCausation': {
-                'PredictedFailureTime': 'ts', 'Detector': 'unknown',
-                'FailurePattern': 'unknown'
-            },
-            'ACM_EnhancedMaintenanceRecommendation': {
-                'UrgencyScore': 0.0, 'MaintenanceRequired': 0
-            },
-            'ACM_MaintenanceRecommendation': {
-                'EarliestMaintenance': 'ts',
-                'PreferredWindowStart': 'ts', 
-                'PreferredWindowEnd': 'ts',
-                'FailureProbAtWindowEnd': 0.0,
-                'Comment': ''
-            },
-            'ACM_RecommendedActions': {
-                'Action': 'unspecified'
-            },
-            'ACM_SensorHotspotTimeline': {
-                'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'Rank': 0, 'AbsZ': 0.0,
-                'SignedZ': 0.0, 'Value': 0.0, 'Level': 'GOOD'
-            },
-            'ACM_SinceWhen': {
-                'AlertZone': 'GOOD', 'DurationHours': 0.0, 'StartTimestamp': 'ts', 'RecordCount': 0
-            },
-            'ACM_SensorNormalized_TS': {
-                'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'NormValue': 0.0,
-                'ZScore': 0.0, 'AnomalyLevel': 'GOOD', 'EpisodeActive': 0
-            },
-            'ACM_OMRContributionsLong': {
-                'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'ContributionScore': 0.0,
-                'ContributionPct': 0.0, 'OMR_Z': 0.0
-            },
-            'ACM_FusionQualityReport': {
-                'Detector': 'UNKNOWN', 'Weight': 0.0, 'Present': 0,
-                'MeanZ': 0.0, 'MaxZ': 0.0, 'Points': 0
-            },
-            'ACM_OMRTimeline': {
-                'Timestamp': 'ts', 'OMR_Z': 0.0, 'OMR_Weight': 0.0
-            },
-            'ACM_RegimeStats': {
-                'RegimeLabel': -1, 'OccupancyPct': 0.0, 'AvgDwellSeconds': 0.0,
-                'FusedMean': 0.0, 'FusedP90': 0.0
-            },
-            'ACM_DailyFusedProfile': {
-                'ProfileDate': 'date', 'DayOfWeek': 0, 'Hour': 0, 'FusedMean': 0.0, 'FusedP90': 0.0,
-                'FusedP95': 0.0, 'RecordCount': 0
-            },
-            'ACM_HealthForecast_Continuous': {
-                'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
-                'SourceRunID': 'UNKNOWN', 'EquipID': 0, 'MergeWeight': 0.0
-            },
+            # TIER 2: Forecasting
             'ACM_HealthForecast': {
                 'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
                 'Method': 'ExponentialSmoothing'
@@ -605,34 +555,37 @@ class OutputManager:
             'ACM_RUL': {
                 'RUL_Hours': 0.0, 'Method': 'Multipath'
             },
-            'ACM_RUL_TS': {
-                'Timestamp': 'ts', 'RUL_Hours': 0.0, 'Method': 'Multipath'
+            # TIER 4: Diagnostics
+            'ACM_SensorDefects': {
+                'DetectorType': 'UNKNOWN', 'Severity': 'LOW', 'ViolationCount': 0, 'ViolationPct': 0.0,
+                'MaxZ': 0.0, 'AvgZ': 0.0, 'CurrentZ': 0.0, 'ActiveDefect': 0
             },
-            'ACM_FailureHazard_TS': {
-                'Timestamp': 'ts', 'HazardRaw': 0.0, 'HazardSmooth': 0.0, 'Survival': 0.0,
-                'FailureProb': 0.0, 'RunID': 'UNKNOWN', 'EquipID': 0
+            'ACM_SensorHotspots': {
+                'SensorName': 'UNKNOWN', 'MaxTimestamp': 'ts', 'LatestTimestamp': 'ts',
+                'MaxAbsZ': 0.0, 'MaxSignedZ': 0.0, 'LatestAbsZ': 0.0, 'LatestSignedZ': 0.0,
+                'ValueAtPeak': 0.0, 'LatestValue': 0.0, 'TrainMean': 0.0, 'TrainStd': 0.0,
+                'AboveWarnCount': 0, 'AboveAlertCount': 0
             },
             'ACM_EpisodeDiagnostics': {
-                'episode_id': 0, 'peak_z': 0.0, 'peak_timestamp': 'ts', 'duration_h': 0.0,
-                'dominant_sensor': 'UNKNOWN', 'severity': 'UNKNOWN', 'severity_reason': 'UNKNOWN',
-                'avg_z': 0.0, 'min_health_index': 0.0
+                'EpisodeID': 0, 'StartTime': 'ts', 'EndTime': 'ts', 'PeakZ': 0.0,
+                'DurationHours': 0.0, 'TopSensor1': 'UNKNOWN', 'Severity': 'UNKNOWN',
+                'severity_reason': 'UNKNOWN', 'AvgZ': 0.0, 'min_health_index': 0.0
             },
-            'ACM_HealthDistributionOverTime': {
-                'BucketStart': 'ts', 'BucketSeconds': 3600, 'FusedP50': 0.0,
-                'FusedP75': 0.0, 'FusedP90': 0.0, 'FusedP95': 0.0,
-                'HealthP50': 0.0, 'HealthP10': 0.0, 'BucketCount': 0
-            },
-            'ACM_ChartGenerationLog': {
-                'ChartName': 'unknown', 'Status': 'unknown', 'Reason': '',
-                'DurationSeconds': 0.0, 'Timestamp': 'ts'
-            }
-            ,
-            'ACM_AlertAge': {
-                'AlertZone': 'GOOD', 'DurationHours': 0.0, 'StartTimestamp': 'ts', 'RecordCount': 0
-            }
         }
 
         Console.info("" + f"Manager initialized (batch_size={batch_size}, batching={'ON' if enable_batching else 'OFF'}, sql_cache={sql_health_cache_seconds}s, io_workers={max_io_workers}, flush={batch_flush_rows} rows/{batch_flush_seconds}s, max_futures={max_in_flight_futures})", component="OUTPUT")
+    
+    def set_maturity_state(self, maturity_state: str) -> None:
+        """V11 CRITICAL: Update maturity state after model lifecycle is computed.
+        
+        This MUST be called from acm_main.py after model_state is determined.
+        Eliminates the race condition where writers query ACM_ActiveModels independently.
+        
+        Args:
+            maturity_state: One of 'COLDSTART', 'LEARNING', 'CONVERGED', 'DEPRECATED'
+        """
+        self.maturity_state = maturity_state
+        Console.info(f"OutputManager maturity_state set to {maturity_state}", component="OUTPUT")
     
     @contextmanager
     def batched_transaction(self):
@@ -694,192 +647,21 @@ class OutputManager:
     
     # ==================== DATA LOADING METHOD ====================
     
-    def load_data(self, cfg: Dict[str, Any], start_utc: Optional[pd.Timestamp] = None, end_utc: Optional[pd.Timestamp] = None, equipment_name: Optional[str] = None, sql_mode: bool = False):
+    def load_data(self, cfg: Dict[str, Any], start_utc: Optional[pd.Timestamp] = None, end_utc: Optional[pd.Timestamp] = None, equipment_name: Optional[str] = None):
         """
-        Load training and scoring data from CSV files or SQL historian.
-        
-        Consolidates data loading into OutputManager since it's part of the I/O pipeline.
+        Load training and scoring data from SQL historian.
         
         Args:
             cfg: Configuration dictionary
-            start_utc: Optional start time for SQL window queries
-            end_utc: Optional end time for SQL window queries
+            start_utc: Start time for SQL window queries
+            end_utc: End time for SQL window queries
             equipment_name: Equipment name for SQL historian queries (e.g., 'FD_FAN', 'GAS_TURBINE')
-            sql_mode: If True, load from SQL historian; if False, load from CSV files
         """
-        # Use consistent config access with fallback
-        data_cfg = cfg.get("data", {})
-        train_path = data_cfg.get("train_csv")
-        score_path = data_cfg.get("score_csv")
-        
-        # SQL mode: Load from historian SP instead of CSV
-        if sql_mode:
-            if not self.sql_client:
-                raise ValueError("[DATA] SQL mode requested but no SQL client available")
-            if not equipment_name:
-                raise ValueError("[DATA] SQL mode requires equipment_name parameter")
-            return self._load_data_from_sql(cfg, equipment_name, start_utc, end_utc)
-        
-        # ACM is SQL-only mode - CSV operations removed
-        
-        # CSV mode: Cold-start mode: If no training data, use first N% of score data for training
-        cold_start_mode = False
-        if not train_path and score_path:
-            Console.info("" + "Cold-start mode: No training data provided, will split score data", component="DATA")
-            cold_start_mode = True
-        elif not train_path or not score_path:
-            raise ValueError("[DATA] Please set data.train_csv and data.score_csv in config.")
-
-        _sampling = data_cfg.get("sampling_secs", 1)
-        # Treat empty/invalid values as "auto" (let cadence be inferred)
-        try:
-            if _sampling in (None, "", "auto", "null"):
-                sampling_secs: Optional[int] = None
-            else:
-                sampling_secs = int(_sampling)
-        except (TypeError, ValueError):
-            sampling_secs = None
-
-        allow_resample = bool(_cfg_get(data_cfg, "allow_resample", True))
-        resample_strict = bool(_cfg_get(data_cfg, "resample_strict", False))
-        interp_method = str(_cfg_get(data_cfg, "interp_method", "linear"))
-        ts_col_cfg = _cfg_get(data_cfg, "timestamp_col", None)
-        io_engine = _cfg_get(data_cfg, "io_engine", None)
-        # Allow override in data.max_fill_ratio (preferred), fallback to runtime.max_fill_ratio
-        max_fill_ratio = float(_cfg_get(data_cfg, "max_fill_ratio", _cfg_get(cfg, "runtime.max_fill_ratio", 0.20)))
-        
-        # COLD-02: Configurable cold-start split ratio (default 0.6 = 60% train, 40% score)
-        cold_start_split_ratio = float(_cfg_get(data_cfg, "cold_start_split_ratio", 0.6))
-        if not (0.1 <= cold_start_split_ratio <= 0.9):
-            Console.warn(f"Invalid cold_start_split_ratio={cold_start_split_ratio}, using default 0.6", component="DATA", invalid_value=cold_start_split_ratio)
-            cold_start_split_ratio = 0.6
-        
-        # COLD-03: Minimum samples validation (default 500)
-        min_train_samples = int(_cfg_get(data_cfg, "min_train_samples", 500))
-
-        # Read CSVs (with heartbeat)
-        if cold_start_mode:
-            hb = Heartbeat("Reading CSV (cold-start: will split data)", next_hint="parse timestamps", eta_hint=10).start()
-            score_raw, ts_score = _read_csv_with_peek(score_path, ts_col_cfg, engine=io_engine)
-            
-            # COLD-03: Validate sufficient data for cold-start
-            if len(score_raw) < 10:
-                raise ValueError(f"[DATA] Cold-start requires at least 10 rows, got {len(score_raw)}")
-            
-            ts_col = ts_col_cfg or ts_score
-            split_idx = int(len(score_raw) * cold_start_split_ratio)
-            train_raw = score_raw.iloc[:split_idx].copy()
-            score_raw = score_raw.iloc[split_idx:].copy()
-            ts_train = ts_score
-            
-            # COLD-03: Warn if training samples below recommended minimum
-            if len(train_raw) < min_train_samples:
-                Console.warn(f"Cold-start training data ({len(train_raw)} rows) is below recommended minimum ({min_train_samples} rows)", component="DATA", actual_rows=len(train_raw), min_required=min_train_samples)
-                Console.warn(f"Model quality may be degraded. Consider: more data, higher split_ratio (current: {cold_start_split_ratio:.2f})", component="DATA", split_ratio=cold_start_split_ratio)
-            
-            Console.info("" + f"Cold-start split ({cold_start_split_ratio:.1%}): {len(train_raw)} train rows, {len(score_raw)} score rows", component="DATA")
-            hb.stop()
-        else:
-            hb = Heartbeat("Reading CSVs (train & score)", next_hint="parse timestamps", eta_hint=10).start()
-            train_raw, ts_train = _read_csv_with_peek(train_path, ts_col_cfg, engine=io_engine)
-            score_raw, ts_score = _read_csv_with_peek(score_path, ts_col_cfg, engine=io_engine)
-            hb.stop()
-            ts_col = ts_col_cfg or ts_train or ts_score
-
-        # Apply window constraints if provided (for SQL mode)
-        if start_utc:
-            train_raw = train_raw[pd.to_datetime(train_raw[ts_col], errors='coerce') >= start_utc]
-        if end_utc:
-            score_raw = score_raw[pd.to_datetime(score_raw[ts_col], errors='coerce') < end_utc]
-
-        # Parse timestamps / index
-        hb = Heartbeat("Parsing timestamps & indexing", next_hint="numeric pruning", eta_hint=8).start()
-        train = _parse_ts_index(train_raw, ts_col)
-        score = _parse_ts_index(score_raw, ts_col)
-        hb.stop()
-
-        now_cutoff = _future_cutoff_ts(cfg)
-        train, tz_stripped_train, future_train = _coerce_local_and_filter_future(train, "TRAIN", now_cutoff)
-        score, tz_stripped_score, future_score = _coerce_local_and_filter_future(score, "SCORE", now_cutoff)
-        tz_stripped_total = tz_stripped_train + tz_stripped_score
-        future_rows_total = future_train + future_score
-        
-        # COLD-03: Validate training sample count (both cold-start and normal modes)
-        if len(train) < min_train_samples:
-            if cold_start_mode:
-                # Already warned during split
-                pass
-            else:
-                Console.warn(f"Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)", component="DATA", actual_rows=len(train), min_required=min_train_samples)
-                Console.warn("Model quality may be degraded. Consider providing more training data.", component="DATA", actual_rows=len(train), min_required=min_train_samples)
-
-        # Keep numeric only (same set across train/score)
-        hb = Heartbeat("Selecting numeric sensor columns", next_hint="cadence check", eta_hint=4).start()
-        train_num = _infer_numeric_cols(train)
-        score_num = _infer_numeric_cols(score)
-        kept = sorted(list(set(train_num).intersection(score_num)))
-        dropped = [c for c in train.columns if c not in kept]
-        train = train[kept]
-        score = score[kept]
-        train = train.astype(np.float32)
-        score = score.astype(np.float32)
-        hb.stop()
-
-        # Cadence check + guardrails
-        hb = Heartbeat("Cadence check / resample / fill small gaps", next_hint="finalize", eta_hint=15).start()
-        # Ensure type stability for indexes
-        train.index = pd.DatetimeIndex(train.index)
-        score.index = pd.DatetimeIndex(score.index)
-        train.index = pd.DatetimeIndex(train.index)
-        score.index = pd.DatetimeIndex(score.index)
-        cad_ok_train = _check_cadence(cast(pd.DatetimeIndex, train.index), sampling_secs)
-        cad_ok_score = _check_cadence(cast(pd.DatetimeIndex, score.index), sampling_secs)
-        cadence_ok = bool(cad_ok_train and cad_ok_score)
-
-        native_train = _native_cadence_secs(cast(pd.DatetimeIndex, train.index))
-        if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
-            Console.warn(f"Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) - skipping to avoid upsample.", component="DATA", requested_secs=sampling_secs, native_secs=native_train)
-            sampling_secs = None
-
-        if sampling_secs is not None:
-            base_secs = float(sampling_secs)
-        else:
-            base_secs = native_train if math.isfinite(native_train) else 1.0
-        max_gap_secs = int(_cfg_get(data_cfg, "max_gap_secs", base_secs * 3))
-
-        explode_guard_factor = float(_cfg_get(data_cfg, "explode_guard_factor", 2.0))
-        will_resample = allow_resample and (not cadence_ok) and (sampling_secs is not None)
-        if will_resample:
-            span_secs = (train.index[-1].value - train.index[0].value) / 1e9 if len(train.index) else 0.0
-            safe_sampling = float(sampling_secs) if sampling_secs is not None else 1.0
-            approx_rows = int(span_secs / max(1.0, safe_sampling)) + 1
-            if len(train) and approx_rows > explode_guard_factor * len(train):
-                Console.warn(f"Resample would expand rows from {len(train)} -> ~{approx_rows} (>x{explode_guard_factor:.1f}). Skipping resample.", component="DATA")
-                will_resample = False
-
-        if will_resample:
-            assert sampling_secs is not None
-            train = _resample(train, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
-            score = _resample(score, int(sampling_secs), interp_method, resample_strict, max_gap_secs, max_fill_ratio)
-            train = train.astype(np.float32)
-            score = score.astype(np.float32)
-            cadence_ok = True
-        hb.stop()
-
-        meta = DataMeta(
-            timestamp_col=ts_col,
-            cadence_ok=cadence_ok,
-            kept_cols=kept,
-            dropped_cols=dropped,
-            start_ts=train.index.min() if len(train) else pd.Timestamp.now(),
-            end_ts=score.index.max() if len(score) else pd.Timestamp.now(),
-            n_rows=len(train) + len(score),
-            sampling_seconds=sampling_secs or native_train,
-            tz_stripped=tz_stripped_total,
-            future_rows_dropped=future_rows_total,
-            dup_timestamps_removed=0
-        )
-        return train, score, meta
+        if not self.sql_client:
+            raise ValueError("SQL client required but not available")
+        if not equipment_name:
+            raise ValueError("equipment_name parameter required")
+        return self._load_data_from_sql(cfg, equipment_name, start_utc, end_utc)
     
     def _load_data_from_sql(self, cfg: Dict[str, Any], equipment_name: str, start_utc: Optional[pd.Timestamp], end_utc: Optional[pd.Timestamp], is_coldstart: bool = False):
         """
@@ -901,7 +683,7 @@ class OutputManager:
         
         # SQL mode requires explicit time windows
         if not start_utc or not end_utc:
-            raise ValueError("[DATA] SQL mode requires start_utc and end_utc parameters")
+            raise ValueError("SQL mode requires start_utc and end_utc parameters")
         
         # COLD-02: Configurable cold-start split ratio (default 0.6 = 60% train, 40% score)
         # Only used during coldstart - regular batch mode uses ALL data for scoring
@@ -917,10 +699,9 @@ class OutputManager:
         
         # Call stored procedure to get all data for time range
         # Pass EquipmentName directly - SP will resolve to correct data table (e.g., FD_FAN_Data)
-        hb = Heartbeat("Calling usp_ACM_GetHistorianData_TEMP", next_hint="parse results", eta_hint=5).start()
         try:
             if self.sql_client is None:
-                raise ValueError("[DATA] SQL mode requested but no SQL client available")
+                raise ValueError("SQL mode requested but no SQL client available")
             cur = cast(Any, self.sql_client).cursor()
             # Pass EquipmentName to stored procedure (SP resolves to {EquipmentName}_Data table)
             cur.execute(
@@ -931,7 +712,7 @@ class OutputManager:
             # Fetch all rows
             rows = cur.fetchall()
             if not rows:
-                raise ValueError(f"[DATA] No data returned from SQL historian for {equipment_name} in time range")
+                raise ValueError(f"No data returned from SQL historian for {equipment_name} in time range")
             
             # Get column names from cursor description
             columns = [desc[0] for desc in cur.description]
@@ -949,26 +730,23 @@ class OutputManager:
                 cur.close()
             except:
                 pass
-            hb.stop()
         
         # Validate sufficient data
         # For coldstart, enforce minimum. For incremental scoring, allow smaller batches.
         required_minimum = min_train_samples if is_coldstart else max(10, min_train_samples // 10)
         if len(df_all) < required_minimum:
-            raise ValueError(f"[DATA] Insufficient data from SQL historian: {len(df_all)} rows (minimum {required_minimum} required)")
+            raise ValueError(f"Insufficient data from SQL historian: {len(df_all)} rows (minimum {required_minimum} required)")
 
         # Robust timestamp handling for SQL historian: if configured column is missing
         # but the standard EntryDateTime column is present, fall back to it.
         if ts_col not in df_all.columns and "EntryDateTime" in df_all.columns:
             Console.warn(
-                f"[DATA] Timestamp column '{ts_col}' not found in SQL historian results; "
+                f"Timestamp column '{ts_col}' not found in SQL historian results; "
                 "falling back to 'EntryDateTime'.", component="DATA", configured_col=ts_col, fallback_col="EntryDateTime", equipment=equipment_name
             )
             ts_col = "EntryDateTime"
         
         # Split into train/score based on mode
-        hb = Heartbeat("Splitting train/score data", next_hint="parse timestamps", eta_hint=3).start()
-        
         if is_coldstart:
             # COLDSTART MODE: Split data for initial model training
             split_idx = int(len(df_all) * cold_start_split_ratio)
@@ -987,11 +765,7 @@ class OutputManager:
             score_raw = df_all.copy()
             Console.info("" + f"BATCH MODE: All {len(score_raw)} rows allocated to scoring (baseline from cache)", component="DATA")
         
-        hb.stop()
-        
         # Parse timestamps / index
-        hb = Heartbeat("Parsing timestamps & indexing", next_hint="numeric pruning", eta_hint=4).start()
-        
         # Handle empty train in batch mode
         if len(train_raw) == 0 and not is_coldstart:
             # Create empty DataFrame with DatetimeIndex matching score columns
@@ -1001,7 +775,6 @@ class OutputManager:
             train = _parse_ts_index(train_raw, ts_col)
         
         score = _parse_ts_index(score_raw, ts_col)
-        hb.stop()
         
         # Filter future timestamps
         now_cutoff = _future_cutoff_ts(cfg)
@@ -1015,8 +788,6 @@ class OutputManager:
             Console.warn(f"Training data ({len(train)} rows) is below recommended minimum ({min_train_samples} rows)", component="DATA", actual_rows=len(train), min_required=min_train_samples, equipment=equipment_name, mode="coldstart")
         
         # Keep numeric only (same set across train/score)
-        hb = Heartbeat("Selecting numeric sensor columns", next_hint="cadence check", eta_hint=2).start()
-        
         if len(train) == 0 and not is_coldstart:
             # BATCH MODE: Train is empty, use all score columns
             # Train will be loaded from baseline_buffer later in acm_main.py
@@ -1038,9 +809,9 @@ class OutputManager:
             train = train.astype(np.float32)
             score = score.astype(np.float32)
         
-        hb.stop()
-        
         Console.info("" + f"Kept {len(kept)} numeric columns, dropped {len(dropped)} non-numeric", component="DATA")
+        
+        Console.status(f"Checking cadence and resampling for {len(score)} score rows...")
         
         # Cadence check + resampling (same logic as CSV mode)
         _sampling = data_cfg.get("sampling_secs", 1)
@@ -1058,10 +829,12 @@ class OutputManager:
         interp_method = str(_cfg_get(data_cfg, "interp_method", "linear"))
         max_fill_ratio = float(_cfg_get(data_cfg, "max_fill_ratio", _cfg_get(cfg, "runtime.max_fill_ratio", 0.20)))
         
-        hb = Heartbeat("Cadence check / resample / fill small gaps", next_hint="finalize", eta_hint=8).start()
+        Console.status("  Checking train cadence...")
         cad_ok_train = _check_cadence(cast(pd.DatetimeIndex, train.index), sampling_secs)
+        Console.status("  Checking score cadence...")
         cad_ok_score = _check_cadence(cast(pd.DatetimeIndex, score.index), sampling_secs)
         cadence_ok = bool(cad_ok_train and cad_ok_score)
+        Console.status(f"  Cadence check complete: train={cad_ok_train}, score={cad_ok_score}")
         
         native_train = _native_cadence_secs(cast(pd.DatetimeIndex, train.index))
         if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
@@ -1091,7 +864,6 @@ class OutputManager:
             train = train.astype(np.float32)
             score = score.astype(np.float32)
             cadence_ok = True
-        hb.stop()
 
         meta = DataMeta(
             timestamp_col=ts_col,
@@ -1144,49 +916,91 @@ class OutputManager:
                 pass
     
     def _prepare_dataframe_for_sql(self, df: pd.DataFrame, non_numeric_cols: Optional[set] = None) -> pd.DataFrame:
-        """Prepare DataFrame for SQL insertion with proper type coercion."""
+        """Prepare DataFrame for SQL insertion with robust type coercion (SQL Server safe)."""
         if df.empty:
             return df
-            
+
         out = df.copy()
-        non_numeric_cols = non_numeric_cols or set()
+        non_numeric_cols = set(non_numeric_cols or set())
 
-        # Timestamps â†’ UTC naive and strip microseconds (floor to seconds) for SQL
-        for col in out.columns:
-            if pd.api.types.is_datetime64_any_dtype(out[col]):
-                ts_series = pd.to_datetime(out[col], errors='coerce')
-                ts_series = ts_series.dt.tz_localize(None)
-                # Floor to whole seconds using lowercase 's' (Pandas FutureWarning fix)
-                ts_series = ts_series.dt.floor('s')
-                # Convert to native Python datetime objects to avoid SQL Server microsecond overflow
-                # Suppress FutureWarning - we're intentionally using np.array() wrapper
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', message='.*to_pydatetime.*', category=FutureWarning)
-                    out[col] = np.array(ts_series.dt.to_pydatetime())
+        # Helper: name-based timestamp detection to handle object/string timestamp columns too
+        def _looks_like_ts(col_name: str) -> bool:
+            c = (col_name or "").lower()
+            return c in {"timestamp", "time", "ts", "datetime"} or c.endswith("_ts") or c.endswith("_time") or c.endswith("_timestamp")
 
-        # Count infs before replace
-        num_only = out.select_dtypes(include=[np.number])
-        inf_count = np.isinf(num_only.values).sum() if not num_only.empty else 0
-        if inf_count > 0:
-            Console.warn(f"Replaced {int(inf_count)} Inf/-Inf values with None for SQL compatibility", component="OUTPUT", inf_count=int(inf_count), columns=len(num_only.columns))
-
-        # Replace in one pass
-        out = out.replace({np.inf: None, -np.inf: None})
-        out = out.where(pd.notnull(out), None)
-
-        # Convert numpy scalars to Python types
-        # Preserve integer types for ID columns to avoid SQL cast errors
-        integer_columns = {'EquipID', 'RegimeLabel', 'episode_id'}
+        # 1) Normalize datetime columns (dtype-based) + timestamp-like object columns (name-based)
         for col in out.columns:
             if col in non_numeric_cols:
-                continue
+                # Still allow datetime normalization for non-numeric columns if they are timestamp-like
+                pass
+
+            is_dt = pd.api.types.is_datetime64_any_dtype(out[col])
+            is_obj_ts = (not is_dt) and _looks_like_ts(col) and out[col].dtype == object
+
+            if is_dt or is_obj_ts:
+                ts_series = pd.to_datetime(out[col], errors="coerce")
+                # drop timezone if present, keep UTC-naive convention
+                try:
+                    ts_series = ts_series.dt.tz_localize(None)
+                except Exception:
+                    pass
+                ts_series = ts_series.dt.floor("s")
+
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=".*to_pydatetime.*", category=FutureWarning)
+                    out[col] = np.array(ts_series.dt.to_pydatetime())
+
+        # 2) Replace Inf/-Inf and NaNs to None (SQL-friendly)
+        # Use float types only for isinf check - nullable integers (Int64) don't support isinf
+        float_only = out.select_dtypes(include=[np.floating])
+        inf_count = 0
+        if not float_only.empty:
+            try:
+                inf_count = int(np.isinf(float_only.values).sum())
+            except TypeError:
+                # Fallback: check column-by-column for mixed types
+                for col in float_only.columns:
+                    col_vals = float_only[col].dropna()
+                    if len(col_vals) > 0:
+                        try:
+                            inf_count += int(np.isinf(col_vals.values).sum())
+                        except TypeError:
+                            pass
+        if inf_count > 0:
+            Console.warn(
+                f"Replaced {inf_count} Inf/-Inf values with None for SQL compatibility",
+                component="OUTPUT",
+                inf_count=inf_count,
+                columns=len(float_only.columns),
+            )
+
+        out = out.replace({np.inf: None, -np.inf: None})
+        # Note: do NOT blanket-coerce everything to object early; keep types until after numeric handling
+
+        # 3) Preserve integer types for known ID-like columns (case-insensitive)
+        integer_columns_ci = {c.lower() for c in {"EquipID", "equip_id", "episode_id", "EpisodeID", "RegimeLabel", "regime_label"}}
+
+        for col in out.columns:
+            col_l = col.lower()
+
+            # Skip caller-marked non-numeric columns for numeric coercion only
+            # (but do NOT skip boolean normalization; booleans must become int for SQL)
             if pd.api.types.is_bool_dtype(out[col]):
                 out[col] = out[col].astype(object).where(pd.isna(out[col]), out[col].astype(int))
-            elif col in integer_columns and pd.api.types.is_numeric_dtype(out[col]):
-                # Keep as integer for SQL INT columns
-                out[col] = out[col].astype('Int64')  # nullable integer
-            elif pd.api.types.is_numeric_dtype(out[col]):
+                continue
+
+            if col_l in integer_columns_ci and pd.api.types.is_numeric_dtype(out[col]):
+                out[col] = out[col].astype("Int64")  # nullable integer
+                continue
+
+            if col in non_numeric_cols:
+                continue
+
+            if pd.api.types.is_numeric_dtype(out[col]):
                 out[col] = out[col].astype(float)
+
+        # 4) Finally, normalize NaN/NaT to None for pyodbc binding
+        out = out.where(pd.notnull(out), None)
 
         return out
     
@@ -1219,142 +1033,211 @@ class OutputManager:
             # Wait a bit before checking again
             time.sleep(0.1)
     
-    def write_dataframe(self, 
-                       df: pd.DataFrame, 
-                       artifact_name: str,
-                       sql_table: Optional[str] = None,
-                       sql_columns: Optional[Dict[str, str]] = None,
-                       non_numeric_cols: Optional[set] = None,
-                       add_created_at: bool = False,
-                       allow_repair: bool = True) -> Dict[str, Any]:
+    def write_dataframe(
+        self,
+        df: pd.DataFrame,
+        artifact_name: str,
+        sql_table: Optional[str] = None,
+        sql_columns: Optional[Dict[str, str]] = None,
+        non_numeric_cols: Optional[set] = None,
+        add_created_at: bool = False,
+        allow_repair: bool = True,
+        required: bool = False,
+    ) -> Dict[str, Any]:
         """
-        Write DataFrame to SQL (file output disabled).
-        
+        Write DataFrame to SQL (SQL-only; file output removed).
+
         Args:
             df: DataFrame to write
             artifact_name: Logical name for the artifact (used for caching/logging)
-            sql_table: Optional SQL table name
+            sql_table: Optional SQL table name. If None, no SQL write is attempted.
             sql_columns: Optional column mapping for SQL (df_col -> sql_col)
-            non_numeric_cols: Set of columns to treat as non-numeric for SQL
+            non_numeric_cols: Set of columns to treat as non-numeric for SQL preparation
             add_created_at: Whether to add CreatedAt timestamp column for SQL
-            allow_repair: OUT-17: If False, block SQL write when required fields missing instead of auto-repairing
-            
+            allow_repair: If False, block SQL write when required fields missing instead of auto-repairing
+            required: If True, raise on write failure; if False, log warning and continue (default False for backwards-compat)
+
         Returns:
-            Dictionary with write results and metadata
+            Dict with SQL write results and metadata.
         """
         start_time = time.time()
-        
-        result = {
-            'file_written': False,
-            'sql_written': False,
-            'rows': len(df),
-            'error': None
-        }
-        
-        # OUT-18: Check if auto-flush needed before write
-        if self._should_auto_flush():
-            Console.info("" + f"Auto-flushing batch (rows={self._current_batch.total_rows}, age={time.time() - self._current_batch.created_at:.1f}s)", component="OUTPUT")
-            self.flush()
-        
-        # OUT-18: Apply backpressure if too many in-flight operations
-        self._wait_for_futures_capacity()
-        
-        try:
-            # OUT-18: Update batch row tracking
-            with self._batch_lock:
-                self._current_batch.total_rows += len(df)
-            
-            # Attempt SQL write if configured
-            if sql_table and self._check_sql_health():
-                try:
-                    # Prepare data for SQL
-                    sql_df = self._prepare_dataframe_for_sql(df, non_numeric_cols or set())
-                    
-                    # Apply column mapping if provided
-                    if sql_columns:
-                        # First, select only columns that are in the mapping (source columns)
-                        mapped_source_cols = [col for col in sql_columns.keys() if col in sql_df.columns]
-                        sql_df = sql_df[mapped_source_cols]
-                        # Then rename to target SQL column names
-                        sql_df = sql_df.rename(columns=sql_columns)
-                    
-                    # Add metadata columns (required for all SQL tables)
-                    # Preserve existing RunID if already present (e.g., hazard table with truncated ID)
-                    if "RunID" not in sql_df.columns:
-                        sql_df["RunID"] = self.run_id
-                    if "EquipID" not in sql_df.columns:
-                        sql_df["EquipID"] = self.equip_id or 0
-                    # OUT-17: Apply per-table required NOT NULL defaults with repair policy
-                    sql_df, repair_info = self._apply_sql_required_defaults(sql_table, sql_df, allow_repair)
-                    # MED-02: Log what was repaired for observability
-                    if repair_info.get('repairs_needed'):
-                        Console.info(f"Applied defaults to {sql_table}: {repair_info.get('missing_fields')}", component="SCHEMA")
-                    
-                    # OUT-17: Block write if repairs needed but not allowed
-                    if not allow_repair and repair_info['repairs_needed']:
-                        raise ValueError(f"Required fields missing and allow_repair=False: {repair_info['missing_fields']}")
-                    
-                    # Add CreatedAt timestamp only if requested
-                    if add_created_at:
-                        sql_df["CreatedAt"] = pd.Timestamp.now().tz_localize(None)
-                    
-                    # Special-case: avoid PK collisions for maintenance recommendation by deleting existing
-                    if sql_table == "ACM_MaintenanceRecommendation" and self.sql_client is not None:
-                        try:
-                            with self.sql_client.cursor() as cur:
-                                cur.execute(
-                                    "DELETE FROM dbo.[ACM_MaintenanceRecommendation] WHERE RunID = ? AND EquipID = ?",
-                                    (self.run_id, int(self.equip_id or 0))
-                                )
-                                if hasattr(self.sql_client, "commit"):
-                                    self.sql_client.commit()
-                                elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
-                                    if not getattr(self.sql_client.conn, "autocommit", True):
-                                        self.sql_client.conn.commit()
-                        except Exception as del_ex:
-                            Console.warn(f"Pre-delete failed for {sql_table}: {del_ex}", component="OUTPUT", table=sql_table, equip_id=self.equip_id, run_id=self.run_id, error_type=type(del_ex).__name__)
 
-                    # FORECAST-UPSERT-05: Route forecast tables to MERGE upsert methods (v10 schema)
-                    if sql_table == "ACM_HealthForecast":
-                        inserted = self._upsert_health_forecast(sql_df)
-                    elif sql_table == "ACM_FailureForecast":
-                        inserted = self._upsert_failure_forecast(sql_df)
-                    elif sql_table == "ACM_DetectorForecast_TS":
-                        inserted = self._upsert_detector_forecast_ts(sql_df)
-                    elif sql_table == "ACM_SensorForecast":
-                        inserted = self._upsert_sensor_forecast(sql_df)
-                    elif sql_table == "ACM_RUL":
-                        inserted = self._bulk_insert_sql(sql_table, sql_df)  # RUL uses standard insert
-                    else:
-                        # Bulk insert with batching for all other tables
-                        inserted = self._bulk_insert_sql(sql_table, sql_df)
-                    
-                    result['sql_written'] = inserted > 0
-                    if result['sql_written']: 
-                        self.stats['sql_writes'] += 1
-                    
-                except Exception as e:
-                    Console.warn(f"SQL write failed for {sql_table}: {e}", component="OUTPUT", table=sql_table, rows=len(sql_df), equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                    result['error'] = str(e)
-                    self.stats['sql_failures'] += 1
-            elif not sql_table:
-                # No target; skip quietly
+        result: Dict[str, Any] = {
+            "sql_written": False,
+            "rows": int(len(df)),
+            "inserted": 0,
+            "error": None,
+            "sql_table": sql_table,
+            "artifact": artifact_name,
+        }
+
+        # OUT-18: auto-flush before write if needed
+        if self._should_auto_flush():
+            Console.info(
+                f"Auto-flushing batch (rows={self._current_batch.total_rows}, age={time.time() - self._current_batch.created_at:.1f}s)",
+                component="OUTPUT",
+            )
+            self.flush()
+
+        # OUT-18: backpressure
+        self._wait_for_futures_capacity()
+
+        # Track rows in current batch regardless of whether we write to SQL
+        with self._batch_lock:
+            self._current_batch.total_rows += len(df)
+
+        sql_df: Optional[pd.DataFrame] = None
+
+        try:
+            # If no sql_table requested, skip SQL quietly
+            if not sql_table:
                 return result
-            
+
+            # Guard: Only write to ALLOWED_TABLES (contract enforcement)
+            if sql_table not in ALLOWED_TABLES:
+                Console.warn(
+                    f"Table '{sql_table}' not in ALLOWED_TABLES; skipping write",
+                    component="OUTPUT",
+                    table=sql_table,
+                    rows=len(df),
+                )
+                result["error"] = f"Table '{sql_table}' not in ALLOWED_TABLES"
+                return result
+
+            # Skip empty DataFrames (no-op)
+            if df.empty:
+                return result
+
+            # If SQL unhealthy, skip with an error string (do not throw)
+            if not self._check_sql_health():
+                msg = f"SQL health check failed; skipped write to {sql_table}"
+                Console.warn(
+                    msg,
+                    component="OUTPUT",
+                    table=sql_table,
+                    rows=len(df),
+                    equip_id=self.equip_id,
+                    run_id=self.run_id,
+                )
+                result["error"] = msg
+                return result
+
+            # Prepare data for SQL
+            sql_df = self._prepare_dataframe_for_sql(df, non_numeric_cols or set())
+
+            # Apply column mapping (df_col -> sql_col)
+            if sql_columns:
+                mapped_source_cols = [c for c in sql_columns.keys() if c in sql_df.columns]
+                sql_df = sql_df[mapped_source_cols].rename(columns=sql_columns)
+
+            # Required metadata columns (all SQL tables)
+            if "RunID" not in sql_df.columns:
+                sql_df["RunID"] = self.run_id
+            if "EquipID" not in sql_df.columns:
+                sql_df["EquipID"] = int(self.equip_id or 0)
+
+            # OUT-17: apply required defaults w/ repair policy
+            sql_df, repair_info = self._apply_sql_required_defaults(sql_table, sql_df, allow_repair)
+
+            if repair_info.get("repairs_needed"):
+                Console.info(
+                    f"Applied defaults to {sql_table}: {repair_info.get('missing_fields')}",
+                    component="SCHEMA",
+                )
+
+            if (not allow_repair) and repair_info.get("repairs_needed"):
+                raise ValueError(
+                    f"Required fields missing and allow_repair=False: {repair_info.get('missing_fields')}"
+                )
+
+            # CreatedAt is optional and explicitly requested
+            if add_created_at and "CreatedAt" not in sql_df.columns:
+                sql_df["CreatedAt"] = pd.Timestamp.now().tz_localize(None)
+
+            # Special-case: avoid PK collisions for maintenance recommendation (keep as-is)
+            if sql_table == "ACM_MaintenanceRecommendation" and self.sql_client is not None:
+                try:
+                    with self.sql_client.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM dbo.[ACM_MaintenanceRecommendation] WHERE RunID = ? AND EquipID = ?",
+                            (self.run_id, int(self.equip_id or 0)),
+                        )
+                    # Commit semantics: support both patterns
+                    if hasattr(self.sql_client, "commit"):
+                        self.sql_client.commit()
+                    elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                        if not getattr(self.sql_client.conn, "autocommit", True):
+                            self.sql_client.conn.commit()
+                except Exception as del_ex:
+                    Console.warn(
+                        f"Pre-delete failed for {sql_table}: {del_ex}",
+                        component="OUTPUT",
+                        table=sql_table,
+                        equip_id=self.equip_id,
+                        run_id=self.run_id,
+                        error_type=type(del_ex).__name__,
+                    )
+
+            # Route forecast tables to upsert methods, else bulk insert
+            if sql_table == "ACM_HealthForecast":
+                inserted = int(self._upsert_health_forecast(sql_df))
+            elif sql_table == "ACM_FailureForecast":
+                inserted = int(self._upsert_failure_forecast(sql_df))
+            elif sql_table == "ACM_DetectorForecast_TS":
+                inserted = int(self._upsert_detector_forecast_ts(sql_df))
+            elif sql_table == "ACM_SensorForecast":
+                inserted = int(self._upsert_sensor_forecast(sql_df))
+            else:
+                inserted = int(self._bulk_insert_sql(sql_table, sql_df))
+
+            result["inserted"] = inserted
+            result["sql_written"] = inserted > 0
+
+            if result["sql_written"]:
+                self.stats["sql_writes"] += 1
+
+            return result
+
         except Exception as e:
-            Console.error(f"Failed to process artifact {artifact_name}: {e}", component="OUTPUT", artifact=artifact_name, equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-            result['error'] = str(e)
-            raise
-        
+            # Ensure we never reference sql_df if it wasn't built
+            rows_for_log = len(sql_df) if isinstance(sql_df, pd.DataFrame) else len(df)
+            
+            error_msg = f"SQL write failed for {sql_table}: {str(e)[:500]}"
+            
+            if required:
+                # For required tables, escalate to error and re-raise
+                Console.error(
+                    f"[CRITICAL] Required table {sql_table} write failed: {error_msg}",
+                    component="OUTPUT",
+                    table=sql_table,
+                    rows=rows_for_log,
+                    equip_id=self.equip_id,
+                    run_id=self.run_id,
+                    error_type=type(e).__name__,
+                )
+                result["error"] = error_msg
+                raise RuntimeError(f"Required table write failed: {error_msg}") from e
+            else:
+                # For optional tables, warn and continue (backwards-compatible behavior)
+                Console.warn(
+                    f"SQL write failed for {sql_table}: {error_msg}",
+                    component="OUTPUT",
+                    table=sql_table,
+                    rows=rows_for_log,
+                    equip_id=self.equip_id,
+                    run_id=self.run_id,
+                    error_type=type(e).__name__,
+                )
+                result["error"] = error_msg
+            result["error"] = str(e)
+            self.stats["sql_failures"] += 1
+            return result
+
         finally:
             elapsed = time.time() - start_time
-            self.stats['write_time'] += elapsed
-            
-            # FCST-15: Cache DataFrame for downstream modules (lightweight)
-            # Use artifact_name directly as key
+            self.stats["write_time"] += elapsed
+            # FCST-15: cache for downstream modules
             self._artifact_cache[artifact_name] = df
-        
-        return result
 
     def write_table(self, table_name: str, df: pd.DataFrame, delete_existing: bool = False) -> int:
         """Generic SQL table writer with RunID/EquipID injection, defaults, and upsert routing."""
@@ -1377,8 +1260,11 @@ class OutputManager:
                 sql_df = df.copy()
                 now = pd.Timestamp.now().tz_localize(None)
 
-                # Inject metadata
-                if 'RunID' not in sql_df.columns:
+                # Tables that don't have a standard RunID column (use alternative names)
+                tables_without_runid = {'ACM_SeasonalPatterns'}
+                
+                # Inject metadata (skip RunID for tables that don't have it)
+                if 'RunID' not in sql_df.columns and table_name not in tables_without_runid:
                     sql_df['RunID'] = self.run_id
                 if 'EquipID' not in sql_df.columns:
                     sql_df['EquipID'] = self.equip_id or 0
@@ -1402,13 +1288,20 @@ class OutputManager:
                 sql_df = self._prepare_dataframe_for_sql(sql_df)
 
                 # Optional delete-existing by RunID (+EquipID when available)
+                # Some tables use alternative RunID column names
                 if delete_existing and self.sql_client is not None and self.run_id:
                     try:
                         with self.sql_client.cursor() as cur:
+                            # Map table-specific RunID column names
+                            run_id_column_map = {
+                                'ACM_SeasonalPatterns': 'DetectedByRunID',
+                            }
+                            run_id_col = run_id_column_map.get(table_name, 'RunID')
+                            
                             if 'EquipID' in sql_df.columns and self.equip_id is not None:
-                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0)))
+                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE {run_id_col} = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0)))
                             else:
-                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,))
+                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE {run_id_col} = ?", (self.run_id,))
                             if hasattr(self.sql_client, "commit"):
                                 self.sql_client.commit()
                             elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
@@ -1616,38 +1509,30 @@ class OutputManager:
                 warnings.filterwarnings('ignore', category=FutureWarning, message='.*Downcasting.*')
                 df_clean = df_clean.replace(['N/A', 'n/a', 'NA', 'na', '#N/A'], np.nan)
             
-            # Convert timestamp columns to datetime objects FIRST
-            for col in df_clean.columns:
-                if 'timestamp' in col.lower() or col in ['Date', 'date']:
+            # Convert timestamp columns to datetime objects (vectorized)
+            # PHASE-1 FIX: Use centralized DATETIME_COLUMNS constant instead of heuristic
+            ts_cols = [c for c in df_clean.columns if c in DATETIME_COLUMNS or 'timestamp' in c.lower()]
+            for col in ts_cols:
+                try:
+                    df_clean[col] = pd.to_datetime(df_clean[col], format='mixed', errors='coerce')
                     try:
-                        # Try standard format first, then let pandas infer
-                        df_clean[col] = pd.to_datetime(df_clean[col], format='mixed', errors='coerce')
-                        try:
-                            # Drop timezone info if present
-                            df_clean[col] = df_clean[col].dt.tz_localize(None)
-                        except Exception:
-                            pass
-                        # Log if any conversions failed
-                        null_count = df_clean[col].isna().sum()
-                        if null_count > 0:
-                            Console.warn(f"{null_count} timestamps failed to parse in column {col}", component="OUTPUT", table=table_name, column=col, failed_count=null_count)
-                    except Exception as ex:
-                        Console.warn(f"Timestamp conversion failed for {col}: {ex}", component="OUTPUT", table=table_name, column=col, error_type=type(ex).__name__)
-                        pass  # Not a timestamp column, skip conversion
+                        df_clean[col] = df_clean[col].dt.tz_localize(None)
+                    except Exception:
+                        pass
+                    null_count = df_clean[col].isna().sum()
+                    if null_count > 0:
+                        Console.warn(f"{null_count} timestamps failed to parse in column {col}", component="OUTPUT", table=table_name, column=col, failed_count=null_count)
+                except Exception as ex:
+                    Console.warn(f"Timestamp conversion failed for {col}: {ex}", component="OUTPUT", table=table_name, column=col, error_type=type(ex).__name__)
             
-            # Replace extreme float values BEFORE replacing NaN (so we can use .abs())
-            import numpy as np
-            for col in df_clean.columns:
-                if df_clean[col].dtype in [np.float64, np.float32]:
-                    # Check for extreme values that will cause SQL Server errors
-                    # Use pandas notnull() to avoid NaN before checking absolute value
-                    valid_mask = pd.notnull(df_clean[col])
-                    if valid_mask.any():
-                        # CRIT-06: Lower extreme threshold to 1e38 for SQL safety
-                        extreme_mask = valid_mask & (df_clean[col].abs() > 1e38)
-                        if extreme_mask.any():
-                            Console.warn(f"Replacing {extreme_mask.sum()} extreme float values in {table_name}.{col}", component="OUTPUT", table=table_name, column=col, extreme_count=int(extreme_mask.sum()))
-                            df_clean.loc[extreme_mask, col] = None
+            # Replace extreme float values BEFORE replacing NaN (vectorized)
+            float_cols = df_clean.select_dtypes(include=[np.float64, np.float32]).columns
+            for col in float_cols:
+                # CRIT-06: Lower extreme threshold to 1e38 for SQL safety
+                extreme_mask = df_clean[col].abs() > 1e38
+                if extreme_mask.any():
+                    Console.warn(f"Replacing {extreme_mask.sum()} extreme float values in {table_name}.{col}", component="OUTPUT", table=table_name, column=col, extreme_count=int(extreme_mask.sum()))
+                    df_clean.loc[extreme_mask, col] = None
             
             # Replace Inf with None, then replace all NaN with None for SQL NULL
             df_clean = df_clean.replace([np.inf, -np.inf], None)
@@ -1743,626 +1628,16 @@ class OutputManager:
     def list_cached_tables(self) -> List[str]:
         """Return list of tables currently in the artifact cache."""
         return list(self._artifact_cache.keys())
-    
-    # ==================== DATA TRANSFORMATION METHODS ====================
-    
-    def melt_scores_long(self, df_wide: pd.DataFrame, equip_id: int, run_id: str, source: str = "ACM") -> pd.DataFrame:
-        """
-        Convert a wide sensor frame (index = timestamps, columns = sensors) to
-        the canonical long format for dbo.ScoresTS.
-        """
-        if not isinstance(df_wide.index, pd.DatetimeIndex):
-            raise ValueError("melt_scores_long expects a DatetimeIndex.")
-        out = df_wide.copy()
-        out.index = pd.to_datetime(out.index)
-        out = out.reset_index().rename(columns={"index": "EntryDateTime"})
-        long = out.melt(id_vars=["EntryDateTime"], var_name="Sensor", value_name="Value")
-        long["EquipID"] = int(equip_id)
-        long["Source"] = source
-        long["RunID"] = run_id
-        return long
 
-    # ==================== MISSING ANALYTICS GENERATORS (MED-03..MED-09) ====================
-
-    def _generate_culprit_history(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """Extract culprit sensors per episode with basic scoring.
-        Returns DataFrame suitable for ACM_CulpritHistory: RunID, EquipID, EpisodeID, Sensor, Contribution.
-        """
-        if episodes_df is None or len(episodes_df) == 0:
-            return pd.DataFrame(columns=["RunID","EquipID","EpisodeID","Sensor","Contribution"])  
-        rows = []
-        for i, ep in episodes_df.iterrows():
-            ep_id = ep.get("EpisodeID", i)
-            sensors = ep.get("CulpritSensors") or ep.get("Sensors") or []
-            if isinstance(sensors, str):
-                try:
-                    sensors = [s.strip() for s in sensors.split(',') if s.strip()]
-                except Exception:
-                    sensors = []
-            for s in sensors:
-                rows.append({
-                    "RunID": self.run_id,
-                    "EquipID": int(self.equip_id or 0),
-                    "EpisodeID": int(ep_id),
-                    "Sensor": str(s),
-                    "Contribution": float(ep.get("PeakZ", 0.0))
-                })
-        return pd.DataFrame(rows)
-
-    def _generate_episode_metrics(self, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """Compute RUN-LEVEL episode summary statistics for ACM_EpisodeMetrics table.
-        Returns a single-row DataFrame with aggregate metrics across all episodes in this run.
-        """
-        if episodes_df is None or len(episodes_df) == 0:
-            return pd.DataFrame([{
-                "RunID": self.run_id,
-                "EquipID": int(self.equip_id or 0),
-                "TotalEpisodes": 0,
-                "TotalDurationHours": 0.0,
-                "AvgDurationHours": 0.0,
-                "MedianDurationHours": 0.0,
-                "MaxDurationHours": 0.0,
-                "MinDurationHours": 0.0,
-                "RatePerDay": 0.0,
-                "MeanInterarrivalHours": 0.0
-            }])
-        
-        # Get durations directly from duration_hours or duration_h column (already calculated)
-        durations = []
-        if 'duration_hours' in episodes_df.columns:
-            durations = episodes_df['duration_hours'].dropna().tolist()
-        elif 'duration_h' in episodes_df.columns:
-            durations = episodes_df['duration_h'].dropna().tolist()
-        
-        # Calculate interarrival times using peak_timestamp
-        timestamps = []
-        timestamp_col = 'peak_timestamp' if 'peak_timestamp' in episodes_df.columns else 'PeakTimestamp'
-        if timestamp_col in episodes_df.columns:
-            for i, ep in episodes_df.iterrows():
-                ts_val = ep.get(timestamp_col)
-                ts = pd.to_datetime(ts_val) if ts_val is not None else pd.NaT
-                if isinstance(ts, pd.Timestamp):
-                    timestamps.append(ts)
-        
-        # Calculate interarrival times (time between consecutive episodes)
-        interarrivals = []
-        if len(timestamps) > 1:
-            timestamps_sorted = sorted(timestamps)
-            for i in range(1, len(timestamps_sorted)):
-                interarrival_hours = (timestamps_sorted[i] - timestamps_sorted[i-1]).total_seconds() / 3600.0
-                interarrivals.append(interarrival_hours)
-        
-        # Compute statistics
-        total_eps = len(episodes_df)
-        total_dur_h = sum(durations) if durations else 0.0
-        avg_dur_h = np.mean(durations) if durations else 0.0
-        median_dur_h = np.median(durations) if durations else 0.0
-        max_dur_h = max(durations) if durations else 0.0
-        min_dur_h = min(durations) if durations else 0.0
-        mean_interarrival_h = np.mean(interarrivals) if interarrivals else 0.0
-        
-        # Calculate rate per day (episodes per 24 hours)
-        rate_per_day = 0.0
-        if len(timestamps) >= 2:
-            time_span_hours = (max(timestamps) - min(timestamps)).total_seconds() / 3600.0
-            if time_span_hours > 0:
-                rate_per_day = (total_eps / time_span_hours) * 24.0
-        
-        return pd.DataFrame([{
-            "RunID": self.run_id,
-            "EquipID": int(self.equip_id or 0),
-            "TotalEpisodes": int(total_eps),
-            "TotalDurationHours": round(total_dur_h, 2),
-            "AvgDurationHours": round(avg_dur_h, 2),
-            "MedianDurationHours": round(median_dur_h, 2),
-            "MaxDurationHours": round(max_dur_h, 2),
-            "MinDurationHours": round(min_dur_h, 2),
-            "RatePerDay": round(rate_per_day, 3),
-            "MeanInterarrivalHours": round(mean_interarrival_h, 2)
-        }])
-
-    def _generate_episode_diagnostics(self, episodes_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Create per-episode diagnostics rows with timestamps and severity label.
-        Returns DataFrame for ACM_EpisodeDiagnostics.
-        
-        NOTE: This is a DUPLICATE write that happens AFTER write_episodes().
-        We must use the EXACT same column names and extract the SAME values to avoid overwriting good data with UNKNOWN.
-        """
-        # Use lowercase column names to match write_episodes output
-        cols = ["episode_id", "peak_timestamp", "dominant_sensor", "duration_h", "severity", "avg_z", "peak_z"]
-        if episodes_df is None or len(episodes_df) == 0:
-            return pd.DataFrame(columns=cols)
-        
-        rows = []
-        for i, ep in episodes_df.iterrows():
-            # Extract timestamp
-            _ts_val = ep.get("peak_timestamp") or ep.get("PeakTimestamp") or ep.get("start_ts")
-            ts = pd.to_datetime(_ts_val) if _ts_val is not None else pd.NaT
-            
-            # Extract peak_z (try multiple column names)
-            peak_z = float(ep.get("peak_z", ep.get("peak_fused_z", ep.get("PeakZ", 0.0))))
-            
-            # Calculate severity from peak_z
-            if pd.isna(peak_z):
-                severity = "UNKNOWN"
-            elif peak_z >= 6:
-                severity = "CRITICAL"
-            elif peak_z >= 4:
-                severity = "HIGH"
-            elif peak_z >= 2:
-                severity = "MEDIUM"
-            else:
-                severity = "LOW"
-            
-            # Extract dominant_sensor from culprits
-            dominant_sensor = ep.get("dominant_sensor", "UNKNOWN")
-            if dominant_sensor == "UNKNOWN" and "culprits" in ep:
-                culprit_str = ep["culprits"]
-                if pd.notna(culprit_str) and culprit_str != '':
-                    # culprits field already contains formatted label from format_culprit_label()
-                    # e.g., "Multivariate Outlier (PCA-TÂ²)" or "Multivariate Outlier (PCA-TÂ²) â†’ SensorName"
-                    # Extract just the detector label (before " â†’ " if sensor attribution exists)
-                    if ' â†’ ' in str(culprit_str):
-                        dominant_sensor = str(culprit_str).split(' â†’ ')[0].strip()
-                    else:
-                        dominant_sensor = str(culprit_str).strip()
-            
-            # Extract avg_z
-            avg_z = float(ep.get("avg_z", ep.get("avg_fused_z", 0.0)))
-            
-            # Calculate duration_h from duration_s if needed
-            duration_h = ep.get("duration_h", ep.get("duration_hours", 0.0))
-            if duration_h == 0.0 and "duration_s" in ep:
-                duration_h = float(ep["duration_s"]) / 3600.0
-            
-            rows.append({
-                "episode_id": int(ep.get("episode_id", ep.get("EpisodeID", i))),
-                "peak_timestamp": ts,
-                "dominant_sensor": dominant_sensor,
-                "duration_h": duration_h,
-                "severity": severity,
-                "avg_z": avg_z,
-                "peak_z": peak_z,
-            })
-        return pd.DataFrame(rows)
-
-    def _generate_omr_contributions_long(self, scores_df: pd.DataFrame, omr_contributions: pd.DataFrame, 
-                                          top_n: int = 15) -> pd.DataFrame:
-        """Melt OMR contributions wide DataFrame to long format, keeping only TOP N contributors per timestamp.
-        
-        This optimization reduces storage by ~95% for equipment with many sensors (e.g., 792 sensors â†’ 15 per timestamp).
-        Expected input columns end with '_contrib'; outputs columns: Timestamp, SensorName, ContributionScore, ContributionPct.
-        
-        Args:
-            scores_df: Scores DataFrame with omr_z column
-            omr_contributions: Wide-format OMR contributions (columns = sensors)
-            top_n: Number of top contributors to keep per timestamp (default 15)
-        """
-        if omr_contributions is None or len(omr_contributions) == 0:
-            return pd.DataFrame(columns=["Timestamp","SensorName","ContributionScore","ContributionPct","OMR_Z","RunID","EquipID"])
-        df = omr_contributions.copy()
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index, errors="coerce")
-        # Reset index - preserve original index name or use 'index'
-        df = df.reset_index()
-        # Rename first column (the old index) to 'Timestamp' regardless of its original name
-        if df.columns[0] != 'Timestamp':
-            df = df.rename(columns={df.columns[0]: 'Timestamp'})
-        value_cols = [c for c in df.columns if c.endswith("_contrib")] or [c for c in df.columns if c not in ["Timestamp"]]
-        long = df.melt(id_vars=["Timestamp"], var_name="SensorName", value_name="ContributionScore")
-        long["SensorName"] = long["SensorName"].astype(str).str.replace("_contrib","", regex=False)
-        
-        # TASK-1-FIX: Ensure ContributionScore is never NULL to prevent SQL constraint violations
-        # Replace NaN/NULL with 0.0 before any downstream processing
-        long["ContributionScore"] = pd.to_numeric(long["ContributionScore"], errors="coerce").fillna(0.0)
-        
-        # PERF-FIX: Keep only TOP N contributors per timestamp to reduce storage by ~95%
-        # Sort by absolute contribution score (descending) and keep top N per timestamp
-        long["AbsContrib"] = long["ContributionScore"].abs()
-        long = long.sort_values(["Timestamp", "AbsContrib"], ascending=[True, False])
-        long = long.groupby("Timestamp").head(top_n).drop(columns=["AbsContrib"])
-        
-        # Calculate ContributionPct: percentage of total contribution at each timestamp
-        long["ContributionPct"] = 0.0
-        if not long.empty and "ContributionScore" in long.columns:
-            # Group by timestamp and calculate percentage (now only for top N)
-            long["ContributionPct"] = long.groupby("Timestamp")["ContributionScore"].transform(
-                lambda x: (x / x.sum() * 100) if x.sum() != 0 else 0.0
-            )
-        
-        # Add OMR_Z from scores_df if available
-        long["OMR_Z"] = 0.0
-        if scores_df is not None and "omr_z" in scores_df.columns:
-            # Merge OMR_Z values by timestamp
-            omr_z_map = scores_df.set_index(scores_df.index)["omr_z"].to_dict()
-            long["OMR_Z"] = long["Timestamp"].map(omr_z_map).fillna(0.0)
-        
-        long["RunID"] = self.run_id
-        long["EquipID"] = int(self.equip_id or 0)
-        return long
-
-    def _generate_regime_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Compute regime statistics: occupancy, dwell time, fused score stats.
-        Returns DataFrame for ACM_RegimeStats with correct column names.
-        """
-        if scores_df is None or len(scores_df) == 0 or "regime_label" not in scores_df.columns:
-            return pd.DataFrame(columns=["RunID", "EquipID", "RegimeLabel", "OccupancyPct", "AvgDwellSeconds", "FusedMean", "FusedP90"])
-        
-        regimes = pd.to_numeric(scores_df["regime_label"], errors="coerce")
-        fused = pd.to_numeric(scores_df.get("fused", pd.Series(dtype=float)), errors="coerce")
-        regimes = regimes.dropna().astype(int)
-        
-        # Total points for occupancy calculation
-        total_points = len(regimes)
-        if total_points == 0:
-            return pd.DataFrame(columns=["RunID", "EquipID", "RegimeLabel", "OccupancyPct", "AvgDwellSeconds", "FusedMean", "FusedP90"])
-        
-        # Estimate dt_hours from timestamp index
-        if hasattr(scores_df.index, 'to_series'):
-            ts = scores_df.index.to_series()
-            if len(ts) > 1:
-                dt_hours = float((ts.diff().median().total_seconds()) / 3600.0)
-            else:
-                dt_hours = 0.5  # default 30 min
-        else:
-            dt_hours = 0.5
-        
-        out = []
-        for label in sorted(regimes.unique()):
-            mask = regimes == label
-            count = int(mask.sum())
-            occupancy_pct = float(count / total_points * 100.0)
-            
-            # Estimate average dwell time (consecutive points in same regime)
-            # Simple approximation: total time in regime / number of transitions into regime
-            regime_transitions = (mask.astype(int).diff().fillna(0) == 1).sum()
-            if regime_transitions > 0:
-                avg_dwell_seconds = float((count * dt_hours * 3600) / regime_transitions)
-            else:
-                avg_dwell_seconds = float(count * dt_hours * 3600)  # All in one segment
-            
-            # Fused score stats for this regime
-            fused_in_regime = fused[mask].dropna()
-            if len(fused_in_regime) > 0:
-                fused_mean = float(fused_in_regime.mean())
-                fused_p90 = float(fused_in_regime.quantile(0.90))
-            else:
-                fused_mean = 0.0
-                fused_p90 = 0.0
-            
-            out.append({
-                "RunID": self.run_id,
-                "EquipID": int(self.equip_id or 0),
-                "RegimeLabel": int(label),
-                "OccupancyPct": round(occupancy_pct, 2),
-                "AvgDwellSeconds": round(avg_dwell_seconds, 1),
-                "FusedMean": round(fused_mean, 4),
-                "FusedP90": round(fused_p90, 4)
-            })
-        return pd.DataFrame(out)
-
-    def _generate_daily_fused_profile(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Aggregate fused scores by date for daily profiling.
-        Returns DataFrame for ACM_DailyFusedProfile: ProfileDate, AvgFusedScore, MaxFusedScore, MinFusedScore, SampleCount.
-        """
-        if scores_df is None or len(scores_df) == 0 or "fused" not in scores_df.columns:
-            return pd.DataFrame(columns=["RunID","EquipID","ProfileDate","AvgFusedScore","MaxFusedScore","MinFusedScore","SampleCount"])
-        
-        idx = pd.to_datetime(scores_df.index, errors="coerce")
-        fused = pd.to_numeric(scores_df["fused"], errors="coerce")
-        
-        # Group by date
-        df = pd.DataFrame({"Date": idx.date, "FusedZ": fused})
-        grp = df.groupby("Date", dropna=True)["FusedZ"].agg(
-            AvgFusedScore='mean',
-            MaxFusedScore='max',
-            MinFusedScore='min',
-            SampleCount='count'
-        ).reset_index().rename(columns={"Date": "ProfileDate"})
-        
-        grp["RunID"] = self.run_id
-        grp["EquipID"] = int(self.equip_id or 0)
-        return grp[["RunID","EquipID","ProfileDate","AvgFusedScore","MaxFusedScore","MinFusedScore","SampleCount"]]
-
-    def _generate_health_histogram(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Bin health index into 10-point buckets (0-100).
-        Returns DataFrame for ACM_HealthHistogram: BinStart, BinEnd, Count.
-        """
-        if scores_df is None or len(scores_df) == 0:
-            return pd.DataFrame(columns=["RunID","EquipID","BinStart","BinEnd","Count"])
-        fused = pd.to_numeric(scores_df["fused"], errors="coerce")
-        # v10.1.0: Use centralized _health_index function with softer sigmoid
-        health = _health_index(fused) if fused is not None else pd.Series([], dtype=float)
-        bins = list(range(0, 101, 10))
-        cats = pd.cut(health, bins=bins, include_lowest=True, right=False)
-        counts = cats.value_counts().sort_index()
-        rows = []
-        for interval, cnt in counts.items():
-            try:
-                start = int(getattr(interval, 'left', 0))
-                end = int(getattr(interval, 'right', 0))
-            except Exception:
-                start, end = 0, 0
-            rows.append({"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "BinStart": start, "BinEnd": end, "Count": int(cnt)})
-        return pd.DataFrame(rows)
-
-    def _generate_alert_age(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Compute time since first alert crossing based on fused z threshold (default 3.0).
-        Returns DataFrame for ACM_AlertAge with a single row per run.
-        """
-        threshold = 3.0
-        cols = ["RunID","EquipID","FirstAlert","LastAlert","AlertAgeHours"]
-        if scores_df is None or len(scores_df) == 0 or "fused" not in scores_df.columns:
-            return pd.DataFrame([{c: None for c in cols}])
-        idx = pd.to_datetime(scores_df.index, errors="coerce")
-        fused = pd.to_numeric(scores_df["fused"], errors="coerce")
-        alert_mask = fused >= threshold
-        if not alert_mask.any():
-            return pd.DataFrame([{"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "FirstAlert": None, "LastAlert": None, "AlertAgeHours": 0.0}])
-        first_ts = idx[alert_mask].min()
-        last_ts = idx[alert_mask].max()
-        age_hours = float((last_ts - first_ts).total_seconds()/3600.0) if (isinstance(first_ts, pd.Timestamp) and isinstance(last_ts, pd.Timestamp)) else 0.0
-        return pd.DataFrame([{"RunID": self.run_id, "EquipID": int(self.equip_id or 0), "FirstAlert": first_ts, "LastAlert": last_ts, "AlertAgeHours": age_hours}])
-
-    # ==================== SPECIALIZED SQL WRITE FUNCTIONS ====================
-    # These replace all the scattered write functions from data_io.py, storage.py, 
-    # and sql_analytics_writer.py with a unified interface
-    
-    def write_scores_ts(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write scores timeseries to ACM_Scores_Long table.
-        
-        SQL Schema for ACM_Scores_Long:
-            - Id (BIGINT, identity)
-            - RunID (UNIQUEIDENTIFIER)
-            - EquipID (INT)
-            - Timestamp (DATETIME2)
-            - SensorName (NVARCHAR(128)) - sensor being scored, NULL for detector-level
-            - DetectorName (NVARCHAR(64)) - detector name (ar1, pca_spe, etc.)
-            - Score (FLOAT) - z-score value
-            - Threshold (FLOAT) - threshold used for this detector
-            - IsAnomaly (BIT) - whether score exceeds threshold
-        """
-        if not self._check_sql_health():
-            return 0
-            
-        try:
-            sql_df = df.copy()
-
-            if sql_df.empty:
-                return 0
-
-            # Case A: already long from melt_scores_long (legacy format)
-            if {'EntryDateTime', 'Sensor', 'Value'}.issubset(set(sql_df.columns)):
-                sql_df = sql_df.rename(columns={
-                    'EntryDateTime': 'Timestamp',
-                    'Sensor': 'DetectorName',  # Map to correct SQL column
-                    'Value': 'Score'  # Map to correct SQL column
-                })
-                # Ensure required metadata exists
-                if 'RunID' not in sql_df.columns:
-                    sql_df['RunID'] = run_id
-                if 'EquipID' not in sql_df.columns:
-                    sql_df['EquipID'] = self.equip_id or 0
-                # Add missing columns with defaults
-                if 'SensorName' not in sql_df.columns:
-                    sql_df['SensorName'] = None  # Detector-level scores, no specific sensor
-                if 'Threshold' not in sql_df.columns:
-                    sql_df['Threshold'] = 3.0  # Default threshold
-                if 'IsAnomaly' not in sql_df.columns:
-                    sql_df['IsAnomaly'] = (sql_df['Score'].abs() >= 3.0).astype(int)
-                sql_df['Timestamp'] = pd.to_datetime(sql_df['Timestamp']).dt.tz_localize(None)
-                sql_df = sql_df.dropna(subset=['Score'])
-                return self._bulk_insert_sql('ACM_Scores_Long', sql_df)
-
-            # Case B: wide - melt to long
-            if sql_df.index.name == 'timestamp' or isinstance(sql_df.index, pd.DatetimeIndex):
-                sql_df = sql_df.reset_index().rename(columns={sql_df.columns[0]: 'Timestamp'})
-            detector_cols = [c for c in sql_df.columns if c.endswith('_z') or c.startswith('ACM_')]
-            if not detector_cols:
-                return 0
-            long_df = sql_df.melt(
-                id_vars=['Timestamp'],
-                value_vars=detector_cols,
-                var_name='DetectorName',  # Map to correct SQL column
-                value_name='Score'  # Map to correct SQL column
-            )
-            # Normalize detector names (remove _z suffix)
-            long_df['DetectorName'] = long_df['DetectorName'].str.replace('_z', '', regex=False)
-            long_df['Timestamp'] = pd.to_datetime(long_df['Timestamp']).dt.tz_localize(None)
-            long_df['RunID'] = run_id
-            long_df['EquipID'] = self.equip_id or 0
-            # Add missing columns with defaults
-            long_df['SensorName'] = None  # Detector-level scores, no specific sensor
-            long_df['Threshold'] = 3.0  # Default threshold
-            long_df['IsAnomaly'] = (long_df['Score'].abs() >= 3.0).astype(int)
-            long_df = long_df.dropna(subset=['Score'])
-            return self._bulk_insert_sql('ACM_Scores_Long', long_df)
-            
-        except Exception as e:
-            Console.warn(f"write_scores_ts failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=run_id, rows=len(df) if df is not None else 0, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
-    
-    def write_drift_ts(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write drift timeseries to ACM_DriftSeries table."""
-        if not self._check_sql_health():
-            return 0
-            
-        try:
-            sql_df = df.copy()
-            
-            # Expected columns: Timestamp, DriftValue, RunID, EquipID
-            if 'drift_z' in sql_df.columns:
-                sql_df['DriftValue'] = sql_df['drift_z']
-            elif 'cusum_z' in sql_df.columns:
-                sql_df['DriftValue'] = sql_df['cusum_z']
-            elif 'value' in sql_df.columns:
-                sql_df['DriftValue'] = sql_df['value']
-            else:
-                return 0
-            
-            # Prepare timestamp
-            if sql_df.index.name == 'timestamp' or isinstance(sql_df.index, pd.DatetimeIndex):
-                sql_df = sql_df.reset_index()
-                timestamp_col = sql_df.columns[0]
-                sql_df = sql_df.rename(columns={timestamp_col: 'Timestamp'})
-            
-            # Add metadata
-            sql_df['RunID'] = run_id
-            sql_df['EquipID'] = self.equip_id or 0
-            
-            # Select final columns
-            sql_df = sql_df[['RunID', 'EquipID', 'Timestamp', 'DriftValue']].copy()
-            sql_df['Timestamp'] = pd.to_datetime(sql_df['Timestamp']).dt.tz_localize(None)
-            sql_df = sql_df.dropna(subset=['DriftValue'])
-            
-            return self._bulk_insert_sql('ACM_DriftSeries', sql_df)
-            
-        except Exception as e:
-            Console.warn(f"write_drift_ts failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=run_id, rows=len(df) if df is not None else 0, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
-    
-    def write_anomaly_events(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write anomaly events to ACM_Anomaly_Events table."""
-        if not self._check_sql_health() or df.empty:
-            return 0
-            
-        try:
-            sql_df = df.copy()
-            
-            # Map columns for ACM_Anomaly_Events (table uses StartTime/EndTime, not StartTs/EndTs)
-            column_map = {
-                'episode_id': 'EpisodeID',
-                'start_ts': 'StartTime',
-                'end_ts': 'EndTime',
-                'peak_fused_z': 'PeakScore',
-                'severity': 'Severity',
-                'status': 'Status'
-            }
-            
-            for old_col, new_col in column_map.items():
-                if old_col in sql_df.columns:
-                    sql_df[new_col] = sql_df[old_col]
-            
-            # Add metadata
-            sql_df['RunID'] = run_id
-            sql_df['EquipID'] = self.equip_id or 0
-            
-            # Add defaults
-            if 'Severity' not in sql_df.columns:
-                sql_df['Severity'] = 'info'
-            if 'Status' not in sql_df.columns:
-                sql_df['Status'] = 'OPEN'
-            
-            # Handle timestamps
-            for ts_col in ['StartTime', 'EndTime']:
-                if ts_col in sql_df.columns:
-                    sql_df[ts_col] = pd.to_datetime(sql_df[ts_col]).dt.tz_localize(None)
-            
-            # Select final columns
-            final_cols = ['RunID', 'EquipID', 'StartTime', 'EndTime', 'Severity']
-            sql_df = sql_df[[c for c in final_cols if c in sql_df.columns]]
-            
-            return self._bulk_insert_sql('ACM_Anomaly_Events', sql_df)
-            
-        except Exception as e:
-            Console.warn(f"write_anomaly_events failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=run_id, rows=len(df) if df is not None else 0, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
-    
-    def write_regime_episodes(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write regime episodes to ACM_Regime_Episodes table."""
-        if not self._check_sql_health() or df.empty:
-            return 0
-            
-        try:
-            sql_df = df.copy()
-            
-            # Map columns for ACM_Regime_Episodes
-            column_map = {
-                'start_ts': 'StartTs',
-                'end_ts': 'EndTs',
-                'regime_label': 'RegimeLabel',
-                'duration_s': 'DurationSeconds',
-                'stability_score': 'StabilityScore'
-            }
-            
-            for old_col, new_col in column_map.items():
-                if old_col in sql_df.columns:
-                    sql_df[new_col] = sql_df[old_col]
-            
-            # Add metadata
-            sql_df['RunID'] = run_id
-            sql_df['EquipID'] = self.equip_id or 0
-            
-            # Handle timestamps
-            for ts_col in ['StartTs', 'EndTs']:
-                if ts_col in sql_df.columns:
-                    sql_df[ts_col] = pd.to_datetime(sql_df[ts_col]).dt.tz_localize(None)
-            
-            # Select final columns
-            final_cols = ['RunID', 'EquipID', 'StartTs', 'EndTs', 'RegimeLabel', 'DurationSeconds', 'StabilityScore']
-            sql_df = sql_df[[c for c in final_cols if c in sql_df.columns]]
-            
-            return self._bulk_insert_sql('ACM_Regime_Episodes', sql_df)
-            
-        except Exception as e:
-            Console.warn(f"write_regime_episodes failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=run_id, rows=len(df) if df is not None else 0, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
-    
-    def write_pca_model(self, model_data: Dict[str, Any]) -> int:
-        """Write PCA model metadata to ACM_PCA_Models table."""
-        if not self._check_sql_health():
-            return 0
-            
-        try:
-            # Accept caller-provided schema and add common metadata when missing
-            row = dict(model_data)
-            row.setdefault('RunID', self.run_id)
-            row.setdefault('EquipID', self.equip_id or 0)
-            # Provide CreatedAt if not present
-            if 'CreatedAt' not in row:
-                row['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
-            sql_df = pd.DataFrame([row])
-            
-            return self._bulk_insert_sql('ACM_PCA_Models', sql_df)
-            
-        except Exception as e:
-            Console.warn(f"write_pca_model failed: {e}", component="OUTPUT", equip_id=self.equip_id, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
-    
-    def write_pca_loadings(self, df: pd.DataFrame, run_id: str) -> int:
-        """Write PCA loadings to ACM_PCA_Loadings table."""
-        if not self._check_sql_health() or df.empty:
-            return 0
-            
-        try:
-            sql_df = df.copy()
-            
-            # Normalize possible caller column names
-            sql_df['RunID'] = sql_df.get('RunID', run_id)
-            sql_df['EquipID'] = sql_df.get('EquipID', self.equip_id or 0)
-            if 'ComponentID' not in sql_df.columns and 'ComponentNo' in sql_df.columns:
-                sql_df['ComponentID'] = sql_df['ComponentNo']
-            if 'FeatureName' not in sql_df.columns and 'Sensor' in sql_df.columns:
-                sql_df['FeatureName'] = sql_df['Sensor']
-            # Keep common columns; _bulk_insert_sql will filter to table cols
-            
-            return self._bulk_insert_sql('ACM_PCA_Loadings', sql_df)
-            
-        except Exception as e:
-            Console.warn(f"write_pca_loadings failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=run_id, rows=len(df) if df is not None else 0, error_type=type(e).__name__, error=str(e)[:200])
-            return 0
-    
-    def write_pca_metrics(self, pca_detector=None, tables_dir=None, enable_sql=True, df=None, run_id=None) -> int:
-        """Write PCA metrics to ACM_PCA_Metrics table.
+    def write_pca_metrics(self, pca_detector=None, df=None, run_id=None) -> int:
+        """Write PCA metrics to ACM_PCA_Metrics table (SQL-only).
         
         Args:
             pca_detector: PCASubspaceDetector instance (new style)
-            tables_dir: Path for file output (ignored in SQL-only mode)
-            enable_sql: Whether SQL write is enabled
             df: Pre-built DataFrame (legacy style, optional)
             run_id: Run ID for legacy style
         """
-        if not self._check_sql_health() or not enable_sql:
+        if not self._check_sql_health():
             return 0
             
         try:
@@ -2425,68 +1700,173 @@ class OutputManager:
             Console.warn(f"write_pca_metrics failed: {e}", component="OUTPUT", equip_id=self.equip_id, error_type=type(e).__name__, error=str(e)[:200])
             return 0
 
-    def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
-        """Upsert PCA metrics using DELETE by full PK scope to prevent data loss.
+    def write_pca_loadings(self, df: pd.DataFrame, run_id: str = None) -> int:
+        """Write PCA loadings to ACM_PCA_Loadings table.
         
-        Primary key is (RunID, EquipID, ComponentName, MetricType).
-        CRITICAL: Delete only specific metric types being updated to prevent data loss.
-        This method may be called multiple times per run with different metric types.
+        Schema: RunID, EquipID, EntryDateTime, ComponentNo, ComponentID, 
+                Sensor, FeatureName, Loading, CreatedAt
+        
+        Args:
+            df: DataFrame with columns: RunID, EntryDateTime, ComponentNo, Sensor, Loading
+            run_id: Run ID (optional, can come from df)
+        
+        Returns:
+            Number of rows written
+        """
+        if df is None or df.empty:
+            return 0
+        if not self._check_sql_health():
+            return 0
+        
+        try:
+            sql_df = df.copy()
+            
+            # Ensure required columns
+            if 'EquipID' not in sql_df.columns:
+                sql_df['EquipID'] = self.equip_id or 0
+            if 'RunID' not in sql_df.columns:
+                sql_df['RunID'] = run_id or self.run_id or ''
+            if 'EntryDateTime' not in sql_df.columns:
+                sql_df['EntryDateTime'] = datetime.now()
+            if 'ComponentID' not in sql_df.columns:
+                sql_df['ComponentID'] = sql_df.get('ComponentNo', 0)
+            if 'FeatureName' not in sql_df.columns:
+                sql_df['FeatureName'] = sql_df.get('Sensor', '')
+            
+            # Select only the columns the table expects
+            keep_cols = ['RunID', 'EquipID', 'EntryDateTime', 'ComponentNo', 'ComponentID', 
+                         'Sensor', 'FeatureName', 'Loading']
+            keep_cols = [c for c in keep_cols if c in sql_df.columns]
+            sql_df = sql_df[keep_cols]
+            
+            return self._bulk_insert_sql('ACM_PCA_Loadings', sql_df)
+            
+        except Exception as e:
+            Console.warn(f"write_pca_loadings failed: {e}", component="OUTPUT",
+                        equip_id=self.equip_id, run_id=run_id, error=str(e)[:200])
+            return 0
+
+    def _upsert_pca_metrics(self, df: pd.DataFrame) -> int:
+        """Upsert PCA metrics using DELETE + INSERT pattern.
+        
+        Actual table schema (from INFORMATION_SCHEMA):
+        - ID (identity)
+        - RunID (required)
+        - EquipID (required) 
+        - NComponents (nullable)
+        - ExplainedVariance (nullable - total explained variance ratio)
+        - ComponentsJson (nullable - JSON array of per-component details)
+        - MetricType (nullable - e.g., 'pca_fit')
+        - TrainSamples (nullable)
+        - TrainFeatures (nullable)
+        - CreatedAt (default)
+        
+        Input df may have either:
+        - Legacy format: ComponentName, MetricType, Value (aggregate to new format)
+        - New format: NComponents, ExplainedVariance, ComponentsJson, etc.
         """
         if df.empty or self.sql_client is None:
             return 0
         
-        # Validate required columns for PK matching
-        required_cols = ['RunID', 'EquipID', 'ComponentName', 'MetricType']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            Console.warn(f"_upsert_pca_metrics missing required columns: {missing_cols}", component="OUTPUT", missing_columns=missing_cols, available_columns=list(df.columns))
-            return 0
-        
         try:
+            import json
             conn = self.sql_client.conn
             cursor = conn.cursor()
             
-            # Get unique RunID+EquipID pairs
-            # Get unique (RunID, EquipID, ComponentName, MetricType) tuples to delete
-            pk_tuples = df[['RunID', 'EquipID', 'ComponentName', 'MetricType']].drop_duplicates()
+            # Check if this is legacy format (ComponentName, MetricType, Value)
+            is_legacy_format = 'Value' in df.columns and ('ComponentName' in df.columns or 'MetricType' in df.columns)
             
-            # DELETE existing rows by full PK scope (prevents data loss + PK collisions)
-            deleted_count = 0
-            for _, row in pk_tuples.iterrows():
-                try:
-                    cursor.execute("""
-                        DELETE FROM ACM_PCA_Metrics 
-                        WHERE RunID = ? AND EquipID = ? AND ComponentName = ? AND MetricType = ?
-                        """,
-                        (row['RunID'], row['EquipID'], row['ComponentName'], row['MetricType'])
-                    )
-                    deleted_count += cursor.rowcount
-                except Exception as del_err:
-                    Console.warn(f"DELETE failed for {row['ComponentName']}/{row['MetricType']}: {del_err}", component="OUTPUT", table="ACM_PCA_Metrics", component_name=row['ComponentName'], metric_type=row['MetricType'], error_type=type(del_err).__name__)
+            if is_legacy_format:
+                # Convert legacy format to new format
+                df = df.copy()
+                
+                # Group by RunID, EquipID and aggregate
+                if 'RunID' not in df.columns:
+                    df['RunID'] = self.run_id
+                if 'EquipID' not in df.columns:
+                    df['EquipID'] = self.equip_id
+                    
+                grouped = df.groupby(['RunID', 'EquipID'])
+                
+                pivot_data = []
+                for (run_id, equip_id), group in grouped:
+                    row_dict = {'RunID': run_id, 'EquipID': equip_id, 'MetricType': 'pca_fit'}
+                    
+                    # Extract n_components if present
+                    n_comp_mask = group['MetricType'].str.lower().str.contains('n_components|ncomponents', na=False)
+                    if n_comp_mask.any():
+                        try:
+                            row_dict['NComponents'] = int(group.loc[n_comp_mask, 'Value'].iloc[0])
+                        except (ValueError, TypeError):
+                            row_dict['NComponents'] = None
+                    
+                    # Extract total explained variance
+                    var_mask = group['MetricType'].str.lower().str.contains('explained.*variance|total.*variance', na=False)
+                    if var_mask.any():
+                        try:
+                            row_dict['ExplainedVariance'] = float(group.loc[var_mask, 'Value'].iloc[0])
+                        except (ValueError, TypeError):
+                            row_dict['ExplainedVariance'] = None
+                    
+                    # Build ComponentsJson from individual PC entries
+                    if 'ComponentName' in group.columns:
+                        pc_mask = group['ComponentName'].str.startswith('PC', na=False)
+                        if pc_mask.any():
+                            components = []
+                            for _, pc_row in group[pc_mask].iterrows():
+                                components.append({
+                                    'name': str(pc_row['ComponentName']),
+                                    'type': str(pc_row.get('MetricType', '')),
+                                    'value': float(pc_row['Value']) if pd.notna(pc_row['Value']) else None
+                                })
+                            if components:
+                                row_dict['ComponentsJson'] = json.dumps(components)
+                    
+                    pivot_data.append(row_dict)
+                
+                if not pivot_data:
+                    Console.debug("No PCA metrics to write after legacy conversion", component="OUTPUT")
+                    return 0
+                    
+                df = pd.DataFrame(pivot_data)
             
-            if deleted_count > 0:
-                Console.info(f"Deleted {deleted_count} existing PCA metric rows before upsert", component="OUTPUT")
+            # Ensure RunID and EquipID are present
+            if 'RunID' not in df.columns:
+                df['RunID'] = self.run_id
+            if 'EquipID' not in df.columns:
+                df['EquipID'] = self.equip_id
             
-            # Prepare bulk insert data
+            # DELETE existing rows for this RunID+EquipID - single batch delete
+            run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
+            for run_id, equip_id in run_equip_pairs.values:
+                cursor.execute(
+                    "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?",
+                    (str(run_id), int(equip_id))
+                )
+            
+            # Prepare bulk insert using the actual schema columns
             insert_sql = """
-            INSERT INTO ACM_PCA_Metrics (RunID, EquipID, ComponentName, MetricType, Value, Timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO ACM_PCA_Metrics (RunID, EquipID, NComponents, ExplainedVariance, ComponentsJson, MetricType, TrainSamples, TrainFeatures)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """
             
-            # Build list of tuples for bulk insert
-            rows_to_insert = []
-            for _, row in df.iterrows():
-                rows_to_insert.append((
-                    row['RunID'],
-                    row['EquipID'],
-                    row.get('ComponentName', 'PCA'),
-                    row['MetricType'],
-                    row['Value'],
-                    row.get('Timestamp', datetime.now())
-                ))
+            # Vectorized row preparation
+            rows_to_insert = [
+                (
+                    str(row['RunID']),
+                    int(row['EquipID']),
+                    int(row['NComponents']) if pd.notna(row.get('NComponents')) else None,
+                    float(row['ExplainedVariance']) if pd.notna(row.get('ExplainedVariance')) else None,
+                    str(row['ComponentsJson']) if pd.notna(row.get('ComponentsJson')) else None,
+                    str(row.get('MetricType', 'pca_fit')) if pd.notna(row.get('MetricType')) else 'pca_fit',
+                    int(row['TrainSamples']) if pd.notna(row.get('TrainSamples')) else None,
+                    int(row['TrainFeatures']) if pd.notna(row.get('TrainFeatures')) else None
+                )
+                for row in df.to_dict('records')
+            ]
             
-            # Bulk insert all rows in one transaction
             if rows_to_insert:
+                cursor.fast_executemany = True
                 cursor.executemany(insert_sql, rows_to_insert)
             
             conn.commit()
@@ -2555,62 +1935,54 @@ class OutputManager:
             df['DetectorName'] = df['DetectorName'].fillna('UNKNOWN')
         
         try:
+            # PERFORMANCE FIX: Replace row-by-row MERGE with DELETE + bulk INSERT
+            # The MERGE pattern was doing N individual SQL round-trips (catastrophic)
+            
+            # First, delete existing records for this RunID/EquipID
             conn = self.sql_client.conn
             cursor = conn.cursor()
-            row_count = 0
             
-            for _, row in df.iterrows():
-                run_id = row['RunID']
-                equip_id = row['EquipID']
-                detector_name = row['DetectorName']
-                timestamp = row['Timestamp']
-                forecast_value = row.get('ForecastValue', 0.0)
-                ci_lower = row.get('CiLower', 0.0)
-                ci_upper = row.get('CiUpper', 0.0)
-                forecast_std = row.get('ForecastStd', 0.0)
-                method = row.get('Method', 'AR1')
-                
-                # Ensure no NaN values are passed as None to SQL
-                if pd.isna(forecast_value):
-                    forecast_value = 0.0
-                if pd.isna(ci_lower):
-                    ci_lower = 0.0
-                if pd.isna(ci_upper):
-                    ci_upper = 0.0
-                if pd.isna(forecast_std):
-                    forecast_std = 0.0
-                if pd.isna(method):
-                    method = 'AR1'
-                if pd.isna(detector_name):
-                    detector_name = 'UNKNOWN'
-                    
-                created_at = row.get('CreatedAt', datetime.now())
-                
-                merge_sql = """
-                MERGE INTO ACM_DetectorForecast_TS AS target
-                USING (SELECT ? AS RunID, ? AS EquipID, ? AS DetectorName, ? AS Timestamp) AS source
-                ON (target.RunID = source.RunID AND target.EquipID = source.EquipID AND target.DetectorName = source.DetectorName AND target.Timestamp = source.Timestamp)
-                WHEN MATCHED THEN
-                    UPDATE SET ForecastValue = ?, CiLower = ?, CiUpper = ?, ForecastStd = ?, Method = ?
-                WHEN NOT MATCHED THEN
-                    INSERT (RunID, EquipID, DetectorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """
-                cursor.execute(merge_sql, (
-                    # ON clause
-                    run_id, equip_id, detector_name, timestamp,
-                    # UPDATE
-                    forecast_value, ci_lower, ci_upper, forecast_std, method,
-                    # INSERT
-                    run_id, equip_id, detector_name, timestamp, forecast_value, ci_lower, ci_upper, forecast_std, method, created_at
-                ))
-                row_count += cursor.rowcount
+            # Get unique RunID/EquipID pairs
+            run_id = df['RunID'].iloc[0] if 'RunID' in df.columns else self.run_id
+            equip_id = df['EquipID'].iloc[0] if 'EquipID' in df.columns else (self.equip_id or 0)
             
+            cursor.execute(
+                "DELETE FROM ACM_DetectorForecast_TS WHERE RunID = ? AND EquipID = ?",
+                (run_id, equip_id)
+            )
+            
+            # Clean NaN values vectorized (not row-by-row)
+            df = df.copy()
+            df['ForecastValue'] = pd.to_numeric(df['ForecastValue'], errors='coerce').fillna(0.0)
+            df['CiLower'] = pd.to_numeric(df['CiLower'], errors='coerce').fillna(0.0)
+            df['CiUpper'] = pd.to_numeric(df['CiUpper'], errors='coerce').fillna(0.0)
+            df['ForecastStd'] = pd.to_numeric(df['ForecastStd'], errors='coerce').fillna(0.0)
+            df['Method'] = df['Method'].fillna('AR1')
+            df['DetectorName'] = df['DetectorName'].fillna('UNKNOWN')
+            if 'CreatedAt' not in df.columns:
+                df['CreatedAt'] = datetime.now()
+            
+            # Bulk insert with fast_executemany
+            cursor.fast_executemany = True
+            
+            insert_sql = """
+            INSERT INTO ACM_DetectorForecast_TS 
+            (RunID, EquipID, DetectorName, Timestamp, ForecastValue, CiLower, CiUpper, ForecastStd, Method, CreatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            
+            # Build tuples for executemany (vectorized)
+            records = list(df[['RunID', 'EquipID', 'DetectorName', 'Timestamp', 
+                              'ForecastValue', 'CiLower', 'CiUpper', 'ForecastStd', 
+                              'Method', 'CreatedAt']].itertuples(index=False, name=None))
+            
+            cursor.executemany(insert_sql, records)
             conn.commit()
-            return row_count
+            return len(records)
             
         except Exception as e:
             Console.warn(f"_upsert_detector_forecast_ts failed: {e}", component="OUTPUT", table="ACM_DetectorForecast_TS", rows=len(df), equip_id=self.equip_id, error_type=type(e).__name__, error=str(e)[:200])
+            return 0
             return 0
     
     def _upsert_sensor_forecast(self, df: pd.DataFrame) -> int:
@@ -2646,152 +2018,200 @@ class OutputManager:
             Console.error(f"write_run_stats failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
             return 0
     
-    def write_scores(self, 
-                    scores_df: pd.DataFrame, 
-                    run_dir: Path,
-                    enable_sql: bool = True) -> Dict[str, Any]:
+    def write_scores(self, scores_df: pd.DataFrame) -> Dict[str, Any]:
         """
-        Write scores with optimized dual-write coordination.
+        Write scores (SQL-only) to dbo.ACM_Scores_Wide.
+
+        Normalizes index to tz-naive seconds and writes a Timestamp column.
+        Timestamp normalization is deterministic and always applied.
         
-        Replaces storage.write_scores_csv() with better performance.
+        v11.1.5 FIX: Deletes existing rows for the same EquipID + timestamp range
+        before inserting to prevent duplicate data from overlapping batch runs.
         """
-        # Prepare scores for output
         scores_for_output = scores_df.copy()
         scores_for_output.index.name = "timestamp"
-        
-        # Convert index to UTC naive timestamps
+
         if len(scores_for_output.index):
-            try:
-                scores_for_output.index = pd.to_datetime(scores_for_output.index).tz_localize(None)
-            except Exception:
-                scores_for_output.index = pd.to_datetime(scores_for_output.index).tz_localize(None)
-        
-        # Write with SQL dual-write if enabled
-        sql_table = "ACM_Scores_Wide" if enable_sql else None
+            ts = pd.to_datetime(scores_for_output.index, errors="coerce")
+            # Deterministic normalization: always tz-naive, floored to seconds
+            # This ensures consistent SQL Server insertion regardless of input timezone
+            if ts.tz is not None:
+                ts = ts.tz_localize(None)
+            ts = ts.floor("s")
+            scores_for_output.index = ts
+
+        # v11.1.5 FIX: Delete overlapping data BEFORE insert to prevent duplicates
+        # This handles the case where multiple batch runs cover overlapping time ranges
+        if len(scores_for_output.index) > 0 and self.sql_client is not None and self.equip_id:
+            min_ts = scores_for_output.index.min()
+            max_ts = scores_for_output.index.max()
+            if pd.notna(min_ts) and pd.notna(max_ts):
+                try:
+                    with self.sql_client.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM dbo.[ACM_Scores_Wide] "
+                            "WHERE EquipID = ? AND Timestamp BETWEEN ? AND ?",
+                            (int(self.equip_id), min_ts, max_ts)
+                        )
+                        deleted = cur.rowcount
+                        if deleted > 0:
+                            Console.info(
+                                f"Deleted {deleted} overlapping rows from ACM_Scores_Wide",
+                                component="OUTPUT", table="ACM_Scores_Wide",
+                                equip_id=self.equip_id, min_ts=str(min_ts), max_ts=str(max_ts)
+                            )
+                    if hasattr(self.sql_client, "commit"):
+                        self.sql_client.commit()
+                    elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                        if not getattr(self.sql_client.conn, "autocommit", True):
+                            self.sql_client.conn.commit()
+                except Exception as del_ex:
+                    Console.warn(
+                        f"Failed to delete overlapping scores: {del_ex}",
+                        component="OUTPUT", table="ACM_Scores_Wide",
+                        equip_id=self.equip_id, error_type=type(del_ex).__name__
+                    )
+
         score_columns = {
             "timestamp": "Timestamp",
-            "ar1_z": "ar1_z", "pca_spe_z": "pca_spe_z", "pca_t2_z": "pca_t2_z",
-            "iforest_z": "iforest_z", "gmm_z": "gmm_z",
-            "cusum_z": "cusum_z", "drift_z": "drift_z", "hst_z": "hst_z", "fused": "fused",
-            "regime_label": "regime_label", "transient_state": "transient_state"
+            "ar1_z": "ar1_z",
+            "pca_spe_z": "pca_spe_z",
+            "pca_t2_z": "pca_t2_z",
+            "iforest_z": "iforest_z",
+            "gmm_z": "gmm_z",
+            "cusum_z": "cusum_z",
+            "drift_z": "drift_z",
+            "hst_z": "hst_z",
+            "fused": "fused",
+            "regime_label": "regime_label",
+            "transient_state": "transient_state",
         }
-        
-        # CHART-04: Use uniform timestamp format without 'T' or 'Z' suffixes
+
+        # non_numeric_cols must refer to *pre-mapping* column names because prepare() runs first.
         return self.write_dataframe(
-            scores_for_output.reset_index(),
-            run_dir / "scores.csv",
-            sql_table=sql_table,
+            df=scores_for_output.reset_index(),
+            artifact_name="scores",
+            sql_table="ACM_Scores_Wide",
             sql_columns=score_columns,
-            non_numeric_cols={"RunID", "EquipID", "Timestamp", "regime_label", "transient_state"}
+            non_numeric_cols={"timestamp", "regime_label", "transient_state"},
+            add_created_at=False,
+            allow_repair=True,
         )
     
-    def write_episodes(self, 
-                      episodes_df: pd.DataFrame, 
-                      run_dir: Path,
-                      enable_sql: bool = True) -> Dict[str, Any]:
+    def write_episodes(self, episodes_df: pd.DataFrame) -> Dict[str, Any]:
         """
-        Write episodes with optimized dual-write coordination.
+        Write episodes to SQL (SQL-only).
         
-        Replaces storage.write_episodes_csv() with better performance.
-        
-        NOTE: Individual episodes go to CSV only. Summary QC goes to ACM_Episodes SQL table.
+        Individual episodes go to ACM_EpisodeDiagnostics.
+        Run-level summary goes to ACM_Episodes.
         """
         if episodes_df.empty:
-            # Write empty file
-            empty_df = pd.DataFrame(columns=['episode_id', 'start_ts', 'end_ts', 'duration_s'])
-            return self.write_dataframe(empty_df, run_dir / "episodes.csv")
+            return {"sql_written": False, "rows": 0, "inserted": 0, "error": None}
         
         # Prepare episodes for output
         episodes_for_output = episodes_df.copy().reset_index(drop=True)
         
-        # SCHEMA-FIX: Individual episodes go to ACM_EpisodeDiagnostics (not ACM_Episodes which is run-level summary)
-        sql_table = "ACM_EpisodeDiagnostics" if enable_sql else None
+        # Track which repairs are applied for explicit schema drift reporting
+        repairs_applied = []
+        
         episode_columns = {
-            'episode_id': 'episode_id',
-            'peak_fused_z': 'peak_z',
+            'episode_id': 'EpisodeID',
+            'start_ts': 'StartTime',
+            'end_ts': 'EndTime',
+            'peak_fused_z': 'PeakZ',
             'peak_timestamp': 'peak_timestamp', 
-            'duration_hours': 'duration_h',
-            'dominant_sensor': 'dominant_sensor',  # Already extracted from culprits
-            'severity': 'severity',
-            'avg_fused_z': 'avg_z',
+            'duration_hours': 'DurationHours',
+            'dominant_sensor': 'TopSensor1',
+            'severity': 'Severity',
+            'avg_fused_z': 'AvgZ',
             'min_health_index': 'min_health_index'
         }
         
         # Add episode_id if missing (sequential)
         if 'episode_id' not in episodes_for_output.columns:
             episodes_for_output['episode_id'] = range(1, len(episodes_for_output) + 1)
+            repairs_applied.append("episode_id_added")
         
         # Calculate duration_hours from duration_s if needed
         if 'duration_hours' not in episodes_for_output.columns and 'duration_s' in episodes_for_output.columns:
             episodes_for_output['duration_hours'] = episodes_for_output['duration_s'] / 3600.0
+            repairs_applied.append("duration_hours_derived")
         
         # Extract peak_timestamp from start_ts if missing
         if 'peak_timestamp' not in episodes_for_output.columns and 'start_ts' in episodes_for_output.columns:
             episodes_for_output['peak_timestamp'] = episodes_for_output['start_ts']
+            repairs_applied.append("peak_timestamp_fallback_used")
         
         # Map regime_label to MaxRegimeLabel
         if 'regime_label' in episodes_for_output.columns:
             episodes_for_output['MaxRegimeLabel'] = episodes_for_output['regime_label']
+            repairs_applied.append("regime_label_mapped")
         elif 'regime' in episodes_for_output.columns:
             episodes_for_output['MaxRegimeLabel'] = episodes_for_output['regime']
+            repairs_applied.append("regime_mapped_fallback")
         
         # Extract dominant sensor from culprits field
+        # PERF-OPT: Vectorized dominant sensor extraction from culprits field
         # culprits format: "Detector (Sensor Name)" or "Detector"
         if 'culprits' in episodes_for_output.columns:
-            def extract_dominant_sensor(culprit_str):
-                if pd.isna(culprit_str) or culprit_str == '':
-                    return 'UNKNOWN'
-                # culprits field already contains formatted label from format_culprit_label()
-                # e.g., "Multivariate Outlier (PCA-TÂ²)" or "Multivariate Outlier (PCA-TÂ²) â†’ SensorName"
-                # Extract just the detector label (before " â†’ " if sensor attribution exists)
-                if ' â†’ ' in str(culprit_str):
-                    return str(culprit_str).split(' â†’ ')[0].strip()
-                else:
-                    return str(culprit_str).strip()
-            episodes_for_output['dominant_sensor'] = episodes_for_output['culprits'].apply(extract_dominant_sensor)
+            culprits_col = episodes_for_output['culprits'].fillna('').astype(str)
+            # Split on arrow separator and take first part (handle encoding variants)
+            # Use unicode arrow character (U+2192)
+            arrow = ' ' + chr(8594) + ' '  # Unicode arrow with spaces
+            has_arrow = culprits_col.str.contains(arrow, na=False, regex=False)
+            split_result = culprits_col.str.split(arrow).str[0].str.strip()
+            episodes_for_output['dominant_sensor'] = np.where(
+                culprits_col == '',
+                'UNKNOWN',
+                np.where(has_arrow, split_result, culprits_col.str.strip())
+            )
+            repairs_applied.append("dominant_sensor_extracted")
         else:
             episodes_for_output['dominant_sensor'] = 'UNKNOWN'
+            repairs_applied.append("dominant_sensor_defaulted")
         
-        # ALWAYS recalculate severity from peak_fused_z (overrides any pre-existing severity like 'info')
+        # PERF-OPT: Vectorized severity calculation from peak_fused_z using np.select
+        # FIX: Use ABSOLUTE VALUE of z-scores - negative z-scores (below-normal) are equally anomalous
         if 'peak_fused_z' in episodes_for_output.columns:
-            def calculate_severity(peak_z):
-                if pd.isna(peak_z):
-                    return 'UNKNOWN'
-                if peak_z >= 6:
-                    return 'CRITICAL'
-                elif peak_z >= 4:
-                    return 'HIGH'
-                elif peak_z >= 2:
-                    return 'MEDIUM'
-                else:
-                    return 'LOW'
-            episodes_for_output['severity'] = episodes_for_output['peak_fused_z'].apply(calculate_severity)
+            peak_z = episodes_for_output['peak_fused_z']
+            abs_peak_z = np.abs(peak_z)  # FIX: Both +17.9 and -17.9 should be CRITICAL
+            conditions = [
+                peak_z.isna(),
+                abs_peak_z >= 6,
+                abs_peak_z >= 4,
+                abs_peak_z >= 2,
+            ]
+            choices = ['UNKNOWN', 'CRITICAL', 'HIGH', 'MEDIUM']
+            episodes_for_output['severity'] = np.select(conditions, choices, default='LOW')
+            repairs_applied.append("severity_calculated")
         elif 'severity' not in episodes_for_output.columns:
             episodes_for_output['severity'] = 'UNKNOWN'
+            repairs_applied.append("severity_defaulted")
         
-        # Add defaults for SQL
-        if enable_sql:
-            if 'status' not in episodes_for_output.columns:
-                episodes_for_output['status'] = 'CLOSED'
+        # Add status default
+        if 'status' not in episodes_for_output.columns:
+            episodes_for_output['status'] = 'CLOSED'
+            repairs_applied.append("status_defaulted")
         
-        # DEBUG: Show what we're writing  
-        # Columns ready for write to ACM_EpisodeDiagnostics
-        if not episodes_for_output.empty:
-            Console.info(f"DEBUG: First row before write: severity={episodes_for_output.iloc[0].get('severity')}, peak_z={episodes_for_output.iloc[0].get('peak_fused_z')}, dominant={episodes_for_output.iloc[0].get('dominant_sensor')}", component="EPISODES")
+        # Log all repairs for explicit schema drift tracking
+        if repairs_applied:
+            Console.info(f"Applied {len(repairs_applied)} schema repairs to episodes: {', '.join(repairs_applied)}", 
+                        component="EPISODES", equip_id=self.equip_id, episode_count=len(episodes_for_output))
         
         result = self.write_dataframe(
             episodes_for_output,
-            run_dir / "episodes.csv",
-            sql_table=sql_table,
+            "episodes",
+            sql_table="ACM_EpisodeDiagnostics",
             sql_columns=episode_columns,
             non_numeric_cols={
                 "RunID", "EquipID", "episode_id", "peak_timestamp",
                 "dominant_sensor", "severity", "min_health_index"
-            }
+            },
+            required=True
         )
         
         # Also write run-level summary to ACM_Episodes
-        if enable_sql and not episodes_df.empty:
+        if not episodes_df.empty:
             try:
                 summary = pd.DataFrame([{
                     'RunID': self.run_id,
@@ -2807,12 +2227,1517 @@ class OutputManager:
         
         return result
     
+    def write_threshold_metadata(
+        self,
+        equip_id: int,
+        threshold_type: str,
+        threshold_value: float,
+        calculation_method: str,
+        sample_count: int,
+        train_start: Optional[datetime] = None,
+        train_end: Optional[datetime] = None,
+        config_signature: Optional[str] = None,
+        notes: Optional[str] = None
+    ) -> int:
+        """Write adaptive threshold metadata to ACM_AdaptiveConfig.
+        
+        Maps to actual table schema:
+        - ConfigKey: threshold_type (e.g., 'fused_alert_z')
+        - ConfigValue: threshold_value as string
+        - MinBound/MaxBound: 0.0/infinity for thresholds
+        - IsLearned: True (since computed from data)
+        - DataVolumeAtTuning: sample_count
+        - PerformanceMetric: calculation_method
+        - Source: 'adaptive_threshold_calculator'
+        - ResearchReference: notes
+        
+        Args:
+            equip_id: Equipment ID
+            threshold_type: Type of threshold (e.g., 'fused_alert_z', 'fused_warn_z')
+            threshold_value: Calculated threshold value
+            calculation_method: Method used (e.g., 'quantile_0.997')
+            sample_count: Number of samples used in calculation
+            train_start: Start of training window (unused - table doesn't have this)
+            train_end: End of training window (unused - table doesn't have this)
+            config_signature: Hash of config used (unused - table doesn't have this)
+            notes: Optional notes about calculation
+        
+        Returns:
+            Number of rows written (1 on success, 0 on failure)
+        """
+        if not self._check_sql_health():
+            return 0
+        try:
+            # Handle dict values (per-regime thresholds) - store first value only
+            if isinstance(threshold_value, dict):
+                # Take first value for storage, or average
+                threshold_float = float(list(threshold_value.values())[0]) if threshold_value else 0.0
+            else:
+                threshold_float = float(threshold_value)
+            
+            row = {
+                'EquipID': int(equip_id),
+                'ConfigKey': threshold_type,
+                'ConfigValue': threshold_float,  # Float column
+                'MinBound': 0.0,
+                'MaxBound': 999999.0,  # Effectively no upper bound
+                'IsLearned': 1,  # BIT column
+                'DataVolumeAtTuning': int(sample_count),
+                'PerformanceMetric': 0.0,  # Float column - store 0 for now
+                'ResearchReference': f"{calculation_method}: {notes}" if notes else calculation_method,
+                'Source': 'adaptive_threshold_calculator',
+            }
+            # Use MERGE to handle existing records (UNIQUE constraint on EquipID+ConfigKey)
+            return self._upsert_adaptive_config(row)
+        except Exception as e:
+            Console.warn(f"write_threshold_metadata failed: {e}", component="THRESHOLD", error=str(e)[:200])
+            return 0
+    
+    def _upsert_adaptive_config(self, row: dict) -> int:
+        """Upsert single row into ACM_AdaptiveConfig using MERGE.
+        
+        Table has UNIQUE constraint on (EquipID, ConfigKey).
+        """
+        if self.sql_client is None:
+            return 0
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            merge_sql = """
+            MERGE INTO ACM_AdaptiveConfig AS target
+            USING (SELECT ? AS EquipID, ? AS ConfigKey) AS source (EquipID, ConfigKey)
+            ON target.EquipID = source.EquipID AND target.ConfigKey = source.ConfigKey
+            WHEN MATCHED THEN
+                UPDATE SET 
+                    ConfigValue = ?,
+                    MinBound = ?,
+                    MaxBound = ?,
+                    IsLearned = ?,
+                    DataVolumeAtTuning = ?,
+                    PerformanceMetric = ?,
+                    ResearchReference = ?,
+                    Source = ?,
+                    UpdatedAt = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (EquipID, ConfigKey, ConfigValue, MinBound, MaxBound, IsLearned, 
+                        DataVolumeAtTuning, PerformanceMetric, ResearchReference, Source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            cursor.execute(merge_sql, (
+                # Match keys
+                row['EquipID'], row['ConfigKey'],
+                # Update values
+                row['ConfigValue'], row['MinBound'], row['MaxBound'], row['IsLearned'],
+                row['DataVolumeAtTuning'], row['PerformanceMetric'], row['ResearchReference'], row['Source'],
+                # Insert values
+                row['EquipID'], row['ConfigKey'], row['ConfigValue'], row['MinBound'], row['MaxBound'],
+                row['IsLearned'], row['DataVolumeAtTuning'], row['PerformanceMetric'], 
+                row['ResearchReference'], row['Source']
+            ))
+            conn.commit()
+            return 1
+        except Exception as e:
+            Console.warn(f"_upsert_adaptive_config failed: {e}", component="OUTPUT",
+                        equip_id=row.get('EquipID'), config_key=row.get('ConfigKey'), error=str(e)[:200])
+            if self.sql_client and self.sql_client.conn:
+                try:
+                    self.sql_client.conn.rollback()
+                except:
+                    pass
+            return 0
+    
+    def load_omr_drift_context(self, equip_id: int, lookback_hours: int = 24) -> dict:
+        """Load OMR and drift context from recent data for forecasting.
+        
+        Queries ACM_Scores_Wide for recent OMR/drift values and ACM_DriftSeries for trend.
+        
+        Args:
+            equip_id: Equipment ID
+            lookback_hours: How many hours of history to consider
+            
+        Returns:
+            Dict with keys:
+                - omr_z: Most recent OMR z-score (or None)
+                - omr_trend: 'increasing', 'decreasing', 'stable', or 'unknown'
+                - top_contributors: List of top contributing sensors
+                - drift_z: Most recent drift z-score (or None)
+                - drift_trend: 'increasing', 'decreasing', 'stable', or 'unknown'
+        """
+        result = {
+            'omr_z': None,
+            'omr_trend': 'unknown',
+            'top_contributors': [],
+            'drift_z': None,
+            'drift_trend': 'unknown'
+        }
+        
+        if not self._check_sql_health():
+            return result
+        
+        try:
+            conn = self.sql_client.conn
+            cursor = conn.cursor()
+            
+            # Get most recent fused score (Overall Model Residual is computed from fused scores)
+            # ACM_Scores_Wide has 'fused' column, not 'omr_z'
+            cursor.execute("""
+                SELECT TOP 1 fused
+                FROM ACM_Scores_Wide
+                WHERE EquipID = ? AND fused IS NOT NULL
+                ORDER BY Timestamp DESC
+            """, (equip_id,))
+            row = cursor.fetchone()
+            if row:
+                result['omr_z'] = float(row[0]) if row[0] is not None else None
+            
+            # Get OMR/fused trend from recent values
+            cursor.execute("""
+                SELECT fused
+                FROM (
+                    SELECT TOP 10 fused, Timestamp
+                    FROM ACM_Scores_Wide
+                    WHERE EquipID = ? AND fused IS NOT NULL
+                    ORDER BY Timestamp DESC
+                ) sub
+                ORDER BY Timestamp ASC
+            """, (equip_id,))
+            omr_values = [float(r[0]) for r in cursor.fetchall() if r[0] is not None]
+            if len(omr_values) >= 3:
+                # Simple trend: compare first half avg to second half avg
+                mid = len(omr_values) // 2
+                first_avg = sum(omr_values[:mid]) / mid
+                second_avg = sum(omr_values[mid:]) / (len(omr_values) - mid)
+                if second_avg > first_avg * 1.1:
+                    result['omr_trend'] = 'increasing'
+                elif second_avg < first_avg * 0.9:
+                    result['omr_trend'] = 'decreasing'
+                else:
+                    result['omr_trend'] = 'stable'
+            
+            # Get top contributors from SensorHotspots (most recent by max z-score)
+            cursor.execute("""
+                SELECT TOP 3 SensorName
+                FROM ACM_SensorHotspots
+                WHERE EquipID = ?
+                ORDER BY MaxAbsZ DESC
+            """, (equip_id,))
+            result['top_contributors'] = [r[0] for r in cursor.fetchall() if r[0]]
+            
+            # Get drift from DriftSeries
+            cursor.execute("""
+                SELECT TOP 1 DriftValue
+                FROM ACM_DriftSeries
+                WHERE EquipID = ?
+                ORDER BY Timestamp DESC
+            """, (equip_id,))
+            row = cursor.fetchone()
+            if row:
+                result['drift_z'] = float(row[0]) if row[0] is not None else None
+            
+            # Get drift trend
+            cursor.execute("""
+                SELECT DriftValue
+                FROM (
+                    SELECT TOP 10 DriftValue, Timestamp
+                    FROM ACM_DriftSeries
+                    WHERE EquipID = ?
+                    ORDER BY Timestamp DESC
+                ) sub
+                ORDER BY Timestamp ASC
+            """, (equip_id,))
+            drift_values = [float(r[0]) for r in cursor.fetchall() if r[0] is not None]
+            if len(drift_values) >= 3:
+                mid = len(drift_values) // 2
+                first_avg = sum(drift_values[:mid]) / mid
+                second_avg = sum(drift_values[mid:]) / (len(drift_values) - mid)
+                if second_avg > first_avg * 1.1:
+                    result['drift_trend'] = 'increasing'
+                elif second_avg < first_avg * 0.9:
+                    result['drift_trend'] = 'decreasing'
+                else:
+                    result['drift_trend'] = 'stable'
+            
+            cursor.close()
+        except Exception as e:
+            Console.debug(f"load_omr_drift_context failed: {e}", component="OUTPUT", error=str(e)[:200])
+        
+        return result
+    
+    # =========================================================================
+    # DataFrame Builder Methods (moved from acm_main.py in v11.2)
+    # =========================================================================
+    # These methods build DataFrames for SQL persistence. They encapsulate the
+    # data transformation logic that was previously scattered in acm_main.py.
+    # =========================================================================
+    
+    @staticmethod
+    def _build_data_quality_records(
+        train_numeric: pd.DataFrame,
+        score_numeric: pd.DataFrame,
+        cfg: Dict[str, Any],
+        low_var_threshold: float = 1e-4,
+    ) -> List[Dict[str, Any]]:
+        """Build per-sensor data quality records for train and score windows.
+        
+        Computes quality metrics for each sensor including:
+        - Row counts, null counts, null percentages
+        - Standard deviation (variance indicator)
+        - Longest gap (consecutive nulls)
+        - Flatline spans (consecutive identical values)
+        - Time ranges (min/max timestamps)
+        - Quality notes (low variance, all nulls, flatline warnings)
+        
+        Args:
+            train_numeric: Training data DataFrame
+            score_numeric: Score data DataFrame
+            cfg: Config dictionary with data settings
+            low_var_threshold: Threshold for low-variance detection
+            
+        Returns:
+            List of per-sensor data quality dictionaries
+        """
+        interp_method = str((cfg.get("data", {}) or {}).get("interp_method", "linear"))
+        sampling_secs = (cfg.get("data", {}) or {}).get("sampling_secs", None)
+        
+        # Find common columns
+        common_cols = []
+        if hasattr(train_numeric, "columns") and hasattr(score_numeric, "columns"):
+            common_cols = [c for c in train_numeric.columns if c in score_numeric.columns]
+        
+        def calc_longest_gap(series: pd.Series) -> int:
+            """Calculate longest consecutive null run."""
+            if len(series) == 0:
+                return 0
+            is_null = series.isna()
+            if not is_null.any():
+                return 0
+            null_runs = is_null.astype(int).groupby((~is_null).cumsum()).sum()
+            return int(null_runs.max()) if len(null_runs) > 0 else 0
+        
+        def calc_flatline_span(series: pd.Series) -> int:
+            """Calculate longest consecutive identical value run."""
+            if len(series) == 0:
+                return 0
+            numeric = pd.to_numeric(series, errors='coerce').dropna()
+            if len(numeric) < 2:
+                return 0
+            is_same = (numeric == numeric.shift()).astype(int)
+            flat_runs = is_same.groupby((~is_same.astype(bool)).cumsum()).sum()
+            return int(flat_runs.max()) if len(flat_runs) > 0 else 0
+        
+        records = []
+        for col in common_cols:
+            tr_series = train_numeric[col]
+            sc_series = score_numeric[col]
+            tr_total = int(len(tr_series))
+            sc_total = int(len(sc_series))
+            tr_nulls = int(tr_series.isna().sum())
+            sc_nulls = int(sc_series.isna().sum())
+            tr_std = float(pd.to_numeric(tr_series, errors="coerce").std()) if tr_total else float("nan")
+            sc_std = float(pd.to_numeric(sc_series, errors="coerce").std()) if sc_total else float("nan")
+            
+            tr_longest_gap = calc_longest_gap(tr_series)
+            sc_longest_gap = calc_longest_gap(sc_series)
+            tr_flatline = calc_flatline_span(tr_series)
+            sc_flatline = calc_flatline_span(sc_series)
+            
+            # Format timestamps
+            tr_min_ts = pd.Timestamp(tr_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
+            tr_max_ts = pd.Timestamp(tr_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
+            sc_min_ts = pd.Timestamp(sc_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
+            sc_max_ts = pd.Timestamp(sc_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
+            
+            # Build quality notes
+            note_bits = []
+            if tr_total > 0 and tr_std < low_var_threshold:
+                note_bits.append("low_variance_train")
+            if tr_total > 0 and tr_nulls == tr_total:
+                note_bits.append("all_nulls_train")
+            if sc_total > 0 and sc_nulls == sc_total:
+                note_bits.append("all_nulls_score")
+            if tr_flatline > 100:
+                note_bits.append(f"flatline_train_{tr_flatline}pts")
+            if sc_flatline > 100:
+                note_bits.append(f"flatline_score_{sc_flatline}pts")
+            
+            records.append({
+                "sensor": str(col),
+                "train_count": tr_total,
+                "train_nulls": tr_nulls,
+                "train_null_pct": (100.0 * tr_nulls / tr_total) if tr_total else 0.0,
+                "train_std": tr_std,
+                "train_longest_gap": tr_longest_gap,
+                "train_flatline_span": tr_flatline,
+                "train_min_ts": tr_min_ts,
+                "train_max_ts": tr_max_ts,
+                "score_count": sc_total,
+                "score_nulls": sc_nulls,
+                "score_null_pct": (100.0 * sc_nulls / sc_total) if sc_total else 0.0,
+                "score_std": sc_std,
+                "score_longest_gap": sc_longest_gap,
+                "score_flatline_span": sc_flatline,
+                "score_min_ts": sc_min_ts,
+                "score_max_ts": sc_max_ts,
+                "interp_method": interp_method,
+                "sampling_secs": sampling_secs,
+                "notes": ",".join(note_bits)
+            })
+        
+        return records
+
+    @staticmethod
+    def _build_health_timeline(
+        frame: pd.DataFrame,
+        cfg: Dict[str, Any],
+        run_id: Optional[str],
+        equip_id: int,
+        equip: str
+    ) -> Tuple[Optional[pd.DataFrame], int, int]:
+        """Build health timeline DataFrame from fused scores.
+        
+        Computes health index using softer sigmoid formula (v10.1.0), applies
+        exponential smoothing to prevent unrealistic jumps, and adds quality flags.
+        
+        Args:
+            frame: Score DataFrame with 'fused' column (required)
+            cfg: Config dictionary with health.* settings
+            run_id: Run identifier for SQL
+            equip_id: Equipment ID
+            equip: Equipment name for logging
+            
+        Returns:
+            Tuple of (health_df, volatile_count, extreme_count)
+        """
+        if 'fused' not in frame.columns:
+            return None, 0, 0
+        
+        # v10.1.0: Calculate raw health index using softer sigmoid formula
+        z_threshold = cfg.get('health', {}).get('z_threshold', 5.0)
+        steepness = cfg.get('health', {}).get('steepness', 1.5)
+        abs_z = np.abs(frame['fused'])
+        normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
+        sigmoid = 1 / (1 + np.exp(-normalized * steepness))
+        raw_health = np.clip(100.0 * (1 - sigmoid), 0.0, 100.0)
+        
+        # Apply exponential smoothing to prevent unrealistic jumps
+        alpha = cfg.get('health', {}).get('smoothing_alpha', 0.3)
+        smoothed_health = pd.Series(raw_health).ewm(alpha=alpha, adjust=False).mean()
+        
+        # Data quality flags based on rate of change
+        health_change = smoothed_health.diff().abs()
+        max_change_per_period = cfg.get('health', {}).get('max_change_per_period', 20.0)
+        quality_flag = np.where(
+            health_change > max_change_per_period,
+            'VOLATILE',
+            'NORMAL'
+        )
+        quality_flag[0] = 'NORMAL'
+        
+        # Check for extreme FusedZ values (data quality issue indicator)
+        extreme_z_threshold = cfg.get('health', {}).get('extreme_z_threshold', 10.0)
+        quality_flag = np.where(
+            np.abs(frame['fused']) > extreme_z_threshold,
+            'EXTREME_ANOMALY',
+            quality_flag
+        )
+        
+        health_df = pd.DataFrame({
+            'Timestamp': frame.index,
+            'HealthIndex': smoothed_health,
+            'RawHealthIndex': raw_health,
+            'HealthZone': pd.cut(
+                smoothed_health,
+                bins=[-1, 30, 50, 70, 85, 101],
+                labels=['CRITICAL', 'ALERT', 'WATCH', 'CAUTION', 'GOOD']
+            ),
+            'FusedZ': frame['fused'],
+            'QualityFlag': quality_flag,
+            'RunID': run_id,
+            'EquipID': equip_id
+        })
+        
+        # Count quality issues
+        volatile_count = int((quality_flag == 'VOLATILE').sum())
+        extreme_count = int((quality_flag == 'EXTREME_ANOMALY').sum())
+        
+        # Log quality issues
+        if volatile_count > 0:
+            Console.warn(f"{volatile_count} volatile health transitions detected (>{max_change_per_period}% change)", 
+                        component="HEALTH", equip=equip, volatile_count=volatile_count, threshold=max_change_per_period)
+        if extreme_count > 0:
+            Console.warn(f"{extreme_count} extreme anomaly scores detected (|Z| > {extreme_z_threshold})", 
+                        component="HEALTH", equip=equip, extreme_count=extreme_count, z_threshold=extreme_z_threshold)
+        
+        return health_df, volatile_count, extreme_count
+
+    @staticmethod
+    def _build_regime_timeline(
+        frame: pd.DataFrame,
+        regime_model: Any,
+        run_id: Optional[str],
+        equip_id: int
+    ) -> Optional[pd.DataFrame]:
+        """Build regime timeline DataFrame from frame's regime labels.
+        
+        Creates a timeline with regime labels and health state labels.
+        
+        Args:
+            frame: Score DataFrame with 'regime_label' column
+            regime_model: Optional RegimeModel with health_labels mapping
+            run_id: Run identifier for SQL
+            equip_id: Equipment ID
+            
+        Returns:
+            DataFrame ready for ACM_RegimeTimeline (or None if no regime_label column)
+        """
+        if 'regime_label' not in frame.columns:
+            return None
+        
+        regime_df = pd.DataFrame({
+            'Timestamp': frame.index,
+            'RegimeLabel': frame['regime_label'].astype(int),
+            'EquipID': equip_id,
+            'RunID': run_id
+        })
+        
+        # Add RegimeState based on regime_model if available
+        if regime_model and hasattr(regime_model, 'health_labels'):
+            regime_df['RegimeState'] = regime_df['RegimeLabel'].map(
+                lambda x: regime_model.health_labels.get(int(x), 'unknown')
+            )
+        else:
+            regime_df['RegimeState'] = 'unknown'
+        
+        return regime_df
+
+    @staticmethod
+    def _build_drift_ts(
+        frame: pd.DataFrame,
+        equip_id: int,
+        run_id: Optional[str],
+        cfg: Dict[str, Any],
+    ) -> Optional[pd.DataFrame]:
+        """Build DriftTS DataFrame from frame's drift_z column.
+        
+        Creates a time series of drift Z-scores with method metadata.
+        
+        Args:
+            frame: Score DataFrame with 'drift_z' column
+            equip_id: Equipment ID
+            run_id: Run identifier for SQL
+            cfg: Config dict with drift.method setting
+            
+        Returns:
+            DataFrame ready for ACM_DriftTS (or None if no drift_z column)
+        """
+        if "drift_z" not in frame.columns:
+            return None
+        
+        drift_method = (cfg.get("drift", {}) or {}).get("method", "CUSUM")
+        return pd.DataFrame({
+            "EntryDateTime": pd.to_datetime(frame.index),
+            "EquipID": int(equip_id),
+            "DriftZ": frame["drift_z"].astype(np.float32),
+            "Method": drift_method,
+            "RunID": run_id or ""
+        })
+
+    @staticmethod
+    def _build_anomaly_events(
+        episodes: pd.DataFrame,
+        equip_id: int,
+        run_id: Optional[str],
+    ) -> Optional[pd.DataFrame]:
+        """Build AnomalyEvents DataFrame from episodes.
+        
+        Transforms episode data into events format for ACM_Anomaly_Events SQL table.
+        
+        Args:
+            episodes: DataFrame with start_ts, end_ts, severity, score, culprits columns
+            equip_id: Equipment ID
+            run_id: Run identifier for SQL
+            
+        Returns:
+            DataFrame ready for ACM_Anomaly_Events (or None if no episodes)
+        """
+        if episodes is None or len(episodes) == 0:
+            return None
+        
+        return pd.DataFrame({
+            "EquipID": int(equip_id),
+            "start_ts": episodes["start_ts"],
+            "end_ts": episodes["end_ts"],
+            "severity": episodes.get("severity", pd.Series(["info"] * len(episodes))),
+            "Detector": "FUSION",
+            "Score": episodes.get("score", np.nan),
+            "ContributorsJSON": episodes.get("culprits", "{}"),
+            "RunID": run_id or ""
+        })
+
+    @staticmethod
+    def _build_regime_episodes(
+        episodes: pd.DataFrame,
+        equip_id: int,
+        run_id: Optional[str],
+    ) -> Optional[pd.DataFrame]:
+        """Build RegimeEpisodes DataFrame from episodes.
+        
+        Transforms episode data into regime episodes format for ACM_RegimeEpisodes.
+        
+        Args:
+            episodes: DataFrame with start_ts, end_ts, regime columns
+            equip_id: Equipment ID
+            run_id: Run identifier for SQL
+            
+        Returns:
+            DataFrame ready for ACM_RegimeEpisodes (or None if no episodes)
+        """
+        if episodes is None or len(episodes) == 0:
+            return None
+        
+        return pd.DataFrame({
+            "EquipID": int(equip_id),
+            "StartEntryDateTime": episodes["start_ts"],
+            "EndEntryDateTime": episodes["end_ts"],
+            "RegimeLabel": episodes.get("regime", pd.Series([""] * len(episodes))),
+            "Confidence": np.nan,
+            "RunID": run_id or ""
+        })
+
+    def write_anomaly_events(self, df_events: pd.DataFrame, run_id: str) -> int:
+        """Write anomaly events to ACM_Anomaly_Events table.
+        
+        V11: Adds Confidence column based on episode duration and maturity state.
+        
+        Args:
+            df_events: DataFrame with event data (EquipID, start_ts, end_ts, severity, etc.)
+            run_id: Current run ID
+        
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or df_events is None or df_events.empty:
+            return 0
+        try:
+            df = df_events.copy()
+            df['RunID'] = run_id
+            # Rename columns to match table schema
+            col_map = {
+                'start_ts': 'StartTime',
+                'end_ts': 'EndTime',
+                'severity': 'Severity',
+                'Detector': 'DetectorType',
+                'Score': 'PeakScore',
+                'ContributorsJSON': 'ContributorsJSON'
+            }
+            for old, new in col_map.items():
+                if old in df.columns and new not in df.columns:
+                    df[new] = df[old]
+            
+            # V11: Add confidence for each episode - VECTORIZED for performance
+            if _CONFIDENCE_AVAILABLE and compute_episode_confidence is not None:
+                try:
+                    maturity_state = getattr(self, 'maturity_state', 'COLDSTART')
+                    
+                    # PERFORMANCE FIX: Vectorized episode confidence computation
+                    import numpy as np
+                    
+                    # Determine column names
+                    start_col = 'StartTime' if 'StartTime' in df.columns else 'start_ts'
+                    end_col = 'EndTime' if 'EndTime' in df.columns else 'end_ts'
+                    
+                    # Calculate durations vectorized
+                    if start_col in df.columns and end_col in df.columns:
+                        start_times = pd.to_datetime(df[start_col], errors='coerce')
+                        end_times = pd.to_datetime(df[end_col], errors='coerce')
+                        duration_seconds = (end_times - start_times).dt.total_seconds().fillna(3600).values
+                    else:
+                        duration_seconds = np.full(len(df), 3600.0)
+                    
+                    # Get peak scores vectorized
+                    if 'PeakScore' in df.columns:
+                        peak_z = pd.to_numeric(df['PeakScore'], errors='coerce').fillna(3.0).values
+                    elif 'Score' in df.columns:
+                        peak_z = pd.to_numeric(df['Score'], errors='coerce').fillna(3.0).values
+                    else:
+                        peak_z = np.full(len(df), 3.0)
+                    
+                    # Vectorized confidence calculation
+                    maturity_base = {'COLDSTART': 0.4, 'LEARNING': 0.6, 'CONVERGED': 0.8, 'DEPRECATED': 0.65}.get(maturity_state, 0.5)
+                    
+                    # Duration confidence: longer episodes more reliable (up to 1 hour = full weight)
+                    duration_conf = np.minimum(duration_seconds / 3600.0, 1.0) * 0.2
+                    
+                    # Peak Z confidence: higher peaks more confident
+                    peak_conf = np.minimum(np.abs(peak_z) / 8.0, 1.0) * 0.3
+                    
+                    # Combined (vectorized)
+                    raw_conf = maturity_base * 0.5 + duration_conf + peak_conf
+                    df['Confidence'] = np.round(np.clip(raw_conf, 0.2, 0.95), 3)
+                    
+                except Exception as e:
+                    Console.warn(f"Failed to compute episode confidence: {e}", component="EPISODES")
+            
+            return self.write_table('ACM_Anomaly_Events', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_anomaly_events failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_episodes(self, df_reg: pd.DataFrame, run_id: str) -> int:
+        """Write regime episodes to ACM_RegimeEpisodes table.
+        
+        Args:
+            df_reg: DataFrame with regime episode data
+            run_id: Current run ID
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or df_reg is None or df_reg.empty:
+            return 0
+        try:
+            df = df_reg.copy()
+            df['RunID'] = run_id
+            return self.write_table('ACM_Regime_Episodes', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_regime_episodes failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_pca_model(self, model_row: Dict[str, Any]) -> int:
+        """Write PCA model metadata to ACM_PCA_Model table.
+        
+        Args:
+            model_row: Dict with model metadata
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or not model_row:
+            return 0
+        try:
+            row = dict(model_row)
+            row['RunID'] = self.run_id
+            row['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_PCA_Models', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_pca_model failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_run_stats(self, stats: Dict[str, Any]) -> int:
+        """Write run statistics to ACM_RunStats table.
+        
+        Args:
+            stats: Dict with run statistics
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or not stats:
+            return 0
+        try:
+            return self.write_table('ACM_Run_Stats', pd.DataFrame([stats]), delete_existing=False)
+        except Exception as e:
+            Console.warn(f"write_run_stats failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    # =========================================================================
+    # NEW TABLE WRITE METHODS (Dec 25, 2025 - v11 completion)
+    # =========================================================================
+    
+    def write_detector_correlation(self, detector_correlations: Dict[str, Dict[str, float]]) -> int:
+        """Write detector correlation matrix to ACM_DetectorCorrelation.
+        
+        PERFORMANCE: Uses list comprehension instead of nested loops.
+        
+        Args:
+            detector_correlations: Nested dict {detector1: {detector2: correlation}}
+        """
+        if not self._check_sql_health() or not detector_correlations:
+            return 0
+        try:
+            # PERFORMANCE FIX: Single list comprehension instead of nested append loops
+            run_id = self.run_id
+            equip_id = self.equip_id or 0
+            
+            rows = [
+                {
+                    'RunID': run_id,
+                    'EquipID': equip_id,
+                    'Detector1': d1,
+                    'Detector2': d2,
+                    'Correlation': float(corr) if not pd.isna(corr) else 0.0
+                }
+                for d1, correlations in detector_correlations.items()
+                for d2, corr in correlations.items()
+            ]
+            
+            if not rows:
+                return 0
+            return self.write_table('ACM_DetectorCorrelation', pd.DataFrame(rows), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_detector_correlation failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_drift_series(self, drift_df: pd.DataFrame) -> int:
+        """Write drift detection time series to ACM_DriftSeries.
+        
+        Args:
+            drift_df: DataFrame with Timestamp, DriftValue, optionally DriftState
+        """
+        if not self._check_sql_health() or drift_df is None or drift_df.empty:
+            return 0
+        try:
+            df = drift_df.copy()
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            # Map column names if needed
+            if 'DriftZ' in df.columns and 'DriftValue' not in df.columns:
+                df['DriftValue'] = df['DriftZ']
+            return self.write_table('ACM_DriftSeries', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_drift_series failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_sensor_normalized_ts(self, scores_df: pd.DataFrame, sensor_cols: List[str] = None) -> int:
+        """Write normalized sensor z-scores to ACM_SensorNormalized_TS.
+        
+        Transforms wide-format scores DataFrame (one column per sensor) to long format
+        (one row per timestamp/sensor pair) for time-series analysis.
+        
+        PERFORMANCE: Uses vectorized pd.melt() instead of row-by-row loops.
+        
+        Schema: ID, RunID, EquipID, Timestamp, SensorName, RawValue, NormalizedValue, CreatedAt
+        
+        Args:
+            scores_df: DataFrame with Timestamp index/column and sensor z-score columns
+            sensor_cols: List of sensor column names to extract (if None, uses all float columns)
+            
+        Returns:
+            Number of rows written
+        """
+        if not self._check_sql_health() or scores_df is None or scores_df.empty:
+            return 0
+        
+        try:
+            df = scores_df.copy()
+            
+            # Ensure Timestamp is a column, not index
+            if 'Timestamp' not in df.columns:
+                if isinstance(df.index, pd.DatetimeIndex) or df.index.name in ('Timestamp', 'EntryDateTime'):
+                    df = df.reset_index()
+                    if 'EntryDateTime' in df.columns:
+                        df['Timestamp'] = df['EntryDateTime']
+                    elif df.columns[0] != 'Timestamp' and pd.api.types.is_datetime64_any_dtype(df[df.columns[0]]):
+                        df['Timestamp'] = df.iloc[:, 0]
+                elif 'EntryDateTime' in df.columns:
+                    df['Timestamp'] = df['EntryDateTime']
+                else:
+                    dt_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+                    if dt_cols:
+                        df['Timestamp'] = df[dt_cols[0]]
+                    else:
+                        Console.warn("write_sensor_normalized_ts: No Timestamp column found", component="OUTPUT")
+                        return 0
+            
+            # Determine sensor columns
+            if sensor_cols is None:
+                exclude = {'Timestamp', 'RunID', 'EquipID', 'regime_label', 'fused', 'health', 
+                          'ar1_z', 'pca_spe_z', 'pca_t2_z', 'iforest_z', 'gmm_z', 'omr_z',
+                          'mhal_z', 'cusum_z', 'drift_z', 'hst_z', 'river_hst_z'}
+                sensor_cols = [c for c in df.columns if c not in exclude 
+                              and df[c].dtype in ['float64', 'float32', 'int64', 'int32']
+                              and not c.endswith('_z')]
+            
+            # Filter to only columns that exist
+            sensor_cols = [c for c in sensor_cols if c in df.columns]
+            
+            if not sensor_cols:
+                Console.debug("write_sensor_normalized_ts: No sensor columns found", component="OUTPUT")
+                return 0
+            
+            # PERFORMANCE FIX: Use vectorized pd.melt() instead of row-by-row loops
+            # This is 100-1000x faster than the previous nested loop approach
+            long_df = df[['Timestamp'] + sensor_cols].melt(
+                id_vars=['Timestamp'],
+                value_vars=sensor_cols,
+                var_name='SensorName',
+                value_name='NormalizedValue'
+            )
+            
+            # Drop NaN values (vectorized)
+            long_df = long_df.dropna(subset=['NormalizedValue'])
+            
+            if long_df.empty:
+                return 0
+            
+            # Add required columns (vectorized assignment)
+            long_df['RunID'] = self.run_id or ''
+            long_df['EquipID'] = self.equip_id or 0
+            long_df['RawValue'] = None
+            
+            # Reorder columns for consistency
+            long_df = long_df[['RunID', 'EquipID', 'Timestamp', 'SensorName', 'RawValue', 'NormalizedValue']]
+            
+            # v11.1.5 FIX: Delete by TIMESTAMP RANGE instead of just RunID
+            # This prevents duplicates when overlapping batch runs cover same time periods
+            min_ts = long_df['Timestamp'].min()
+            max_ts = long_df['Timestamp'].max()
+            if pd.notna(min_ts) and pd.notna(max_ts) and self.sql_client and self.equip_id:
+                try:
+                    with self.sql_client.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM dbo.[ACM_SensorNormalized_TS] "
+                            "WHERE EquipID = ? AND Timestamp BETWEEN ? AND ?",
+                            (int(self.equip_id), min_ts, max_ts)
+                        )
+                        deleted = cur.rowcount
+                        if deleted > 0:
+                            Console.info(
+                                f"Deleted {deleted} overlapping rows from ACM_SensorNormalized_TS",
+                                component="OUTPUT", table="ACM_SensorNormalized_TS",
+                                equip_id=self.equip_id, min_ts=str(min_ts), max_ts=str(max_ts)
+                            )
+                    if hasattr(self.sql_client, "commit"):
+                        self.sql_client.commit()
+                    elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                        if not getattr(self.sql_client.conn, "autocommit", True):
+                            self.sql_client.conn.commit()
+                except Exception as del_ex:
+                    Console.warn(
+                        f"Failed to delete overlapping sensor data: {del_ex}",
+                        component="OUTPUT", table="ACM_SensorNormalized_TS",
+                        equip_id=self.equip_id, error_type=type(del_ex).__name__
+                    )
+            
+            # Now insert new data (delete_existing=False since we handled it above)
+            return self.write_table('ACM_SensorNormalized_TS', long_df, delete_existing=False)
+            
+        except Exception as e:
+            Console.warn(f"write_sensor_normalized_ts failed: {e}", component="OUTPUT", 
+                        error=str(e)[:200], sensor_count=len(sensor_cols) if sensor_cols else 0)
+            return 0
+    
+    def write_sensor_correlations(self, corr_matrix: pd.DataFrame, corr_type: str = 'pearson') -> int:
+        """Write sensor correlation matrix to ACM_SensorCorrelations.
+        
+        PERFORMANCE: Uses vectorized numpy operations instead of nested loops.
+        NOTE: Keeps only latest run's correlations per equipment (deletes all prior).
+        
+        Args:
+            corr_matrix: Pandas correlation matrix (sensors x sensors)
+            corr_type: 'pearson' or 'spearman'
+        """
+        if not self._check_sql_health() or corr_matrix is None or corr_matrix.empty:
+            return 0
+        try:
+            import numpy as np
+            
+            # PERFORMANCE FIX: Vectorized upper triangle extraction
+            # Get upper triangle indices (including diagonal)
+            sensors = list(corr_matrix.columns)
+            n = len(sensors)
+            
+            # Use numpy to get upper triangle mask
+            mask = np.triu(np.ones((n, n), dtype=bool))
+            
+            # Stack to create all (i, j) pairs efficiently
+            rows_idx, cols_idx = np.where(mask)
+            
+            # Extract correlation values at those positions
+            corr_values = corr_matrix.values[rows_idx, cols_idx]
+            
+            # Build DataFrame directly (vectorized)
+            df = pd.DataFrame({
+                'RunID': self.run_id,
+                'EquipID': self.equip_id or 0,
+                'Sensor1': [sensors[i] for i in rows_idx],
+                'Sensor2': [sensors[j] for j in cols_idx],
+                'Correlation': corr_values,
+                'CorrelationType': corr_type
+            })
+            
+            # Drop NaN correlations (vectorized)
+            df = df.dropna(subset=['Correlation'])
+            
+            if df.empty:
+                return 0
+            
+            # Delete ALL prior correlations for this equipment (not just this run)
+            # We only need the latest correlation matrix per equipment
+            try:
+                with self.sql_client.cursor() as cur:
+                    cur.execute("DELETE FROM dbo.[ACM_SensorCorrelations] WHERE EquipID = ?", 
+                               (int(self.equip_id or 0),))
+                    if hasattr(self.sql_client, "commit"):
+                        self.sql_client.commit()
+            except Exception as del_ex:
+                Console.debug(f"ACM_SensorCorrelations cleanup skipped: {del_ex}", component="OUTPUT")
+            
+            return self.write_table('ACM_SensorCorrelations', df, delete_existing=False)
+        except Exception as e:
+            Console.warn(f"write_sensor_correlations failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_feature_drop_log(self, dropped_features: List[Dict[str, Any]]) -> int:
+        """Write dropped features log to ACM_FeatureDropLog.
+        
+        Args:
+            dropped_features: List of dicts with keys: FeatureName, DropReason, DropValue, Threshold
+        """
+        if not self._check_sql_health() or not dropped_features:
+            return 0
+        try:
+            df = pd.DataFrame(dropped_features)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_FeatureDropLog', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_feature_drop_log failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_calibration_summary(self, calibration_data: List[Dict[str, Any]]) -> int:
+        """Write detector calibration summary to ACM_CalibrationSummary.
+        
+        Args:
+            calibration_data: List of dicts with DetectorType, CalibrationScore, etc.
+        """
+        if not self._check_sql_health() or not calibration_data:
+            return 0
+        try:
+            df = pd.DataFrame(calibration_data)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_CalibrationSummary', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_calibration_summary failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_occupancy(self, occupancy_data: List[Dict[str, Any]]) -> int:
+        """Write regime occupancy stats to ACM_RegimeOccupancy.
+        
+        Args:
+            occupancy_data: List of dicts with RegimeLabel, DwellTimeHours, DwellFraction, etc.
+        """
+        if not self._check_sql_health() or not occupancy_data:
+            return 0
+        try:
+            df = pd.DataFrame(occupancy_data)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_RegimeOccupancy', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_regime_occupancy failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_transitions(self, transition_matrix: Dict[str, Dict[str, int]]) -> int:
+        """Write regime transition matrix to ACM_RegimeTransitions.
+        
+        PERFORMANCE: Uses list comprehension instead of nested loops.
+        
+        Args:
+            transition_matrix: Nested dict {from_regime: {to_regime: count}}
+        """
+        if not self._check_sql_health() or not transition_matrix:
+            return 0
+        try:
+            run_id = self.run_id
+            equip_id = self.equip_id or 0
+            
+            # PERFORMANCE FIX: List comprehension with precomputed totals
+            rows = [
+                {
+                    'RunID': run_id,
+                    'EquipID': equip_id,
+                    'FromRegime': str(from_r),
+                    'ToRegime': str(to_r),
+                    'TransitionCount': int(count),
+                    'TransitionProbability': float(count) / sum(transitions.values()) if sum(transitions.values()) > 0 else 0.0
+                }
+                for from_r, transitions in transition_matrix.items()
+                for to_r, count in transitions.items()
+            ]
+            
+            if not rows:
+                return 0
+            return self.write_table('ACM_RegimeTransitions', pd.DataFrame(rows), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_regime_transitions failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_contribution_timeline(self, contributions_df: pd.DataFrame) -> int:
+        """Write detector contribution timeline to ACM_ContributionTimeline.
+        
+        Args:
+            contributions_df: DataFrame with Timestamp, DetectorType, ContributionPct
+        """
+        if not self._check_sql_health() or contributions_df is None or contributions_df.empty:
+            return 0
+        try:
+            df = contributions_df.copy()
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_ContributionTimeline', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_contribution_timeline failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_promotion_log(self, promotions: List[Dict[str, Any]]) -> int:
+        """Write regime maturity promotions to ACM_RegimePromotionLog.
+        
+        Args:
+            promotions: List of dicts with RegimeLabel, FromState, ToState, Reason, etc.
+        """
+        if not self._check_sql_health() or not promotions:
+            return 0
+        try:
+            df = pd.DataFrame(promotions)
+            df['RunID'] = self.run_id
+            df['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_RegimePromotionLog', df, delete_existing=False)  # Append, don't delete
+        except Exception as e:
+            Console.warn(f"write_regime_promotion_log failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_refit_request(
+        self, 
+        reasons: List[str],
+        anomaly_rate: Optional[float] = None,
+        drift_score: Optional[float] = None,
+        regime_quality: Optional[float] = None
+    ) -> int:
+        """Write refit request to ACM_RefitRequests table.
+        
+        Creates the table if it doesn't exist and inserts a refit request record.
+        This is used by auto-tuning when model quality degrades.
+        
+        Args:
+            reasons: List of reasons triggering the refit request
+            anomaly_rate: Current anomaly rate (if triggered by high anomaly rate)
+            drift_score: Drift score (if triggered by drift)
+            regime_quality: Regime silhouette score (if triggered by regime quality)
+            
+        Returns:
+            1 if request written successfully, 0 otherwise
+        """
+        if not self._check_sql_health():
+            return 0
+        
+        try:
+            with self.sql_client.cursor() as cur:
+                # Ensure table exists (idempotent DDL)
+                cur.execute("""
+                    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ACM_RefitRequests]') AND type in (N'U'))
+                    BEGIN
+                        CREATE TABLE [dbo].[ACM_RefitRequests] (
+                            [RequestID] INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                            [EquipID] INT NOT NULL,
+                            [RequestedAt] DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                            [Reason] NVARCHAR(MAX) NULL,
+                            [AnomalyRate] FLOAT NULL,
+                            [DriftScore] FLOAT NULL,
+                            [ModelAgeHours] FLOAT NULL,
+                            [RegimeQuality] FLOAT NULL,
+                            [Acknowledged] BIT NOT NULL DEFAULT 0,
+                            [AcknowledgedAt] DATETIME2 NULL
+                        );
+                        CREATE INDEX [IX_RefitRequests_EquipID_Ack] ON [dbo].[ACM_RefitRequests]([EquipID], [Acknowledged]);
+                    END
+                """)
+                
+                # Insert request
+                cur.execute("""
+                    INSERT INTO [dbo].[ACM_RefitRequests]
+                        (EquipID, Reason, AnomalyRate, DriftScore, RegimeQuality)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    int(self.equip_id or 0),
+                    "; ".join(reasons) if reasons else None,
+                    float(anomaly_rate) if anomaly_rate is not None else None,
+                    float(drift_score) if drift_score is not None else None,
+                    float(regime_quality) if regime_quality is not None else None,
+                ))
+                
+            Console.info("SQL refit request recorded in ACM_RefitRequests", component="OUTPUT")
+            return 1
+        except Exception as e:
+            Console.warn(f"write_refit_request failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_fusion_metrics(
+        self, 
+        fusion_weights: Dict[str, float], 
+        tuning_diagnostics: Dict[str, Any],
+        previous_weights: Optional[Dict[str, float]] = None
+    ) -> int:
+        """Write fusion tuning diagnostics and metrics to ACM_RunMetrics (EAV format).
+        
+        Writes fusion weight metrics, quality scores, and sample counts to ACM_RunMetrics
+        table in Entity-Attribute-Value format for flexibility.
+        
+        Args:
+            fusion_weights: Dict mapping detector names to their fusion weights
+            tuning_diagnostics: Dict with detector_metrics, method, etc.
+            previous_weights: Optional dict of weights from previous run (for warm start tracking)
+            
+        Returns:
+            Number of records written (0 if failed or disabled)
+        """
+        if not self._check_sql_health() or not tuning_diagnostics:
+            return 0
+            
+        try:
+            # Add timestamp and metadata
+            tuning_diagnostics["timestamp"] = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+            tuning_diagnostics["warm_started"] = previous_weights is not None
+            if previous_weights:
+                tuning_diagnostics["previous_weights"] = previous_weights
+            
+            # Build metrics rows for CSV output
+            metrics_rows = []
+            for detector_name, weight in fusion_weights.items():
+                det_metrics = tuning_diagnostics.get("detector_metrics", {}).get(detector_name, {})
+                metrics_rows.append({
+                    "detector_name": detector_name,
+                    "weight": weight,
+                    "n_samples": det_metrics.get("n_samples", 0),
+                    "quality_score": det_metrics.get("quality_score", 0.0),
+                    "tuning_method": tuning_diagnostics.get("method", "unknown"),
+                    "timestamp": tuning_diagnostics["timestamp"]
+                })
+            
+            if not metrics_rows:
+                return 0
+            
+            # SQL mode: Write to ACM_RunMetrics in EAV format
+            if not self.sql_client:
+                return 0
+                
+            timestamp_now = pd.Timestamp.now()
+            insert_records = [
+                (self.run_id, int(self.equip_id), f"fusion.weight.{row['detector_name']}", 
+                 float(row['weight']), timestamp_now)
+                for row in metrics_rows
+            ] + [
+                (self.run_id, int(self.equip_id), f"fusion.quality.{row['detector_name']}", 
+                 float(row['quality_score']), timestamp_now)
+                for row in metrics_rows
+            ] + [
+                (self.run_id, int(self.equip_id), f"fusion.n_samples.{row['detector_name']}", 
+                 float(row['n_samples']), timestamp_now)
+                for row in metrics_rows
+            ]
+            
+            insert_sql = """
+                INSERT INTO dbo.ACM_RunMetrics 
+                (RunID, EquipID, MetricName, MetricValue, Timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            """
+            
+            with self.sql_client.cursor() as cur:
+                cur.fast_executemany = True
+                cur.executemany(insert_sql, insert_records)
+            self.sql_client.conn.commit()
+            
+            Console.info(f"Saved fusion metrics -> SQL:ACM_RunMetrics ({len(insert_records)} records)", 
+                         component="OUTPUT", equip=self.equipment)
+            return len(insert_records)
+            
+        except Exception as e:
+            Console.warn(f"write_fusion_metrics failed: {e}", component="OUTPUT",
+                         equip=self.equipment, error=str(e)[:200])
+            return 0
+    
+    def check_refit_request(self) -> bool:
+        """Check for pending refit requests in ACM_RefitRequests table.
+        
+        If a pending request exists, acknowledges it so it won't be processed again
+        on the next run.
+        
+        Returns:
+            True if a pending refit request was found and acknowledged, False otherwise
+        """
+        if not self._check_sql_health():
+            return False
+            
+        try:
+            with self.sql_client.cursor() as cur:
+                cur.execute(
+                    """
+                    IF OBJECT_ID(N'[dbo].[ACM_RefitRequests]', N'U') IS NOT NULL
+                    BEGIN
+                        SELECT TOP 1 RequestID, RequestedAt, Reason
+                        FROM [dbo].[ACM_RefitRequests]
+                        WHERE EquipID = ? AND Acknowledged = 0
+                        ORDER BY RequestedAt DESC
+                    END
+                    """,
+                    (int(self.equip_id),),
+                )
+                row = cur.fetchone()
+                if row:
+                    Console.warn(f"SQL refit request found: id={row[0]} at {row[1]}", component="MODEL",
+                                 equip=self.equipment, refit_request_id=row[0])
+                    # Acknowledge refit so it is not re-used next run
+                    cur.execute(
+                        "UPDATE [dbo].[ACM_RefitRequests] SET Acknowledged = 1, AcknowledgedAt = SYSUTCDATETIME() WHERE RequestID = ?",
+                        (int(row[0]),),
+                    )
+                    self.sql_client.conn.commit()
+                    return True
+        except Exception as rf_err:
+            Console.warn(f"Refit check failed: {rf_err}", component="MODEL",
+                         equip=self.equipment, error_type=type(rf_err).__name__, error=str(rf_err)[:200])
+        
+        return False
+    
+    def update_baseline_buffer(
+        self, 
+        score_numeric: pd.DataFrame,
+        cfg: Dict[str, Any],
+        coldstart_complete: bool
+    ) -> bool:
+        """Update the ACM_BaselineBuffer table with latest raw score data.
+        
+        Uses smart refresh logic to avoid writing on every batch:
+        - Always write during coldstart
+        - Write periodically (every N batches) after coldstart
+        - Uses vectorized pandas melt for 100x speedup over loops
+        
+        Args:
+            score_numeric: Raw score DataFrame with sensor columns
+            cfg: Configuration dictionary
+            coldstart_complete: Whether coldstart phase is complete
+        
+        Returns:
+            True if buffer was written, False if skipped
+        """
+        if not self._check_sql_health():
+            return False
+            
+        baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+        window_hours = float(baseline_cfg.get("window_hours", 72))
+        max_points = int(baseline_cfg.get("max_points", 100000))
+        refresh_interval = int(baseline_cfg.get("refresh_interval_batches", 10))
+        
+        # Determine if we should write baseline buffer this run
+        should_write_buffer = False
+        write_reason = ""
+        recent_run_count = 0
+        
+        if not coldstart_complete:
+            # Coldstart in progress - always write to build baseline
+            should_write_buffer = True
+            write_reason = "coldstart"
+        else:
+            # Models exist - check periodic refresh
+            try:
+                with self.sql_client.cursor() as cur:
+                    run_count_result = cur.execute(
+                        "SELECT COUNT(*) FROM ACM_Runs WHERE EquipID = ? AND CreatedAt > DATEADD(DAY, -7, GETDATE())",
+                        (int(self.equip_id),)
+                    ).fetchone()
+                    recent_run_count = run_count_result[0] if run_count_result else 0
+                    if recent_run_count == 0 or (recent_run_count % refresh_interval == 0):
+                        should_write_buffer = True
+                        write_reason = f"periodic_refresh (batch {recent_run_count})"
+            except Exception:
+                should_write_buffer = True
+                write_reason = "fallback"
+        
+        if not should_write_buffer:
+            batches_until_refresh = refresh_interval - (recent_run_count % refresh_interval) if refresh_interval > 0 else 0
+            Console.info(f"Skipping buffer write (models exist, next refresh in {batches_until_refresh} batches)", component="BASELINE")
+            return False
+        
+        # Skip if no data to write
+        if len(score_numeric) == 0:
+            return False
+        
+        # Normalize index to local naive timestamps
+        to_append = score_numeric.copy()
+        to_append = self._ensure_local_index(to_append)
+        
+        # OPTIMIZATION v10.2.1: Vectorized pandas melt (100x faster than Python loops)
+        try:
+            to_append_reset = to_append.reset_index()
+            ts_col = to_append_reset.columns[0]
+            
+            long_df = to_append_reset.melt(
+                id_vars=[ts_col],
+                var_name='SensorName',
+                value_name='SensorValue'
+            )
+            
+            long_df = long_df.dropna(subset=['SensorValue'])
+            long_df['EquipID'] = int(self.equip_id)
+            long_df['DataQuality'] = None
+            # Normalize timestamp column to local naive
+            long_df = long_df.set_index(ts_col)
+            long_df = self._ensure_local_index(long_df)
+            long_df = long_df.reset_index().rename(columns={ts_col: 'Timestamp'})
+            long_df = long_df[['EquipID', 'Timestamp', 'SensorName', 'SensorValue', 'DataQuality']]
+            
+            if len(long_df) > 0:
+                baseline_records = list(long_df.itertuples(index=False, name=None))
+                
+                insert_sql = """
+                INSERT INTO dbo.ACM_BaselineBuffer (EquipID, Timestamp, SensorName, SensorValue, DataQuality)
+                VALUES (?, ?, ?, ?, ?)
+                """
+                with self.sql_client.cursor() as cur:
+                    cur.fast_executemany = True
+                    cur.executemany(insert_sql, baseline_records)
+                self.sql_client.conn.commit()
+                Console.info(f"Wrote {len(baseline_records)} records to ACM_BaselineBuffer ({write_reason})", component="BASELINE")
+                
+                # Run cleanup procedure
+                try:
+                    with self.sql_client.cursor() as cur:
+                        cur.execute("EXEC dbo.usp_CleanupBaselineBuffer @EquipID=?, @RetentionHours=?, @MaxRowsPerEquip=?",
+                                  (int(self.equip_id), int(window_hours), max_points))
+                    self.sql_client.conn.commit()
+                except Exception as cleanup_err:
+                    Console.warn(f"Cleanup procedure failed: {cleanup_err}", component="BASELINE",
+                                 equip=self.equipment, equip_id=self.equip_id, error=str(cleanup_err)[:200])
+                
+                return True
+                
+        except Exception as sql_err:
+            Console.warn(f"SQL write to ACM_BaselineBuffer failed: {sql_err}", component="BASELINE",
+                         equip=self.equipment, equip_id=self.equip_id, error=str(sql_err)[:200])
+            try:
+                self.sql_client.conn.rollback()
+            except:
+                pass
+        
+        return False
+    
+    def _ensure_local_index(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure the DataFrame index is a timezone-naive local DatetimeIndex.
+
+        Simplified policy: treat all timestamps as local time and drop any tz info.
+        """
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, errors="coerce")
+        else:
+            # If timezone-aware, strip tz information and keep local wall-clock times
+            try:
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+            except Exception:
+                # Fallback: coerce to naive datetimes
+                df.index = pd.to_datetime(df.index, errors="coerce")
+        return df
+    
+    def write_drift_controller(self, controller_state: Dict[str, Any]) -> int:
+        """Write drift controller state to ACM_DriftController.
+        
+        Args:
+            controller_state: Dict with ControllerState, Threshold, Sensitivity, etc.
+        """
+        if not self._check_sql_health() or not controller_state:
+            return 0
+        try:
+            row = dict(controller_state)
+            row['RunID'] = self.run_id
+            row['EquipID'] = self.equip_id or 0
+            return self.write_table('ACM_DriftController', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_drift_controller failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_regime_definitions(self, regime_defs: List[Dict[str, Any]], version: int) -> int:
+        """Write regime definitions to ACM_RegimeDefinitions (v11).
+        
+        Args:
+            regime_defs: List of dicts with RegimeID, RegimeName, CentroidJSON, etc.
+            version: Regime model version number
+        """
+        if not self._check_sql_health() or not regime_defs:
+            return 0
+        try:
+            df = pd.DataFrame(regime_defs)
+            df['EquipID'] = self.equip_id or 0
+            df['RegimeVersion'] = version
+            df['CreatedByRunID'] = self.run_id
+            return self.write_table('ACM_RegimeDefinitions', df, delete_existing=False)  # Keep history
+        except Exception as e:
+            Console.warn(f"write_regime_definitions failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_active_models(self, model_state: Dict[str, Any]) -> int:
+        """Write/update active model versions to ACM_ActiveModels (v11).
+        
+        Args:
+            model_state: Dict with ActiveRegimeVersion, RegimeMaturityState, etc.
+        
+        Note: ACM_ActiveModels has EquipID only (no RunID), so we delete by EquipID before insert.
+        """
+        if not self._check_sql_health() or not model_state:
+            return 0
+        try:
+            row = dict(model_state)
+            row['EquipID'] = self.equip_id or 0
+            row['LastUpdatedAt'] = datetime.now()
+            row['LastUpdatedBy'] = self.run_id
+            
+            # Manual delete by EquipID (table has no RunID column)
+            try:
+                with self.sql_client.cursor() as cur:
+                    cur.execute("DELETE FROM dbo.[ACM_ActiveModels] WHERE EquipID = ?", (int(self.equip_id or 0),))
+                    if hasattr(self.sql_client, "commit"):
+                        self.sql_client.commit()
+            except Exception as del_ex:
+                Console.debug(f"ACM_ActiveModels delete skipped: {del_ex}", component="OUTPUT")
+            
+            # Insert new row (delete_existing=False since we manually deleted)
+            return self.write_table('ACM_ActiveModels', pd.DataFrame([row]), delete_existing=False)
+        except Exception as e:
+            Console.warn(f"write_active_models failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_data_contract_validation(self, validation_result: Dict[str, Any]) -> int:
+        """Write data contract validation result to ACM_DataContractValidation (v11).
+        
+        Args:
+            validation_result: Dict with Passed, RowsValidated, ColumnsValidated, IssuesJSON, etc.
+        """
+        if not self._check_sql_health() or not validation_result:
+            return 0
+        try:
+            row = dict(validation_result)
+            row['RunID'] = self.run_id
+            row['EquipID'] = self.equip_id or 0
+            row['ValidatedAt'] = datetime.now()
+            return self.write_table('ACM_DataContractValidation', pd.DataFrame([row]), delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_data_contract_validation failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
+    def write_seasonal_patterns(self, patterns: List[Dict[str, Any]]) -> int:
+        """Write detected seasonal patterns to ACM_SeasonalPatterns (v11).
+        
+        Args:
+            patterns: List of dicts with SensorName, PatternType, PeriodHours, Amplitude, etc.
+        """
+        if not self._check_sql_health() or not patterns:
+            return 0
+        try:
+            df = pd.DataFrame(patterns)
+            df['EquipID'] = self.equip_id or 0
+            df['DetectedAt'] = datetime.now()
+            df['DetectedByRunID'] = self.run_id
+            return self.write_table('ACM_SeasonalPatterns', df, delete_existing=True)
+        except Exception as e:
+            Console.warn(f"write_seasonal_patterns failed: {e}", component="OUTPUT", error=str(e)[:200])
+            return 0
+    
     
     def get_stats(self) -> Dict[str, Any]:
         """Get performance statistics."""
         return {
             **self.stats,
-            'avg_write_time': self.stats['write_time'] / max(1, self.stats['files_written']),
+            'avg_write_time': self.stats['write_time'] / max(1, self.stats['sql_writes']),
             'sql_success_rate': 1.0 - (self.stats['sql_failures'] / max(1, self.stats['sql_health_checks']))
         }
     
@@ -2827,10 +3752,12 @@ class OutputManager:
         self.flush()  # OUT-18: Use flush() for DRY
         
         stats = self.get_stats()
-        Console.info(f"[OUTPUT] Finalized: {stats['files_written']} files, "
-                f"{stats['sql_writes']} SQL ops, "
-                f"{stats['total_rows']} total rows, "
-                f"{stats['avg_write_time']:.3f}s avg write time")
+        # Note: sql_writes only tracks writes via write_dataframe() method
+        # Many tables are written via direct SQL, batched transactions, etc.
+        # This is intentionally low-level debug info, not a complete count
+        Console.debug(f"OutputManager stats: {stats['sql_writes']} write_dataframe calls, "
+                f"{stats['total_rows']} batch rows, "
+                f"{stats['avg_write_time']:.3f}s avg write time", component="OUTPUT")
         
         return stats
 
@@ -2842,729 +3769,474 @@ class OutputManager:
             pass
 
     # ==================== BULK DELETE OPTIMIZATION ====================
-    
-    def _bulk_delete_analytics_tables(self, tables: List[str]) -> int:
+
+    def _delete_timeline_overlaps(self, tables: List[str], min_ts: pd.Timestamp, max_ts: pd.Timestamp) -> int:
         """
-        PERF-OPT: Delete existing rows for RunID/EquipID from multiple tables in a single batch.
+        v11.1.5 FIX: Delete overlapping rows from timeline tables by TIMESTAMP RANGE.
         
-        This eliminates 26+ individual DELETE round-trips, replacing them with one batched operation.
-        Typical speedup: 2-3 seconds saved on comprehensive analytics.
+        Unlike _bulk_delete_analytics_tables which deletes by RunID, this method
+        deletes by EquipID + Timestamp range to prevent duplicate data when
+        overlapping batch runs cover the same time periods.
         
         Args:
-            tables: List of table names to clear for current RunID/EquipID
+            tables: List of table names to clean (must have Timestamp column)
+            min_ts: Minimum timestamp in the data being written
+            max_ts: Maximum timestamp in the data being written
             
         Returns:
             Total rows deleted across all tables
         """
+        if not self.sql_client or not self.equip_id:
+            return 0
+        if pd.isna(min_ts) or pd.isna(max_ts):
+            return 0
+            
+        total_deleted = 0
+        cursor_factory = lambda: cast(Any, self.sql_client).cursor()
+        
+        for table_name in tables:
+            if table_name not in ALLOWED_TABLES:
+                continue
+                
+            try:
+                with self.sql_client.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM dbo.[{table_name}] "
+                        f"WHERE EquipID = ? AND Timestamp BETWEEN ? AND ?",
+                        (int(self.equip_id), min_ts, max_ts)
+                    )
+                    deleted = cur.rowcount
+                    if deleted > 0:
+                        total_deleted += deleted
+                        Console.info(
+                            f"Deleted {deleted} overlapping rows from {table_name}",
+                            component="OUTPUT", table=table_name,
+                            equip_id=self.equip_id, min_ts=str(min_ts), max_ts=str(max_ts)
+                        )
+                        
+                # Commit after each table
+                if hasattr(self.sql_client, "commit"):
+                    self.sql_client.commit()
+                elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                    if not getattr(self.sql_client.conn, "autocommit", True):
+                        self.sql_client.conn.commit()
+                        
+            except Exception as del_ex:
+                Console.warn(
+                    f"Failed to delete overlapping data from {table_name}: {del_ex}",
+                    component="OUTPUT", table=table_name,
+                    equip_id=self.equip_id, error_type=type(del_ex).__name__
+                )
+                
+        return total_deleted
+
+    def _bulk_delete_analytics_tables(self, tables: List[str]) -> int:
+        """
+        PERF-OPT v11: Delete existing rows for current RunID/EquipID from multiple tables in ONE SQL batch.
+
+        - Filters to ALLOWED_TABLES only.
+        - Skips non-existent tables (cached).
+        - Chooses predicate based on presence of RunID / EquipID columns.
+        - Executes a single SQL batch to avoid N round-trips.
+
+        Returns:
+            Number of tables for which a DELETE statement was included in the batch.
+            (Rowcount not tracked in this batched approach.)
+        """
         if not self.sql_client or not self.run_id:
             return 0
-        
-        total_deleted = 0
+
         start_time = time.perf_counter()
-        
+        tables_targeted = 0
+
+        # Local cursor factory for helper functions that expect a callable
+        cursor_factory = lambda: cast(Any, self.sql_client).cursor()
+
         try:
-            cursor_factory = lambda: cast(Any, self.sql_client).cursor()
-            cur = cursor_factory()
-            
-            try:
-                # Build batch DELETE statements
-                for table_name in tables:
-                    if table_name not in ALLOWED_TABLES:
-                        continue
-                    
-                    # Check if table exists (use cache)
-                    exists = self._table_exists_cache.get(table_name)
-                    if exists is None:
-                        exists = _table_exists(cursor_factory, table_name)
-                        self._table_exists_cache[table_name] = bool(exists)
-                    if not exists:
-                        continue
-                    
-                    # Get table columns to check for RunID/EquipID
-                    if table_name in self._table_insertable_cache:
-                        table_cols = self._table_insertable_cache[table_name]
-                    elif table_name in self._table_columns_cache:
-                        table_cols = self._table_columns_cache[table_name]
-                    else:
-                        try:
-                            cols = set(_get_insertable_columns(cursor_factory, table_name))
-                            if not cols:
-                                cols = set(_get_table_columns(cursor_factory, table_name))
-                            self._table_insertable_cache[table_name] = cols
-                            table_cols = cols
-                        except Exception:
-                            continue
-                    
-                    # Execute DELETE
+            # Normalize candidate tables: allowed + unique, preserve input order
+            seen = set()
+            candidate_tables: List[str] = []
+            for t in tables:
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                if t in ALLOWED_TABLES:
+                    candidate_tables.append(t)
+
+            if not candidate_tables:
+                return 0
+
+            delete_statements: List[str] = []
+
+            for table_name in candidate_tables:
+                # Table existence (cached)
+                exists = self._table_exists_cache.get(table_name)
+                if exists is None:
                     try:
-                        if "RunID" in table_cols and "EquipID" in table_cols and self.equip_id is not None:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?",
-                                (self.run_id, int(self.equip_id or 0))
-                            ).rowcount or 0
-                        elif "RunID" in table_cols:
-                            rows_deleted = cur.execute(
-                                f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?",
-                                (self.run_id,)
-                            ).rowcount or 0
-                        else:
-                            rows_deleted = 0
-                        total_deleted += rows_deleted
-                        # PERF-OPT: Track that this table was pre-deleted (skip in _bulk_insert_sql)
-                        self._bulk_predeleted_tables.add(table_name)
+                        exists = bool(_table_exists(cursor_factory, table_name))
                     except Exception:
-                        pass  # Individual table failures are non-fatal
-                
+                        exists = False
+                    self._table_exists_cache[table_name] = exists
+
+                if not exists:
+                    continue
+
+                # Column presence (prefer cached insertable/columns; avoid repeated metadata calls)
+                table_cols = (
+                    self._table_insertable_cache.get(table_name)
+                    or self._table_columns_cache.get(table_name)
+                )
+
+                if table_cols is None:
+                    try:
+                        cols = set(_get_insertable_columns(cursor_factory, table_name) or [])
+                        if not cols:
+                            cols = set(_get_table_columns(cursor_factory, table_name) or [])
+                        table_cols = cols
+                        # Cache in insertable cache since we use it as "known columns" anyway
+                        self._table_insertable_cache[table_name] = table_cols
+                    except Exception:
+                        # If we cannot introspect columns, skip (safe default)
+                        continue
+
+                # Build the WHERE predicate
+                has_runid = "RunID" in table_cols
+                has_equipid = "EquipID" in table_cols and (self.equip_id is not None)
+
+                if not has_runid:
+                    continue  # no RunID => cannot safely scope delete to current run
+
+                if has_equipid:
+                    delete_statements.append(
+                        f"DELETE FROM dbo.[{table_name}] WHERE RunID = @RunID AND EquipID = @EquipID"
+                    )
+                else:
+                    delete_statements.append(
+                        f"DELETE FROM dbo.[{table_name}] WHERE RunID = @RunID"
+                    )
+
+                # Mark as pre-deleted so _bulk_insert_sql can skip its own per-table pre-delete logic
+                self._bulk_predeleted_tables.add(table_name)
+                tables_targeted += 1
+
+            if not delete_statements:
+                return 0
+
+            # One network round-trip
+            batch_sql = ";\n".join(delete_statements)
+
+            cur = cursor_factory()
+            try:
+                # Parameter binding via pyodbc placeholders within DECLARE assignment is OK.
+                # We declare parameters once and reuse them in all statements.
+                sql = f"""
+DECLARE @RunID NVARCHAR(36) = ?;
+DECLARE @EquipID INT = ?;
+{batch_sql};
+"""
+                cur.execute(sql, (self.run_id, int(self.equip_id or 0)))
+
+                # Commit behavior: follow your existing pattern (depends on autocommit / wrapper)
+                if hasattr(self.sql_client, "commit"):
+                    self.sql_client.commit()
+                elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
+                    if not getattr(self.sql_client.conn, "autocommit", True):
+                        self.sql_client.conn.commit()
+
             finally:
                 try:
                     cur.close()
                 except Exception:
                     pass
-            
+
             elapsed = time.perf_counter() - start_time
-            if total_deleted > 0:
-                Console.info(f"Bulk pre-delete: {total_deleted} rows from {len(tables)} tables in {elapsed:.2f}s", component="OUTPUT")
-            
+            Console.info(
+                f"Bulk pre-delete: {tables_targeted} tables targeted, {len(delete_statements)} DELETE statements in {elapsed:.2f}s (batched)",
+                component="OUTPUT",
+                tables_targeted=tables_targeted,
+                delete_count=len(delete_statements)
+            )
+            return tables_targeted
+
         except Exception as e:
-            Console.warn(f"Bulk pre-delete failed (non-fatal): {e}", component="OUTPUT", tables=len(tables), equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__)
-        
-        return total_deleted
+            Console.warn(
+                f"Bulk pre-delete failed (non-fatal): {e}",
+                component="OUTPUT",
+                tables=len(tables),
+                equip_id=self.equip_id,
+                run_id=self.run_id,
+                error_type=type(e).__name__,
+            )
+            return 0
 
     # ==================== COMPREHENSIVE ANALYTICS TABLES ====================
-    
-    def generate_all_analytics_tables(self, 
-                                     scores_df: pd.DataFrame, 
-                                     episodes_df: pd.DataFrame, 
-                                     cfg: Dict[str, Any],
-                                     tables_dir: Path,
-                                     enable_sql: bool = True,
-                                     sensor_context: Optional[Dict[str, Any]] = None) -> Dict[str, int]:  # Default to TRUE for SQL mode
-        """
-        Generate all 26 comprehensive analytics tables for complete analytical coverage.
-        
-        MANDATES that ALL data is written to SQL database - no exceptions!
-        This provides the rock-solid analytical basis required by operators and engineers.
-        
-        PERFORMANCE: Uses batched transaction for all SQL writes to minimize commit overhead.
-        """
-        Console.info("Generating comprehensive analytics tables...", component="ANALYTICS")
-        table_count = 0
-        sql_count = 0
-        
-        # FORCE SQL WRITES - this is mandatory in SQL mode
-        force_sql = enable_sql or (self.sql_client is not None)
 
+    def generate_all_analytics_tables(
+        self,
+        scores_df: pd.DataFrame,
+        cfg: Dict[str, Any],
+        sensor_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, int]:
+        """
+        Generate essential analytics tables (v11 - SQL-only).
+
+        Writes only the tables in ALLOWED_TABLES:
+          - ACM_HealthTimeline: Health % over time (required for RUL forecasting)
+          - ACM_RegimeTimeline: Operating regime assignments
+          - ACM_SensorDefects: Sensor-level anomaly flags
+          - ACM_SensorHotspots: Top anomalous sensors (RUL attribution)
+          - ACM_DataQuality: Data quality per sensor (generated in-memory, SQL write)
+        """
+        Console.info("Generating analytics tables (v11 SQL-only)...", component="ANALYTICS")
+
+        sql_count = 0
+
+        # SQL is mandatory: if not ready, skip (non-fatal)
+        if (self.sql_client is None) or (not self.run_id):
+            Console.warn(
+                "Analytics table generation skipped (SQL not ready). Missing sql_client and/or run_id.",
+                component="ANALYTICS",
+                equip_id=getattr(self, "equip_id", None),
+                run_id=getattr(self, "run_id", None),
+            )
+            return {"sql_tables": 0}
+
+        has_fused = "fused" in scores_df.columns
+        has_regimes = "regime_label" in scores_df.columns
+
+        # Extract sensor context
         sensor_values = None
         sensor_zscores = None
         sensor_train_mean = None
         sensor_train_std = None
-        omr_contributions = None
+        data_quality_df = None
+
         if sensor_context:
-            values_candidate = sensor_context.get('values')
-            zscores_candidate = sensor_context.get('z_scores')
-            if isinstance(values_candidate, pd.DataFrame) and len(values_candidate.columns):
-                sensor_values = values_candidate.reindex(scores_df.index)
-            if isinstance(zscores_candidate, pd.DataFrame) and len(zscores_candidate.columns):
-                sensor_zscores = zscores_candidate.reindex(scores_df.index)
-            mean_candidate = sensor_context.get('train_mean')
-            std_candidate = sensor_context.get('train_std')
-            if isinstance(mean_candidate, pd.Series):
-                sensor_train_mean = mean_candidate
-            if isinstance(std_candidate, pd.Series):
-                sensor_train_std = std_candidate
-            omni = sensor_context.get('omr_contributions') if isinstance(sensor_context, dict) else None
-            if isinstance(omni, pd.DataFrame) and len(omni.index):
-                try:
-                    omr_contributions = omni.reindex(scores_df.index)
-                except Exception:
-                    omr_contributions = omni
-        
-        # ANA-12: Tiered analytics - check fused availability
-        has_fused = 'fused' in scores_df.columns
-        has_regimes = 'regime_label' in scores_df.columns
-        
-        # PERF-OPT: Define all analytics tables for bulk pre-delete
-        # This eliminates 26+ individual DELETE round-trips (saves ~2-3s)
-        analytics_tables = [
-            "ACM_DetectorCorrelation", "ACM_CalibrationSummary", "ACM_OMRContributionsLong",
-            "ACM_FusionQualityReport", "ACM_RegimeOccupancy", "ACM_RegimeTransitions",
-            "ACM_RegimeDwellStats", "ACM_HealthTimeline", "ACM_HealthDistributionOverTime",
-            "ACM_RegimeTimeline", "ACM_OMRTimeline", "ACM_RegimeStats", "ACM_ContributionCurrent",
-            "ACM_ContributionTimeline", "ACM_DriftSeries", "ACM_ThresholdCrossings",
-            "ACM_SinceWhen", "ACM_SensorRanking", "ACM_HealthHistogram", "ACM_DailyFusedProfile",
-            "ACM_AlertAge", "ACM_RegimeStability", "ACM_DefectSummary", "ACM_DefectTimeline",
-            "ACM_SensorDefects", "ACM_HealthZoneByPeriod", "ACM_SensorAnomalyByPeriod",
-            "ACM_SensorHotspots", "ACM_SensorNormalized_TS", "ACM_SensorHotspotTimeline"
-        ]
-        
-        # Use batched transaction for all SQL writes
+            v = sensor_context.get("values")
+            z = sensor_context.get("z_scores")
+
+            if isinstance(v, pd.DataFrame) and len(v.columns):
+                sensor_values = v.reindex(scores_df.index)
+
+            if isinstance(z, pd.DataFrame) and len(z.columns):
+                sensor_zscores = z.reindex(scores_df.index)
+
+            m = sensor_context.get("train_mean")
+            s = sensor_context.get("train_std")
+
+            if isinstance(m, pd.Series):
+                sensor_train_mean = m
+            if isinstance(s, pd.Series):
+                sensor_train_std = s
+
+            dq = sensor_context.get("data_quality_df")
+            if isinstance(dq, pd.DataFrame) and len(dq.columns):
+                data_quality_df = dq.copy()
+
+        # v11.1.5 FIX: Separate timeline tables (need timestamp-range deletion) from other tables
+        timeline_tables = ["ACM_HealthTimeline", "ACM_RegimeTimeline"]
+        non_timeline_tables = ["ACM_SensorDefects", "ACM_SensorHotspots", "ACM_DataQuality"]
+
+        # Get timestamp range for deduplication
+        min_ts = None
+        max_ts = None
+        if isinstance(scores_df.index, pd.DatetimeIndex):
+            min_ts = scores_df.index.min()
+            max_ts = scores_df.index.max()
+        elif 'Timestamp' in scores_df.columns:
+            min_ts = pd.to_datetime(scores_df['Timestamp']).min()
+            max_ts = pd.to_datetime(scores_df['Timestamp']).max()
+
         with self.batched_transaction():
             try:
-                # PERF-OPT: Bulk delete all analytics tables upfront
-                if force_sql and self.sql_client and self.run_id:
-                    self._bulk_delete_analytics_tables(analytics_tables)
+                # v11.1.5 FIX: Delete timeline tables by TIMESTAMP RANGE to prevent duplicates
+                # from overlapping batch runs (not by RunID which misses cross-run overlaps)
+                if pd.notna(min_ts) and pd.notna(max_ts):
+                    self._delete_timeline_overlaps(timeline_tables, min_ts, max_ts)
                 
-                # TIER-A & TIER-B: Write detector-level and regime tables
-                # These provide diagnostic value independent of fused scores
-                
-                # TIER-B: Detector correlation (no fused dependency)
-                detector_corr_df = self._generate_detector_correlation(scores_df)
-                result = self.write_dataframe(detector_corr_df, tables_dir / "detector_correlation.csv",
-                                            sql_table="ACM_DetectorCorrelation" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # TIER-B: Calibration summary (no fused dependency)
-                calibration_df = self._generate_calibration_summary(scores_df, cfg)
-                result = self.write_dataframe(calibration_df, tables_dir / "calibration_summary.csv",
-                                              sql_table="ACM_CalibrationSummary" if force_sql else None,
-                                              add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
+                # Delete non-timeline tables by RunID (original behavior - safe for non-time-series)
+                self._bulk_delete_analytics_tables(non_timeline_tables)
 
-                # Write OMR per-sensor contributions (long format) when available
-                if omr_contributions is not None and not omr_contributions.empty:
-                    try:
-                        omr_long = self._generate_omr_contributions_long(scores_df, omr_contributions)
-                        # OMR-FIX: Ensure no NULL scores (causes SQL constraint violation)
-                        if "ContributionScore" in omr_long.columns:
-                            omr_long["ContributionScore"] = omr_long["ContributionScore"].fillna(0.0)
-                        
-                        result = self.write_dataframe(
-                            omr_long,
-                            tables_dir / "omr_contributions_long.csv",
-                            sql_table="ACM_OMRContributionsLong" if force_sql else None,
-                            add_created_at=True,
-                            non_numeric_cols={"SensorName"}
-                        )
-                        table_count += 1
-                        if result.get('sql_written'): sql_count += 1
-                    except Exception as e:
-                        Console.warn(f"Failed to write omr_contributions_long.csv: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-
-                # Fusion quality snapshot (weights + basic stats)
-                try:
-                    fusion_q_df = self._generate_fusion_quality_report(scores_df, cfg)
-                    if not fusion_q_df.empty:
-                        result = self.write_dataframe(
-                            fusion_q_df,
-                            tables_dir / "fusion_quality_report.csv",
-                            sql_table="ACM_FusionQualityReport" if force_sql else None,
-                            add_created_at=True
-                        )
-                        table_count += 1
-                        if result.get('sql_written'): sql_count += 1
-                    else:
-                        table_count += 1
-                except Exception as e:
-                    Console.warn(f"Failed to write fusion_quality_report.csv: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                
-                # TIER-A: Regime tables (if available, no fused dependency)
-                if has_regimes:
-                    Console.info("Writing Tier-A regime tables...", component="ANALYTICS")
-                    regime_occ_df = self._generate_regime_occupancy(scores_df)
-                    result = self.write_dataframe(regime_occ_df, tables_dir / "regime_occupancy.csv",
-                                                sql_table="ACM_RegimeOccupancy" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                    
-                    regime_trans_df = self._generate_regime_transition_matrix(scores_df)
-                    result = self.write_dataframe(regime_trans_df, tables_dir / "regime_transition_matrix.csv",
-                                                sql_table="ACM_RegimeTransitions" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                    
-                    regime_dwell_df = self._generate_regime_dwell_stats(scores_df)
-                    result = self.write_dataframe(regime_dwell_df, tables_dir / "regime_dwell_stats.csv",
-                                                sql_table="ACM_RegimeDwellStats" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                
-                # ANA-12: If fused missing, return after Tier-A/B tables
-                if not has_fused:
-                    Console.warn("No fused scores - Tier-C (health, defects, episodes) tables skipped", component="ANALYTICS")
-                    Console.info(f"Wrote {table_count} Tier-A/B tables ({sql_count} to SQL)", component="ANALYTICS")
-                    return {"csv_tables": table_count, "sql_tables": sql_count}
-                
-                # TIER-C: Fused-dependent tables (all below require 'fused' column)
-                Console.info("Writing Tier-C fused-dependent tables...", component="ANALYTICS")
-                
-                # 1. Health Timeline (enhanced with smoothing and quality flags)
-                health_df = self._generate_health_timeline(scores_df, cfg)
-                result = self.write_dataframe(health_df, tables_dir / "health_timeline.csv", 
-                                            sql_table="ACM_HealthTimeline" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-
-                # 1b. Health distribution over time (hourly buckets)
-                try:
-                    hdist_df = self._generate_health_distribution_over_time(scores_df)
+                # 1) ACM_HealthTimeline
+                if has_fused:
+                    health_df = self._generate_health_timeline(scores_df, cfg)
                     result = self.write_dataframe(
-                        hdist_df,
-                        tables_dir / "health_distribution_over_time.csv",
-                        sql_table="ACM_HealthDistributionOverTime" if force_sql else None,
-                        sql_columns={"Count": "BucketCount"},
-                        add_created_at=True
+                        health_df,
+                        "health_timeline",
+                        sql_table="ACM_HealthTimeline",
+                        add_created_at=True,
                     )
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                except Exception as e:
-                    Console.warn(f"Failed to write health_distribution_over_time.csv: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                
-                # 2. Regime Timeline (enhanced)  
-                if 'regime_label' in scores_df.columns:
+                    if result.get("sql_written"):
+                        sql_count += 1
+
+                # 2) ACM_RegimeTimeline
+                if has_regimes:
                     regime_df = self._generate_regime_timeline(scores_df)
-                    result = self.write_dataframe(regime_df, tables_dir / "regime_timeline.csv",
-                                                sql_table="ACM_RegimeTimeline" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
+                    result = self.write_dataframe(
+                        regime_df,
+                        "regime_timeline",
+                        sql_table="ACM_RegimeTimeline",
+                        add_created_at=True,
+                    )
+                    if result.get("sql_written"):
+                        sql_count += 1
 
-                # 2b. OMR timeline (if available)
-                if 'omr_z' in scores_df.columns:
-                    try:
-                        omr_tl_df = self._generate_omr_timeline(scores_df, cfg)
-                        result = self.write_dataframe(
-                            omr_tl_df,
-                            tables_dir / "omr_timeline.csv",
-                            sql_table="ACM_OMRTimeline" if force_sql else None,
-                            add_created_at=True
-                        )
-                        table_count += 1
-                        if result.get('sql_written'): sql_count += 1
-                    except Exception as e:
-                        Console.warn(f"Failed to write omr_timeline.csv: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
+                # 3) ACM_SensorDefects
+                if has_fused:
+                    sensor_defects_df = self._generate_sensor_defects(scores_df)
+                    result = self.write_dataframe(
+                        sensor_defects_df,
+                        "sensor_defects",
+                        sql_table="ACM_SensorDefects",
+                        add_created_at=True,
+                    )
+                    if result.get("sql_written"):
+                        sql_count += 1
 
-                    # Compact regime stats for dashboards
-                    try:
-                        regime_stats_df = self._generate_regime_stats(scores_df)
-                        result = self.write_dataframe(
-                            regime_stats_df,
-                            tables_dir / "regime_stats.csv",
-                            sql_table="ACM_RegimeStats" if force_sql else None,
-                            add_created_at=True
-                        )
-                        table_count += 1
-                        if result.get('sql_written'): sql_count += 1
-                    except Exception as e:
-                        Console.warn(f"Failed to write regime_stats.csv: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                
-                # 3. Contribution Now (current sensor importance)
-                contrib_now_df = self._generate_contrib_now(scores_df)
-                result = self.write_dataframe(contrib_now_df, tables_dir / "contrib_now.csv",
-                                            sql_table="ACM_ContributionCurrent" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # 4. Contribution Timeline (historical contributions)
-                contrib_timeline_df = self._generate_contrib_timeline(scores_df)
-                result = self.write_dataframe(contrib_timeline_df, tables_dir / "contrib_timeline.csv",
-                                            sql_table="ACM_ContributionTimeline" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # 5. Drift Series (CUSUM/drift detection)
-                if 'drift_z' in scores_df.columns or 'cusum_z' in scores_df.columns:
-                    drift_df = self._generate_drift_series(scores_df)
-                    result = self.write_dataframe(drift_df, tables_dir / "drift_series.csv",
-                                                sql_table="ACM_DriftSeries" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                
-                # 6. Threshold Crossings (anomaly events)
-                threshold_df = self._generate_threshold_crossings(scores_df)
-                result = self.write_dataframe(threshold_df, tables_dir / "threshold_crossings.csv",
-                                            sql_table="ACM_ThresholdCrossings" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # 7. Since When (alert start times)
-                since_when_df = self._generate_since_when(scores_df)
-                result = self.write_dataframe(since_when_df, tables_dir / "since_when.csv",
-                                            sql_table="ACM_SinceWhen" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # 8. Sensor Rank Now (current importance ranking)
-                sensor_rank_df = self._generate_sensor_rank_now(scores_df)
-                result = self.write_dataframe(sensor_rank_df, tables_dir / "sensor_rank_now.csv",
-                                            sql_table="ACM_SensorRanking" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # 9. Health Histogram (distribution)
-                health_hist_df = self._generate_health_histogram(scores_df)
-                result = self.write_dataframe(health_hist_df, tables_dir / "health_hist.csv",
-                                            sql_table="ACM_HealthHistogram" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-
-                # Daily fused profile (hour x weekday) for simplified dashboards
-                try:
-                    daily_profile_df = self._generate_daily_fused_profile(scores_df)
-                    if not daily_profile_df.empty:
-                        result = self.write_dataframe(
-                            daily_profile_df,
-                            tables_dir / "daily_fused_profile.csv",
-                            sql_table="ACM_DailyFusedProfile" if force_sql else None,
-                            sql_columns={"Count": "RecordCount"},
-                            add_created_at=True
-                        )
-                        table_count += 1
-                        if result.get('sql_written'): sql_count += 1
-                except Exception as e:
-                    Console.warn(f"Failed to write daily_fused_profile.csv: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                
-                # 11. Alert Age (duration tracking)
-                alert_age_df = self._generate_alert_age(scores_df)
-                result = self.write_dataframe(alert_age_df, tables_dir / "alert_age.csv",
-                                            sql_table="ACM_AlertAge" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # 12. Regime Stability (churn metrics)
-                if 'regime_label' in scores_df.columns:
-                    regime_stab_df = self._generate_regime_stability(scores_df)
-                    result = self.write_dataframe(regime_stab_df, tables_dir / "regime_stability.csv",
-                                                sql_table="ACM_RegimeStability" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                
-                # 13-15. Defect-Focused Tables (operator-friendly)
-                defect_summary_df = self._generate_defect_summary(scores_df, episodes_df)
-                result = self.write_dataframe(defect_summary_df, tables_dir / "defect_summary.csv",
-                                            sql_table="ACM_DefectSummary" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                defect_timeline_df = self._generate_defect_timeline(scores_df)
-                result = self.write_dataframe(defect_timeline_df, tables_dir / "defect_timeline.csv",
-                                            sql_table="ACM_DefectTimeline" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                sensor_defects_df = self._generate_sensor_defects(scores_df)
-                result = self.write_dataframe(sensor_defects_df, tables_dir / "sensor_defects.csv",
-                                            sql_table="ACM_SensorDefects" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                # 16-17. Health Zone Analysis
-                health_zone_df = self._generate_health_zone_by_period(scores_df)
-                result = self.write_dataframe(health_zone_df, tables_dir / "health_zone_by_period.csv",
-                                            sql_table="ACM_HealthZoneByPeriod" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-                
-                sensor_anomaly_df = self._generate_sensor_anomaly_by_period(scores_df)
-                result = self.write_dataframe(sensor_anomaly_df, tables_dir / "sensor_anomaly_by_period.csv",
-                                            sql_table="ACM_SensorAnomalyByPeriod" if force_sql else None,
-                                            add_created_at=True)
-                table_count += 1
-                if result.get('sql_written'): sql_count += 1
-
-                sensor_ready = sensor_zscores is not None and sensor_values is not None
+                # 4) ACM_SensorHotspots
+                sensor_ready = (sensor_zscores is not None) and (sensor_values is not None)
                 if sensor_ready:
-                    warn_threshold = float((cfg.get('regimes', {}) or {}).get('health', {}).get('fused_warn_z', 1.5) or 1.5)
-                    alert_threshold = float((cfg.get('regimes', {}) or {}).get('health', {}).get('fused_alert_z', 3.0) or 3.0)
-                    top_n = int((cfg.get('output', {}) or {}).get('sensor_hotspot_top_n', 25))
+                    warn_threshold = float(
+                        ((cfg.get("regimes", {}) or {}).get("health", {}) or {}).get("fused_warn_z", 1.5) or 1.5
+                    )
+                    alert_threshold = float(
+                        ((cfg.get("regimes", {}) or {}).get("health", {}) or {}).get("fused_alert_z", 3.0) or 3.0
+                    )
+                    top_n = int((cfg.get("output", {}) or {}).get("sensor_hotspot_top_n", 25))
 
                     sensor_hotspots_df = self._generate_sensor_hotspots_table(
-                        sensor_zscores if sensor_zscores is not None else pd.DataFrame(),
-                        sensor_values if sensor_values is not None else pd.DataFrame(),
-                        sensor_train_mean,
-                        sensor_train_std,
-                        warn_threshold,
-                        alert_threshold,
-                        top_n
+                        sensor_zscores=sensor_zscores,
+                        sensor_values=sensor_values,
+                        train_mean=sensor_train_mean,
+                        train_std=sensor_train_std,
+                        warn_z=warn_threshold,
+                        alert_z=alert_threshold,
+                        top_n=top_n,
                     )
+
                     result = self.write_dataframe(
                         sensor_hotspots_df,
-                        tables_dir / "sensor_hotspots.csv",
-                        sql_table="ACM_SensorHotspots" if force_sql else None,
+                        "sensor_hotspots",
+                        sql_table="ACM_SensorHotspots",
                         non_numeric_cols={"SensorName"},
-                        add_created_at=True
+                        add_created_at=True,
                     )
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
+                    if result.get("sql_written"):
+                        sql_count += 1
 
-                    # Normalized raw sensor timeline with anomaly flags and episode overlays
-                    try:
-                        norm_top_n = int((cfg.get('output', {}) or {}).get('sensor_normalized_top_n', 20) or 20)
-                        sensor_norm_df = self._generate_sensor_normalized_ts(
-                            sensor_values=sensor_values if sensor_values is not None else pd.DataFrame(),
-                            sensor_train_mean=sensor_train_mean,
-                            sensor_train_std=sensor_train_std,
-                            sensor_zscores=sensor_zscores if sensor_zscores is not None else pd.DataFrame(),
-                            episodes_df=episodes_df,
-                            warn_z=warn_threshold,
-                            alert_z=alert_threshold,
-                            top_n=norm_top_n
-                        )
-                        result = self.write_dataframe(
-                            sensor_norm_df,
-                            tables_dir / "sensor_normalized_ts.csv",
-                            sql_table="ACM_SensorNormalized_TS" if force_sql else None,
-                            non_numeric_cols={"SensorName", "AnomalyLevel"},
-                            add_created_at=True
-                        )
-                        table_count += 1
-                        if result.get('sql_written'): sql_count += 1
-                    except Exception as e:
-                        Console.warn(f"Sensor normalized timeline skipped: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
+                # 5) ACM_DataQuality (SQL-only)
+                if isinstance(data_quality_df, pd.DataFrame) and len(data_quality_df.columns):
+                    dq_df = data_quality_df.copy()
 
-                    sensor_timeline_df = self._generate_sensor_hotspot_timeline(
-                        sensor_zscores if sensor_zscores is not None else pd.DataFrame(),
-                        sensor_values,
-                        warn_threshold,
-                        alert_threshold,
-                        top_k=3
-                    )
+                    if "CheckName" not in dq_df.columns:
+                        dq_df["CheckName"] = "NullsBySensor"
+
+                    if "CheckResult" not in dq_df.columns:
+                        # PERFORMANCE: Vectorized check result derivation (replaces slow row-by-row apply)
+                        # Get Notes column (support both legacy lowercase and new PascalCase)
+                        notes_col = dq_df.get("Notes", dq_df.get("notes", pd.Series([""] * len(dq_df), index=dq_df.index)))
+                        notes_lower = notes_col.fillna("").astype(str).str.lower()
+                        
+                        # Get null percentages
+                        tr_pct = pd.to_numeric(dq_df.get("TrainNullPct", dq_df.get("train_null_pct", 0)), errors='coerce').fillna(0)
+                        sc_pct = pd.to_numeric(dq_df.get("ScoreNullPct", dq_df.get("score_null_pct", 0)), errors='coerce').fillna(0)
+                        max_pct = np.maximum(tr_pct, sc_pct)
+                        
+                        # Vectorized condition checks
+                        has_all_nulls = notes_lower.str.contains("all_nulls_train|all_nulls_score", regex=True)
+                        has_low_var = notes_lower.str.contains("low_variance_train", regex=False)
+                        
+                        # Build result: FAIL -> CAUTION -> OK (in priority order)
+                        check_result = pd.Series("OK", index=dq_df.index)
+                        check_result = check_result.where(~((max_pct >= 10) | has_low_var), "CAUTION")
+                        check_result = check_result.where(~((max_pct >= 80) | has_all_nulls), "FAIL")
+                        
+                        dq_df["CheckResult"] = check_result
+
+                    if "RunID" not in dq_df.columns:
+                        dq_df["RunID"] = self.run_id
+                    if "EquipID" not in dq_df.columns:
+                        dq_df["EquipID"] = self.equip_id
+
+                    # Standardize column naming to PascalCase for SQL
+                    col_mapping = {
+                        "sensor": "Sensor",
+                        "train_count": "TrainCount",
+                        "train_nulls": "TrainNulls",
+                        "train_null_pct": "TrainNullPct",
+                        "train_std": "TrainStd",
+                        "train_longest_gap": "TrainLongestGap",
+                        "train_flatline_span": "TrainFlatlineSpan",
+                        "train_min_ts": "TrainMinTs",
+                        "train_max_ts": "TrainMaxTs",
+                        "score_count": "ScoreCount",
+                        "score_nulls": "ScoreNulls",
+                        "score_null_pct": "ScoreNullPct",
+                        "score_std": "ScoreStd",
+                        "score_longest_gap": "ScoreLongestGap",
+                        "score_flatline_span": "ScoreFlatlineSpan",
+                        "score_min_ts": "ScoreMinTs",
+                        "score_max_ts": "ScoreMaxTs",
+                        "interp_method": "InterpMethod",
+                        "sampling_secs": "SamplingSecs",
+                        "notes": "Notes",
+                    }
+                    dq_df = dq_df.rename(columns={k: v for k, v in col_mapping.items() if k in dq_df.columns})
+
+                    expected_cols = [
+                        "Sensor", "TrainCount", "TrainNulls", "TrainNullPct", "TrainStd",
+                        "TrainLongestGap", "TrainFlatlineSpan", "TrainMinTs", "TrainMaxTs",
+                        "ScoreCount", "ScoreNulls", "ScoreNullPct", "ScoreStd",
+                        "ScoreLongestGap", "ScoreFlatlineSpan", "ScoreMinTs", "ScoreMaxTs",
+                        "InterpMethod", "SamplingSecs", "Notes",
+                        "RunID", "EquipID", "CheckName", "CheckResult",
+                    ]
+                    cols_to_keep = [c for c in expected_cols if c in dq_df.columns]
+                    dq_df = dq_df[cols_to_keep]
+
                     result = self.write_dataframe(
-                        sensor_timeline_df,
-                        tables_dir / "sensor_hotspot_timeline.csv",
-                        sql_table="ACM_SensorHotspotTimeline" if force_sql else None,
-                        non_numeric_cols={"SensorName", "Level"},
-                        add_created_at=True
+                        dq_df,
+                        "data_quality",
+                        sql_table="ACM_DataQuality",
+                        add_created_at=True,
                     )
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                
-                # 18. Already generated: data_quality.csv
-                
-                # 19. Drift Events
-                if 'drift_z' in scores_df.columns or 'cusum_z' in scores_df.columns:
-                    drift_events_df = self._generate_drift_events(scores_df)
-                    result = self.write_dataframe(drift_events_df, tables_dir / "drift_events.csv",
-                                                sql_table="ACM_DriftEvents" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-                
-                # 24. Culprit History (episode-based sensor culprit tracking)
-                if episodes_df is not None and not episodes_df.empty:
-                    culprit_hist_df = self._generate_culprit_history(scores_df, episodes_df)
-                    result = self.write_dataframe(culprit_hist_df, tables_dir / "culprit_history.csv",
-                                                sql_table="ACM_CulpritHistory" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
+                    if result.get("sql_written"):
+                        sql_count += 1
 
-                    # 25. Episode Metrics (episode statistical summary)
-                    episode_metrics_df = self._generate_episode_metrics(episodes_df)
-                    result = self.write_dataframe(episode_metrics_df, tables_dir / "episode_metrics.csv",
-                                                sql_table="ACM_EpisodeMetrics" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
+                Console.info(
+                    f"Generated analytics tables (SQL written: {sql_count})",
+                    component="ANALYTICS",
+                    equip_id=self.equip_id,
+                    run_id=self.run_id,
+                )
+                return {"sql_tables": sql_count}
 
-                    # 25b. Episode Diagnostics (per-episode troubleshooting metrics)
-                    episode_diagnostics_df = self._generate_episode_diagnostics(episodes_df, scores_df)
-                    result = self.write_dataframe(episode_diagnostics_df, tables_dir / "episode_diagnostics.csv",
-                                                sql_table="ACM_EpisodeDiagnostics" if force_sql else None,
-                                                add_created_at=True)
-                    table_count += 1
-                    if result.get('sql_written'): sql_count += 1
-
-                    # 25c. Episodes QC (run-level quality summary)
-                    try:
-                        episodes_qc_df = self._generate_episodes_qc(scores_df, episodes_df)
-                        # SCHEMA-FIX: Write to ACM_EpisodesQC (run-level summary), not ACM_Episodes (individual episodes)
-                        result = self.write_dataframe(episodes_qc_df, tables_dir / "episodes_qc.csv",
-                                             sql_table="ACM_EpisodesQC" if force_sql else None,
-                                             add_created_at=False)
-                        table_count += 1
-                        if result.get('sql_written'): sql_count += 1
-                    except Exception as e:
-                        Console.warn(f"Failed to write episodes_qc.csv: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                
-                # 26. Data Quality (already written separately, but ensure SQL write)
-                if force_sql:
-                    try:
-                        data_quality_path = tables_dir / "data_quality.csv"
-                        if data_quality_path.exists():
-                            dq_df = pd.read_csv(data_quality_path)
-                            # Ensure required SQL columns exist with safe defaults
-                            if 'CheckName' not in dq_df.columns:
-                                dq_df['CheckName'] = 'NullsBySensor'
-                            # Provide a likely-cased Sensor column if only lowercase exists
-                            if 'sensor' in dq_df.columns and 'Sensor' not in dq_df.columns:
-                                dq_df['Sensor'] = dq_df['sensor']
-                            # Derive a CheckResult when missing based on null percentages and notes
-                            if 'CheckResult' not in dq_df.columns:
-                                def _derive_result(row):
-                                    try:
-                                        notes = str(row.get('notes', '') or '').lower()
-                                        tr_pct = float(row.get('train_null_pct', 0) or 0)
-                                        sc_pct = float(row.get('score_null_pct', 0) or 0)
-                                        if 'all_nulls_train' in notes or 'all_nulls_score' in notes:
-                                            return 'FAIL'
-                                        if max(tr_pct, sc_pct) >= 80:
-                                            return 'FAIL'
-                                        if max(tr_pct, sc_pct) >= 10:
-                                            return 'CAUTION'
-                                        if 'low_variance_train' in notes:
-                                            return 'CAUTION'
-                                        return 'OK'
-                                    except Exception:
-                                        return 'OK'
-                                dq_df['CheckResult'] = dq_df.apply(_derive_result, axis=1)
-                            
-                            # Add required SQL columns that may be missing
-                            if 'RunID' not in dq_df.columns:
-                                dq_df['RunID'] = self.current_run_id
-                            if 'EquipID' not in dq_df.columns:
-                                dq_df['EquipID'] = self.equip_id
-                            
-                            # Rename 'sensor' to 'sensor' (already correct in table schema)
-                            # Select only the columns the table expects
-                            expected_cols = [
-                                'sensor', 'train_count', 'train_nulls', 'train_null_pct', 'train_std',
-                                'train_longest_gap', 'train_flatline_span', 'train_min_ts', 'train_max_ts',
-                                'score_count', 'score_nulls', 'score_null_pct', 'score_std',
-                                'score_longest_gap', 'score_flatline_span', 'score_min_ts', 'score_max_ts',
-                                'interp_method', 'sampling_secs', 'notes', 'RunID', 'EquipID', 'CheckName', 'CheckResult'
-                            ]
-                            # Keep only columns that exist in both dq_df and expected_cols
-                            cols_to_keep = [c for c in expected_cols if c in dq_df.columns]
-                            dq_df = dq_df[cols_to_keep]
-                            
-                            result = self.write_dataframe(
-                                dq_df,
-                                data_quality_path,
-                                sql_table="ACM_DataQuality",
-                                add_created_at=True
-                            )
-                            if result.get('sql_written'): sql_count += 1
-                    except Exception as e:
-                        Console.warn(f"Failed to write data_quality to SQL: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                
-                Console.info(f"Generated {table_count} comprehensive analytics tables", component="ANALYTICS")
-                Console.info(f"Written {sql_count} tables to SQL database", component="ANALYTICS")
-                return {"csv_tables": table_count, "sql_tables": sql_count}
-                
             except Exception as e:
-                Console.warn(f"Comprehensive table generation failed: {e}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
+                Console.warn(
+                    f"Analytics table generation failed: {e}",
+                    component="ANALYTICS",
+                    equip_id=self.equip_id,
+                    run_id=self.run_id,
+                    error_type=type(e).__name__,
+                    error=str(e)[:200],
+                )
                 import traceback
-                Console.warn(f"Error traceback: {traceback.format_exc()}", component="ANALYTICS", equip_id=self.equip_id, run_id=self.run_id)
-                return {"csv_tables": table_count, "sql_tables": sql_count}
-
-    def _generate_regime_stability(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate regime stability metrics (transition frequency, dwell time).
-        
-        Returns DataFrame with stability indicators.
-        """
-        if scores_df.empty or 'regime_label' not in scores_df.columns:
-            return pd.DataFrame(columns=['RunID', 'EquipID', 'Period', 'TransitionCount', 'AvgDwellTime', 'StabilityScore'])
-        
-        # Ensure timestamp
-        if 'Timestamp' in scores_df.columns:
-            ts_col = pd.to_datetime(scores_df['Timestamp'], errors='coerce')
-        else:
-            try:
-                ts_col = pd.to_datetime(scores_df.index, errors='coerce')
-            except Exception:
-                return pd.DataFrame(columns=['RunID', 'EquipID', 'Period', 'TransitionCount', 'AvgDwellTime', 'StabilityScore'])
-        
-        df = scores_df.copy()
-        df['Timestamp'] = ts_col
-        df['regime'] = df['regime_label'].fillna(-1)
-        
-        # Count transitions
-        transitions = (df['regime'] != df['regime'].shift()).sum() - 1  # -1 to exclude first row
-        
-        # Calculate average dwell time (hours)
-        if len(df) > 1:
-            total_time = (df['Timestamp'].max() - df['Timestamp'].min()).total_seconds() / 3600.0
-            avg_dwell = total_time / max(1, transitions)
-        else:
-            avg_dwell = 0.0
-        
-        # Stability score (inverse of transition frequency)
-        stability = 100.0 / (1.0 + transitions / max(1, len(df)))
-        
-        # Include MetricName to satisfy NOT NULL column requirement in ACM_RegimeStability
-        result = pd.DataFrame({
-            'RunID': [self.run_id],
-            'EquipID': [int(self.equip_id or 0)],
-            'MetricName': ['RegimeStability'],
-            # Use StabilityScore as MetricValue to satisfy NOT NULL schema and be meaningful
-            'MetricValue': [float(stability)],
-            'Period': ['full_window'],
-            'TransitionCount': [transitions],
-            'AvgDwellTime': [avg_dwell],
-            'StabilityScore': [stability]
-        })
-        
-        return result
-    
-    
-    def _generate_episode_severity_mapping(self, episodes_df: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Generate episodes severity mapping JSON with counts and color palette.
-        
-        OUT-28: Provides severity level metadata for downstream consumers
-        to understand severity distribution and rendering.
-        
-        Returns:
-            Dict with severity levels, color mapping, and counts
-        """
-        # CHART-12: Use centralized severity color palette
-        severity_levels = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-        color_map = SEVERITY_COLORS  # Centralized constant from top of file
-        
-        # Count episodes by severity
-        counts = {}
-        total_episodes = len(episodes_df)
-        
-        if 'severity' in episodes_df.columns:
-            severity_counts = episodes_df['severity'].str.upper().value_counts().to_dict()
-            for level in severity_levels:
-                counts[level] = severity_counts.get(level, 0)
-        else:
-            # No severity column - all defaults
-            for level in severity_levels:
-                counts[level] = 0
-        
-        # Validate counts sum
-        count_sum = sum(counts.values())
-        validation_status = "VALID" if count_sum == total_episodes else "MISMATCH"
-        
-        return {
-            "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "severity_levels": severity_levels,
-            "color_map": color_map,
-            "counts": counts,
-            "total_episodes": total_episodes,
-            "validation_status": validation_status,
-            "count_sum": count_sum
-        }
+                Console.warn(
+                    f"Traceback: {traceback.format_exc()}",
+                    component="ANALYTICS",
+                    equip_id=self.equip_id,
+                    run_id=self.run_id,
+                )
+                return {"sql_tables": sql_count}
 
     def _generate_health_timeline(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
         """
-        Generate enhanced health timeline with smoothing and quality flags.
+        Generate enhanced health timeline with smoothing, quality flags, and V11 confidence.
         
         Implements EMA smoothing + rate limiting to prevent unrealistic health jumps
         caused by sensor noise, missing data, or coldstart artifacts.
+        
+        V11: Adds Confidence column based on maturity state and data quality.
         
         Args:
             scores_df: DataFrame with fused Z-scores and timestamp index
@@ -3615,163 +4287,85 @@ class OutputManager:
             labels=['ALERT', 'WATCH', 'GOOD']
         )
         
-        ts_values = normalize_timestamp_series(scores_df.index).to_list()
-        return pd.DataFrame({
-            'Timestamp': ts_values,
-            'HealthIndex': smoothed_health.round(2).to_list(),
-            'RawHealthIndex': raw_health.round(2).to_list(),
-            'QualityFlag': quality_flag.astype(str).to_list(),
-            'HealthZone': zones.astype(str).to_list(),
-            'FusedZ': scores_df['fused'].round(4).to_list()
+        # V11: Compute confidence for each health reading - VECTORIZED for performance
+        confidence_values = [None] * len(scores_df)  # Default to None
+        if _CONFIDENCE_AVAILABLE and compute_health_confidence is not None:
+            try:
+                maturity_state = getattr(self, 'maturity_state', 'COLDSTART')
+                n_rows = len(scores_df)
+                
+                # PERFORMANCE FIX: Vectorized confidence computation
+                # Instead of calling compute_health_confidence per row, batch process
+                fused_z_array = scores_df['fused'].values
+                sample_counts = np.arange(1, n_rows + 1)
+                
+                # Compute confidence vectorized (if function supports arrays) or use fast loop
+                # Most confidence functions have similar structure, so we pre-compute common factors
+                confidence_values = []
+                
+                # Batch compute with minimal overhead - avoid function call overhead
+                # Base confidence from maturity state (constant for all rows)
+                maturity_base = {'COLDSTART': 0.3, 'LEARNING': 0.6, 'CONVERGED': 0.85, 'DEPRECATED': 0.7}.get(maturity_state, 0.5)
+                
+                # Vectorized computation using numpy (already imported at module level)
+                fused_z_abs = np.abs(fused_z_array)
+                
+                # Signal confidence: higher Z = higher confidence (anomaly is real)
+                signal_conf = np.minimum(fused_z_abs / 6.0, 1.0) * 0.3
+                
+                # Sample confidence: more samples = higher confidence
+                sample_conf = np.minimum(sample_counts / 1000.0, 1.0) * 0.2
+                
+                # Combined confidence (vectorized)
+                raw_conf = maturity_base * 0.5 + signal_conf + sample_conf
+                confidence_values = np.round(np.clip(raw_conf, 0.1, 0.95), 3).tolist()
+                
+            except Exception as e:
+                Console.warn(f"Failed to compute health confidence: {e}", component="HEALTH")
+                confidence_values = None  # Will be set as NaN in DataFrame
+        
+        # PERFORMANCE: Avoid .to_list() - use direct Series/array assignment
+        ts_series = normalize_timestamp_series(scores_df.index)
+        result_df = pd.DataFrame({
+            'Timestamp': ts_series.values,
+            'HealthIndex': smoothed_health.round(2).values,
+            'RawHealthIndex': raw_health.round(2).values,
+            'QualityFlag': quality_flag.astype(str).values,
+            'HealthZone': zones.astype(str).values,
+            'FusedZ': scores_df['fused'].round(4).values,
         })
+        # Add confidence column - handle both array and None cases
+        if confidence_values is not None:
+            result_df['Confidence'] = confidence_values
+        else:
+            result_df['Confidence'] = np.nan
+        return result_df
     
     def _generate_regime_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime timeline with confidence."""
+        """Generate regime timeline with confidence.
+        
+        V11: Adds AssignmentConfidence from regime_confidence column (computed in Phase 2).
+        PERFORMANCE: Uses .values instead of .to_list() for faster DataFrame construction.
+        """
         regimes = pd.to_numeric(scores_df['regime_label'], errors='coerce').astype('Int64')
-        ts_values = normalize_timestamp_series(scores_df.index).to_list()
-        return pd.DataFrame({
-            'Timestamp': ts_values,
-            'RegimeLabel': regimes.to_list(),
-            'RegimeState': (scores_df['regime_state'].astype(str).to_list() if 'regime_state' in scores_df.columns else [str('unknown')] * len(scores_df))
+        ts_series = normalize_timestamp_series(scores_df.index)
+        
+        # PERFORMANCE: Avoid .to_list() - build DataFrame with .values directly
+        result = pd.DataFrame({
+            'Timestamp': ts_series.values,
+            'RegimeLabel': regimes.values,
+            'RegimeState': (scores_df['regime_state'].astype(str).values if 'regime_state' in scores_df.columns else 'unknown')
         })
-    
-    def _generate_contrib_now(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate current sensor contributions."""
-        # Get latest z-scores for detectors
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        if not detector_cols:
-            return pd.DataFrame({'DetectorType': ['No detectors'], 'ContributionPct': [0.0], 'ZScore': [0.0]})
         
-        latest_scores = scores_df[detector_cols].iloc[-1].abs()
-        total = latest_scores.sum()
-        if total == 0:
-            contributions = pd.Series([100.0 / len(detector_cols)] * len(detector_cols), index=detector_cols)
-        else:
-            contributions = (latest_scores / total * 100).round(2)
+        # V11: Add assignment confidence if available (computed in regimes.py)
+        if 'regime_confidence' in scores_df.columns:
+            result['AssignmentConfidence'] = scores_df['regime_confidence'].round(3).values
         
-        df = pd.DataFrame({
-            'DetectorType': contributions.index,
-            'ContributionPct': contributions.values,
-            'ZScore': latest_scores.values
-        }).sort_values('ContributionPct', ascending=False)
-        # SQL-safe human-readable detector labels for dashboards
-        df['DetectorType'] = df['DetectorType'].apply(lambda c: get_detector_label(str(c), sql_safe=True))
-        return df
-    
-    def _generate_contrib_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate historical sensor contributions over time."""
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c not in ('fused', 'fused_z')]
-        if not detector_cols:
-            return pd.DataFrame({'Timestamp': [], 'DetectorType': [], 'ContributionPct': []})
-
-        # dynamic sampling to ~target points
-        n = len(scores_df)
-        step = max(1, n // AnalyticsConstants.TARGET_SAMPLING_POINTS)
-        sampled = scores_df[detector_cols].iloc[::step].abs()
-
-        totals = sampled.sum(axis=1)
-        valid = totals > 0
-        normalized = sampled[valid].div(totals[valid], axis=0) * 100
-
-        tmp = normalized.reset_index()
-        idx_col = tmp.columns[0]
-        long_df = tmp.melt(id_vars=idx_col, var_name='DetectorType', value_name='ContributionPct')
-        long_df.rename(columns={idx_col: 'Timestamp'}, inplace=True)
-        long_df['Timestamp'] = normalize_timestamp_series(long_df['Timestamp'])
-        long_df['ContributionPct'] = long_df['ContributionPct'].round(2)
-        # SQL-safe human-readable detector labels
-        long_df['DetectorType'] = long_df['DetectorType'].apply(lambda c: get_detector_label(str(c), sql_safe=True))
-        return long_df[['Timestamp', 'DetectorType', 'ContributionPct']]
-    
-    def _generate_defect_summary(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate executive defect summary."""
-        health_index = _health_index(scores_df['fused'])
-        current_health = health_index.iloc[-1]
-        avg_health = health_index.mean()
-        min_health = health_index.min()
-        
-        # Determine status
-        if current_health >= 85:
-            status = "HEALTHY"
-            severity = "LOW"
-        elif current_health >= 70:
-            status = "CAUTION"
-            severity = "MEDIUM"
-        else:
-            status = "ALERT"
-            severity = "HIGH"
-        
-        # Count episodes
-        episode_count = len(episodes_df) if episodes_df is not None and not episodes_df.empty else 0
-        
-        # Find worst sensor
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        if detector_cols:
-            latest_scores = scores_df[detector_cols].iloc[-1].abs()
-            worst_sensor = str(latest_scores.idxmax()).replace('_z', '')
-        else:
-            worst_sensor = "Unknown"
-        
-        # Count health zones
-        zones = pd.cut(health_index, bins=[0, 70, 85, 100], labels=['ALERT', 'WATCH', 'GOOD'])
-        zone_counts = zones.value_counts()
-        
-        return pd.DataFrame({
-            'Status': [status],
-            'Severity': [severity], 
-            'CurrentHealth': [round(current_health, 1)],
-            'AvgHealth': [round(avg_health, 1)],
-            'MinHealth': [round(min_health, 1)],
-            'EpisodeCount': [episode_count],
-            'WorstSensor': [worst_sensor],
-            'GoodCount': [zone_counts.get('GOOD', 0)],
-            'WatchCount': [zone_counts.get('WATCH', 0)],
-            'AlertCount': [zone_counts.get('ALERT', 0)]
-        })
-    
-    def _generate_defect_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate defect event timeline."""
-        health_index = _health_index(scores_df['fused'])
-        zones = pd.cut(health_index, bins=[0, 70, 85, 100], labels=['ALERT', 'WATCH', 'GOOD'])
-        
-        # Find peaks above threshold
-        peaks = zones != zones.shift()
-        peak_events = []
-        
-        zones_shifted = zones.shift()
-        
-        for idx in scores_df[peaks].index:
-            from_zone_val = zones_shifted.loc[idx]
-            # Handle scalar value properly
-            try:
-                from_zone = str(from_zone_val) if not pd.isna(from_zone_val) else 'START'
-            except (ValueError, TypeError):
-                from_zone = 'START'
-
-            # Use tz-naive UTC datetime for SQL compatibility
-            ts_naive = normalize_timestamp_scalar(idx)
-            to_zone = str(zones.loc[idx])
-            # FusedZ at this timestamp if available
-            fused_val = None
-            try:
-                if 'fused' in scores_df.columns:
-                    val = scores_df.loc[idx, 'fused']
-                    fused_val = round(float(cast(Any, val)), 4) if (val is not None and pd.notna(val)) else 0.0
-            except Exception:
-                fused_val = 0.0
-
-            peak_events.append({
-                'Timestamp': ts_naive,
-                'EventType': 'ZONE_CHANGE',
-                'FromZone': from_zone,
-                'ToZone': to_zone,
-                'HealthZone': to_zone,
-                'HealthAtEvent': round(health_index.loc[idx], 2),
-                'HealthIndex': round(health_index.loc[idx], 2),
-                'FusedZ': fused_val if fused_val is not None else 0.0
-            })
-        
-        return pd.DataFrame(peak_events)
+        # V11: Add regime version if available
+        if 'regime_version' in scores_df.columns:
+            result['RegimeVersion'] = scores_df['regime_version'].values
+            
+        return result
     
     def _generate_sensor_defects(self, scores_df: pd.DataFrame) -> pd.DataFrame:
         """Generate per-sensor defect analysis."""
@@ -3826,162 +4420,6 @@ class OutputManager:
         
         return pd.DataFrame(defect_data).sort_values('ViolationPct', ascending=False)
     
-    def _generate_health_zone_by_period(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate health zone distribution by time period (long format).
-        Emits one row per period per zone with required HealthZone.
-        """
-        health_index = _health_index(scores_df['fused'])
-        zones = pd.cut(health_index, bins=[0, 70, 85, 100], labels=['ALERT', 'WATCH', 'GOOD'])
-
-        idx_dates = pd.to_datetime(scores_df.index, errors='coerce')
-        daily_zones = pd.DataFrame({'date': idx_dates.to_series().dt.date, 'zone': zones})
-        zone_summary = daily_zones.groupby(['date', 'zone'], observed=False).size().unstack(fill_value=0)
-        totals = zone_summary.sum(axis=1)
-
-        rows = []
-        for date, counts in zone_summary.iterrows():
-            period_start = pd.Timestamp(str(date)).to_pydatetime()
-            total_points = int(cast(Any, totals.get(date, 0)))
-            for hz in ['GOOD', 'WATCH', 'ALERT']:
-                cnt = int(counts.get(hz, 0))
-                pct = (cnt / total_points * 100.0) if total_points > 0 else 0.0
-                rows.append({
-                    'PeriodStart': period_start,
-                    'PeriodType': 'DAY',
-                    'HealthZone': hz,
-                    'ZonePct': round(pct, 1),
-                    'ZoneCount': cnt,
-                    'TotalPoints': total_points,
-                    'Date': str(date),  # CSV readability; SQL will ignore if no column
-                })
-        return pd.DataFrame(rows)
-    
-    def _generate_sensor_anomaly_by_period(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate per-sensor anomaly rates by time period."""
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        results = []
-        
-        # Group by day
-        daily_data = scores_df.groupby(pd.to_datetime(scores_df.index, errors='coerce').to_series().dt.date)
-        
-        for date, day_data in daily_data:
-            for detector in detector_cols:
-                values = day_data[detector].abs()
-                anomaly_rate = (values > 2.0).mean() * 100
-                # PeriodStart: start of the day (tz-naive) to satisfy SQL NOT NULL
-                period_start = pd.Timestamp(str(date)).to_pydatetime()
-                
-                results.append({
-                    'Date': str(date),  # For CSV readability
-                    'PeriodStart': period_start,
-                    'PeriodType': 'DAY',
-                    'PeriodSeconds': 86400,
-                    'DetectorType': detector.replace('_z', ''),
-                    'AnomalyRatePct': round(anomaly_rate, 2),
-                    'MaxZ': round(values.max(), 4),
-                    'AvgZ': round(values.mean(), 4),
-                    'Points': len(values)
-                })
-        
-        return pd.DataFrame(results)
-
-    def _generate_sensor_normalized_ts(
-        self,
-        sensor_values: pd.DataFrame,
-        sensor_train_mean: Optional[pd.Series],
-        sensor_train_std: Optional[pd.Series],
-        sensor_zscores: pd.DataFrame,
-        episodes_df: Optional[pd.DataFrame],
-        warn_z: float,
-        alert_z: float,
-        top_n: int = 20,
-    ) -> pd.DataFrame:
-        """Build a long-form normalized sensor timeline with anomalies and episode overlays.
-
-        Columns: Timestamp, SensorName, NormValue, ZScore, AnomalyLevel, EpisodeActive
-        """
-        if sensor_values is None or sensor_values.empty:
-            return pd.DataFrame({
-                'Timestamp': [], 'SensorName': [], 'NormValue': [], 'ZScore': [],
-                'AnomalyLevel': [], 'EpisodeActive': []
-            })
-
-        # Determine sensors to include based on peak |z|
-        try:
-            abs_z = sensor_zscores.abs() if sensor_zscores is not None else None
-            if abs_z is not None and not abs_z.empty:
-                ranked = abs_z.max().sort_values(ascending=False)
-                sensors = ranked.index[:max(1, int(top_n))].tolist()
-            else:
-                sensors = list(sensor_values.columns)
-        except Exception:
-            sensors = list(sensor_values.columns)
-
-        values = sensor_values[sensors].copy()
-
-        # Compute normalized values using training mean/std when present; otherwise fallback to zscores or per-column std
-        if isinstance(sensor_train_mean, pd.Series) and isinstance(sensor_train_std, pd.Series):
-            mean = sensor_train_mean.reindex(values.columns)
-            std = sensor_train_std.reindex(values.columns).replace(0.0, np.nan)
-            norm = (values - mean) / std
-        elif sensor_zscores is not None and not sensor_zscores.empty:
-            norm = sensor_zscores[sensors].copy()
-        else:
-            col_mean = values.mean(axis=0)
-            col_std = values.std(axis=0).replace(0.0, np.nan)
-            norm = (values - col_mean) / col_std
-
-        norm = norm.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-        # ZScore source for anomaly marking
-        if sensor_zscores is not None and not sensor_zscores.empty:
-            z_for_mark = sensor_zscores[sensors].copy()
-        else:
-            z_for_mark = norm.copy()
-
-        # Build episode active mask per timestamp
-        episode_active = pd.Series(0, index=values.index)
-        if episodes_df is not None and not episodes_df.empty and {'start_ts', 'end_ts'}.issubset(set(episodes_df.columns)):
-            for _, ep in episodes_df.iterrows():
-                try:
-                    s = pd.to_datetime(ep['start_ts'], errors='coerce')
-                    e = pd.to_datetime(ep['end_ts'], errors='coerce')
-                    if pd.notna(s) and pd.notna(e) and e >= s:
-                        mask = (values.index >= s) & (values.index <= e)
-                        if mask.any():
-                            episode_active.loc[mask] = 1
-                except Exception:
-                    continue
-
-        # Melt into long format
-        df_norm = norm.copy()
-        df_norm.index.name = 'Timestamp'
-        long_norm = df_norm.reset_index().melt(id_vars=['Timestamp'], var_name='SensorName', value_name='NormValue')
-
-        df_z = z_for_mark.copy()
-        df_z.index.name = 'Timestamp'
-        long_z = df_z.reset_index().melt(id_vars=['Timestamp'], var_name='SensorName', value_name='ZScore')
-
-        out = long_norm.merge(long_z, on=['Timestamp', 'SensorName'], how='left')
-
-        # Map anomaly level
-        abs_z_vals = out['ZScore'].abs()
-        out['AnomalyLevel'] = np.where(abs_z_vals >= float(alert_z), 'ALERT',
-                                np.where(abs_z_vals >= float(warn_z), 'WARN', 'GOOD'))
-
-        # Attach episode flag
-        ep_flag = episode_active.reset_index()
-        ep_flag.columns = ['Timestamp', 'EpisodeActive']
-        out = out.merge(ep_flag, on='Timestamp', how='left')
-        out['EpisodeActive'] = out['EpisodeActive'].fillna(0).astype(int)
-
-        # Convert timestamps to naive local policy
-        out['Timestamp'] = out['Timestamp'].apply(normalize_timestamp_scalar)
-
-        # Order columns
-        out = out[['Timestamp', 'SensorName', 'NormValue', 'ZScore', 'AnomalyLevel', 'EpisodeActive']]
-        return out
-
     def _generate_sensor_hotspots_table(
         self,
         sensor_zscores: pd.DataFrame,
@@ -3992,7 +4430,7 @@ class OutputManager:
         alert_z: float,
         top_n: int
     ) -> pd.DataFrame:
-        """Summarize top sensors by peak z-score deviation."""
+        """Summarize top sensors by peak z-score deviation (vectorized)."""
         empty_schema = {
             'SensorName': [], 'MaxTimestamp': [], 'LatestTimestamp': [], 'MaxAbsZ': [],
             'MaxSignedZ': [], 'LatestAbsZ': [], 'LatestSignedZ': [], 'ValueAtPeak': [],
@@ -4003,56 +4441,71 @@ class OutputManager:
         if sensor_zscores is None or sensor_zscores.empty:
             return pd.DataFrame(empty_schema)
 
-        records: List[Dict[str, Any]] = []
-        for sensor in sensor_zscores.columns:
-            series = sensor_zscores[sensor].dropna()
-            if series.empty:
-                continue
-            abs_series = series.abs()
-            max_idx = abs_series.idxmax()
-            max_abs = float(abs_series.loc[max_idx])
-            max_signed = float(series.loc[max_idx])
-            latest_ts = series.index[-1]
-            latest_signed = float(series.iloc[-1])
-            latest_abs = abs(latest_signed)
-            above_warn = int((abs_series >= warn_z).sum())
-            above_alert = int((abs_series >= alert_z).sum()) if alert_z > 0 else 0
-
-            value_at_peak = None
-            latest_value = None
-            if sensor in sensor_values.columns:
-                try:
-                    value_at_peak = sensor_values.loc[max_idx, sensor]
-                except Exception:
-                    value_at_peak = sensor_values[sensor].reindex([max_idx]).iloc[-1]
-                try:
-                    latest_value = sensor_values.loc[latest_ts, sensor]
-                except Exception:
-                    latest_value = sensor_values[sensor].iloc[-1]
-
-            train_mean_val = (float(cast(Any, train_mean.get(sensor))) if isinstance(train_mean, pd.Series) and sensor in train_mean.index and pd.notna(train_mean.get(sensor)) else None)
-            train_std_val = (float(cast(Any, train_std.get(sensor))) if isinstance(train_std, pd.Series) and sensor in train_std.index and pd.notna(train_std.get(sensor)) else None)
-
-            records.append({
-                'SensorName': sensor,
-                'MaxTimestamp': normalize_timestamp_scalar(max_idx),
-                'LatestTimestamp': normalize_timestamp_scalar(latest_ts),
-                'MaxAbsZ': round(max_abs, 4),
-                'MaxSignedZ': round(max_signed, 4),
-                'LatestAbsZ': round(latest_abs, 4),
-                'LatestSignedZ': round(latest_signed, 4),
-                'ValueAtPeak': (float(cast(Any, value_at_peak)) if value_at_peak is not None and pd.notna(value_at_peak) else None),
-                'LatestValue': (float(cast(Any, latest_value)) if latest_value is not None and pd.notna(latest_value) else None),
-                'TrainMean': train_mean_val,
-                'TrainStd': train_std_val,
-                'AboveWarnCount': above_warn,
-                'AboveAlertCount': above_alert
-            })
-
-        if not records:
+        # Drop columns with all NaN
+        valid_cols = sensor_zscores.columns[sensor_zscores.notna().any()]
+        if len(valid_cols) == 0:
             return pd.DataFrame(empty_schema)
-
-        df = pd.DataFrame(records)
+        
+        zs = sensor_zscores[valid_cols]
+        abs_zs = zs.abs()
+        
+        # Vectorized aggregations
+        max_abs = abs_zs.max()  # Series: sensor -> max abs z
+        max_idx = abs_zs.idxmax()  # Series: sensor -> timestamp of max
+        
+        # Get latest timestamp per column (last non-NaN index)
+        latest_ts = pd.Series(index=valid_cols, dtype=object)
+        for c in valid_cols:
+            col_notna = zs[c].dropna()
+            latest_ts[c] = col_notna.index[-1] if len(col_notna) > 0 else pd.NaT
+        
+        # Signed value at max and latest
+        max_signed = pd.Series({c: zs.loc[max_idx[c], c] if pd.notna(max_idx[c]) else np.nan for c in valid_cols})
+        latest_signed = zs.iloc[-1]
+        latest_abs = latest_signed.abs()
+        
+        # Threshold counts (vectorized)
+        above_warn = (abs_zs >= warn_z).sum()
+        above_alert = (abs_zs >= alert_z).sum() if alert_z > 0 else pd.Series(0, index=valid_cols)
+        
+        # Value at peak and latest - vectorized lookup
+        value_at_peak = pd.Series(index=valid_cols, dtype=float)
+        latest_value = pd.Series(index=valid_cols, dtype=float)
+        common_cols = valid_cols.intersection(sensor_values.columns)
+        for c in common_cols:
+            if pd.notna(max_idx[c]) and max_idx[c] in sensor_values.index:
+                value_at_peak[c] = sensor_values.loc[max_idx[c], c]
+            if pd.notna(latest_ts[c]) and latest_ts[c] in sensor_values.index:
+                latest_value[c] = sensor_values.loc[latest_ts[c], c]
+        
+        # Train mean/std
+        train_mean_vals = pd.Series(index=valid_cols, dtype=float)
+        train_std_vals = pd.Series(index=valid_cols, dtype=float)
+        if isinstance(train_mean, pd.Series):
+            common = valid_cols.intersection(train_mean.index)
+            train_mean_vals[common] = train_mean[common]
+        if isinstance(train_std, pd.Series):
+            common = valid_cols.intersection(train_std.index)
+            train_std_vals[common] = train_std[common]
+        
+        # Build DataFrame directly
+        df = pd.DataFrame({
+            'SensorName': valid_cols,
+            'MaxTimestamp': [normalize_timestamp_scalar(max_idx[c]) for c in valid_cols],
+            'LatestTimestamp': [normalize_timestamp_scalar(latest_ts[c]) for c in valid_cols],
+            'MaxAbsZ': max_abs.round(4).values,
+            'MaxSignedZ': max_signed.round(4).values,
+            'LatestAbsZ': latest_abs.round(4).values,
+            'LatestSignedZ': latest_signed.round(4).values,
+            'ValueAtPeak': value_at_peak.values,
+            'LatestValue': latest_value.values,
+            'TrainMean': train_mean_vals.values,
+            'TrainStd': train_std_vals.values,
+            'AboveWarnCount': above_warn.astype(int).values,
+            'AboveAlertCount': above_alert.astype(int).values
+        })
+        
+        # Filter and sort
         df = df[df['MaxAbsZ'] >= warn_z]
         if df.empty:
             return pd.DataFrame(empty_schema)
@@ -4061,1051 +4514,256 @@ class OutputManager:
             df = df.head(top_n)
         return df.reset_index(drop=True)
 
-    def _generate_sensor_hotspot_timeline(
-        self,
-        sensor_zscores: pd.DataFrame,
-        sensor_values: Optional[pd.DataFrame],
-        warn_z: float,
-        alert_z: float,
-        top_k: int = 3
-    ) -> pd.DataFrame:
-        """Produce timestamped rows for the strongest sensor deviations."""
-        if sensor_zscores is None or sensor_zscores.empty:
-            return pd.DataFrame({
-                'Timestamp': [], 'SensorName': [], 'Rank': [], 'AbsZ': [],
-                'SignedZ': [], 'Value': [], 'Level': []
-            })
 
-        records: List[Dict[str, Any]] = []
-        abs_df = sensor_zscores.abs()
-        for ts, row in abs_df.iterrows():
-            top = row.nlargest(top_k)
-            for rank, (sensor, abs_val) in enumerate(top.items(), start=1):
-                if pd.isna(abs_val) or abs_val < warn_z:
-                    continue
-                ts_key = (pd.Timestamp(str(cast(Any, ts))) if not isinstance(ts, pd.Timestamp) else ts)
-                sensor_key = str(sensor)
-                signed_z = sensor_zscores.at[ts_key, sensor_key]
-                value = None
-                if sensor_values is not None and sensor in sensor_values.columns:
-                    try:
-                        value = sensor_values.at[ts_key, sensor_key]
-                    except Exception:
-                        value = sensor_values[sensor].reindex([ts]).iloc[-1]
-                level = 'ALERT' if abs_val >= alert_z else 'WARN'
-                records.append({
-                    'Timestamp': normalize_timestamp_scalar(ts),
-                    'SensorName': sensor,
-                    'Rank': rank,
-                    'AbsZ': round(float(abs_val), 4),
-                    'SignedZ': (round(float(cast(Any, signed_z)), 4) if signed_z is not None and pd.notna(signed_z) else None),
-                    'Value': (float(cast(Any, value)) if value is not None and pd.notna(value) else None),
-                    'Level': level
-                })
+# ============================================================================
+# Artifact Write Helpers (moved from acm_main.py v11.2)
+# ============================================================================
 
-        if not records:
-            return pd.DataFrame({
-                'Timestamp': [], 'SensorName': [], 'Rank': [], 'AbsZ': [],
-                'SignedZ': [], 'Value': [], 'Level': []
-            })
+def write_pca_artifacts(
+    output_manager: "OutputManager",
+    pca_detector: Any,
+    frame: pd.DataFrame,
+    train: pd.DataFrame,
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str,
+    spe_p95_train: float,
+    t2_p95_train: float,
+    cfg: Dict[str, Any],
+) -> Tuple[int, int, int]:
+    """Write PCA model, loadings, and metrics to SQL tables.
+    
+    This helper consolidates all PCA-related SQL writes:
+    - ACM_PCAModel: Model metadata, thresholds, scaler config
+    - ACM_PCALoadings: Component loadings per sensor
+    - ACM_PCAMetrics: P95 SPE/T2 score stats, variance explained
+    
+    Args:
+        output_manager: OutputManager instance for SQL writes
+        pca_detector: PCA detector instance with pca and scaler attributes
+        frame: Scored frame DataFrame with pca_spe and pca_t2 columns
+        train: Training DataFrame with sensor columns
+        run_id: Current run UUID
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        spe_p95_train: P95 SPE threshold from training data
+        t2_p95_train: P95 T2 threshold from training data
+        cfg: Config dictionary with runtime settings
+        
+    Returns:
+        Tuple of (rows_pca_model, rows_pca_load, rows_pca_metrics)
+    """
+    import json
+    rows_pca_model = rows_pca_load = rows_pca_metrics = 0
+    
+    try:
+        now_utc = pd.Timestamp.now()
+        pca_model = getattr(pca_detector, "pca", None)
 
-        df = pd.DataFrame(records).sort_values(['Timestamp', 'Rank']).reset_index(drop=True)
-        return df
-    
-    def _generate_detector_correlation(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate detector correlation matrix with SQL schema columns."""
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        if len(detector_cols) < 2:
-            return pd.DataFrame({'DetectorA': [], 'DetectorB': [], 'PearsonR': []})
+        # PCA Model row (TRAIN window used)
+        var_ratio = getattr(pca_model, "explained_variance_ratio_", None)
+        var_json = json.dumps(var_ratio.tolist()) if var_ratio is not None else "[]"
 
-        def _pair_hint(label_a: str, label_b: str) -> str:
-            labels = (label_a + " " + label_b).lower()
-            has_baseline = "baseline" in labels or "omr" in labels
-            has_corr = "correlation" in labels or "pca" in labels or "density" in labels or "isolationforest" in labels
-            has_spike = "time-series" in labels or "ar1" in labels
-            has_distance = "distance" in labels or "mahal" in labels
-            if has_baseline and has_corr:
-                return "Health baseline moving with a pattern change"
-            if has_baseline and has_spike:
-                return "Health baseline tracking repeated spikes"
-            if has_corr and has_distance:
-                return "Regime/cluster shift across many sensors"
-            if has_corr and has_spike:
-                return "Transient spikes align with pattern change"
-            if has_spike:
-                return "Temporal spikes seen by both detectors"
-            if has_baseline:
-                return "Overall health shifting with another detector"
-            return "Detectors reacting together; check shared cause"
-        
-        correlations = []
-        for i, det_a in enumerate(detector_cols):
-            for det_b in detector_cols[i+1:]:
-                sa = pd.to_numeric(scores_df[det_a], errors='coerce')
-                sb = pd.to_numeric(scores_df[det_b], errors='coerce')
-                std_a = float(sa.std(skipna=True))
-                std_b = float(sb.std(skipna=True))
-                if std_a == 0.0 or std_b == 0.0:
-                    r = 0.0
-                else:
-                    r = sa.corr(sb)
-                    r = 0.0 if pd.isna(r) else float(round(r, 4))
-                correlations.append({
-                    'DetectorA': get_detector_label(str(det_a), sql_safe=True),
-                    'DetectorB': get_detector_label(str(det_b), sql_safe=True),
-                    'PearsonR': r,
-                    'PairLabel': f"{get_detector_label(str(det_a), sql_safe=True)} <-> {get_detector_label(str(det_b), sql_safe=True)}",
-                    'DisturbanceHint': _pair_hint(get_detector_label(str(det_a), sql_safe=True), get_detector_label(str(det_b), sql_safe=True))
-                })
-        
-        return pd.DataFrame(correlations)
-    
-    def _generate_calibration_summary(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
-        """Generate detector calibration and saturation summary with SQL schema columns."""
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        calibration_data = []
-        
-        clip_z = cfg.get('thresholds', {}).get('self_tune', {}).get('clip_z', 30.0)
-        # ANA-07: Get mhal condition number from diagnostics
-        mhal_cond_num = cfg.get("_diagnostics", {}).get("mhal_cond_num", None)
-        
-        for detector in detector_cols:
-            values = scores_df[detector].abs()
-            saturation_pct = (values >= clip_z).mean() * 100
-            
-            row = {
-                'DetectorType': get_detector_label(str(detector), sql_safe=True),
-                'MeanZ': round(values.mean(), 4),
-                'StdZ': round(values.std(), 4),
-                'P95Z': round(values.quantile(0.95), 4),
-                'P99Z': round(values.quantile(0.99), 4),
-                'ClipZ': clip_z,
-                'SaturationPct': round(saturation_pct, 2)
-            }
-            
-            # ANA-07: Add mhal_cond_num column (only populated for mhal_z row)
-            # Ensure extreme values don't get written (already handled by output_manager SQL cleaning)
-            if detector == 'mhal_z' and mhal_cond_num is not None:
-                # Check for extreme values before rounding
-                if abs(mhal_cond_num) > 1e100:
-                    row['MahalCondNum'] = None  # Extreme value, set to NULL
-                else:
-                    row['MahalCondNum'] = round(mhal_cond_num, 2)
-            else:
-                row['MahalCondNum'] = None
-            
-            calibration_data.append(row)
-        
-        return pd.DataFrame(calibration_data)
-    
-    def _generate_regime_transition_matrix(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime transition counts and probabilities."""
-        regime_col = scores_df['regime_label']
-        transitions = []
-        
-        for i in range(1, len(regime_col)):
-            from_regime = regime_col.iloc[i-1]
-            to_regime = regime_col.iloc[i]
-            if from_regime != to_regime:  # Exclude self-transitions
-                transitions.append({'FromLabel': from_regime, 'ToLabel': to_regime})
-        
-        if not transitions:
-            return pd.DataFrame({'FromLabel': [], 'ToLabel': [], 'Count': [], 'Prob': []})
-        
-        # Count transitions
-        transition_df = pd.DataFrame(transitions)
-        transition_counts = transition_df.groupby(['FromLabel', 'ToLabel']).size().reset_index(name='Count')
-        
-        # Calculate probabilities
-        total_transitions = transition_counts['Count'].sum()
-        transition_counts['Prob'] = (transition_counts['Count'] / total_transitions).round(4)
-        
-        return transition_counts
-    
-    def _generate_regime_dwell_stats(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime dwell time statistics using real timestamps."""
-        rl = pd.Series(scores_df['regime_label'])
-        ts = pd.to_datetime(scores_df.index)
-        group = rl.ne(rl.shift()).cumsum()
-        runs = (pd.DataFrame({'regime': rl, 'ts': ts})
-                  .groupby(group)
-                  .agg(regime=('regime','first'), start=('ts','first'), end=('ts','last')))
-        runs['seconds'] = (runs['end'] - runs['start']).dt.total_seconds().clip(lower=0)
-        out = (runs.groupby('regime')['seconds']
-                  .agg(runs='count',
-                       mean_seconds='mean',
-                       median_seconds='median',
-                       min_seconds='min',
-                       max_seconds='max')
-                  .reset_index())
-        
-        # Rename columns for SQL compatibility
-        out = out.rename(columns={
-            'regime': 'RegimeLabel',
-            'runs': 'Runs',
-            'mean_seconds': 'MeanSeconds',
-            'median_seconds': 'MedianSeconds',
-            'min_seconds': 'MinSeconds',
-            'max_seconds': 'MaxSeconds'
-        })
-        
-        return out
-    
-    def _generate_drift_events(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate significant drift events from CUSUM series."""
-        drift_col = 'cusum_z' if 'cusum_z' in scores_df.columns else 'drift_z'
-        if drift_col not in scores_df.columns:
-            return pd.DataFrame({'Timestamp': [], 'Value': [], 'SegmentStart': [], 'SegmentEnd': []})
-        
-        drift_values = scores_df[drift_col].abs()
-        threshold = 3.0  # Threshold for significant drift events
-        
-        # Find peaks above threshold
-        peaks = drift_values > threshold
-        peak_events = []
-        
-        if peaks.any():
-            # Find continuous segments above threshold
-            in_segment = False
-            segment_start = None
-            
-            for idx in peaks.index:
-                is_peak = peaks.loc[idx]
-                if is_peak and not in_segment:
-                    segment_start = idx
-                    in_segment = True
-                elif not is_peak and in_segment:
-                    peak_events.append({
-                        'Timestamp': normalize_timestamp_scalar(idx),
-                        'Value': round(drift_values.loc[segment_start:idx].max(), 4),
-                        'SegmentStart': normalize_timestamp_scalar(segment_start),
-                        'SegmentEnd': normalize_timestamp_scalar(idx)
-                    })
-                    in_segment = False
-            
-            # Handle final segment if it ends with a peak
-            if in_segment:
-                final_idx = scores_df.index[-1]
-                peak_events.append({
-                    'Timestamp': normalize_timestamp_scalar(final_idx),
-                    'Value': round(drift_values.loc[segment_start:final_idx].max(), 4),
-                    'SegmentStart': normalize_timestamp_scalar(segment_start),
-                    'SegmentEnd': normalize_timestamp_scalar(final_idx)
-                })
-        
-        return pd.DataFrame(peak_events)
-    
-    def _generate_drift_series(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate drift series timeline."""
-        drift_col = 'cusum_z' if 'cusum_z' in scores_df.columns else 'drift_z'
-        if drift_col not in scores_df.columns:
-            return pd.DataFrame({'Timestamp': [], 'DriftValue': []})
-        ts_values = normalize_timestamp_series(scores_df.index).to_list()
-        drift_values = scores_df[drift_col].round(4).to_list()
-        return pd.DataFrame({
-            'Timestamp': ts_values,
-            'DriftValue': drift_values
-        })
-    
-    def _generate_threshold_crossings(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate threshold crossing events."""
-        threshold = 2.0  # Standard threshold
-        crossings = []
-        
-        # Check fused score crossings
-        fused_high = scores_df['fused'] > threshold
-        crossing_points = fused_high != fused_high.shift()
-        
-        for idx in scores_df[crossing_points].index:
-            crossings.append({
-                'Timestamp': normalize_timestamp_scalar(idx),
-                'DetectorType': 'fused',
-                'Threshold': threshold,
-                'ZScore': round(float(cast(Any, scores_df.loc[idx, 'fused'])), 4),
-                'Direction': 'up' if float(cast(Any, scores_df.loc[idx, 'fused'])) > threshold else 'down'
-            })
-        
-        return pd.DataFrame(crossings)
-    
-    def _generate_since_when(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate alert start times summary."""
-        first_alert = scores_df[scores_df['fused'] > 2.0].index.min() if len(scores_df[scores_df['fused'] > 2.0]) > 0 else None
-        
-        if first_alert:
-            duration_hours = (scores_df.index.max() - first_alert).total_seconds() / 3600
-            return pd.DataFrame({
-                'RunID': [self.run_id],
-                'EquipID': [int(self.equip_id) if self.equip_id else 0],
-                'AlertZone': ['ALERT'],
-                'DurationHours': [round(duration_hours, 2)],
-                'StartTimestamp': [normalize_timestamp_scalar(first_alert)],
-                'RecordCount': [len(scores_df[scores_df['fused'] > 2.0])]
-            })
+        # Capture actual scaler type from PCA detector
+        scaler_name = pca_detector.scaler.__class__.__name__ if hasattr(pca_detector, 'scaler') else "StandardScaler"
+        scaler_params = {}
+        if hasattr(pca_detector, 'scaler'):
+            scaler_params["with_mean"] = getattr(pca_detector.scaler, 'with_mean', True)
+            scaler_params["with_std"] = getattr(pca_detector.scaler, 'with_std', True)
         else:
-            return pd.DataFrame({
-                'RunID': [self.run_id],
-                'EquipID': [int(self.equip_id) if self.equip_id else 0],
-                'AlertZone': ['GOOD'],
-                'DurationHours': [0.0],
-                'StartTimestamp': [None],
-                'RecordCount': [0]
-            })
-
-    def _generate_episodes_qc(self, scores_df: pd.DataFrame, episodes_df: pd.DataFrame) -> pd.DataFrame:
-        """Summarize episode quality for batch-to-batch tracking.
-
-        Columns: RunID, EquipID, EpisodeCount, MedianDurationMinutes, CoveragePct,
-                 TimeInAlertPct, MaxFusedZ, AvgFusedZ
-        """
-        if episodes_df is None or episodes_df.empty:
-            return pd.DataFrame({
-                'RunID': [self.run_id],
-                'EquipID': [int(self.equip_id) if self.equip_id else 0],
-                'EpisodeCount': [0],
-                'MedianDurationMinutes': [0.0],
-                'CoveragePct': [0.0],
-                'TimeInAlertPct': [0.0],
-                'MaxFusedZ': [float('nan')],
-                'AvgFusedZ': [float('nan')],
-            })
-
-        ep_count = int(len(episodes_df))
-        durations_h = (pd.to_numeric(episodes_df['duration_hours'], errors='coerce') if 'duration_hours' in episodes_df.columns else pd.Series([], dtype=float))
-        median_minutes = float(np.nanmedian(durations_h) * 60.0) if len(durations_h) else 0.0
-
-        # Coverage: fraction of timeline covered by episodes (approx using start/end)
-        if {'start_ts','end_ts'}.issubset(set(episodes_df.columns)) and len(scores_df.index):
-            t0 = scores_df.index.min()
-            t1 = scores_df.index.max()
-            total_secs = max(1.0, (t1 - t0).total_seconds())
-            covered = 0.0
-            for _, ep in episodes_df.iterrows():
-                try:
-                    s = pd.to_datetime(ep['start_ts'], errors='coerce')
-                    e = pd.to_datetime(ep['end_ts'], errors='coerce')
-                    if pd.notna(s) and pd.notna(e):
-                        s = max(s, t0); e = min(e, t1)
-                        if e > s:
-                            covered += (e - s).total_seconds()
-                except Exception:
-                    pass
-            coverage_pct = float(covered / total_secs * 100.0)
-        else:
-            coverage_pct = 0.0
-
-        fused = (pd.to_numeric(scores_df['fused'], errors='coerce') if 'fused' in scores_df.columns else pd.Series(dtype=float))
-        if len(fused):
-            time_in_alert_pct = float((fused > 2.0).mean() * 100.0)
-            max_fused = float(np.nanmax(fused))
-            avg_fused = float(np.nanmean(fused))
-        else:
-            time_in_alert_pct = 0.0
-            max_fused = float('nan')
-            avg_fused = float('nan')
-
-        return pd.DataFrame([{
-            'RunID': self.run_id,
-            'EquipID': int(self.equip_id) if self.equip_id else 0,
-            'EpisodeCount': ep_count,
-            'MedianDurationMinutes': round(median_minutes, 2),
-            'CoveragePct': round(coverage_pct, 2),
-            'TimeInAlertPct': round(time_in_alert_pct, 2),
-            'MaxFusedZ': max_fused,
-            'AvgFusedZ': avg_fused,
-        }])
-    def _generate_sensor_rank_now(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate current sensor importance ranking."""
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        if not detector_cols:
-            return pd.DataFrame({'DetectorType': [], 'RankPosition': [], 'ContributionPct': [], 'ZScore': []})
+            scaler_params = {"with_mean": True, "with_std": True}
         
-        # Use latest values for ranking
-        latest_scores = scores_df[detector_cols].iloc[-1].abs()
-        ranked = latest_scores.sort_values(ascending=False)
-        
-        # Calculate contributions as percentages
-        total = ranked.sum()
-        contributions = (ranked / total * 100).round(2) if total > 0 else pd.Series([0] * len(ranked), index=ranked.index)
-        
-        return pd.DataFrame({
-            'DetectorType': ranked.index,
-            'RankPosition': range(1, len(ranked) + 1),
-            'ContributionPct': contributions.values,
-            'ZScore': ranked.values
-        })
-    
-    def _generate_regime_occupancy(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime time occupancy statistics with consistent label typing.
-
-        Ensures labels are numeric (Int64) to align with timeline outputs and
-        includes all observed labels present in the frame.
-        """
-        if 'regime_label' not in scores_df.columns or len(scores_df) == 0:
-            return pd.DataFrame({'RegimeLabel': [], 'RecordCount': [], 'Percentage': []})
-
-        regimes = pd.to_numeric(scores_df['regime_label'], errors='coerce').dropna().astype('Int64')
-        if regimes.empty:
-            return pd.DataFrame({'RegimeLabel': [], 'RecordCount': [], 'Percentage': []})
-
-        counts = regimes.value_counts().sort_index()
-        total = counts.sum() if len(counts) else 0
-        # Dwell approximation
-        runs = []
-        cur = None
-        start = None
-        for ts, lab in zip(scores_df.index, regimes):
-            if pd.isna(lab):
-                continue
-            if cur is None:
-                cur, start = lab, ts
-                continue
-            if lab != cur:
-                runs.append((int(cur), (ts - start).total_seconds()))
-                cur, start = lab, ts
-        if cur is not None and start is not None and len(scores_df.index):
-            runs.append((int(cur), (scores_df.index[-1] - start).total_seconds()))
-        dwell = pd.DataFrame(runs, columns=['RegimeLabel', 'DwellSeconds']) if runs else pd.DataFrame(columns=['RegimeLabel', 'DwellSeconds'])
-        stats = []
-        for lab, cnt in counts.items():
-            try:
-                lab_int = int(str(lab))
-            except Exception:
-                continue
-            sel = scores_df['regime_label'] == lab
-            fvals = pd.to_numeric(scores_df.loc[sel, 'fused'], errors='coerce') if 'fused' in scores_df.columns else pd.Series(dtype=float)
-            fused_mean = float(fvals.mean()) if len(fvals) else float('nan')
-            fused_p90 = float(np.nanpercentile(fvals, 90)) if len(fvals) else float('nan')
-            avg_dwell = float(dwell[dwell['RegimeLabel'] == lab_int]['DwellSeconds'].mean()) if not dwell.empty else float('nan')
-            occ = float(cnt / total * 100.0) if total > 0 else 0.0
-            stats.append({
-                'RegimeLabel': lab_int,
-                'RecordCount': int(cnt),
-                'Percentage': round(occ, 2),
-                'AvgDwellSeconds': round(avg_dwell, 1) if np.isfinite(avg_dwell) else None,
-                'FusedMean': fused_mean,
-                'FusedP90': fused_p90,
-            })
-        return pd.DataFrame(stats).sort_values('RegimeLabel')
-
-
-    def _generate_fusion_quality_report(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
-        """Produce a simple fusion quality snapshot.
-
-        Columns: Detector, Weight, Present, MeanZ, MaxZ, Points
-        """
-        rows: List[Dict[str, Any]] = []
-        weights = ((cfg.get('fusion', {}) or {}).get('weights', {}) or {})
-        # Detector columns typically end with _z (including fused)
-        zcols = [c for c in scores_df.columns if c.endswith('_z') or c == 'fused']
-        stats = {}
-        for c in zcols:
-            s = pd.to_numeric(scores_df[c], errors='coerce')
-            stats[c] = {
-                'MeanZ': float(np.nanmean(s)) if len(s) else float('nan'),
-                'MaxZ': float(np.nanmax(s)) if len(s) else float('nan'),
-                'Points': int(len(s))
-            }
-        # Normalize common keys (e.g., omr_z vs omr)
-        def _norm_key(k: str) -> str:
-            return k if k in zcols else (k + '_z' if (k + '_z') in zcols else k)
-        for det, w in weights.items():
-            key = _norm_key(str(det))
-            present = key in zcols
-            det_stats = stats.get(key, {'MeanZ': float('nan'), 'MaxZ': float('nan'), 'Points': 0})
-            # Use SQL-safe human-readable labels
-            detector_label = get_detector_label(key, sql_safe=True)
-            rows.append({
-                'Detector': detector_label,
-                'Weight': float(w) if w is not None else 0.0,
-                'Present': bool(present),
-                **det_stats
-            })
-        # Add any present detectors not listed in weights for visibility
-        for c in zcols:
-            detector_label = get_detector_label(c, sql_safe=True)
-            if detector_label not in [r['Detector'] for r in rows]:
-                rows.append({'Detector': detector_label, 'Weight': 0.0, 'Present': True, **stats.get(c, {})})
-        return pd.DataFrame(rows)
-
-    def _generate_health_distribution_over_time(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Hourly health distribution percentiles to align with heatmaps.
-
-        Columns: BucketStart, BucketSeconds, FusedP50, FusedP75, FusedP90, FusedP95,
-                 HealthP50, HealthP10, Count
-        """
-        if 'fused' not in scores_df.columns or scores_df.empty:
-            return pd.DataFrame(columns=['BucketStart','BucketSeconds','FusedP50','FusedP75','FusedP90','FusedP95','HealthP50','HealthP10','Count'])
-        idx = pd.DatetimeIndex(scores_df.index)
-        fused = pd.to_numeric(scores_df['fused'], errors='coerce')
-        health = _health_index(fused)
-        df = pd.DataFrame({'fused': fused, 'health': health}, index=idx)
-        df = df[~df.index.isna()]
-        if df.empty:
-            return pd.DataFrame(columns=['BucketStart','BucketSeconds','FusedP50','FusedP75','FusedP90','FusedP95','HealthP50','HealthP10','Count'])
-        hourly = df.groupby([idx.year, idx.month, idx.day, idx.hour])
-        rows = []
-        for (y, m, d, h), grp in hourly:
-            bucket_start = pd.Timestamp(year=int(y), month=int(m), day=int(d), hour=int(h))
-            fvals = pd.to_numeric(grp['fused'], errors='coerce').dropna()
-            hvals = pd.to_numeric(grp['health'], errors='coerce').dropna()
-            rows.append({
-                'BucketStart': bucket_start,
-                'BucketSeconds': 3600,
-                'FusedP50': float(np.nanpercentile(fvals, 50)) if len(fvals) else float('nan'),
-                'FusedP75': float(np.nanpercentile(fvals, 75)) if len(fvals) else float('nan'),
-                'FusedP90': float(np.nanpercentile(fvals, 90)) if len(fvals) else float('nan'),
-                'FusedP95': float(np.nanpercentile(fvals, 95)) if len(fvals) else float('nan'),
-                'HealthP50': float(np.nanpercentile(hvals, 50)) if len(hvals) else float('nan'),
-                'HealthP10': float(np.nanpercentile(hvals, 10)) if len(hvals) else float('nan'),
-                'Count': int(len(grp))
-            })
-        out = pd.DataFrame(rows)
-        if not out.empty:
-            out['BucketStart'] = normalize_timestamp_series(out['BucketStart'])
-        return out
-
-    def _generate_omr_timeline(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
-        """Generate OMR timeline with weight annotation when available."""
-        ts_values = normalize_timestamp_series(scores_df.index).to_list()
-        omr_series = (pd.to_numeric(scores_df['omr_z'], errors='coerce') if 'omr_z' in scores_df.columns else pd.Series(dtype=float))
-        try:
-            weights = (cfg.get('fusion', {}) or {}).get('weights', {})
-            omr_weight = float(weights.get('omr_z', weights.get('omr', 0.0)))
-        except Exception:
-            omr_weight = 0.0
-        return pd.DataFrame({
-            'Timestamp': ts_values,
-            'OMR_Z': omr_series.round(4).to_list(),
-            'OMR_Weight': [omr_weight] * len(ts_values)
-        })
-
-    def write_threshold_metadata(
-        self,
-        equip_id: int,
-        threshold_type: str,
-        threshold_value: Union[float, Dict[int, float]],
-        calculation_method: str,
-        sample_count: Optional[int] = None,
-        train_start: Optional[datetime] = None,
-        train_end: Optional[datetime] = None,
-        config_signature: Optional[str] = None,
-        notes: Optional[str] = None
-    ) -> None:
-        """
-        Persist adaptive threshold metadata to ACM_ThresholdMetadata table.
-        
-        Args:
-            equip_id: Equipment identifier
-            threshold_type: Type of threshold ('fused_alert_z', 'fused_warn_z', etc.)
-            threshold_value: Threshold value (float for global, dict for per-regime)
-            calculation_method: Method used ('quantile_99.7', 'mad_3sigma', 'hybrid', etc.)
-            sample_count: Number of training samples used
-            train_start: Training data start time
-            train_end: Training data end time
-            config_signature: Config hash for invalidation
-            notes: Optional explanation
-            
-        Example:
-            # Global threshold
-            output_manager.write_threshold_metadata(
-                equip_id=1,
-                threshold_type='fused_alert_z',
-                threshold_value=3.2,
-                calculation_method='quantile_99.7',
-                sample_count=5000
-            )
-            
-            # Per-regime thresholds
-            output_manager.write_threshold_metadata(
-                equip_id=1,
-                threshold_type='fused_alert_z',
-                threshold_value={0: 2.8, 1: 3.5, 2: 2.3},
-                calculation_method='mad_3sigma',
-                sample_count=5000
-            )
-        """
-        if self.sql_client is None:
-            Console.warn("SQL client not available - skipping threshold metadata write", component="THRESHOLD", equip_id=equip_id, threshold_type=threshold_type)
-            return
-            
-        try:
-            # Mark old thresholds as inactive for this equipment/threshold_type
-            with self.sql_client.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE ACM_ThresholdMetadata 
-                    SET IsActive = 0 
-                    WHERE EquipID = ? AND ThresholdType = ?
-                    """,
-                    (equip_id, threshold_type)
-                )
-            
-            # Prepare rows to insert
-            rows = []
-            if isinstance(threshold_value, dict):
-                # Per-regime thresholds
-                for regime_id, thresh_val in threshold_value.items():
-                    rows.append({
-                        'EquipID': equip_id,
-                        'RegimeID': regime_id if regime_id >= 0 else None,
-                        'ThresholdType': threshold_type,
-                        'ThresholdValue': float(thresh_val),
-                        'CalculationMethod': calculation_method,
-                        'SampleCount': sample_count,
-                        'TrainStartTime': train_start,
-                        'TrainEndTime': train_end,
-                        'ConfigSignature': config_signature,
-                        'IsActive': 1,
-                        'Notes': notes
-                    })
-            else:
-                # Global threshold
-                rows.append({
-                    'EquipID': equip_id,
-                    'RegimeID': None,
-                    'ThresholdType': threshold_type,
-                    'ThresholdValue': float(threshold_value),
-                    'CalculationMethod': calculation_method,
-                    'SampleCount': sample_count,
-                    'TrainStartTime': train_start,
-                    'TrainEndTime': train_end,
-                    'ConfigSignature': config_signature,
-                    'IsActive': 1,
-                    'Notes': notes
-                })
-            
-            # Insert new thresholds directly via cursor for reliability
-            # Ensure CreatedAt and RunID present
-            created_at = pd.Timestamp.now().tz_localize(None)
-            for r in rows:
-                r['CreatedAt'] = created_at
-                # Ensure EquipID set
-                r['EquipID'] = equip_id
-            
-            insert_sql = (
-                "INSERT INTO ACM_ThresholdMetadata (EquipID, RegimeID, ThresholdType, ThresholdValue, "
-                "CalculationMethod, SampleCount, TrainStartTime, TrainEndTime, CreatedAt, ConfigSignature, "
-                "IsActive, Notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            params = [
-                (
-                    r.get('EquipID'),
-                    r.get('RegimeID'),
-                    r.get('ThresholdType'),
-                    r.get('ThresholdValue'),
-                    r.get('CalculationMethod'),
-                    r.get('SampleCount'),
-                    r.get('TrainStartTime'),
-                    r.get('TrainEndTime'),
-                    r.get('CreatedAt'),
-                    r.get('ConfigSignature'),
-                    r.get('IsActive'),
-                    r.get('Notes')
-                ) for r in rows
-            ]
-            with self.sql_client.cursor() as cur:
-                cur.executemany(insert_sql, params)
-            
-            Console.info(f"Threshold metadata written: {threshold_type} = "
-                        f"{threshold_value if not isinstance(threshold_value, dict) else f'{len(threshold_value)} regimes'} "
-                        f"({calculation_method})",
-                        component="THRESHOLD")
-            
-        except Exception as e:
-            Console.error(f"Failed to write threshold metadata: {e}", component="THRESHOLD", equip_id=equip_id, threshold_type=threshold_type, error_type=type(e).__name__, error=str(e)[:200])
-    
-    def read_threshold_metadata(
-        self,
-        equip_id: int,
-        threshold_type: str,
-        regime_id: Optional[int] = None
-    ) -> Optional[float]:
-        """
-        Read latest active threshold from ACM_ThresholdMetadata.
-        
-        Args:
-            equip_id: Equipment identifier
-            threshold_type: Type of threshold ('fused_alert_z', 'fused_warn_z', etc.)
-            regime_id: Optional regime ID (None for global threshold)
-            
-        Returns:
-            Threshold value if found, None otherwise
-            
-        Example:
-            # Read global threshold
-            threshold = output_manager.read_threshold_metadata(
-                equip_id=1,
-                threshold_type='fused_alert_z'
-            )
-            
-            # Read regime-specific threshold
-            threshold = output_manager.read_threshold_metadata(
-                equip_id=1,
-                threshold_type='fused_alert_z',
-                regime_id=2
-            )
-        """
-        if self.sql_client is None:
-            Console.warn("SQL client not available - cannot read threshold metadata", component="THRESHOLD", equip_id=equip_id, threshold_type=threshold_type)
-            return None
-            
-        try:
-            with self.sql_client.get_cursor() as cur:
-                if regime_id is not None:
-                    # Regime-specific lookup
-                    cur.execute(
-                        """
-                        SELECT TOP 1 ThresholdValue
-                        FROM ACM_ThresholdMetadata
-                        WHERE EquipID = ? 
-                          AND ThresholdType = ?
-                          AND RegimeID = ?
-                          AND IsActive = 1
-                        ORDER BY CreatedAt DESC
-                        """,
-                        (equip_id, threshold_type, regime_id)
-                    )
-                else:
-                    # Global lookup (RegimeID IS NULL)
-                    cur.execute(
-                        """
-                        SELECT TOP 1 ThresholdValue
-                        FROM ACM_ThresholdMetadata
-                        WHERE EquipID = ? 
-                          AND ThresholdType = ?
-                          AND RegimeID IS NULL
-                          AND IsActive = 1
-                        ORDER BY CreatedAt DESC
-                        """,
-                        (equip_id, threshold_type)
-                    )
-                
-                row = cur.fetchone()
-                if row:
-                    return float(row[0])
-                return None
-                
-        except Exception as e:
-            Console.error(f"Failed to read threshold metadata: {e}", component="THRESHOLD", equip_id=equip_id, threshold_type=threshold_type, error_type=type(e).__name__, error=str(e)[:200])
-            return None
-
-    # ========================================================================
-    # v10.1.0 Regime-Conditioned Forecasting Tables
-    # ========================================================================
-    
-    def write_rul_by_regime(
-        self,
-        equip_id: int,
-        run_id: str,
-        rul_by_regime: pd.DataFrame
-    ) -> None:
-        """
-        Persist per-regime RUL estimates to ACM_RUL_ByRegime.
-        
-        Args:
-            equip_id: Equipment identifier
-            run_id: Run identifier
-            rul_by_regime: DataFrame with columns:
-                - RegimeLabel: int
-                - RUL_Hours: float
-                - P10_LowerBound: float
-                - P50_Median: float  
-                - P90_UpperBound: float
-                - DegradationRate: float (health units per hour)
-                - Confidence: float (0-1)
-                - Method: str
-                - SampleCount: int
-        """
-        if rul_by_regime is None or rul_by_regime.empty:
-            return
-            
-        df = rul_by_regime.copy()
-        df['EquipID'] = equip_id
-        df['RunID'] = run_id
-        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
-        
-        self._ensure_dataframe_columns(df, 'ACM_RUL_ByRegime')
-        self.write_dataframe(df, 'ACM_RUL_ByRegime')
-        Console.info(f"RUL by regime written: {len(df)} regimes", component="RUL")
-
-    def write_regime_hazard(
-        self,
-        equip_id: int,
-        run_id: str,
-        regime_hazard: pd.DataFrame
-    ) -> None:
-        """
-        Persist per-regime hazard statistics to ACM_RegimeHazard.
-        
-        Args:
-            equip_id: Equipment identifier
-            run_id: Run identifier
-            regime_hazard: DataFrame with columns:
-                - RegimeLabel: int
-                - Timestamp: datetime
-                - HazardRate: float (instantaneous failure rate)
-                - SurvivalProb: float (cumulative survival probability)
-                - CumulativeHazard: float
-                - FailureProb: float (probability of failure by this time)
-                - HealthAtTime: float
-                - DriftAtTime: float (optional)
-                - OMR_Z_AtTime: float (optional)
-        """
-        if regime_hazard is None or regime_hazard.empty:
-            return
-            
-        df = regime_hazard.copy()
-        df['EquipID'] = equip_id
-        df['RunID'] = run_id
-        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
-        
-        # Normalize timestamps
-        if 'Timestamp' in df.columns:
-            df['Timestamp'] = normalize_timestamp_series(df['Timestamp'])
-        
-        self._ensure_dataframe_columns(df, 'ACM_RegimeHazard')
-        self.write_dataframe(df, 'ACM_RegimeHazard')
-        Console.info(f"Regime hazard written: {len(df)} records", component="RUL")
-
-    def write_forecast_context(
-        self,
-        equip_id: int,
-        run_id: str,
-        forecast_context: pd.DataFrame
-    ) -> None:
-        """
-        Persist unified forecast context with OMR/drift/regime state to ACM_ForecastContext.
-        
-        This table provides a comprehensive snapshot of all factors influencing the forecast.
-        
-        Args:
-            equip_id: Equipment identifier
-            run_id: Run identifier
-            forecast_context: DataFrame with columns:
-                - Timestamp: datetime (forecast reference time)
-                - ForecastHorizon_Hours: float
-                - CurrentHealth: float
-                - CurrentRegime: int
-                - RegimeConfidence: float
-                - CurrentOMR_Z: float
-                - OMR_Contribution: float (weight-adjusted contribution)
-                - CurrentDrift_Z: float
-                - DriftTrend: str ('stable', 'increasing', 'decreasing')
-                - FusedZ: float
-                - HealthTrend: str ('improving', 'stable', 'degrading')
-                - DataQuality: float (0-1)
-                - ModelConfidence: float (0-1, forecast model confidence)
-                - ActiveDefects: int (count of active sensor defects)
-                - TopContributor: str (sensor/detector driving health)
-                - Notes: str (optional context)
-        """
-        if forecast_context is None or forecast_context.empty:
-            return
-            
-        df = forecast_context.copy()
-        df['EquipID'] = equip_id
-        df['RunID'] = run_id
-        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
-        
-        # Normalize timestamps
-        if 'Timestamp' in df.columns:
-            df['Timestamp'] = normalize_timestamp_series(df['Timestamp'])
-        
-        self._ensure_dataframe_columns(df, 'ACM_ForecastContext')
-        self.write_dataframe(df, 'ACM_ForecastContext')
-        Console.info(f"Forecast context written: {len(df)} records", component="RUL")
-
-    def write_adaptive_thresholds_by_regime(
-        self,
-        equip_id: int,
-        run_id: str,
-        thresholds_by_regime: pd.DataFrame
-    ) -> None:
-        """
-        Persist per-regime adaptive thresholds to ACM_AdaptiveThresholds_ByRegime.
-        
-        Args:
-            equip_id: Equipment identifier
-            run_id: Run identifier  
-            thresholds_by_regime: DataFrame with columns:
-                - RegimeLabel: int
-                - ThresholdType: str ('fused_alert_z', 'fused_warn_z', etc.)
-                - ThresholdValue: float
-                - CalculationMethod: str
-                - SampleCount: int
-                - RegimeHealthMean: float (mean health in this regime)
-                - RegimeHealthStd: float (std health in this regime)
-                - RegimeOccupancy: float (% time in regime)
-        """
-        if thresholds_by_regime is None or thresholds_by_regime.empty:
-            return
-            
-        df = thresholds_by_regime.copy()
-        df['EquipID'] = equip_id
-        df['RunID'] = run_id
-        df['IsActive'] = 1
-        df['CreatedAt'] = pd.Timestamp.now().tz_localize(None)
-        
-        self._ensure_dataframe_columns(df, 'ACM_AdaptiveThresholds_ByRegime')
-        self.write_dataframe(df, 'ACM_AdaptiveThresholds_ByRegime')
-        Console.info(f"Adaptive thresholds by regime written: {len(df)} records", component="RUL")
-
-    def load_regime_hazard_stats(
-        self,
-        equip_id: int,
-        lookback_days: int = 90
-    ) -> Optional[pd.DataFrame]:
-        """
-        Load historical regime hazard statistics for forecasting.
-        
-        Args:
-            equip_id: Equipment identifier
-            lookback_days: Days of history to load
-            
-        Returns:
-            DataFrame with per-regime statistics or None
-        """
-        if self.sql_client is None:
-            return None
-            
-        try:
-            query = """
-                SELECT RegimeLabel, 
-                       AVG(HazardRate) as AvgHazardRate,
-                       AVG(DegradationRate) as AvgDegradationRate,
-                       AVG(HealthAtTime) as AvgHealth,
-                       STDEV(HealthAtTime) as StdHealth,
-                       COUNT(*) as SampleCount,
-                       AVG(FailureProb) as AvgFailureProb
-                FROM (
-                    SELECT r.RegimeLabel, h.HazardRate, 
-                           COALESCE(rul.DegradationRate, 0) as DegradationRate,
-                           h.HealthAtTime, h.FailureProb
-                    FROM ACM_RegimeHazard h
-                    JOIN ACM_RegimeTimeline r 
-                        ON h.EquipID = r.EquipID AND h.Timestamp = r.Timestamp
-                    LEFT JOIN ACM_RUL_ByRegime rul
-                        ON h.EquipID = rul.EquipID AND h.RunID = rul.RunID 
-                        AND r.RegimeLabel = rul.RegimeLabel
-                    WHERE h.EquipID = ?
-                      AND h.Timestamp >= DATEADD(day, -?, GETDATE())
-                ) sub
-                GROUP BY RegimeLabel
-                ORDER BY RegimeLabel
-            """
-            with self.sql_client.get_cursor() as cur:
-                cur.execute(query, (equip_id, lookback_days))
-                rows = cur.fetchall()
-                if not rows:
-                    return None
-                cols = ['RegimeLabel', 'AvgHazardRate', 'AvgDegradationRate', 
-                        'AvgHealth', 'StdHealth', 'SampleCount', 'AvgFailureProb']
-                return pd.DataFrame(rows, columns=cols)
-        except Exception as e:
-            Console.warn(f"Failed to load regime hazard stats: {e}", component="RUL", equip_id=equip_id, lookback_days=lookback_days, error_type=type(e).__name__)
-            return None
-
-    def load_omr_drift_context(
-        self,
-        equip_id: int,
-        lookback_hours: int = 24
-    ) -> Dict[str, Any]:
-        """
-        Load recent OMR and drift context for forecasting.
-        
-        Args:
-            equip_id: Equipment identifier
-            lookback_hours: Hours of recent data to analyze
-            
-        Returns:
-            Dict with keys: omr_z, omr_trend, drift_z, drift_trend, top_contributors
-        """
-        context: Dict[str, Any] = {
-            'omr_z': None,
-            'omr_trend': 'unknown',
-            'drift_z': None,
-            'drift_trend': 'unknown',
-            'top_contributors': []
+        scaling_spec = json.dumps({"scaler": scaler_name, **scaler_params})
+        model_row = {
+            "RunID": run_id or "",
+            "EquipID": int(equip_id),
+            "EntryDateTime": now_utc,
+            "NComponents": int(getattr(pca_model, "n_components_", getattr(pca_model, "n_components", 0))),
+            "TargetVar": json.dumps({"SPE_P95_train": spe_p95_train, "T2_P95_train": t2_p95_train}),
+            "VarExplainedJSON": var_json,
+            "ScalingSpecJSON": scaling_spec,
+            "ModelVersion": cfg.get("runtime", {}).get("version", "v5.0.0"),
+            "TrainStartEntryDateTime": train.index.min() if len(train.index) else None,
+            "TrainEndEntryDateTime": train.index.max() if len(train.index) else None
         }
-        
-        if self.sql_client is None:
-            return context
-            
+        rows_pca_model = output_manager.write_pca_model(model_row)
+
+        # PCA Loadings
+        comps = getattr(pca_model, "components_", None)
+        if comps is not None and hasattr(train, "columns"):
+            load_rows = []
+            for k in range(comps.shape[0]):
+                for j, sensor in enumerate(train.columns):
+                    load_rows.append({
+                        "RunID": run_id or "",
+                        "EntryDateTime": now_utc,
+                        "ComponentNo": int(k + 1),
+                        "Sensor": str(sensor),
+                        "Loading": float(comps[k, j])
+                    })
+            df_load = pd.DataFrame(load_rows)
+            rows_pca_load = output_manager.write_pca_loadings(df_load, run_id or "")
+
+        # PCA Metrics
+        spe_p95 = float(np.nanpercentile(frame["pca_spe"].to_numpy(dtype=np.float32), 95)) if "pca_spe" in frame.columns else None
+        t2_p95 = float(np.nanpercentile(frame["pca_t2"].to_numpy(dtype=np.float32), 95)) if "pca_t2" in frame.columns else None
+
+        var90_n = None
+        if var_ratio is not None:
+            csum = np.cumsum(var_ratio)
+            var90_n = int(np.searchsorted(csum, 0.90) + 1)
+        df_metrics = pd.DataFrame([{
+            "RunID": run_id or "",
+            "EntryDateTime": now_utc,
+            "Var90_N": var90_n,
+            "ReconRMSE": None,
+            "P95_ReconRMSE": spe_p95,
+            "Notes": json.dumps({"SPE_P95_score": spe_p95, "T2_P95_score": t2_p95})
+        }])
+        rows_pca_metrics = output_manager.write_pca_metrics(df_metrics, run_id or "")
+    except Exception as e:
+        Console.warn(f"PCA artifacts write skipped: {e}", component="SQL",
+                     equip=equip, run_id=run_id, error=str(e)[:200])
+    
+    return rows_pca_model, rows_pca_load, rows_pca_metrics
+
+
+def write_sql_artifacts(
+    output_manager: "OutputManager",
+    frame: pd.DataFrame,
+    episodes: pd.DataFrame,
+    train: pd.DataFrame,
+    pca_detector: Optional[Any],
+    sql_client: Optional[Any],
+    run_id: Optional[str],
+    equip_id: int,
+    equip: str,
+    cfg: Dict[str, Any],
+    meta: Any,
+    win_start: Optional[pd.Timestamp],
+    win_end: Optional[pd.Timestamp],
+    rows_read: int,
+    spe_p95_train: float,
+    t2_p95_train: float,
+    anomaly_count: int,
+    T: Any,
+    culprit_writer_func: Optional[Callable] = None,
+) -> int:
+    """
+    Write SQL-specific artifacts: DriftTS, AnomalyEvents, RegimeEpisodes, PCA, RunStats, Culprits.
+    
+    Args:
+        output_manager: OutputManager instance for SQL writes
+        frame: Scored DataFrame with detector columns
+        episodes: Episodes DataFrame from fusion
+        train: Training DataFrame with sensor columns
+        pca_detector: PCA detector instance (or None)
+        sql_client: SQLClient instance (or None)
+        run_id: Current run UUID
+        equip_id: Equipment ID
+        equip: Equipment name for logging
+        cfg: Config dictionary
+        meta: DataMeta instance with kept_cols, cadence_ok, etc.
+        win_start: Window start timestamp
+        win_end: Window end timestamp
+        rows_read: Number of rows read
+        spe_p95_train: P95 SPE threshold from training
+        t2_p95_train: P95 T2 threshold from training
+        anomaly_count: Number of anomalies detected
+        T: Timer/section manager for profiling
+        culprit_writer_func: Optional function to write episode culprits
+    
+    Returns:
+        Total rows written across all artifact tables.
+    """
+    rows_written = 0
+    
+    # DriftSeries
+    with T.section("sql.drift_series"):
         try:
-            # Get recent OMR values
-            omr_query = """
-                SELECT TOP 10 OMR_Z 
-                FROM ACM_OMRTimeline 
-                WHERE EquipID = ? 
-                  AND Timestamp >= DATEADD(hour, -?, GETDATE())
-                ORDER BY Timestamp DESC
-            """
-            with self.sql_client.get_cursor() as cur:
-                cur.execute(omr_query, (equip_id, lookback_hours))
-                omr_rows = cur.fetchall()
-                if omr_rows:
-                    omr_values = [float(r[0]) for r in omr_rows if r[0] is not None]
-                    if omr_values:
-                        context['omr_z'] = omr_values[0]  # Most recent
-                        if len(omr_values) >= 3:
-                            # Trend: compare first half vs second half
-                            mid = len(omr_values) // 2
-                            recent_avg = np.mean(omr_values[:mid])
-                            older_avg = np.mean(omr_values[mid:])
-                            if recent_avg > older_avg + 0.5:
-                                context['omr_trend'] = 'increasing'
-                            elif recent_avg < older_avg - 0.5:
-                                context['omr_trend'] = 'decreasing'
-                            else:
-                                context['omr_trend'] = 'stable'
-            
-            # Get recent drift values
-            drift_query = """
-                SELECT TOP 10 DriftValue 
-                FROM ACM_DriftSeries 
-                WHERE EquipID = ?
-                  AND Timestamp >= DATEADD(hour, -?, GETDATE())
-                ORDER BY Timestamp DESC
-            """
-            with self.sql_client.get_cursor() as cur:
-                cur.execute(drift_query, (equip_id, lookback_hours))
-                drift_rows = cur.fetchall()
-                if drift_rows:
-                    drift_values = [float(r[0]) for r in drift_rows if r[0] is not None]
-                    if drift_values:
-                        context['drift_z'] = drift_values[0]
-                        if len(drift_values) >= 3:
-                            mid = len(drift_values) // 2
-                            recent_avg = np.mean(drift_values[:mid])
-                            older_avg = np.mean(drift_values[mid:])
-                            if recent_avg > older_avg + 0.3:
-                                context['drift_trend'] = 'increasing'
-                            elif recent_avg < older_avg - 0.3:
-                                context['drift_trend'] = 'decreasing'
-                            else:
-                                context['drift_trend'] = 'stable'
-            
-            # Get top OMR contributors
-            contrib_query = """
-                SELECT TOP 5 SensorName, AVG(ContributionScore) as AvgContrib
-                FROM ACM_OMRContributionsLong
-                WHERE EquipID = ?
-                  AND Timestamp >= DATEADD(hour, -?, GETDATE())
-                GROUP BY SensorName
-                ORDER BY AVG(ContributionScore) DESC
-            """
-            with self.sql_client.get_cursor() as cur:
-                cur.execute(contrib_query, (equip_id, lookback_hours))
-                contrib_rows = cur.fetchall()
-                if contrib_rows:
-                    context['top_contributors'] = [
-                        {'sensor': r[0], 'contribution': float(r[1])} 
-                        for r in contrib_rows if r[0] is not None
-                    ]
-                    
+            df_drift = output_manager._build_drift_ts(frame, equip_id, run_id, cfg)
+            if df_drift is not None:
+                rows_written += output_manager.write_drift_series(df_drift)
         except Exception as e:
-            Console.warn(f"Failed to load OMR/drift context: {e}", component="RUL", equip_id=equip_id, lookback_hours=lookback_hours, error_type=type(e).__name__)
-            
-        return context
+            Console.warn(f"DriftSeries write skipped: {e}", component="SQL",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
 
+    # AnomalyEvents
+    with T.section("sql.events"):
+        try:
+            df_events = output_manager._build_anomaly_events(episodes, equip_id, run_id)
+            if df_events is not None:
+                rows_written += output_manager.write_anomaly_events(df_events, run_id or "")
+        except Exception as e:
+            Console.warn(f"AnomalyEvents write skipped: {e}", component="SQL",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
 
+    # RegimeEpisodes
+    with T.section("sql.regimes"):
+        try:
+            df_reg = output_manager._build_regime_episodes(episodes, equip_id, run_id)
+            if df_reg is not None:
+                rows_written += output_manager.write_regime_episodes(df_reg, run_id or "")
+        except Exception as e:
+            Console.warn(f"RegimeEpisodes write skipped: {e}", component="SQL",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
+
+    # PCA artifacts
+    with T.section("sql.pca"):
+        rows_pca_model, rows_pca_load, rows_pca_metrics = write_pca_artifacts(
+            output_manager=output_manager,
+            pca_detector=pca_detector,
+            frame=frame,
+            train=train,
+            run_id=run_id,
+            equip_id=equip_id,
+            equip=equip,
+            spe_p95_train=spe_p95_train,
+            t2_p95_train=t2_p95_train,
+            cfg=cfg,
+        )
+        rows_written += int(rows_pca_model + rows_pca_load + rows_pca_metrics)
+
+    # RunStats
+    with T.section("sql.run_stats"):
+        try:
+            if sql_client and run_id and win_start is not None and win_end is not None:
+                drift_p95 = None
+                if "drift_z" in frame.columns:
+                    drift_p95 = float(np.nanpercentile(frame["drift_z"].to_numpy(dtype=np.float32), 95))
+                sensors_kept = len(getattr(meta, "kept_cols", []))
+                cadence_ok_pct = float(getattr(meta, "cadence_ok", 1.0)) * 100.0 if hasattr(meta, "cadence_ok") else None
+
+                output_manager.write_run_stats({
+                    "RunID": run_id,
+                    "EquipID": int(equip_id),
+                    "WindowStartEntryDateTime": win_start,
+                    "WindowEndEntryDateTime": win_end,
+                    "SamplesIn": rows_read,
+                    "SamplesKept": rows_read,
+                    "SensorsKept": sensors_kept,
+                    "CadenceOKPct": cadence_ok_pct,
+                    "DriftP95": drift_p95,
+                    "ReconRMSE": None,
+                    "AnomalyCount": anomaly_count
+                })
+        except Exception as e:
+            Console.warn(f"RunStats not recorded: {e}", component="RUN",
+                         equip=equip, run_id=run_id, error=str(e)[:200])
+
+    # Episode culprits
+    with T.section("sql.culprits"):
+        try:
+            if culprit_writer_func and sql_client and run_id and len(episodes) > 0:
+                culprit_writer_func(
+                    sql_client=sql_client,
+                    run_id=run_id,
+                    episodes=episodes,
+                    scores_df=frame,
+                    equip_id=equip_id
+                )
+        except Exception as e:
+            Console.warn(f"Failed to write ACM_EpisodeCulprits: {e}", component="CULPRITS",
+                         equip=equip, run_id=run_id, error=str(e))
+    
+    return rows_written

@@ -15,7 +15,7 @@ Date: November 13, 2025
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
 import pandas as pd
-from core.observability import Console, Heartbeat
+from core.observability import Console
 
 
 class ColdstartState:
@@ -310,8 +310,10 @@ class SmartColdstart:
                      component="COLDSTART", equip_id=self.equip_id, ready=state.is_ready(), 
                      attempts=state.attempt_count, accumulated=state.accumulated_rows, required=state.required_rows)
         
-        # Always calculate optimal window to ensure we load enough data
-        # The optimal window calculates from EARLIEST available data forward
+        # Calculate optimal window based on min_rows, but use the LARGER of:
+        # 1. The batch runner's provided window (initial_start, initial_end)
+        # 2. The calculated optimal window (for min_rows with cadence)
+        # This ensures we don't shrink a large window that batch runner already calculated
         if state.attempt_count == 0:
             Console.info(f"First coldstart attempt - calculating optimal window", component="COLDSTART")
         else:
@@ -323,8 +325,22 @@ class SmartColdstart:
             required_rows=min_rows,
             data_cadence_seconds=data_cadence_seconds
         )
-        attempt_start = optimal_start
-        attempt_end = optimal_end
+        
+        # Compare batch runner's window with calculated optimal window
+        # Use the LARGER window to ensure we get enough data
+        batch_window_minutes = (initial_end - initial_start).total_seconds() / 60
+        optimal_window_minutes = (optimal_end - optimal_start).total_seconds() / 60
+        
+        if batch_window_minutes >= optimal_window_minutes:
+            # Batch runner's window is larger - use it
+            attempt_start = initial_start
+            attempt_end = initial_end
+            Console.info(f"Using batch window ({batch_window_minutes:.0f}m) instead of optimal ({optimal_window_minutes:.0f}m)", component="COLDSTART")
+        else:
+            # Optimal window is larger - use it
+            attempt_start = optimal_start
+            attempt_end = optimal_end
+            Console.info(f"Using optimal window ({optimal_window_minutes:.0f}m) - larger than batch ({batch_window_minutes:.0f}m)", component="COLDSTART")
         
         for attempt in range(1, max_attempts + 1):
             try:
@@ -437,3 +453,138 @@ class SmartColdstart:
                 cur.close()
             except:
                 pass
+
+
+# =============================================================================
+# P4.5: BASELINE SEEDING (moved from acm_main.py)
+# =============================================================================
+
+def seed_baseline(
+    train: pd.DataFrame,
+    score: pd.DataFrame,
+    sql_client: Optional[Any],
+    equip_id: int,
+    cfg: Dict[str, Any],
+    equip: str = "",
+    is_coldstart: bool = False,
+    ensure_local_index_fn: Optional[Any] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str]]:
+    """
+    Seed training baseline when insufficient data available (batch mode).
+    
+    In batch mode, SmartColdstart returns empty train (all data goes to score).
+    This function loads baseline from:
+    1. ACM_BaselineBuffer table (SQL) - cached baseline from previous runs
+    2. First portion of score data (fallback)
+    3. Split score in half if overlap detected
+    
+    Also handles gap bridging when baseline ends before score starts.
+    
+    Args:
+        train: Training DataFrame (may be empty in batch mode)
+        score: Scoring DataFrame
+        sql_client: SQL client for ACM_BaselineBuffer access
+        equip_id: Equipment ID
+        cfg: Config dict with runtime.baseline settings
+        equip: Equipment name for logging
+        is_coldstart: If True, train/score already split from coldstart - skip re-seeding
+        ensure_local_index_fn: Optional function to normalize datetime index
+        
+    Returns:
+        Tuple of (train, score, source_used) where source_used describes origin
+    """
+    baseline_cfg = (cfg.get("runtime", {}) or {}).get("baseline", {}) or {}
+    min_points = int(baseline_cfg.get("min_points", 300))
+    train_rows = len(train)
+    
+    # FIX: If this is a coldstart run and train already has data from coldstart split,
+    # don't re-seed from score - that would cause overlap/data leakage!
+    if is_coldstart and train_rows > 0:
+        return train, score, f"coldstart_split ({train_rows} rows)"
+    
+    # If train already has enough rows, no seeding needed
+    if train_rows >= min_points:
+        return train, score, None
+    
+    used: Optional[str] = None
+    extended = False
+    
+    # Try 1: Load from SQL ACM_BaselineBuffer
+    if sql_client:
+        try:
+            window_hours = float(baseline_cfg.get("window_hours", 72))
+            with sql_client.cursor() as cur:
+                cur.execute("""
+                    SELECT Timestamp, SensorName, SensorValue
+                    FROM dbo.ACM_BaselineBuffer
+                    WHERE EquipID = ? AND Timestamp >= DATEADD(HOUR, -?, GETDATE())
+                    ORDER BY Timestamp
+                """, (int(equip_id), int(window_hours)))
+                rows = cur.fetchall()
+            
+            if rows:
+                # Transform long format → wide format (pivot)
+                baseline_data = {}
+                for row in rows:
+                    ts = pd.Timestamp(row.Timestamp)
+                    sensor = str(row.SensorName)
+                    value = float(row.SensorValue)
+                    if ts not in baseline_data:
+                        baseline_data[ts] = {}
+                    baseline_data[ts][sensor] = value
+                
+                buf = pd.DataFrame.from_dict(baseline_data, orient='index').sort_index()
+                if ensure_local_index_fn:
+                    buf = ensure_local_index_fn(buf)
+                
+                # Align to score columns (score guaranteed to be DataFrame by entry validation)
+                if hasattr(buf, "columns"):
+                    common_cols = [c for c in buf.columns if c in score.columns]
+                    if common_cols:
+                        buf = buf[common_cols]
+                
+                train = buf
+                used = f"ACM_BaselineBuffer ({len(train)} rows)"
+        except Exception as sql_err:
+            Console.warn(f"Failed to load from ACM_BaselineBuffer: {sql_err}", component="BASELINE")
+    
+    # Try 2: Seed from score data
+    if used is None and len(score) > 0:
+        seed_n = min(len(score), max(min_points, int(0.2 * len(score))))
+        train = score.iloc[:seed_n]
+        used = f"score head ({seed_n} rows)"
+        
+        # Check for overlap - train must end BEFORE score starts
+        tr_end_ts = pd.to_datetime(train.index.max())
+        sc_start_ts = pd.to_datetime(score.index.min())
+        
+        if tr_end_ts >= sc_start_ts:
+            # Split score in half to avoid overlap
+            split_idx = len(score) // 2
+            if split_idx >= min_points:
+                train = score.iloc[:split_idx]
+                score = score.iloc[split_idx:].copy()
+                used = f"score split (train={split_idx}, no overlap)"
+            else:
+                Console.warn(f"Cannot split score (too few rows: {len(score)}), accepting overlap", component="BASELINE")
+    
+    if used:
+        # Gap detection: if baseline ends >1h before score starts, extend it
+        if len(train) > 0:
+            tr_end = pd.to_datetime(train.index.max())
+            sc_start = pd.to_datetime(score.index.min()) if len(score) > 0 else None
+            
+            if sc_start and tr_end < sc_start:
+                gap_hours = (sc_start - tr_end).total_seconds() / 3600
+                if gap_hours > 1.0:
+                    # Extend with first 20% of score
+                    if len(score) > 10:
+                        ext_size = max(10, int(0.2 * len(score)))
+                        extension = score.iloc[:ext_size]
+                        train = pd.concat([train, extension], axis=0).drop_duplicates()
+                        extended = True
+                        used = f"{used} +{ext_size} extension"
+        
+        Console.info(f"Baseline: {used} | extended={extended}", component="BASELINE")
+    
+    return train, score, used

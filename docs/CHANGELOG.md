@@ -6,6 +6,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.0.0] - 2025-12-23
+
+### Added
+- **SQL Performance Optimizations**:
+  - Deprecated `ACM_Scores_Long` table (redundant with `ACM_Scores_Wide`) - saves ~44K rows/batch
+  - Batched DELETE operations - single SQL statement instead of 26+ individual DELETEs
+  - Downsampling for long-format tables (`ACM_SensorNormalized_TS`, `ACM_OMRContributionsLong`) - 97% row reduction
+  
+- **New Core Modules**:
+  - `core/feature_matrix.py` - Standardized feature matrix with schema enforcement
+  - `core/pipeline_types.py` - DataContract, SensorValidator, PipelineContext types
+  - `core/pipeline_instrumentation.py` - Stage timing with OpenTelemetry integration
+  - `core/regime_manager.py` - MaturityState-based regime lifecycle management
+  - `core/regime_definitions.py` - ACM_RegimeDefinitions table schema
+  - `core/regime_evaluation.py` - Regime quality metrics (silhouette, DBI, Calinski-Harabasz)
+  - `core/regime_promotion.py` - Manual/auto regime promotion workflow
+  - `core/detector_protocol.py` - DetectorProtocol ABC for all detectors
+  - `core/baseline_normalizer.py` - Regime-aware normalization
+  - `core/baseline_policy.py` - Baseline window management
+  - `core/calibrated_fusion.py` - Detector weight calibration via PR-AUC
+  - `core/confidence_model.py` - Novelty pressure and confidence intervals
+  - `core/drift_controller.py` - Unified drift/novelty control plane
+  - `core/decision_policy.py` - Separation of analytics from operational decisions
+  - `core/health_state.py` - HealthState dataclass with uncertainty bounds
+  - `core/episode_manager.py` - EpisodeCohort lifecycle management
+  - `core/table_schemas.py` - Centralized SQL table schema definitions
+  - `core/seasonality.py` - Time-of-day and day-of-week seasonality detection
+  - `core/asset_similarity.py` - Fleet-level similar asset priors
+
+- **Observability Stack**:
+  - Docker-based stack: Grafana, Alloy, Tempo, Loki, Prometheus, Pyroscope
+  - Unified `core/observability.py` API: Console, Span, Metrics classes
+  - Auto-provisioned Grafana datasources and dashboards
+  - CPU profiling via yappi with Pyroscope integration
+
+### Changed
+- **Table Schema Changes**:
+  - `ACM_Scores_Long` deprecated (use `ACM_Scores_Wide` instead)
+  - Regime tables now include `MaturityState` column
+  - Added `RegimeVersion` to all regime-related writes
+
+### Fixed
+- Eliminated duplicate data between `ACM_Scores_Long` and `ACM_Scores_Wide`
+- Reduced SQL write latency by batching DELETE operations
+
+---
+
 ## [10.0.0] - 2025-12-08
 
 ### Added

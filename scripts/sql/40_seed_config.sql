@@ -161,8 +161,7 @@ VALUES
 -- Output configuration
 INSERT INTO ACM_Config (EquipID, Category, ParamPath, ParamValue, ValueType, UpdatedBy, ChangeReason)
 VALUES
-    (0, 'output', 'output.sql_mode', 'false', 'bool', 'SYSTEM', 'Initial seed - file mode default'),
-    (0, 'output', 'output.dual_mode', 'false', 'bool', 'SYSTEM', 'Initial seed - write both file and SQL when enabled'),
+    (0, 'output', 'output.sql_mode', 'true', 'bool', 'SYSTEM', 'SQL-only mode (file mode removed in v11)'),
     (0, 'output', 'output.artifacts_dir', 'artifacts', 'string', 'SYSTEM', 'Initial seed');
 
 GO

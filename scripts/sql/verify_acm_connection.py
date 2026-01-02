@@ -6,7 +6,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from core.sql_client import SQLClient
 from core.observability import Console
-<<<<<<< HEAD
 
 
 _LOG_PREFIX_HANDLERS = (
@@ -43,8 +42,6 @@ def _log(*args: Any, sep: str = " ", end: str = "\n", file: Any = None, flush: b
 
 
 print = _log
-=======
->>>>>>> 3d95a39f2dd1a1333531c7363d383cea730a3a74
 
 views = [
     'dbo.vw_AnomalyEvents',
