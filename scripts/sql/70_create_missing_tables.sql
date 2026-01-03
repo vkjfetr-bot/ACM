@@ -332,7 +332,7 @@ BEGIN
         SilhouetteScore FLOAT NULL,
         MaturityState NVARCHAR(30) NULL,  -- 'INITIALIZING', 'LEARNING', 'CONVERGED'
         CreatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
-        CreatedByRunID NVARCHAR(50) NULL,
+        RunID NVARCHAR(50) NULL,
         
         CONSTRAINT PK_ACM_RegimeDefinitions PRIMARY KEY CLUSTERED (ID),
         INDEX IX_ACM_RegimeDefinitions_Equip NONCLUSTERED (EquipID, RegimeVersion DESC)
@@ -400,7 +400,7 @@ BEGIN
         PhaseShift FLOAT NULL,
         Confidence FLOAT NULL,
         DetectedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
-        DetectedByRunID NVARCHAR(50) NULL,
+        RunID NVARCHAR(50) NULL,
         
         CONSTRAINT PK_ACM_SeasonalPatterns PRIMARY KEY CLUSTERED (ID),
         INDEX IX_ACM_SeasonalPatterns_Equip NONCLUSTERED (EquipID, SensorName)
@@ -423,7 +423,7 @@ BEGIN
         TypicalHealth FLOAT NULL,
         DataHours FLOAT NULL,
         LastUpdatedAt DATETIME2 NOT NULL DEFAULT GETUTCDATE(),
-        LastUpdatedByRunID NVARCHAR(50) NULL,
+        RunID NVARCHAR(50) NULL,
         
         CONSTRAINT PK_ACM_AssetProfiles PRIMARY KEY CLUSTERED (ID),
         CONSTRAINT UQ_ACM_AssetProfiles_Equip UNIQUE (EquipID),

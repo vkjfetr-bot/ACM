@@ -1641,7 +1641,7 @@ BEGIN
         [DataPointCount] INT NOT NULL,
         [SilhouetteScore] FLOAT NULL,
         [CreatedAt] DATETIME2(7) DEFAULT GETDATE(),
-        [CreatedByRunID] UNIQUEIDENTIFIER NULL,
+        [RunID] UNIQUEIDENTIFIER NULL,
         CONSTRAINT [PK_RegimeDefinitions] PRIMARY KEY CLUSTERED ([EquipID], [RegimeVersion], [RegimeID])
     );
 END
@@ -1678,7 +1678,7 @@ BEGIN
         [PhaseShift] FLOAT NOT NULL,
         [Confidence] FLOAT NOT NULL,
         [DetectedAt] DATETIME2(7) DEFAULT GETDATE(),
-        [DetectedByRunID] UNIQUEIDENTIFIER NULL
+        [RunID] UNIQUEIDENTIFIER NULL
     );
 END
 GO
@@ -1696,7 +1696,7 @@ BEGIN
         [TypicalHealth] FLOAT NOT NULL,
         [DataHours] FLOAT NOT NULL,
         [LastUpdatedAt] DATETIME2(7) DEFAULT GETDATE(),
-        [LastUpdatedByRunID] UNIQUEIDENTIFIER NULL
+        [RunID] UNIQUEIDENTIFIER NULL
     );
 END
 GO

@@ -21,7 +21,7 @@ import time
 import math
 import threading
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Dict, Any, List, Optional, Union, Tuple, TypeVar, Callable, cast, Set
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -254,6 +254,16 @@ SEVERITY_COLORS = {
     "WARNING": "#f59e0b",   # Alias for MEDIUM
 }
 
+# Tables that require UPSERT instead of INSERT (to handle duplicate key conflicts)
+# Maps table name -> upsert method name (method must exist on OutputManager)
+UPSERT_TABLES: Dict[str, str] = {
+    "ACM_HealthForecast": "_upsert_health_forecast",
+    "ACM_FailureForecast": "_upsert_failure_forecast",
+    "ACM_SensorForecast": "_upsert_sensor_forecast",
+    "ACM_DetectorForecast_TS": "_upsert_detector_forecast_ts",
+    "ACM_PCA_Metrics": "_upsert_pca_metrics",
+}
+
 # Enhanced config getter with typing
 T = TypeVar("T")
 
@@ -389,52 +399,7 @@ class OutputManager:
         # without file system dependencies
         self._artifact_cache: Dict[str, pd.DataFrame] = {}
 
-        # Minimal per-table NOT NULL requirements with safe defaults
-        # Only for tables in ALLOWED_TABLES that need repair defaults.
-        # 'ts' indicates we should use a sentinel timestamp (1900-01-01 00:00:00)
-        self._sql_required_defaults: Dict[str, Dict[str, Any]] = {
-            # TIER 1: Core pipeline output
-            'ACM_HealthTimeline': {
-                'Timestamp': 'ts', 'HealthIndex': 0.0, 'HealthZone': 'GOOD', 'FusedZ': 0.0
-            },
-            'ACM_RegimeTimeline': {
-                'Timestamp': 'ts', 'RegimeLabel': -1, 'RegimeState': 'unknown'
-            },
-            # TIER 2: Forecasting
-            'ACM_HealthForecast': {
-                'Timestamp': 'ts', 'ForecastHealth': 0.0, 'CI_Lower': 0.0, 'CI_Upper': 0.0,
-                'Method': 'ExponentialSmoothing'
-            },
-            'ACM_FailureForecast': {
-                'Timestamp': 'ts', 'FailureProb': 0.0, 'ThresholdUsed': 50.0,
-                'Method': 'GaussianTail'
-            },
-            'ACM_SensorForecast': {
-                'Timestamp': 'ts', 'SensorName': 'UNKNOWN', 'ForecastValue': 0.0,
-                'CI_Lower': 0.0, 'CI_Upper': 0.0, 'Method': 'LinearTrend'
-            },
-            'ACM_RUL': {
-                'RUL_Hours': 0.0, 'Method': 'Multipath'
-            },
-            # TIER 4: Diagnostics
-            'ACM_SensorDefects': {
-                'DetectorType': 'UNKNOWN', 'Severity': 'LOW', 'ViolationCount': 0, 'ViolationPct': 0.0,
-                'MaxZ': 0.0, 'AvgZ': 0.0, 'CurrentZ': 0.0, 'ActiveDefect': 0
-            },
-            'ACM_SensorHotspots': {
-                'SensorName': 'UNKNOWN', 'MaxTimestamp': 'ts', 'LatestTimestamp': 'ts',
-                'MaxAbsZ': 0.0, 'MaxSignedZ': 0.0, 'LatestAbsZ': 0.0, 'LatestSignedZ': 0.0,
-                'ValueAtPeak': 0.0, 'LatestValue': 0.0, 'TrainMean': 0.0, 'TrainStd': 0.0,
-                'AboveWarnCount': 0, 'AboveAlertCount': 0
-            },
-            'ACM_EpisodeDiagnostics': {
-                'EpisodeID': 0, 'StartTime': 'ts', 'EndTime': 'ts', 'PeakZ': 0.0,
-                'DurationHours': 0.0, 'TopSensor1': 'UNKNOWN', 'Severity': 'UNKNOWN',
-                'severity_reason': 'UNKNOWN', 'AvgZ': 0.0, 'min_health_index': 0.0
-            },
-        }
-
-        Console.info("" + f"Manager initialized (batch_size={batch_size}, batching={'ON' if enable_batching else 'OFF'}, sql_cache={sql_health_cache_seconds}s, io_workers={max_io_workers}, flush={batch_flush_rows} rows/{batch_flush_seconds}s, max_futures={max_in_flight_futures})", component="OUTPUT")
+        Console.info(f"Manager initialized (batch_size={batch_size}, batching={'ON' if enable_batching else 'OFF'}, sql_cache={sql_health_cache_seconds}s, io_workers={max_io_workers}, flush={batch_flush_rows} rows/{batch_flush_seconds}s, max_futures={max_in_flight_futures})", component="OUTPUT")
     
     def set_maturity_state(self, maturity_state: str) -> None:
         """V11 CRITICAL: Update maturity state after model lifecycle is computed.
@@ -470,38 +435,28 @@ class OutputManager:
             yield
             return
         
+        # Check SQL health ONCE at transaction entry
+        if not self._check_sql_health():
+            Console.error("SQL unhealthy at transaction start - aborting", component="OUTPUT", equip_id=self.equip_id)
+            yield
+            return
+        
         self._batched_transaction_active = True
         start_time = time.time()
         
         try:
-            Console.info("" + "Starting batched transaction", component="OUTPUT")
             yield
             # Commit at end of transaction
-            try:
-                if hasattr(self.sql_client, "commit"):
-                    self.sql_client.commit()
-                    Console.info("" + "Called sql_client.commit()", component="OUTPUT")
-                elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
-                    if not getattr(self.sql_client.conn, "autocommit", True):
-                        self.sql_client.conn.commit()
-                        Console.info("" + "Called sql_client.conn.commit()", component="OUTPUT")
-                    else:
-                        Console.warn("Autocommit is ON - no explicit commit needed", component="OUTPUT", equip_id=self.equip_id, run_id=self.run_id)
-                elapsed = time.time() - start_time
-                Console.info("" + f"Batched transaction committed ({elapsed:.2f}s)", component="OUTPUT")
-            except Exception as e:
-                Console.error(f"Batched transaction commit failed: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                raise
+            self.sql_client.commit()
+            elapsed = time.time() - start_time
+            Console.info(f"Batched transaction committed ({elapsed:.2f}s)", component="OUTPUT")
         except Exception as e:
             # Rollback on error
             try:
-                if hasattr(self.sql_client, "rollback"):
-                    self.sql_client.rollback()
-                elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "rollback"):
-                    self.sql_client.conn.rollback()
-                Console.error(f"Batched transaction rolled back: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-            except:
-                pass
+                self.sql_client.rollback()
+            except Exception:
+                pass  # Rollback failed, original exception more important
+            Console.error(f"Batched transaction rolled back: {e}", component="OUTPUT", equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__)
             raise
         finally:
             self._batched_transaction_active = False
@@ -526,9 +481,17 @@ class OutputManager:
         return loader.load_from_sql(cfg, equipment_name, start_utc, end_utc, is_coldstart)
     
     def _check_sql_health(self) -> bool:
-        """Check SQL availability with caching for performance."""
+        """Check SQL availability with caching for performance.
+        
+        Optimization: Skip check entirely during batched transactions.
+        If we entered the transaction successfully, SQL is healthy.
+        """
         if self.sql_client is None:
             return False
+        
+        # PERF: Inside batched transaction, trust SQL is healthy (checked once at entry)
+        if self._batched_transaction_active:
+            return True
         
         now = time.time()
         last_check, last_result = self._sql_health_cache
@@ -573,10 +536,6 @@ class OutputManager:
 
         # 1) Normalize datetime columns (dtype-based) + timestamp-like object columns (name-based)
         for col in out.columns:
-            if col in non_numeric_cols:
-                # Still allow datetime normalization for non-numeric columns if they are timestamp-like
-                pass
-
             is_dt = pd.api.types.is_datetime64_any_dtype(out[col])
             is_obj_ts = (not is_dt) and _looks_like_ts(col) and out[col].dtype == object
 
@@ -684,7 +643,6 @@ class OutputManager:
         sql_columns: Optional[Dict[str, str]] = None,
         non_numeric_cols: Optional[set] = None,
         add_created_at: bool = False,
-        allow_repair: bool = True,
         required: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -697,7 +655,6 @@ class OutputManager:
             sql_columns: Optional column mapping for SQL (df_col -> sql_col)
             non_numeric_cols: Set of columns to treat as non-numeric for SQL preparation
             add_created_at: Whether to add CreatedAt timestamp column for SQL
-            allow_repair: If False, block SQL write when required fields missing instead of auto-repairing
             required: If True, raise on write failure; if False, log warning and continue (default False for backwards-compat)
 
         Returns:
@@ -751,19 +708,16 @@ class OutputManager:
             if df.empty:
                 return result
 
-            # If SQL unhealthy, skip with an error string (do not throw)
+            # If SQL unhealthy, fail appropriately based on required flag
             if not self._check_sql_health():
-                msg = f"SQL health check failed; skipped write to {sql_table}"
-                Console.warn(
-                    msg,
-                    component="OUTPUT",
-                    table=sql_table,
-                    rows=len(df),
-                    equip_id=self.equip_id,
-                    run_id=self.run_id,
-                )
+                msg = f"SQL health check failed; cannot write to {sql_table}"
                 result["error"] = msg
-                return result
+                if required:
+                    Console.error(msg, component="OUTPUT", table=sql_table, rows=len(df), equip_id=self.equip_id)
+                    raise RuntimeError(msg)
+                else:
+                    Console.warn(msg, component="OUTPUT", table=sql_table, rows=len(df), equip_id=self.equip_id)
+                    return result
 
             # Prepare data for SQL
             sql_df = self._prepare_dataframe_for_sql(df, non_numeric_cols or set())
@@ -774,24 +728,13 @@ class OutputManager:
                 sql_df = sql_df[mapped_source_cols].rename(columns=sql_columns)
 
             # Required metadata columns (all SQL tables)
+            # Note: equip_id validated in __init__, run_id should be set by caller
             if "RunID" not in sql_df.columns:
+                if not self.run_id:
+                    raise ValueError("RunID is required but not set on OutputManager")
                 sql_df["RunID"] = self.run_id
             if "EquipID" not in sql_df.columns:
-                sql_df["EquipID"] = int(self.equip_id or 0)
-
-            # OUT-17: apply required defaults w/ repair policy
-            sql_df, repair_info = self._apply_sql_required_defaults(sql_table, sql_df, allow_repair)
-
-            if repair_info.get("repairs_needed"):
-                Console.info(
-                    f"Applied defaults to {sql_table}: {repair_info.get('missing_fields')}",
-                    component="SCHEMA",
-                )
-
-            if (not allow_repair) and repair_info.get("repairs_needed"):
-                raise ValueError(
-                    f"Required fields missing and allow_repair=False: {repair_info.get('missing_fields')}"
-                )
+                sql_df["EquipID"] = self.equip_id  # Already validated in __init__
 
             # CreatedAt is optional and explicitly requested
             if add_created_at and "CreatedAt" not in sql_df.columns:
@@ -821,15 +764,10 @@ class OutputManager:
                         error_type=type(del_ex).__name__,
                     )
 
-            # Route forecast tables to upsert methods, else bulk insert
-            if sql_table == "ACM_HealthForecast":
-                inserted = int(self._upsert_health_forecast(sql_df))
-            elif sql_table == "ACM_FailureForecast":
-                inserted = int(self._upsert_failure_forecast(sql_df))
-            elif sql_table == "ACM_DetectorForecast_TS":
-                inserted = int(self._upsert_detector_forecast_ts(sql_df))
-            elif sql_table == "ACM_SensorForecast":
-                inserted = int(self._upsert_sensor_forecast(sql_df))
+            # Route upsert tables via UPSERT_TABLES dict, else bulk insert
+            upsert_method = UPSERT_TABLES.get(sql_table)
+            if upsert_method:
+                inserted = int(getattr(self, upsert_method)(sql_df))
             else:
                 inserted = int(self._bulk_insert_sql(sql_table, sql_df))
 
@@ -883,182 +821,49 @@ class OutputManager:
             self._artifact_cache[artifact_name] = df
 
     def write_table(self, table_name: str, df: pd.DataFrame, delete_existing: bool = False) -> int:
-        """Generic SQL table writer with RunID/EquipID injection, defaults, and upsert routing."""
-        # Start span for this write operation (v10.3.0 tracing enhancement)
-        span_context = None
-        if _OBSERVABILITY_AVAILABLE and Span is not None:
-            span_context = Span(
-                f"persist.write",
-                table=table_name,
-                delete_existing=delete_existing,
-            )
-            span_context.__enter__()
-        
-        try:
-            if not self._check_sql_health() or df is None or df.empty:
-                if span_context:
-                    span_context._span.set_attribute("acm.rows_written", 0)
-                return 0
+        """Generic SQL table writer with RunID/EquipID injection and upsert routing."""
+        with Span("persist.write", table=table_name, delete_existing=delete_existing) if _OBSERVABILITY_AVAILABLE and Span else nullcontext() as span:
             try:
-                sql_df = df.copy()
-                now = pd.Timestamp.now().tz_localize(None)
+                if not self._check_sql_health() or df is None or df.empty:
+                    return 0
 
-                # Tables that don't have a standard RunID column (use alternative names)
-                tables_without_runid = {'ACM_SeasonalPatterns'}
-                
-                # Inject metadata (skip RunID for tables that don't have it)
-                if 'RunID' not in sql_df.columns and table_name not in tables_without_runid:
+                sql_df = df.copy()
+
+                # Inject standard metadata columns
+                if 'RunID' not in sql_df.columns:
+                    if not self.run_id:
+                        raise ValueError("RunID is required but not set on OutputManager")
                     sql_df['RunID'] = self.run_id
                 if 'EquipID' not in sql_df.columns:
-                    sql_df['EquipID'] = self.equip_id or 0
+                    sql_df['EquipID'] = self.equip_id
 
-                # Apply required defaults/repairs
-                sql_df, _ = self._apply_sql_required_defaults(table_name, sql_df, allow_repair=True)
-
-                # Fill common fields when present
-                if 'Method' in sql_df.columns:
-                    sql_df['Method'] = sql_df['Method'].fillna('default')
-                if 'LastUpdate' in sql_df.columns:
-                    sql_df['LastUpdate'] = pd.to_datetime(sql_df['LastUpdate']).dt.tz_localize(None).fillna(now)
-                if 'EarliestMaintenance' in sql_df.columns:
-                    sql_df['EarliestMaintenance'] = pd.to_datetime(sql_df['EarliestMaintenance']).dt.tz_localize(None).fillna(now)
-                if 'PreferredWindowStart' in sql_df.columns:
-                    sql_df['PreferredWindowStart'] = pd.to_datetime(sql_df['PreferredWindowStart']).dt.tz_localize(None).fillna(now)
-                if 'PreferredWindowEnd' in sql_df.columns:
-                    sql_df['PreferredWindowEnd'] = pd.to_datetime(sql_df['PreferredWindowEnd']).dt.tz_localize(None).fillna(now)
-
-                # Normalize types/nulls for SQL
                 sql_df = self._prepare_dataframe_for_sql(sql_df)
 
                 # Optional delete-existing by RunID (+EquipID when available)
-                # Some tables use alternative RunID column names
                 if delete_existing and self.sql_client is not None and self.run_id:
                     try:
                         with self.sql_client.cursor() as cur:
-                            # Map table-specific RunID column names
-                            run_id_column_map = {
-                                'ACM_SeasonalPatterns': 'DetectedByRunID',
-                            }
-                            run_id_col = run_id_column_map.get(table_name, 'RunID')
-                            
                             if 'EquipID' in sql_df.columns and self.equip_id is not None:
-                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE {run_id_col} = ? AND EquipID = ?", (self.run_id, int(self.equip_id or 0)))
+                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ? AND EquipID = ?", (self.run_id, self.equip_id))
                             else:
-                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE {run_id_col} = ?", (self.run_id,))
-                            if hasattr(self.sql_client, "commit"):
-                                self.sql_client.commit()
-                            elif hasattr(self.sql_client, "conn") and hasattr(self.sql_client.conn, "commit"):
-                                if not getattr(self.sql_client.conn, "autocommit", True):
-                                    self.sql_client.conn.commit()
+                                cur.execute(f"DELETE FROM dbo.[{table_name}] WHERE RunID = ?", (self.run_id,))
+                            self.sql_client.commit()
                     except Exception as del_ex:
-                        Console.warn(f"delete_existing failed for {table_name}: {del_ex}", component="OUTPUT", table=table_name, equip_id=self.equip_id, run_id=self.run_id, error_type=type(del_ex).__name__)
+                        Console.warn(f"delete_existing failed for {table_name}: {del_ex}", component="OUTPUT", table=table_name)
 
-                # Route known upsert tables (v10 schema)
-                if table_name == "ACM_HealthForecast":
-                    rows_written = self._upsert_health_forecast(sql_df)
-                elif table_name == "ACM_FailureForecast":
-                    rows_written = self._upsert_failure_forecast(sql_df)
-                elif table_name == "ACM_SensorForecast":
-                    rows_written = self._upsert_sensor_forecast(sql_df)
-                elif table_name == "ACM_PCA_Metrics":
-                    rows_written = self._upsert_pca_metrics(sql_df)
-                else:
-                    # Default: bulk insert
-                    rows_written = self._bulk_insert_sql(table_name, sql_df)
-                
-                # Record rows written in span
-                if span_context:
-                    span_context._span.set_attribute("acm.rows_written", rows_written)
-                
+                # Route upsert tables via UPSERT_TABLES dict, else bulk insert
+                upsert_method = UPSERT_TABLES.get(table_name)
+                rows_written = getattr(self, upsert_method)(sql_df) if upsert_method else self._bulk_insert_sql(table_name, sql_df)
+
+                if span:
+                    span._span.set_attribute("acm.rows_written", rows_written)
                 return rows_written
-            except Exception as e:
-                Console.warn(f"write_table failed for {table_name}: {e}", component="OUTPUT", table=table_name, rows=len(df) if df is not None else 0, equip_id=self.equip_id, run_id=self.run_id, error_type=type(e).__name__, error=str(e)[:200])
-                if span_context:
-                    span_context._span.set_attribute("acm.error", True)
-                return 0
-        finally:
-            if span_context:
-                span_context.__exit__(None, None, None)
 
-    def _apply_sql_required_defaults(self, table_name: str, df: pd.DataFrame, allow_repair: bool = True) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        """Fill required columns with safe defaults to satisfy NOT NULL constraints.
-        Only applies to known analytics tables; unknown tables pass through.
-        
-        OUT-17: Now returns tuple of (repaired_df, repair_info) with audit columns added.
-        
-        Args:
-            table_name: SQL table name
-            df: DataFrame to repair
-            allow_repair: If False, don't apply defaults but still report missing fields
-            
-        Returns:
-            Tuple of (repaired DataFrame, repair_info dict with keys:
-                      'repairs_needed', 'missing_fields', 'repaired_count')
-        """
-        repair_info = {
-            'repairs_needed': False,
-            'missing_fields': [],
-            'repaired_count': 0
-        }
-        
-        if df is None or df.empty:
-            return df, repair_info
-            
-        req = self._sql_required_defaults.get(table_name)
-        if not req:
-            return df, repair_info
-            
-        out = df.copy()
-        # CRIT-04: Use current local-naive timestamp instead of 1900-01-01
-        sentinel_ts = pd.Timestamp.now().tz_localize(None)
-        sentinel_date = sentinel_ts.date()
-        filled = {}
-        missing_fields = []
-        
-        for col, default in req.items():
-            if default == 'ts':
-                val = sentinel_ts
-            elif default == 'date':
-                val = sentinel_date
-            else:
-                val = default
-                
-            needs_repair = False
-            
-            if col not in out.columns:
-                missing_fields.append(col)
-                needs_repair = True
-                if allow_repair:
-                    out[col] = val
-                    filled[col] = 'added'
-            else:
-                # Check for nulls
-                try:
-                    null_mask = out[col].isna()
-                except Exception:
-                    null_mask = None
-                    
-                if null_mask is not None and getattr(null_mask, 'any', lambda: False)():
-                    count = int(null_mask.sum())
-                    missing_fields.append(f"{col}({count} nulls)")
-                    needs_repair = True
-                    if allow_repair:
-                        out.loc[null_mask, col] = val
-                        filled[col] = count
-                        
-            if needs_repair:
-                repair_info['repairs_needed'] = True
-                repair_info['repaired_count'] += 1
-        
-        repair_info['missing_fields'] = missing_fields
-        
-        if filled:
-            # Debug-level only - applying defaults is expected behavior, not a warning
-            pass  # Console.debug(f"{table_name}: applied defaults {filled}", component="SCHEMA")
-        if not allow_repair and repair_info['repairs_needed']:
-            Console.warn(f"{table_name}: repairs blocked (allow_repair=False), missing: {missing_fields}", component="SCHEMA", table=table_name, missing_fields=missing_fields)
-            
-        return out, repair_info
+            except Exception as e:
+                Console.warn(f"write_table failed for {table_name}: {e}", component="OUTPUT", table=table_name, error=str(e)[:200])
+                if span:
+                    span._span.set_attribute("acm.error", True)
+                return 0
 
     def _bulk_insert_sql(self, table_name: str, df: pd.DataFrame) -> int:
         """Perform bulk SQL insert with optimized batching and robust commit."""
@@ -1286,11 +1091,10 @@ class OutputManager:
                 metrics_rows = []
                 timestamp = datetime.now()
                 run_id_val = run_id or self.run_id
-                equip_id_val = self.equip_id or 0
                 
                 metrics_rows.append({
                     'RunID': run_id_val,
-                    'EquipID': equip_id_val,
+                    'EquipID': self.equip_id,
                     'ComponentName': 'PCA',
                     'MetricType': 'n_components',
                     'Value': float(pca_detector.pca.n_components_),
@@ -1298,7 +1102,7 @@ class OutputManager:
                 })
                 metrics_rows.append({
                     'RunID': run_id_val,
-                    'EquipID': equip_id_val,
+                    'EquipID': self.equip_id,
                     'ComponentName': 'PCA',
                     'MetricType': 'variance_explained',
                     'Value': float(pca_detector.pca.explained_variance_ratio_.sum()),
@@ -1306,7 +1110,7 @@ class OutputManager:
                 })
                 metrics_rows.append({
                     'RunID': run_id_val,
-                    'EquipID': equip_id_val,
+                    'EquipID': self.equip_id,
                     'ComponentName': 'PCA',
                     'MetricType': 'n_features',
                     'Value': float(len(pca_detector.keep_cols)),
@@ -1318,8 +1122,7 @@ class OutputManager:
             elif df is not None:
                 # Legacy path: DataFrame must have ComponentName and MetricType columns
                 if 'ComponentName' not in df.columns or 'MetricType' not in df.columns:
-                    Console.warn("write_pca_metrics legacy path requires ComponentName and MetricType columns. "
-                                 + "Provided DataFrame has columns: " + str(list(df.columns)), component="OUTPUT", columns=list(df.columns))
+                    Console.warn(f"write_pca_metrics legacy path requires ComponentName and MetricType columns. Provided: {list(df.columns)}", component="OUTPUT")
                     return 0
                 sql_df = df.copy()
             else:
@@ -1356,21 +1159,22 @@ class OutputManager:
             
             # Ensure required columns
             if 'EquipID' not in sql_df.columns:
-                sql_df['EquipID'] = self.equip_id or 0
+                sql_df['EquipID'] = self.equip_id
             if 'RunID' not in sql_df.columns:
-                sql_df['RunID'] = run_id or self.run_id or ''
+                if not (run_id or self.run_id):
+                    raise ValueError("RunID is required but not set")
+                sql_df['RunID'] = run_id or self.run_id
             if 'EntryDateTime' not in sql_df.columns:
                 sql_df['EntryDateTime'] = datetime.now()
-            if 'ComponentID' not in sql_df.columns:
-                sql_df['ComponentID'] = sql_df.get('ComponentNo', 0)
-            if 'FeatureName' not in sql_df.columns:
-                sql_df['FeatureName'] = sql_df.get('Sensor', '')
+            if 'ComponentID' not in sql_df.columns and 'ComponentNo' in sql_df.columns:
+                sql_df['ComponentID'] = sql_df['ComponentNo']
+            if 'FeatureName' not in sql_df.columns and 'Sensor' in sql_df.columns:
+                sql_df['FeatureName'] = sql_df['Sensor']
             
             # Select only the columns the table expects
             keep_cols = ['RunID', 'EquipID', 'EntryDateTime', 'ComponentNo', 'ComponentID', 
                          'Sensor', 'FeatureName', 'Loading']
-            keep_cols = [c for c in keep_cols if c in sql_df.columns]
-            sql_df = sql_df[keep_cols]
+            sql_df = sql_df[[c for c in keep_cols if c in sql_df.columns]]
             
             return self._bulk_insert_sql('ACM_PCA_Loadings', sql_df)
             
@@ -1402,7 +1206,6 @@ class OutputManager:
             return 0
         
         try:
-            import json
             conn = self.sql_client.conn
             cursor = conn.cursor()
             
@@ -1472,6 +1275,8 @@ class OutputManager:
             # DELETE existing rows for this RunID+EquipID - single batch delete
             run_equip_pairs = df[['RunID', 'EquipID']].drop_duplicates()
             for run_id, equip_id in run_equip_pairs.values:
+                if equip_id is None:
+                    continue  # Skip rows with no EquipID
                 cursor.execute(
                     "DELETE FROM ACM_PCA_Metrics WHERE RunID = ? AND EquipID = ?",
                     (str(run_id), int(equip_id))
@@ -1483,7 +1288,8 @@ class OutputManager:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """
             
-            # Vectorized row preparation
+            # Vectorized row preparation - filter out rows with null EquipID
+            valid_records = [r for r in df.to_dict('records') if r.get('EquipID') is not None]
             rows_to_insert = [
                 (
                     str(row['RunID']),
@@ -1495,7 +1301,7 @@ class OutputManager:
                     int(row['TrainSamples']) if pd.notna(row.get('TrainSamples')) else None,
                     int(row['TrainFeatures']) if pd.notna(row.get('TrainFeatures')) else None
                 )
-                for row in df.to_dict('records')
+                for row in valid_records
             ]
             
             if rows_to_insert:
@@ -1510,7 +1316,7 @@ class OutputManager:
             if self.sql_client and self.sql_client.conn:
                 try:
                     self.sql_client.conn.rollback()
-                except:
+                except Exception:
                     pass
             return 0
     
@@ -1577,7 +1383,11 @@ class OutputManager:
             
             # Get unique RunID/EquipID pairs
             run_id = df['RunID'].iloc[0] if 'RunID' in df.columns else self.run_id
-            equip_id = df['EquipID'].iloc[0] if 'EquipID' in df.columns else (self.equip_id or 0)
+            equip_id = df['EquipID'].iloc[0] if 'EquipID' in df.columns else self.equip_id
+            
+            if equip_id is None:
+                Console.warn("_upsert_detector_forecast_ts: equip_id is None, skipping", component="OUTPUT")
+                return 0
             
             cursor.execute(
                 "DELETE FROM ACM_DetectorForecast_TS WHERE RunID = ? AND EquipID = ?",
@@ -1616,7 +1426,6 @@ class OutputManager:
         except Exception as e:
             Console.warn(f"_upsert_detector_forecast_ts failed: {e}", component="OUTPUT", table="ACM_DetectorForecast_TS", rows=len(df), equip_id=self.equip_id, error_type=type(e).__name__, error=str(e)[:200])
             return 0
-            return 0
     
     def _upsert_sensor_forecast(self, df: pd.DataFrame) -> int:
         """
@@ -1644,7 +1453,10 @@ class OutputManager:
             if 'EndTime' not in row and 'WindowEndEntryDateTime' in row:
                 row['EndTime'] = normalize_timestamp_scalar(row.get('WindowEndEntryDateTime'))
             row.setdefault('RunID', self.run_id)
-            row.setdefault('EquipID', self.equip_id or 0)
+            if self.equip_id is None:
+                Console.warn("write_run_stats: equip_id is None, skipping", component="OUTPUT")
+                return 0
+            row.setdefault('EquipID', self.equip_id)
             sql_df = pd.DataFrame([row])
             return self._bulk_insert_sql('ACM_Run_Stats', sql_df)
         except Exception as e:
@@ -1728,7 +1540,6 @@ class OutputManager:
             sql_columns=score_columns,
             non_numeric_cols={"timestamp", "regime_label", "transient_state"},
             add_created_at=False,
-            allow_repair=True,
         )
     
     def write_episodes(self, episodes_df: pd.DataFrame) -> Dict[str, Any]:
@@ -3056,7 +2867,7 @@ class OutputManager:
             df = pd.DataFrame(regime_defs)
             df['EquipID'] = self.equip_id or 0
             df['RegimeVersion'] = version
-            df['CreatedByRunID'] = self.run_id
+            df['RunID'] = self.run_id
             return self.write_table('ACM_RegimeDefinitions', df, delete_existing=False)  # Keep history
         except Exception as e:
             Console.warn(f"write_regime_definitions failed: {e}", component="OUTPUT", error=str(e)[:200])
@@ -3123,7 +2934,7 @@ class OutputManager:
             df = pd.DataFrame(patterns)
             df['EquipID'] = self.equip_id or 0
             df['DetectedAt'] = datetime.now()
-            df['DetectedByRunID'] = self.run_id
+            df['RunID'] = self.run_id
             return self.write_table('ACM_SeasonalPatterns', df, delete_existing=True)
         except Exception as e:
             Console.warn(f"write_seasonal_patterns failed: {e}", component="OUTPUT", error=str(e)[:200])
@@ -3527,7 +3338,7 @@ def write_pca_artifacts(
             "P95_ReconRMSE": spe_p95,
             "Notes": json.dumps({"SPE_P95_score": spe_p95, "T2_P95_score": t2_p95})
         }])
-        rows_pca_metrics = output_manager.write_pca_metrics(df_metrics, run_id or "")
+        rows_pca_metrics = output_manager.write_pca_metrics(df=df_metrics, run_id=run_id or "")
     except Exception as e:
         Console.warn(f"PCA artifacts write skipped: {e}", component="SQL",
                      equip=equip, run_id=run_id, error=str(e)[:200])

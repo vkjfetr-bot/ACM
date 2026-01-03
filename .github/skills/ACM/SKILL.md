@@ -947,10 +947,11 @@ with T.section("persist.new_table"):
 - `EntryDateTime` (legacy, migrate to `Timestamp`)
 - `start_ts` / `end_ts` (snake_case mixed with PascalCase)
 - `ValidatedAt`, `LoggedAt`, `DroppedAt` (use `CreatedAt`)
+- `CreatedByRunID`, `DetectedByRunID`, `LastUpdatedByRunID` (use `RunID`)
 
 **ID Columns:**
 - Always `RunID`, `EquipID` (PascalCase, NEVER snake_case)
-- `LastUpdatedByRunID` (not `LastUpdatedBy`)
+- ALL tables use `RunID` (NEVER `CreatedByRunID`, `DetectedByRunID`, etc.)
 
 **Column Casing:**
 - **ALL columns MUST be PascalCase** (e.g., `HealthIndex`, `RegimeLabel`)
