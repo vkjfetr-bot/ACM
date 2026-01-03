@@ -50,19 +50,25 @@
 
 ---
 
-## Phase 2: Extract Data Loading (~250 lines) [FUTURE]
+## Phase 2: Extract Data Loading (~250 lines) [COMPLETE]
 
-**Create**: `core/data_loader.py`
+**Created**: `core/data_loader.py` (410 lines)
 
-Move these methods:
-- `_load_data_from_sql` (L666-883) - 217 lines
-- `_parse_ts_index` (standalone function)
-- `_coerce_local_and_filter_future` (standalone function)
-- `_infer_numeric_cols` (standalone function)
-- `_native_cadence_secs` (standalone function)
-- `_check_cadence` (standalone function)
-- `_resample` (standalone function)
-- `DataMeta` dataclass
+Moved these methods:
+- `DataMeta` dataclass - MOVED
+- `parse_ts_index` (was `_parse_ts_index`) - MOVED
+- `coerce_local_and_filter_future` (was `_coerce_local_and_filter_future`) - MOVED
+- `infer_numeric_cols` (was `_infer_numeric_cols`) - MOVED
+- `native_cadence_secs` (was `_native_cadence_secs`) - MOVED
+- `check_cadence` (was `_check_cadence`) - MOVED
+- `resample_df` (was `_resample`) - MOVED
+- `DataLoader.load_from_sql` (was `OutputManager._load_data_from_sql`) - MOVED
+
+**Backward Compatibility**:
+- `output_manager.py` re-exports `DataMeta` and helper functions with original names
+- `OutputManager._load_data_from_sql()` is now a thin wrapper delegating to `DataLoader`
+
+**Lines Removed**: 277 (4304 → 4027)
 
 **Reason**: Data loading is not "output" management - separation of concerns.
 
@@ -128,8 +134,8 @@ The 6 `_upsert_*` methods (L1749-2000) have repetitive patterns:
 
 | Phase | Est. Lines Removed | Risk | Priority | Status |
 |-------|-------------------|------|----------|--------|
-| 1: Delete Dead Code | ~270 | LOW | HIGH | IN PROGRESS |
-| 2: Extract Data Loading | ~250 (moved) | MEDIUM | MEDIUM | FUTURE |
+| 1: Delete Dead Code | 466 | LOW | HIGH | COMPLETE |
+| 2: Extract Data Loading | 277 (moved) | MEDIUM | MEDIUM | COMPLETE |
 | 3: Extract Analytics | ~800 (moved) | MEDIUM | MEDIUM | FUTURE |
 | 4: Clean Utilities | ~100 | LOW | LOW | FUTURE |
 | 5: Consolidate Upserts | ~150 | LOW | LOW | FUTURE |
@@ -138,15 +144,15 @@ The 6 `_upsert_*` methods (L1749-2000) have repetitive patterns:
 
 ## Expected Final State
 
-| Metric | Before | After Phase 1 | After All |
-|--------|--------|---------------|-----------|
-| Lines | 4,770 | ~4,500 | ~2,800 |
-| Methods | 71 | ~60 | ~45 |
-| Single Responsibility | NO | NO | YES |
+| Metric | Before | After Phase 1 | After Phase 2 | After All |
+|--------|--------|---------------|---------------|-----------|
+| Lines | 4,770 | 4,304 | 4,027 | ~2,800 |
+| Methods | 71 | ~63 | ~62 | ~45 |
+| Single Responsibility | NO | NO | PARTIAL | YES |
 
-**New Files Created (Phase 2-3)**:
-- `core/data_loader.py` (~300 lines) - Data loading and preparation
-- `core/analytics_builder.py` (~400 lines) - Analytics table generation
+**New Files Created**:
+- `core/data_loader.py` (410 lines) - Data loading and preparation [CREATED]
+- `core/analytics_builder.py` (~400 lines) - Analytics table generation [FUTURE]
 
 **output_manager.py Focus**: Pure SQL write operations only.
 
@@ -156,4 +162,5 @@ The 6 `_upsert_*` methods (L1749-2000) have repetitive patterns:
 
 | Date | Phase | Lines Removed | Commit |
 |------|-------|---------------|--------|
-| 2026-01-03 | 1.1 | 466 lines (4770→4304) | Phase 1: Delete dead code |
+| 2026-01-03 | 1 | 466 lines (4770→4304) | Phase 1: Delete dead code |
+| 2026-01-03 | 2 | 277 lines (4304→4027) | Phase 2: Extract data loading to data_loader.py |
