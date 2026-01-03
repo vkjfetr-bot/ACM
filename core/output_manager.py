@@ -55,6 +55,13 @@ from core.data_loader import (
     resample_df as _resample,
 )
 
+# Phase 3 Extraction: Analytics generation moved to core/analytics_builder.py
+from core.analytics_builder import (
+    AnalyticsBuilder,
+    AnalyticsConstants as _AnalyticsConstants,  # Re-exported for backward compat
+    health_index as _health_index_impl,
+)
+
 # V11: Confidence model for health and episode confidence
 try:
     from core.confidence import compute_health_confidence, compute_episode_confidence
@@ -234,25 +241,8 @@ def _get_insertable_columns(cursor_factory: Callable[[], Any], name: str) -> Lis
         except Exception:
             pass
 
-# constants for analytics & guardrails
-class AnalyticsConstants:
-    DRIFT_EVENT_THRESHOLD = 3.0
-    DEFAULT_CLIP_Z = 30.0
-    TARGET_SAMPLING_POINTS = 500
-    HEALTH_ALERT_THRESHOLD = 70.0
-    HEALTH_CAUTION_THRESHOLD = 85.0  # Previously WATCH
-    HEALTH_WATCH_THRESHOLD = HEALTH_CAUTION_THRESHOLD  # kept for backward compatibility
-
-    @staticmethod
-    def anomaly_level(abs_z: float, warn: float, alert: float) -> str:
-        try:
-            if abs_z >= float(alert):
-                return "ALERT"
-            if abs_z >= float(warn):
-                return "CAUTION"
-        except Exception:
-            pass
-        return "GOOD"
+# constants for analytics & guardrails (re-exported from analytics_builder for backward compat)
+AnalyticsConstants = _AnalyticsConstants
 
 # CHART-12: Centralized severity color palette
 SEVERITY_COLORS = {
@@ -295,46 +285,10 @@ def _future_cutoff_ts(cfg: Dict[str, Any]) -> pd.Timestamp:
 # _native_cadence_secs, _check_cadence, _resample are all imported from data_loader
 # and re-exported for backward compatibility.
 
+# Phase 3: _health_index delegated to analytics_builder.health_index
 def _health_index(fused_z, z_threshold: float = 5.0, steepness: float = 1.5):
-    """
-    Calculate health index from fused z-score using a softer sigmoid mapping.
-    
-    v10.1.0: Replaced overly aggressive 100/(1+Z^2) formula.
-    
-    OLD formula issues:
-    - Z=2.5 gave Health=14% (too harsh for moderate anomaly)
-    - Z=3.0 gave Health=10% (equipment in crisis for minor deviation)
-    
-    NEW sigmoid formula:
-    - Z=0: Health = 100% (perfectly normal)
-    - Z=z_threshold/2 (2.5): Health = 50% (moderate concern)
-    - Z=z_threshold (5.0): Health   15% (serious anomaly)
-    - Z>z_threshold: Health approaches 0% asymptotically
-    
-    Args:
-        fused_z: Fused z-score (scalar, array, or Series)
-        z_threshold: Z-score at which health should be very low (default 5.0)
-        steepness: Controls sigmoid slope (default 1.5, higher=sharper transition)
-    
-    Returns:
-        Health index 0-100 (same type as input)
-    """
-    import numpy as np
-    
-    # Handle various input types
-    abs_z = np.abs(fused_z)
-    
-    # Sigmoid centered at z_threshold/2, with steepness controlling transition sharpness
-    # At z=0: normalized << 0, sigmoid 0, health  100
-    # At z=z_threshold/2: normalized = 0, sigmoid = 0.5, health = 50
-    # At z=z_threshold: normalized > 0, sigmoid   0.85, health   15
-    normalized = (abs_z - z_threshold / 2) / (z_threshold / 4)
-    sigmoid = 1 / (1 + np.exp(-normalized * steepness))
-    
-    health = 100.0 * (1 - sigmoid)
-    
-    # Ensure bounds
-    return np.clip(health, 0.0, 100.0)
+    """Backward compat wrapper - delegates to core.analytics_builder.health_index."""
+    return _health_index_impl(fused_z, z_threshold, steepness)
 
 
 # ==================== MAIN OUTPUT MANAGER CLASS ====================
@@ -3422,446 +3376,33 @@ DECLARE @EquipID INT = ?;
     ) -> Dict[str, int]:
         """
         Generate essential analytics tables (v11 - SQL-only).
-
+        
+        Phase 3: Delegates to AnalyticsBuilder for core logic.
+        
         Writes only the tables in ALLOWED_TABLES:
           - ACM_HealthTimeline: Health % over time (required for RUL forecasting)
           - ACM_RegimeTimeline: Operating regime assignments
           - ACM_SensorDefects: Sensor-level anomaly flags
           - ACM_SensorHotspots: Top anomalous sensors (RUL attribution)
-          - ACM_DataQuality: Data quality per sensor (generated in-memory, SQL write)
+          - ACM_DataQuality: Data quality per sensor
         """
-        Console.info("Generating analytics tables (v11 SQL-only)...", component="ANALYTICS")
-
-        sql_count = 0
-
-        # SQL is mandatory: if not ready, skip (non-fatal)
-        if (self.sql_client is None) or (not self.run_id):
-            Console.warn(
-                "Analytics table generation skipped (SQL not ready). Missing sql_client and/or run_id.",
-                component="ANALYTICS",
-                equip_id=getattr(self, "equip_id", None),
-                run_id=getattr(self, "run_id", None),
-            )
-            return {"sql_tables": 0}
-
-        has_fused = "fused" in scores_df.columns
-        has_regimes = "regime_label" in scores_df.columns
-
-        # Extract sensor context
-        sensor_values = None
-        sensor_zscores = None
-        sensor_train_mean = None
-        sensor_train_std = None
-        data_quality_df = None
-
-        if sensor_context:
-            v = sensor_context.get("values")
-            z = sensor_context.get("z_scores")
-
-            if isinstance(v, pd.DataFrame) and len(v.columns):
-                sensor_values = v.reindex(scores_df.index)
-
-            if isinstance(z, pd.DataFrame) and len(z.columns):
-                sensor_zscores = z.reindex(scores_df.index)
-
-            m = sensor_context.get("train_mean")
-            s = sensor_context.get("train_std")
-
-            if isinstance(m, pd.Series):
-                sensor_train_mean = m
-            if isinstance(s, pd.Series):
-                sensor_train_std = s
-
-            dq = sensor_context.get("data_quality_df")
-            if isinstance(dq, pd.DataFrame) and len(dq.columns):
-                data_quality_df = dq.copy()
-
-        # v11.1.5 FIX: Separate timeline tables (need timestamp-range deletion) from other tables
-        timeline_tables = ["ACM_HealthTimeline", "ACM_RegimeTimeline"]
-        non_timeline_tables = ["ACM_SensorDefects", "ACM_SensorHotspots", "ACM_DataQuality"]
-
-        # Get timestamp range for deduplication
-        min_ts = None
-        max_ts = None
-        if isinstance(scores_df.index, pd.DatetimeIndex):
-            min_ts = scores_df.index.min()
-            max_ts = scores_df.index.max()
-        elif 'Timestamp' in scores_df.columns:
-            min_ts = pd.to_datetime(scores_df['Timestamp']).min()
-            max_ts = pd.to_datetime(scores_df['Timestamp']).max()
-
-        with self.batched_transaction():
-            try:
-                # v11.1.5 FIX: Delete timeline tables by TIMESTAMP RANGE to prevent duplicates
-                # from overlapping batch runs (not by RunID which misses cross-run overlaps)
-                if pd.notna(min_ts) and pd.notna(max_ts):
-                    self._delete_timeline_overlaps(timeline_tables, min_ts, max_ts)
-                
-                # Delete non-timeline tables by RunID (original behavior - safe for non-time-series)
-                self._bulk_delete_analytics_tables(non_timeline_tables)
-
-                # 1) ACM_HealthTimeline
-                if has_fused:
-                    health_df = self._generate_health_timeline(scores_df, cfg)
-                    result = self.write_dataframe(
-                        health_df,
-                        "health_timeline",
-                        sql_table="ACM_HealthTimeline",
-                        add_created_at=True,
-                    )
-                    if result.get("sql_written"):
-                        sql_count += 1
-
-                # 2) ACM_RegimeTimeline
-                if has_regimes:
-                    regime_df = self._generate_regime_timeline(scores_df)
-                    result = self.write_dataframe(
-                        regime_df,
-                        "regime_timeline",
-                        sql_table="ACM_RegimeTimeline",
-                        add_created_at=True,
-                    )
-                    if result.get("sql_written"):
-                        sql_count += 1
-
-                # 3) ACM_SensorDefects
-                if has_fused:
-                    sensor_defects_df = self._generate_sensor_defects(scores_df)
-                    result = self.write_dataframe(
-                        sensor_defects_df,
-                        "sensor_defects",
-                        sql_table="ACM_SensorDefects",
-                        add_created_at=True,
-                    )
-                    if result.get("sql_written"):
-                        sql_count += 1
-
-                # 4) ACM_SensorHotspots
-                sensor_ready = (sensor_zscores is not None) and (sensor_values is not None)
-                if sensor_ready:
-                    warn_threshold = float(
-                        ((cfg.get("regimes", {}) or {}).get("health", {}) or {}).get("fused_warn_z", 1.5) or 1.5
-                    )
-                    alert_threshold = float(
-                        ((cfg.get("regimes", {}) or {}).get("health", {}) or {}).get("fused_alert_z", 3.0) or 3.0
-                    )
-                    top_n = int((cfg.get("output", {}) or {}).get("sensor_hotspot_top_n", 25))
-
-                    sensor_hotspots_df = self._generate_sensor_hotspots_table(
-                        sensor_zscores=sensor_zscores,
-                        sensor_values=sensor_values,
-                        train_mean=sensor_train_mean,
-                        train_std=sensor_train_std,
-                        warn_z=warn_threshold,
-                        alert_z=alert_threshold,
-                        top_n=top_n,
-                    )
-
-                    result = self.write_dataframe(
-                        sensor_hotspots_df,
-                        "sensor_hotspots",
-                        sql_table="ACM_SensorHotspots",
-                        non_numeric_cols={"SensorName"},
-                        add_created_at=True,
-                    )
-                    if result.get("sql_written"):
-                        sql_count += 1
-
-                # 5) ACM_DataQuality (SQL-only)
-                if isinstance(data_quality_df, pd.DataFrame) and len(data_quality_df.columns):
-                    dq_df = data_quality_df.copy()
-
-                    if "CheckName" not in dq_df.columns:
-                        dq_df["CheckName"] = "NullsBySensor"
-
-                    if "CheckResult" not in dq_df.columns:
-                        # PERFORMANCE: Vectorized check result derivation (replaces slow row-by-row apply)
-                        # Get Notes column (support both legacy lowercase and new PascalCase)
-                        notes_col = dq_df.get("Notes", dq_df.get("notes", pd.Series([""] * len(dq_df), index=dq_df.index)))
-                        notes_lower = notes_col.fillna("").astype(str).str.lower()
-                        
-                        # Get null percentages
-                        tr_pct = pd.to_numeric(dq_df.get("TrainNullPct", dq_df.get("train_null_pct", 0)), errors='coerce').fillna(0)
-                        sc_pct = pd.to_numeric(dq_df.get("ScoreNullPct", dq_df.get("score_null_pct", 0)), errors='coerce').fillna(0)
-                        max_pct = np.maximum(tr_pct, sc_pct)
-                        
-                        # Vectorized condition checks
-                        has_all_nulls = notes_lower.str.contains("all_nulls_train|all_nulls_score", regex=True)
-                        has_low_var = notes_lower.str.contains("low_variance_train", regex=False)
-                        
-                        # Build result: FAIL -> CAUTION -> OK (in priority order)
-                        check_result = pd.Series("OK", index=dq_df.index)
-                        check_result = check_result.where(~((max_pct >= 10) | has_low_var), "CAUTION")
-                        check_result = check_result.where(~((max_pct >= 80) | has_all_nulls), "FAIL")
-                        
-                        dq_df["CheckResult"] = check_result
-
-                    if "RunID" not in dq_df.columns:
-                        dq_df["RunID"] = self.run_id
-                    if "EquipID" not in dq_df.columns:
-                        dq_df["EquipID"] = self.equip_id
-
-                    # Standardize column naming to PascalCase for SQL
-                    col_mapping = {
-                        "sensor": "Sensor",
-                        "train_count": "TrainCount",
-                        "train_nulls": "TrainNulls",
-                        "train_null_pct": "TrainNullPct",
-                        "train_std": "TrainStd",
-                        "train_longest_gap": "TrainLongestGap",
-                        "train_flatline_span": "TrainFlatlineSpan",
-                        "train_min_ts": "TrainMinTs",
-                        "train_max_ts": "TrainMaxTs",
-                        "score_count": "ScoreCount",
-                        "score_nulls": "ScoreNulls",
-                        "score_null_pct": "ScoreNullPct",
-                        "score_std": "ScoreStd",
-                        "score_longest_gap": "ScoreLongestGap",
-                        "score_flatline_span": "ScoreFlatlineSpan",
-                        "score_min_ts": "ScoreMinTs",
-                        "score_max_ts": "ScoreMaxTs",
-                        "interp_method": "InterpMethod",
-                        "sampling_secs": "SamplingSecs",
-                        "notes": "Notes",
-                    }
-                    dq_df = dq_df.rename(columns={k: v for k, v in col_mapping.items() if k in dq_df.columns})
-
-                    expected_cols = [
-                        "Sensor", "TrainCount", "TrainNulls", "TrainNullPct", "TrainStd",
-                        "TrainLongestGap", "TrainFlatlineSpan", "TrainMinTs", "TrainMaxTs",
-                        "ScoreCount", "ScoreNulls", "ScoreNullPct", "ScoreStd",
-                        "ScoreLongestGap", "ScoreFlatlineSpan", "ScoreMinTs", "ScoreMaxTs",
-                        "InterpMethod", "SamplingSecs", "Notes",
-                        "RunID", "EquipID", "CheckName", "CheckResult",
-                    ]
-                    cols_to_keep = [c for c in expected_cols if c in dq_df.columns]
-                    dq_df = dq_df[cols_to_keep]
-
-                    result = self.write_dataframe(
-                        dq_df,
-                        "data_quality",
-                        sql_table="ACM_DataQuality",
-                        add_created_at=True,
-                    )
-                    if result.get("sql_written"):
-                        sql_count += 1
-
-                Console.info(
-                    f"Generated analytics tables (SQL written: {sql_count})",
-                    component="ANALYTICS",
-                    equip_id=self.equip_id,
-                    run_id=self.run_id,
-                )
-                return {"sql_tables": sql_count}
-
-            except Exception as e:
-                Console.warn(
-                    f"Analytics table generation failed: {e}",
-                    component="ANALYTICS",
-                    equip_id=self.equip_id,
-                    run_id=self.run_id,
-                    error_type=type(e).__name__,
-                    error=str(e)[:200],
-                )
-                import traceback
-                Console.warn(
-                    f"Traceback: {traceback.format_exc()}",
-                    component="ANALYTICS",
-                    equip_id=self.equip_id,
-                    run_id=self.run_id,
-                )
-                return {"sql_tables": sql_count}
+        builder = AnalyticsBuilder(self)
+        return builder.generate_all(scores_df, cfg, sensor_context)
 
     def _generate_health_timeline(self, scores_df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
-        """
-        Generate enhanced health timeline with smoothing, quality flags, and V11 confidence.
-        
-        Implements EMA smoothing + rate limiting to prevent unrealistic health jumps
-        caused by sensor noise, missing data, or coldstart artifacts.
-        
-        V11: Adds Confidence column based on maturity state and data quality.
-        
-        Args:
-            scores_df: DataFrame with fused Z-scores and timestamp index
-            cfg: Configuration dictionary with health smoothing parameters
-        """
-        # Calculate raw health index (unsmoothed)
-        raw_health = _health_index(scores_df['fused'])
-        
-        # Load config parameters (with defaults)
-        health_cfg = cfg.get('health', {})
-        smoothing_alpha = health_cfg.get('smoothing_alpha', 0.3)
-        max_change_per_period = health_cfg.get('max_change_rate_per_hour', 20.0)
-        extreme_volatility_threshold = health_cfg.get('extreme_volatility_threshold', 30.0)
-        extreme_anomaly_z_threshold = health_cfg.get('extreme_anomaly_z_threshold', 10.0)
-        
-        # Apply EMA smoothing (pandas ewm handles initialization automatically)
-        smoothed_health = raw_health.ewm(alpha=smoothing_alpha, adjust=False).mean()
-        
-        # Calculate rate of change for quality flagging
-        health_change = smoothed_health.diff().abs()
-        
-        # Initialize quality flags as NORMAL
-        quality_flag = pd.Series(['NORMAL'] * len(scores_df), index=scores_df.index)
-        
-        # Flag extreme volatility (large health jumps)
-        volatile_mask = health_change > extreme_volatility_threshold
-        quality_flag[volatile_mask] = 'EXTREME_VOLATILITY'
-        
-        # Flag extreme anomalies (sensor faults, broken thermocouples, etc.)
-        extreme_mask = scores_df['fused'].abs() > extreme_anomaly_z_threshold
-        quality_flag[extreme_mask] = 'EXTREME_ANOMALY'
-        
-        # First point has no previous value, always NORMAL
-        quality_flag.iloc[0] = 'NORMAL'
-        
-        # Log quality issues for operator awareness
-        volatile_count = (quality_flag == 'EXTREME_VOLATILITY').sum()
-        extreme_count = (quality_flag == 'EXTREME_ANOMALY').sum()
-        if volatile_count > 0:
-            Console.warn(f"{volatile_count} volatile health transitions detected (>{extreme_volatility_threshold}% change)", component="HEALTH", equip_id=self.equip_id, run_id=self.run_id, volatile_count=volatile_count, threshold=extreme_volatility_threshold)
-        if extreme_count > 0:
-            Console.warn(f"{extreme_count} extreme anomaly scores detected (|Z| > {extreme_anomaly_z_threshold})", component="HEALTH", equip_id=self.equip_id, run_id=self.run_id, extreme_count=extreme_count, threshold=extreme_anomaly_z_threshold)
-        
-        # Calculate health zones based on SMOOTHED health
-        zones = pd.cut(
-            smoothed_health,
-            bins=[0, AnalyticsConstants.HEALTH_ALERT_THRESHOLD, AnalyticsConstants.HEALTH_WATCH_THRESHOLD, 100],
-            labels=['ALERT', 'WATCH', 'GOOD']
-        )
-        
-        # V11: Compute confidence for each health reading - VECTORIZED for performance
-        confidence_values = [None] * len(scores_df)  # Default to None
-        if _CONFIDENCE_AVAILABLE and compute_health_confidence is not None:
-            try:
-                maturity_state = getattr(self, 'maturity_state', 'COLDSTART')
-                n_rows = len(scores_df)
-                
-                # PERFORMANCE FIX: Vectorized confidence computation
-                # Instead of calling compute_health_confidence per row, batch process
-                fused_z_array = scores_df['fused'].values
-                sample_counts = np.arange(1, n_rows + 1)
-                
-                # Compute confidence vectorized (if function supports arrays) or use fast loop
-                # Most confidence functions have similar structure, so we pre-compute common factors
-                confidence_values = []
-                
-                # Batch compute with minimal overhead - avoid function call overhead
-                # Base confidence from maturity state (constant for all rows)
-                maturity_base = {'COLDSTART': 0.3, 'LEARNING': 0.6, 'CONVERGED': 0.85, 'DEPRECATED': 0.7}.get(maturity_state, 0.5)
-                
-                # Vectorized computation using numpy (already imported at module level)
-                fused_z_abs = np.abs(fused_z_array)
-                
-                # Signal confidence: higher Z = higher confidence (anomaly is real)
-                signal_conf = np.minimum(fused_z_abs / 6.0, 1.0) * 0.3
-                
-                # Sample confidence: more samples = higher confidence
-                sample_conf = np.minimum(sample_counts / 1000.0, 1.0) * 0.2
-                
-                # Combined confidence (vectorized)
-                raw_conf = maturity_base * 0.5 + signal_conf + sample_conf
-                confidence_values = np.round(np.clip(raw_conf, 0.1, 0.95), 3).tolist()
-                
-            except Exception as e:
-                Console.warn(f"Failed to compute health confidence: {e}", component="HEALTH")
-                confidence_values = None  # Will be set as NaN in DataFrame
-        
-        # PERFORMANCE: Avoid .to_list() - use direct Series/array assignment
-        ts_series = normalize_timestamp_series(scores_df.index)
-        result_df = pd.DataFrame({
-            'Timestamp': ts_series.values,
-            'HealthIndex': smoothed_health.round(2).values,
-            'RawHealthIndex': raw_health.round(2).values,
-            'QualityFlag': quality_flag.astype(str).values,
-            'HealthZone': zones.astype(str).values,
-            'FusedZ': scores_df['fused'].round(4).values,
-        })
-        # Add confidence column - handle both array and None cases
-        if confidence_values is not None:
-            result_df['Confidence'] = confidence_values
-        else:
-            result_df['Confidence'] = np.nan
-        return result_df
+        """Backward compat wrapper - delegates to AnalyticsBuilder."""
+        builder = AnalyticsBuilder(self)
+        return builder.generate_health_timeline(scores_df, cfg)
     
     def _generate_regime_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime timeline with confidence.
-        
-        V11: Adds AssignmentConfidence from regime_confidence column (computed in Phase 2).
-        PERFORMANCE: Uses .values instead of .to_list() for faster DataFrame construction.
-        """
-        regimes = pd.to_numeric(scores_df['regime_label'], errors='coerce').astype('Int64')
-        ts_series = normalize_timestamp_series(scores_df.index)
-        
-        # PERFORMANCE: Avoid .to_list() - build DataFrame with .values directly
-        result = pd.DataFrame({
-            'Timestamp': ts_series.values,
-            'RegimeLabel': regimes.values,
-            'RegimeState': (scores_df['regime_state'].astype(str).values if 'regime_state' in scores_df.columns else 'unknown')
-        })
-        
-        # V11: Add assignment confidence if available (computed in regimes.py)
-        if 'regime_confidence' in scores_df.columns:
-            result['AssignmentConfidence'] = scores_df['regime_confidence'].round(3).values
-        
-        # V11: Add regime version if available
-        if 'regime_version' in scores_df.columns:
-            result['RegimeVersion'] = scores_df['regime_version'].values
-            
-        return result
+        """Backward compat wrapper - delegates to AnalyticsBuilder."""
+        builder = AnalyticsBuilder(self)
+        return builder.generate_regime_timeline(scores_df)
     
     def _generate_sensor_defects(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate per-sensor defect analysis."""
-        detector_cols = [c for c in scores_df.columns if c.endswith('_z') and c != 'fused_z']
-        defect_data = []
-        
-        for detector in detector_cols:
-            # Defensive: validate detector column name
-            if detector is None or (isinstance(detector, float) and pd.isna(detector)):
-                Console.warn("Skipping NULL detector column name", component="DEFECTS", equip_id=self.equip_id, run_id=self.run_id)
-                continue
-            detector_col = str(detector)
-            
-            # Use SQL-safe human-readable label instead of raw code
-            detector_label = get_detector_label(detector_col, sql_safe=True)
-            
-            # Determine family from label (first word before space/paren)
-            family_parts = detector_label.split(' ')[0] if ' ' in detector_label else detector_label.split('(')[0]
-            family = family_parts.strip()
-
-            # Safely access values; skip if column missing unexpectedly
-            if detector not in scores_df.columns:
-                Console.warn(f"Missing detector column: {detector}", component="DEFECTS", detector=detector, equip_id=self.equip_id, run_id=self.run_id)
-                continue
-            values = pd.to_numeric(scores_df[detector], errors='coerce').abs()
-            violations = values > 2.0
-            violation_count = int(violations.sum())
-            total_points = int(len(values)) if len(values) else 0
-            violation_pct = (violation_count / total_points * 100) if total_points > 0 else 0.0
-            
-            # Determine severity
-            if violation_pct > 20:
-                severity = "CRITICAL"
-            elif violation_pct > 10:
-                severity = "HIGH"
-            elif violation_pct > 5:
-                severity = "MEDIUM"
-            else:
-                severity = "LOW"
-            
-            defect_data.append({
-                'DetectorType': detector_label,
-                'DetectorFamily': family,
-                'Severity': severity,
-                'ViolationCount': violation_count,
-                'ViolationPct': round(violation_pct, 2),
-                'MaxZ': round(float(values.max()) if len(values) else 0.0, 4),
-                'AvgZ': round(float(values.mean()) if len(values) else 0.0, 4),
-                'CurrentZ': round(float(values.iloc[-1]) if len(values) else 0.0, 4),
-                'ActiveDefect': bool(violations.iloc[-1]) if len(violations) else False
-            })
-        
-        return pd.DataFrame(defect_data).sort_values('ViolationPct', ascending=False)
+        """Backward compat wrapper - delegates to AnalyticsBuilder."""
+        builder = AnalyticsBuilder(self)
+        return builder.generate_sensor_defects(scores_df)
     
     def _generate_sensor_hotspots_table(
         self,
@@ -3873,89 +3414,12 @@ DECLARE @EquipID INT = ?;
         alert_z: float,
         top_n: int
     ) -> pd.DataFrame:
-        """Summarize top sensors by peak z-score deviation (vectorized)."""
-        empty_schema = {
-            'SensorName': [], 'MaxTimestamp': [], 'LatestTimestamp': [], 'MaxAbsZ': [],
-            'MaxSignedZ': [], 'LatestAbsZ': [], 'LatestSignedZ': [], 'ValueAtPeak': [],
-            'LatestValue': [], 'TrainMean': [], 'TrainStd': [], 'AboveWarnCount': [],
-            'AboveAlertCount': []
-        }
-
-        if sensor_zscores is None or sensor_zscores.empty:
-            return pd.DataFrame(empty_schema)
-
-        # Drop columns with all NaN
-        valid_cols = sensor_zscores.columns[sensor_zscores.notna().any()]
-        if len(valid_cols) == 0:
-            return pd.DataFrame(empty_schema)
-        
-        zs = sensor_zscores[valid_cols]
-        abs_zs = zs.abs()
-        
-        # Vectorized aggregations
-        max_abs = abs_zs.max()  # Series: sensor -> max abs z
-        max_idx = abs_zs.idxmax()  # Series: sensor -> timestamp of max
-        
-        # Get latest timestamp per column (last non-NaN index)
-        latest_ts = pd.Series(index=valid_cols, dtype=object)
-        for c in valid_cols:
-            col_notna = zs[c].dropna()
-            latest_ts[c] = col_notna.index[-1] if len(col_notna) > 0 else pd.NaT
-        
-        # Signed value at max and latest
-        max_signed = pd.Series({c: zs.loc[max_idx[c], c] if pd.notna(max_idx[c]) else np.nan for c in valid_cols})
-        latest_signed = zs.iloc[-1]
-        latest_abs = latest_signed.abs()
-        
-        # Threshold counts (vectorized)
-        above_warn = (abs_zs >= warn_z).sum()
-        above_alert = (abs_zs >= alert_z).sum() if alert_z > 0 else pd.Series(0, index=valid_cols)
-        
-        # Value at peak and latest - vectorized lookup
-        value_at_peak = pd.Series(index=valid_cols, dtype=float)
-        latest_value = pd.Series(index=valid_cols, dtype=float)
-        common_cols = valid_cols.intersection(sensor_values.columns)
-        for c in common_cols:
-            if pd.notna(max_idx[c]) and max_idx[c] in sensor_values.index:
-                value_at_peak[c] = sensor_values.loc[max_idx[c], c]
-            if pd.notna(latest_ts[c]) and latest_ts[c] in sensor_values.index:
-                latest_value[c] = sensor_values.loc[latest_ts[c], c]
-        
-        # Train mean/std
-        train_mean_vals = pd.Series(index=valid_cols, dtype=float)
-        train_std_vals = pd.Series(index=valid_cols, dtype=float)
-        if isinstance(train_mean, pd.Series):
-            common = valid_cols.intersection(train_mean.index)
-            train_mean_vals[common] = train_mean[common]
-        if isinstance(train_std, pd.Series):
-            common = valid_cols.intersection(train_std.index)
-            train_std_vals[common] = train_std[common]
-        
-        # Build DataFrame directly
-        df = pd.DataFrame({
-            'SensorName': valid_cols,
-            'MaxTimestamp': [normalize_timestamp_scalar(max_idx[c]) for c in valid_cols],
-            'LatestTimestamp': [normalize_timestamp_scalar(latest_ts[c]) for c in valid_cols],
-            'MaxAbsZ': max_abs.round(4).values,
-            'MaxSignedZ': max_signed.round(4).values,
-            'LatestAbsZ': latest_abs.round(4).values,
-            'LatestSignedZ': latest_signed.round(4).values,
-            'ValueAtPeak': value_at_peak.values,
-            'LatestValue': latest_value.values,
-            'TrainMean': train_mean_vals.values,
-            'TrainStd': train_std_vals.values,
-            'AboveWarnCount': above_warn.astype(int).values,
-            'AboveAlertCount': above_alert.astype(int).values
-        })
-        
-        # Filter and sort
-        df = df[df['MaxAbsZ'] >= warn_z]
-        if df.empty:
-            return pd.DataFrame(empty_schema)
-        df = df.sort_values('MaxAbsZ', ascending=False)
-        if top_n > 0:
-            df = df.head(top_n)
-        return df.reset_index(drop=True)
+        """Backward compat wrapper - delegates to AnalyticsBuilder."""
+        builder = AnalyticsBuilder(self)
+        return builder.generate_sensor_hotspots(
+            sensor_zscores, sensor_values, train_mean, train_std,
+            warn_z, alert_z, top_n
+        )
 
 
 # ============================================================================

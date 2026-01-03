@@ -1,23 +1,22 @@
 # Output Manager Debloat Plan
 
 **File**: `core/output_manager.py`  
-**Current Size**: 4,770 lines (71 methods)  
+**Current Size**: 3,676 lines (was 4,770)  
 **Target Size**: ~2,500-3,000 lines  
-**Estimated Reduction**: ~1,500-2,000 lines (35-40%)  
-**Branch**: `feature/output-manager-debloat`
+**Total Reduction So Far**: 1,094 lines (23%)  
+**Branch**: `feature/phase3-analytics-builder`
 
 ---
 
 ## Executive Summary
 
-| Category | Lines | Action |
-|----------|-------|--------|
-| Dead Code | ~400 | DELETE - never called |
-| Duplicate Methods | ~50 | DELETE - `write_run_stats` duplicate |
-| Unused `_build_*` Methods | ~250 | DELETE - replaced by `_generate_*` |
-| Data Loading (wrong place) | ~250 | MOVE to `core/data_loader.py` |
-| Analytics Generation | ~800 | MOVE to `core/analytics_builder.py` |
-| Utility Functions (top-level) | ~150 | MOVE to `utils/` or inline |
+| Category | Lines | Action | Status |
+|----------|-------|--------|--------|
+| Dead Code | ~466 | DELETE - never called | ✅ DONE |
+| Data Loading (wrong place) | ~277 | MOVE to `core/data_loader.py` | ✅ DONE |
+| Analytics Generation | ~351 | MOVE to `core/analytics_builder.py` | ✅ DONE |
+| Utility Functions (top-level) | ~150 | MOVE to `utils/` or inline | FUTURE |
+| Upsert Consolidation | ~200 | Consolidate patterns | FUTURE |
 
 ---
 
@@ -50,7 +49,7 @@
 
 ---
 
-## Phase 2: Extract Data Loading (~250 lines) [COMPLETE]
+## Phase 2: Extract Data Loading (~277 lines) [COMPLETE]
 
 **Created**: `core/data_loader.py` (410 lines)
 
@@ -70,27 +69,28 @@ Moved these methods:
 
 **Lines Removed**: 277 (4304 → 4027)
 
-**Reason**: Data loading is not "output" management - separation of concerns.
-
 ---
 
-## Phase 3: Extract Analytics Generation (~800 lines) [FUTURE]
+## Phase 3: Extract Analytics Generation (~351 lines) [COMPLETE]
 
-**Create**: `core/analytics_builder.py`
+**Created**: `core/analytics_builder.py` (600 lines)
 
-Move these methods:
-- `generate_all_analytics_tables` (L3974-4230) - 256 lines
-- `_generate_health_timeline` (L4232-4342) - 110 lines
-- `_generate_regime_timeline` (L4344-4368) - 24 lines
-- `_generate_sensor_defects` (L4370-4421) - 51 lines
-- `_generate_sensor_hotspots_table` (L4423-4520) - 97 lines
-- `_health_index` (standalone function) - 45 lines
-- `_bulk_delete_analytics_tables` (L3833-3972) - 139 lines
-- `_delete_timeline_overlaps` (L3773-3831) - 58 lines
+Extracted logic for:
+- `AnalyticsBuilder` class - encapsulates analytics generation
+- `health_index` function - standalone sigmoid health calculation
+- `AnalyticsConstants` class - constants for analytics thresholds
+- `generate_all` - orchestrates all analytics table generation
+- `generate_health_timeline` - health timeline with EMA smoothing, quality flags
+- `generate_regime_timeline` - regime timeline with confidence
+- `generate_sensor_defects` - per-sensor defect analysis
+- `generate_sensor_hotspots` - top sensors by z-score deviation
 
-**Total**: ~800 lines
+**Backward Compatibility**:
+- `output_manager.py` imports and re-exports `AnalyticsConstants` and `_health_index`
+- `OutputManager.generate_all_analytics_tables()` delegates to `AnalyticsBuilder.generate_all()`
+- `OutputManager._generate_*` methods delegate to `AnalyticsBuilder.*` methods
 
-**Reason**: Analytics generation is distinct from raw table writes.
+**Lines Removed**: 351 (4027 → 3676)
 
 ---
 
