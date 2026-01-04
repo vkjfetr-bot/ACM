@@ -234,7 +234,7 @@ pytest tests/test_rust_features.py::test_rolling_median_parity
 **Integration questions:** See `rust_acm/README.md` Section 5 (Development Workflow)  
 **Performance concerns:** See `docs/RUST_MIGRATION_PLAN.md` Section 6 (Success Metrics)
 
-**CI/CD Status:** Check `.github/workflows/rust-build.yml` runs
+**Build Scripts:** Use `scripts/build_rust_windows.ps1` or `scripts/build_rust_linux.sh` for automated builds
 
 ---
 

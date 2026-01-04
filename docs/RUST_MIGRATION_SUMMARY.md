@@ -71,14 +71,13 @@ rust_acm/
 - Zero-copy NumPy interop via PyO3
 - In-place operations minimize memory allocation
 
-### 4. CI/CD Integration
+### 4. Automated Build Scripts
 
-✅ **`.github/workflows/rust-build.yml`**
-- Automated wheel builds for Windows and Linux
-- Multi-Python version support (3.11, 3.12)
-- Rust code quality checks (rustfmt, clippy)
-- Unit test execution
-- Artifact upload for distribution
+✅ **Build automation for Windows/Linux:**
+- `scripts/build_rust_windows.ps1` - Windows wheel builder
+- `scripts/build_rust_linux.sh` - Linux wheel builder
+- Local build validation and testing
+- Manual distribution workflow
 
 ### 5. Configuration Updates
 

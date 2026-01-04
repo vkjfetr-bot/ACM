@@ -409,102 +409,67 @@ cargo build -p acm_features
 
 ## CI/CD Integration
 
-### GitHub Actions Workflow
+### Automated Build Scripts
 
-Create `.github/workflows/rust-build.yml`:
+For continuous integration, you can use automated build scripts instead of cloud-based CI/CD:
 
-```yaml
-name: Build Rust Extension
+**Windows Build Script** (`scripts/build_rust_windows.ps1`):
 
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
+```powershell
+# Build Rust extension on Windows
+param(
+    [string]$PythonVersion = "3.11"
+)
 
-jobs:
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Install maturin
-        run: pip install maturin
-      
-      - name: Build wheel
-        run: |
-          cd rust_acm
-          maturin build --release --out dist/
-      
-      - name: Test import
-        run: |
-          pip install dist/*.whl
-          python -c "import acm_rs; print(acm_rs.__version__)"
-      
-      - name: Upload wheel
-        uses: actions/upload-artifact@v3
-        with:
-          name: wheels-windows
-          path: rust_acm/dist/*.whl
-  
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Build wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          manylinux: auto
-          command: build
-          args: --release --out dist/ -m rust_acm/Cargo.toml
-      
-      - name: Upload wheel
-        uses: actions/upload-artifact@v3
-        with:
-          name: wheels-linux
-          path: dist/*.whl
-  
-  test:
-    needs: [build-windows]
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Download wheel
-        uses: actions/download-artifact@v3
-        with:
-          name: wheels-windows
-          path: dist/
-      
-      - name: Install dependencies
-        run: |
-          pip install pytest pytest-benchmark numpy pandas
-          pip install dist/*.whl
-      
-      - name: Run tests
-        run: pytest tests/test_rust_features.py -v
+Write-Host "Building Rust extension for Python $PythonVersion..."
+
+# Install dependencies
+pip install maturin
+
+# Build wheel
+cd rust_acm
+maturin build --release --out dist/
+
+# Test import
+pip install dist/*.whl --force-reinstall
+python -c "import acm_rs; print('Version:', acm_rs.__version__)"
+
+Write-Host "Build complete! Wheel available in rust_acm/dist/"
+```
+
+**Linux Build Script** (`scripts/build_rust_linux.sh`):
+
+```bash
+#!/bin/bash
+# Build Rust extension on Linux
+
+set -e
+
+PYTHON_VERSION=${1:-3.11}
+
+echo "Building Rust extension for Python $PYTHON_VERSION..."
+
+# Install dependencies
+pip install maturin
+
+# Build wheel (optionally use manylinux for compatibility)
+cd rust_acm
+maturin build --release --out dist/
+
+# Test import
+pip install dist/*.whl --force-reinstall
+python -c "import acm_rs; print('Version:', acm_rs.__version__)"
+
+echo "Build complete! Wheel available in rust_acm/dist/"
+```
+
+**Usage:**
+```powershell
+# Windows
+.\scripts\build_rust_windows.ps1
+
+# Linux
+bash scripts/build_rust_linux.sh
 ```
 
 ### Local Pre-Commit Hook

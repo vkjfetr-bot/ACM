@@ -217,7 +217,7 @@ opt-level = 1         # Some optimization for testing
 - [ ] Rust workspace structure in `/rust_acm/`
 - [ ] Maturin build succeeds on Windows
 - [ ] Python can `import acm_rs` and call a simple test function
-- [ ] CI/CD pipeline builds Rust wheels (GitHub Actions)
+- [ ] Automated build scripts for Windows/Linux wheel creation
 - [ ] Documentation: `docs/RUST_BUILD_GUIDE.md`
 
 ---
@@ -554,28 +554,27 @@ pub fn fit_kmeans(
        maturin build --release --features "abi3-py311" -i python3.11
    ```
 
-3. **GitHub Actions CI**
-   ```yaml
-   # .github/workflows/rust-build.yml
-   name: Build Rust Extension
+3. **Automated Build Scripts**
+   ```powershell
+   # scripts/build_rust_windows.ps1
+   # Build Rust extension on Windows
    
-   on: [push, pull_request]
+   pip install maturin
+   cd rust_acm
+   maturin build --release --out dist/
+   pip install dist/*.whl --force-reinstall
+   python -c "import acm_rs; print('Version:', acm_rs.__version__)"
+   ```
    
-   jobs:
-     build-windows:
-       runs-on: windows-latest
-       steps:
-         - uses: actions/checkout@v4
-         - uses: actions/setup-python@v5
-           with:
-             python-version: '3.11'
-         - uses: dtolnay/rust-toolchain@stable
-         - run: pip install maturin
-         - run: maturin build --release --out dist/
-         - uses: actions/upload-artifact@v3
-           with:
-             name: wheels-windows
-             path: dist/*.whl
+   ```bash
+   # scripts/build_rust_linux.sh
+   # Build Rust extension on Linux
+   
+   pip install maturin
+   cd rust_acm
+   maturin build --release --out dist/
+   pip install dist/*.whl --force-reinstall
+   python -c "import acm_rs; print('Version:', acm_rs.__version__)"
    ```
 
 #### 5.2 Performance Monitoring
@@ -779,7 +778,7 @@ Week 15-16: Phase 5 - Production Deployment & Monitoring
 - 1 QA engineer (40% time, weeks 6-16, testing and validation)
 
 **Infrastructure:**
-- Windows build server (GitHub Actions runners)
+- Windows build environment (local or self-hosted)
 - Performance testing environment (representative hardware)
 - Profiling tools (Grafana + Pyroscope already available)
 
@@ -787,7 +786,7 @@ Week 15-16: Phase 5 - Production Deployment & Monitoring
 
 | Risk | Mitigation |
 |------|-----------|
-| Rust wheel build fails on Windows | Use GitHub Actions Windows runners for early testing; fallback to Polars |
+| Rust wheel build fails on Windows | Test on clean Windows environment; fallback to Polars |
 | Numerical accuracy issues | Comprehensive test suite with ±1e-12 tolerance; cross-validation against pandas |
 | Performance regression | Benchmarking suite on representative data; rollback capability |
 | Increased maintenance burden | Thorough documentation; fallback to Python always available |
@@ -953,9 +952,10 @@ Week 15-16: Phase 5 - Production Deployment & Monitoring
    - Call from Python via `rust_bridge/ffi.py`
    - Verify on Windows
 
-4. **Set up GitHub Actions CI**
-   - Add `.github/workflows/rust-build.yml`
-   - Test wheel building on Windows runner
+4. **Set up automated build scripts**
+   - Create `scripts/build_rust_windows.ps1`
+   - Create `scripts/build_rust_linux.sh`
+   - Test wheel building on local Windows/Linux environments
 
 ### Review Checkpoints
 

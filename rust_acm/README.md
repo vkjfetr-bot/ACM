@@ -246,21 +246,32 @@ RUST_BACKTRACE=1 python script.py
 py-spy record --native -o profile.svg -- python script.py
 ```
 
-## CI/CD Integration
+## Automated Build Integration
 
-GitHub Actions workflow builds wheels for multiple platforms:
+Use the provided build scripts for automated wheel creation:
 
-```yaml
-# .github/workflows/rust-build.yml
+**Windows:**
+```powershell
+# scripts/build_rust_windows.ps1
+param([string]$PythonVersion = "3.11")
 
-jobs:
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: pip install maturin
-      - run: maturin build --release --out dist/
+pip install maturin
+cd rust_acm
+maturin build --release --out dist/
+pip install dist/*.whl --force-reinstall
+python -c "import acm_rs; print('Version:', acm_rs.__version__)"
+```
+
+**Linux:**
+```bash
+# scripts/build_rust_linux.sh
+#!/bin/bash
+
+pip install maturin
+cd rust_acm
+maturin build --release --out dist/
+pip install dist/*.whl --force-reinstall
+python -c "import acm_rs; print('Version:', acm_rs.__version__)"
 ```
 
 ## Performance Monitoring
