@@ -17,9 +17,22 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.2.2"
+__version__ = "11.2.3"
 __version_date__ = "2026-01-04"
 __version_author__ = "ACM Development Team"
+# v11.2.3: ADDITIONAL P0 ANALYTICAL FIXES - Regime and degradation improvements
+# - P0 FIX #2: HDBSCAN transient-aware clustering (ANALYTICAL AUDIT FLAW #2)
+#   - Detects high rate-of-change signals indicating transient-rich data
+#   - Automatically reduces min_cluster_size from 2% to 0.5% (20-50 samples)
+#   - Prevents misclassification of startup/shutdown transients as noise
+#   - Critical for equipment with <1% transient operating time
+# - P0 FIX #3: Regime-conditioned degradation modeling (ANALYTICAL AUDIT FLAW #3)
+#   - New RegimeConditionedDegradationModel class in degradation_model.py
+#   - Fits separate LinearTrendModel per operating regime
+#   - Accounts for regime-specific degradation rates (high-load vs low-load)
+#   - Simulates regime transitions using Markov chain for accurate RUL forecasting
+#   - Prevents averaged-out trends that cause 55% RUL prediction errors
+# Building on v11.2.2 circular tuning, confidence harmonic mean, and promotion criteria
 # v11.2.2: P0 ANALYTICAL FIXES - Critical reliability improvements from comprehensive audit
 # - P0 FIX #1: Circular weight tuning guard now DEFAULTS to True (was False)
 #   - Prevents self-reinforcing feedback loops in detector fusion
