@@ -40,6 +40,18 @@ class MaturityState(str, Enum):
 class PromotionCriteria:
     """Criteria for promoting model from LEARNING to CONVERGED.
     
+    P0-FIX (v11.2.2): ANALYTICAL AUDIT FLAW #10 - Tightened promotion criteria
+    Previous thresholds were too permissive, allowing unreliable models to reach
+    CONVERGED state. New thresholds ensure production-grade reliability.
+    
+    CHANGES:
+    - min_silhouette_score: 0.15 → 0.40 (require decent cluster separation)
+    - min_stability_ratio: 0.6 → 0.75 (reduce regime thrashing from 40% to 25%)
+    - min_training_rows: 200 → 400 (better statistical significance)
+    - min_consecutive_runs: 3 → 5 (more validation before promotion)
+    - max_forecast_mape: 50.0 → 35.0 (tighter forecasting accuracy)
+    - max_forecast_rmse: 15.0 → 12.0 (tighter error bounds)
+    
     FLAW FIX #3: Added forecast quality thresholds. Poor forecasting models
     should not reach CONVERGED state even with good clustering metrics.
     
@@ -52,25 +64,22 @@ class PromotionCriteria:
     - lifecycle.promotion.max_forecast_mape (NEW)
     - lifecycle.promotion.max_forecast_rmse (NEW)
     
-    v11.0.1: Relaxed defaults for faster promotion in industrial settings:
-    - min_training_rows: 200 (was 1000) - matches coldstart minimum
-    - min_stability_ratio: 0.6 (was 0.8) - allows regime switching in dynamic ops
-    
-    v11.2.1: Added forecast quality criteria:
-    - max_forecast_mape: 50.0 - Mean Absolute Percentage Error (lower is better)
-    - max_forecast_rmse: 15.0 - Root Mean Square Error on health scale (0-100)
+    v11.2.2: Strengthened defaults for production reliability based on analytical audit
+    v11.2.1: Added forecast quality criteria
+    v11.0.1: Relaxed defaults for faster promotion in industrial settings (now reverted)
     
     Reference:
-        MAPE < 50% is acceptable for industrial forecasting (Hyndman 2018)
-        RMSE < 15 on 0-100 health scale = reasonable prediction accuracy
+        MAPE < 35% is good for industrial forecasting (Hyndman 2018, adjusted)
+        Silhouette > 0.4 indicates reasonable cluster separation (Rousseeuw 1987)
+        RMSE < 12 on 0-100 health scale = good prediction accuracy
     """
-    min_training_days: int = 7
-    min_silhouette_score: float = 0.15
-    min_stability_ratio: float = 0.6  # v11.0.1: Relaxed from 0.8
-    min_consecutive_runs: int = 3
-    min_training_rows: int = 200  # v11.0.1: Relaxed from 1000
-    max_forecast_mape: float = 50.0  # v11.2.1: NEW - forecast quality gate
-    max_forecast_rmse: float = 15.0  # v11.2.1: NEW - forecast quality gate
+    min_training_days: int = 7  # Keep at 7 days (sufficient for weekly patterns)
+    min_silhouette_score: float = 0.40  # CHANGED from 0.15 (P0 FIX)
+    min_stability_ratio: float = 0.75  # CHANGED from 0.6 (P0 FIX)
+    min_consecutive_runs: int = 5  # CHANGED from 3 (P0 FIX)
+    min_training_rows: int = 400  # CHANGED from 200 (P0 FIX)
+    max_forecast_mape: float = 35.0  # CHANGED from 50.0 (P0 FIX)
+    max_forecast_rmse: float = 12.0  # CHANGED from 15.0 (P0 FIX)
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "PromotionCriteria":
@@ -90,12 +99,12 @@ class PromotionCriteria:
         
         return cls(
             min_training_days=int(promotion.get("min_training_days", 7)),
-            min_silhouette_score=float(promotion.get("min_silhouette_score", 0.15)),
-            min_stability_ratio=float(promotion.get("min_stability_ratio", 0.6)),  # v11.0.1 default
-            min_consecutive_runs=int(promotion.get("min_consecutive_runs", 3)),
-            min_training_rows=int(promotion.get("min_training_rows", 200)),  # v11.0.1 default
-            max_forecast_mape=float(promotion.get("max_forecast_mape", 50.0)),  # v11.2.1: NEW
-            max_forecast_rmse=float(promotion.get("max_forecast_rmse", 15.0)),  # v11.2.1: NEW
+            min_silhouette_score=float(promotion.get("min_silhouette_score", 0.40)),  # v11.2.2: Changed default
+            min_stability_ratio=float(promotion.get("min_stability_ratio", 0.75)),  # v11.2.2: Changed default
+            min_consecutive_runs=int(promotion.get("min_consecutive_runs", 5)),  # v11.2.2: Changed default
+            min_training_rows=int(promotion.get("min_training_rows", 400)),  # v11.2.2: Changed default
+            max_forecast_mape=float(promotion.get("max_forecast_mape", 35.0)),  # v11.2.2: Changed default
+            max_forecast_rmse=float(promotion.get("max_forecast_rmse", 12.0)),  # v11.2.2: Changed default
         )
 
 

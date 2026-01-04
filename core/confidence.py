@@ -46,18 +46,28 @@ class ConfidenceFactors:
     regime_factor: float = 1.0        # Regime assignment confidence
     
     def overall(self) -> float:
-        """Compute overall confidence as geometric mean of factors."""
+        """
+        Compute overall confidence as harmonic mean of factors.
+        
+        P0-FIX (v11.2.2): ANALYTICAL AUDIT FLAW #4
+        Changed from geometric mean to harmonic mean to properly penalize
+        imbalanced factors. Geometric mean allowed high values to mask
+        critically low values (e.g., regime=0.1 → overall=0.56 was too optimistic).
+        
+        Harmonic mean formula: HM = n / (1/f1 + 1/f2 + ... + 1/fn)
+        Properly penalizes low values: regime=0.1 → overall=0.31 (more appropriate)
+        
+        Reference: Harmonic mean used in precision/recall F1-score for similar reasons
+        """
         factors = [
-            self.maturity_factor,
-            self.data_quality_factor,
-            self.prediction_factor,
-            self.regime_factor,
+            max(0.01, self.maturity_factor),      # Prevent division by zero
+            max(0.01, self.data_quality_factor),
+            max(0.01, self.prediction_factor),
+            max(0.01, self.regime_factor),
         ]
-        # Geometric mean - all factors contribute equally
-        product = 1.0
-        for f in factors:
-            product *= max(0.0, min(1.0, f))
-        return product ** (1.0 / len(factors))
+        # Harmonic mean - penalizes imbalanced factors appropriately
+        harmonic = len(factors) / sum(1.0 / f for f in factors)
+        return harmonic
     
     def to_dict(self) -> Dict[str, float]:
         return {
