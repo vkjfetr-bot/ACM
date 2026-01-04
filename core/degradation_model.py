@@ -497,20 +497,31 @@ class LinearTrendModel(BaseDegradationModel):
     def _detect_and_handle_health_jumps(
         self,
         health_series: pd.Series,
-        jump_threshold: float = 15.0,
-        min_post_jump_samples: int = 10
+        jump_threshold: float = 5.0,  # P2-FIX (v11.2.3): Lowered from 15.0 to 5.0
+        min_post_jump_samples: int = 10,
+        min_jump_duration_hours: float = 1.0
     ) -> pd.Series:
         """
-        v11.1.4: Detect maintenance resets (sudden health improvements) and reset forecast baseline.
+        Detect maintenance resets (sudden health improvements) and reset forecast baseline.
+        
+        P2-FIX (v11.2.3): ANALYTICAL AUDIT FLAW #12 - Lower health jump threshold
+        Changed default from 15% to 5% to capture incremental maintenance:
+        - Bearing lubrication: ~8% health improvement
+        - Filter replacement: ~5% health improvement
+        - Sensor calibration: ~3% health improvement
+        
+        Previous 15% threshold only caught major overhauls, missing routine maintenance
+        that significantly resets degradation trajectory.
         
         ANALYTICAL PRINCIPLE:
         Degradation models assume monotonic decline. After maintenance:
-        - Health jumps from 70% to 95% 
+        - Health jumps from 70% to 95% (major) or 70% to 75% (incremental)
         - If we don't detect this, the model uses stale declining trend
         - RUL predictions become unreliable (false alarms)
         
         A "health jump" is defined as:
-        - Health increase > jump_threshold (default 15%) in one time period
+        - Health increase > jump_threshold (default 5%) in one time period
+        - Sustained for > min_jump_duration_hours (not just measurement noise)
         - This indicates external intervention (maintenance, repair, replacement)
         
         When detected:
@@ -521,6 +532,7 @@ class LinearTrendModel(BaseDegradationModel):
             health_series: Time-indexed health values
             jump_threshold: Minimum health increase (%) to be considered a jump
             min_post_jump_samples: Minimum samples required after jump for fitting
+            min_jump_duration_hours: Minimum duration for jump to be sustained (filters noise)
         
         Returns:
             pd.Series: Truncated to post-jump data, or original if no jumps detected
@@ -532,14 +544,50 @@ class LinearTrendModel(BaseDegradationModel):
         health_diff = health_series.diff()
         
         # Find positive jumps (health improvements) above threshold
-        jump_mask = health_diff > jump_threshold
-        jump_indices = health_series.index[jump_mask]
+        jump_candidates = health_diff > jump_threshold
+        jump_candidate_indices = health_series.index[jump_candidates]
         
-        if len(jump_indices) == 0:
+        if len(jump_candidate_indices) == 0:
             return health_series  # No jumps detected
         
+        # Validate jumps are sustained (not just measurement noise)
+        # Check if improvement persists for at least min_jump_duration_hours
+        validated_jumps = []
+        
+        if isinstance(health_series.index, pd.DatetimeIndex):
+            for jump_idx in jump_candidate_indices:
+                jump_loc = health_series.index.get_loc(jump_idx)
+                health_at_jump = health_series.iloc[jump_loc]
+                
+                # Look ahead to check if improvement is sustained
+                future_end = jump_idx + pd.Timedelta(hours=min_jump_duration_hours)
+                future_window = health_series[jump_idx:future_end]
+                
+                if len(future_window) > 1:
+                    # Check if health stays elevated (within 2% of jump level)
+                    if future_window.mean() > health_at_jump - 2.0:
+                        validated_jumps.append(jump_idx)
+                        Console.info(
+                            f"HEALTH-JUMP: Validated sustained jump at {jump_idx} "
+                            f"(+{health_diff[jump_idx]:.1f}%)",
+                            component="DEGRADE"
+                        )
+                else:
+                    # Near end of series, accept the jump
+                    validated_jumps.append(jump_idx)
+        else:
+            # Non-datetime index, can't validate duration
+            validated_jumps = list(jump_candidate_indices)
+        
+        if len(validated_jumps) == 0:
+            Console.info(
+                f"HEALTH-JUMP: {len(jump_candidate_indices)} candidate jumps found but none sustained",
+                component="DEGRADE"
+            )
+            return health_series  # No sustained jumps
+        
         # Use the LAST jump (most recent maintenance)
-        last_jump_idx = jump_indices[-1]
+        last_jump_idx = validated_jumps[-1]
         last_jump_loc = health_series.index.get_loc(last_jump_idx)
         
         # Check if we have enough post-jump samples
@@ -547,9 +595,9 @@ class LinearTrendModel(BaseDegradationModel):
         
         if post_jump_samples < min_post_jump_samples:
             # Not enough post-jump data, use second-to-last jump or full data
-            if len(jump_indices) > 1:
+            if len(validated_jumps) > 1:
                 # Try second-to-last jump
-                second_last_jump_idx = jump_indices[-2]
+                second_last_jump_idx = validated_jumps[-2]
                 second_last_loc = health_series.index.get_loc(second_last_jump_idx)
                 post_second_samples = len(health_series) - second_last_loc - 1
                 if post_second_samples >= min_post_jump_samples:
