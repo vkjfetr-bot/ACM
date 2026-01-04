@@ -1,7 +1,7 @@
 # ACM Rust Migration Plan
 
-**Document Version:** 1.0  
-**Date:** January 4, 2026  
+**Document Version:** 1.1  
+**Date:** January 4, 2026 (Updated with extended analysis)  
 **Target ACM Version:** v11.1.5+  
 **Target Environment:** Windows (Primary), Linux (Secondary)
 
@@ -10,6 +10,8 @@
 ## Executive Summary
 
 This document outlines a phased strategy to migrate compute-intensive components of ACM from Python to Rust while maintaining Python as the orchestration layer. The goal is to achieve 2-10x performance improvements in critical paths (feature engineering, detector scoring, matrix operations) while reducing memory consumption by 30-50% through zero-copy data sharing and efficient memory management.
+
+**Update (v1.1):** Extended analysis in `RUST_MIGRATION_PHASE2_CANDIDATES.md` identifies 12 additional high-impact operations with 3-20x speedup potential, increasing overall pipeline speedup from 1.7x to **3.6x**.
 
 **Key Principles:**
 1. **Python remains the orchestrator** - All pipeline logic, SQL integration, configuration, and business logic stays in Python
@@ -58,6 +60,8 @@ Based on ACM system architecture analysis:
 ---
 
 ## 2. Rust Migration Strategy
+
+**See Also:** `docs/RUST_MIGRATION_PHASE2_CANDIDATES.md` for detailed analysis of 12 additional migration candidates identified after Phase 1 completion.
 
 ### 2.1 Architecture Overview
 
