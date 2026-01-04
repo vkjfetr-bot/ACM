@@ -64,9 +64,11 @@ def tune_detector_weights(
         temperature = float(tune_cfg.get("temperature", 2.0))
         detector_priors = tune_cfg.get("detector_priors", {})  # Dict[str, float] for per-detector biases
     
-        # P2-FIX (v11.1.6): Circular tuning guard
-        # If require_external_labels is True, only tune if episodes come from external source
-        require_external = tune_cfg.get("require_external_labels", False)
+        # P0-FIX (v11.2.2): Circular tuning guard - DEFAULT TO TRUE
+        # ANALYTICAL AUDIT FLAW #1: Circular weight tuning causes self-reinforcing feedback
+        # Using same-run episodes to tune weights creates mode collapse risk
+        # CHANGE: Default to True (was False) to enforce external validation
+        require_external = tune_cfg.get("require_external_labels", True)
     
         # Check if episodes_df has a "source" column or attribute indicating origin
         episode_source = "unknown"
@@ -375,13 +377,30 @@ def tune_detector_weights(
         diagnostics["pre_tune_weights"] = dict(current_weights)
     
         # Blend with existing weights using learning rate
+        # P0-FIX (v11.2.2): Add weight stability guard
         tuned_weights = {}
+        max_drift_threshold = tune_cfg.get("max_weight_drift", 0.20)  # 20% max change
+        
         for detector_name in streams.keys():
             old_weight = current_weights.get(detector_name, 0.0)
             new_weight = raw_weights.get(detector_name, 0.0)
         
             # Exponential moving average
             blended = (1 - learning_rate) * old_weight + learning_rate * new_weight
+            
+            # P0-FIX: Check for excessive drift (FLAW #1 stability guard)
+            if old_weight > 0.01:  # Only check if old_weight is meaningful
+                drift = abs(blended - old_weight) / old_weight
+                if drift > max_drift_threshold:
+                    Console.warn(
+                        f"Excessive weight drift for {detector_name}: {old_weight:.3f} → {blended:.3f} "
+                        f"(drift={drift:.1%} > {max_drift_threshold:.1%}). Rejecting tune.",
+                        component="TUNE", detector=detector_name, old_weight=old_weight, 
+                        new_weight=blended, drift=drift
+                    )
+                    diagnostics["reason"] = "excessive_drift"
+                    diagnostics["excessive_drift_detector"] = detector_name
+                    return current_weights, diagnostics
         
             # Enforce minimum weight
             tuned_weights[detector_name] = max(blended, min_weight)

@@ -17,29 +17,30 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.2.1"
+__version__ = "11.2.2"
 __version_date__ = "2026-01-04"
 __version_author__ = "ACM Development Team"
-# v11.2.1: ANALYTICAL CORRECTNESS - Critical confidence & lifecycle fixes
-# - FLAW FIX #2: Prediction confidence now includes time-to-horizon decay
-#   - Added prediction_horizon_hours parameter with exponential decay
-#   - Far-future predictions correctly penalized (exp(-horizon/tau))
-# - FLAW FIX #3: Model lifecycle promotion now checks forecast quality
-#   - Added forecast_mape and forecast_rmse to PromotionCriteria
-#   - Poor forecasting models cannot reach CONVERGED (MAPE<50%, RMSE<15)
-# - FLAW FIX #4: RUL reliability gate now checks detector drift
-#   - Added drift_z parameter to check_rul_reliability()
-#   - Converged models with drift_z>3.0 marked NOT_RELIABLE
-# - FLAW FIX #5: Health confidence includes inter-detector agreement
-#   - Added detector_zscores parameter to compute_health_confidence()
-#   - Low agreement (high std) reduces confidence appropriately
-# - FLAW FIX #6: Episode confidence checks temporal coherence
-#   - Added rise_time_seconds parameter for boundary sharpness
-#   - Fuzzy episode boundaries (slow rise) reduce confidence
-# - FLAW FIX #8: Data quality confidence uses sigmoid vs linear
-#   - Replaced linear interpolation with smooth sigmoid function
-#   - Avoids overconfidence at threshold boundaries
-# Building on v11.2.0 pipeline phase criticality fixes
+# v11.2.2: P0 ANALYTICAL FIXES - Critical reliability improvements from comprehensive audit
+# - P0 FIX #1: Circular weight tuning guard now DEFAULTS to True (was False)
+#   - Prevents self-reinforcing feedback loops in detector fusion
+#   - Added weight stability guard: rejects tuning if drift > 20% (configurable)
+#   - Protects against mode collapse where weights converge to extreme values
+# - P0 FIX #4: Confidence calculation changed from geometric to harmonic mean
+#   - Properly penalizes imbalanced confidence factors
+#   - Example: regime=0.1 now yields overall=0.31 (was 0.56, too optimistic)
+#   - Harmonic mean prevents high factors from masking critically low factors
+# - P0 FIX #10: Tightened model promotion criteria for production reliability
+#   - min_silhouette_score: 0.15 → 0.40 (require decent cluster separation)
+#   - min_stability_ratio: 0.6 → 0.75 (reduce regime thrashing from 40% to 25%)
+#   - min_training_rows: 200 → 400 (better statistical significance)
+#   - min_consecutive_runs: 3 → 5 (more validation before promotion)
+#   - max_forecast_mape: 50.0 → 35.0 (tighter forecasting accuracy)
+#   - max_forecast_rmse: 15.0 → 12.0 (tighter error bounds)
+# - ANALYTICAL AUDIT: Comprehensive review documented in docs/ACM_V11_ANALYTICAL_AUDIT.md
+#   - Identified 12 flaws across detector fusion, regime clustering, RUL estimation
+#   - 4 P0 (critical), 5 P1 (high), 3 P2 (medium) issues documented
+#   - This release addresses the 4 P0 issues for immediate reliability gains
+# Building on v11.2.1 confidence & lifecycle fixes
 
 # v11.1.6: REGIME ANALYTICAL CORRECTNESS - Critical clustering fixes from expert audit
 # - REGIME_MODEL_VERSION bumped to "3.0" (breaking change in model serialization)
