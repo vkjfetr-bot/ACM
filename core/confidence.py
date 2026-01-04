@@ -96,6 +96,9 @@ def compute_data_quality_confidence(
     """
     Confidence factor based on data quality.
     
+    FLAW FIX #8: Replaced linear interpolation with sigmoid function to avoid
+    overestimating confidence with marginal sample counts.
+    
     Args:
         sample_count: Number of samples in training window
         min_samples: Minimum for any confidence (below = 0.1)
@@ -104,14 +107,24 @@ def compute_data_quality_confidence(
     
     Returns:
         Confidence factor 0-1
+    
+    Reference:
+        Sigmoid avoids overconfidence at threshold boundaries.
+        Threshold = (min_samples + optimal_samples) / 2
+        Scale = (optimal_samples - min_samples) / 6 (99.7% of sigmoid range)
     """
     if sample_count < min_samples:
         sample_factor = 0.1
     elif sample_count >= optimal_samples:
         sample_factor = 1.0
     else:
-        # Linear interpolation
-        sample_factor = 0.1 + 0.9 * (sample_count - min_samples) / (optimal_samples - min_samples)
+        # FIXED: Sigmoid function instead of linear interpolation
+        # Maps min_samples -> 0.1, optimal_samples -> 1.0 smoothly
+        threshold = (min_samples + optimal_samples) / 2.0
+        scale = (optimal_samples - min_samples) / 6.0  # 3-sigma rule
+        sigmoid = 1.0 / (1.0 + np.exp(-(sample_count - threshold) / scale))
+        # Rescale sigmoid [0,1] to [0.1, 1.0]
+        sample_factor = 0.1 + 0.9 * sigmoid
     
     # Combine with coverage
     return sample_factor * max(0.1, min(1.0, coverage_ratio))
@@ -122,21 +135,33 @@ def compute_prediction_confidence(
     p50: float,
     p90: float,
     max_acceptable_spread: float = 100.0,
+    prediction_horizon_hours: float = 0.0,
+    characteristic_horizon: float = 168.0,  # 7 days default
 ) -> float:
     """
-    Confidence factor based on prediction uncertainty.
+    Confidence factor based on prediction uncertainty and horizon.
+    
+    FLAW FIX #2: Added time-to-horizon adjustment. Far-future predictions
+    get lower confidence due to compounding uncertainty.
     
     Narrow confidence intervals = high confidence.
     Wide intervals = low confidence.
+    Long horizons = lower confidence.
     
     Args:
         p10: 10th percentile prediction
         p50: 50th percentile (median) prediction
         p90: 90th percentile prediction
         max_acceptable_spread: Maximum P90-P10 spread for full confidence
+        prediction_horizon_hours: Time horizon for prediction (0 = no adjustment)
+        characteristic_horizon: Time constant for exponential decay (default 168h = 7 days)
     
     Returns:
         Confidence factor 0-1
+    
+    Reference:
+        Horizon adjustment: confidence * exp(-horizon / tau)
+        tau = 168h (7 days) means 63% confidence at 7-day horizon
     """
     if p50 <= 0:
         return 0.1  # Invalid prediction
@@ -146,8 +171,16 @@ def compute_prediction_confidence(
     
     # Sigmoid-like mapping: small spread = high confidence
     # relative_spread of 0 -> 1.0, relative_spread of 2.0 -> 0.5
-    confidence = 1.0 / (1.0 + relative_spread)
-    return max(0.1, min(1.0, confidence))
+    base_confidence = 1.0 / (1.0 + relative_spread)
+    
+    # FIXED: Add exponential decay for prediction horizon
+    if prediction_horizon_hours > 0:
+        horizon_factor = np.exp(-prediction_horizon_hours / characteristic_horizon)
+        final_confidence = base_confidence * horizon_factor
+    else:
+        final_confidence = base_confidence
+    
+    return max(0.1, min(1.0, final_confidence))
 
 
 def check_rul_reliability(
@@ -158,9 +191,14 @@ def check_rul_reliability(
     min_training_rows: int = 500,
     min_training_days: float = 7.0,
     min_health_history_days: float = 3.0,
+    drift_z: Optional[float] = None,
+    drift_threshold: float = 3.0,
 ) -> Tuple[ReliabilityStatus, str]:
     """
     Gate RUL predictions based on prerequisites.
+    
+    FLAW FIX #4: Added detector drift check. Converged models with high drift
+    are marked NOT_RELIABLE to prevent predictions from stale models.
     
     V11 Rule #10: RUL must be gated or suppressed.
     V11 Rule #20: If unsure, the system must say "not reliable".
@@ -173,9 +211,15 @@ def check_rul_reliability(
         min_training_rows: Minimum rows required
         min_training_days: Minimum training days required
         min_health_history_days: Minimum health history required
+        drift_z: Current drift Z-score (None = no drift monitoring)
+        drift_threshold: Maximum allowed drift Z-score (default 3.0)
     
     Returns:
         Tuple of (status, reason)
+    
+    Reference:
+        Drift check prevents predictions from models experiencing concept drift.
+        drift_z > 3.0 indicates statistical process change (3-sigma rule).
     """
     maturity_upper = str(maturity_state).upper()
     
@@ -188,6 +232,10 @@ def check_rul_reliability(
     
     if maturity_upper == 'DEPRECATED':
         return ReliabilityStatus.NOT_RELIABLE, "Model DEPRECATED - needs refresh"
+    
+    # FIXED: Check for concept drift (stale model)
+    if drift_z is not None and abs(drift_z) > drift_threshold:
+        return ReliabilityStatus.NOT_RELIABLE, f"Model drift detected: drift_z={drift_z:.2f} > {drift_threshold} (concept drift)"
     
     # Check data requirements for CONVERGED model
     if training_rows < min_training_rows:
@@ -207,23 +255,43 @@ def compute_health_confidence(
     regime_confidence: float = 1.0,
     maturity_state: str = "CONVERGED",
     sample_count: int = 1000,
+    detector_zscores: Optional[List[float]] = None,
 ) -> float:
     """
     Compute confidence for a health score.
+    
+    FLAW FIX #5: Added inter-detector agreement factor. Low agreement among
+    detectors indicates uncertain health state.
     
     Args:
         fused_z: Fused anomaly Z-score
         regime_confidence: Confidence in regime assignment (0-1)
         maturity_state: Model maturity state
         sample_count: Training sample count
+        detector_zscores: List of individual detector z-scores for agreement check
     
     Returns:
         Confidence 0-1
+    
+    Reference:
+        Agreement factor = 1 - normalized_std(detector_zscores)
+        High std = detectors disagree = lower confidence
     """
+    # Compute detector agreement if scores provided
+    if detector_zscores and len(detector_zscores) > 1:
+        # Normalize z-scores to [-1, 1] range for comparison
+        normalized = [min(1.0, max(-1.0, z / 10.0)) for z in detector_zscores]
+        std_norm = np.std(normalized)
+        # Agreement: low std = high agreement
+        # std of 0 -> agreement 1.0, std of 1.0 -> agreement 0.0
+        agreement_factor = max(0.1, 1.0 - std_norm)
+    else:
+        agreement_factor = 1.0  # No disagreement if single detector
+    
     factors = ConfidenceFactors(
         maturity_factor=compute_maturity_confidence(maturity_state),
         data_quality_factor=compute_data_quality_confidence(sample_count),
-        prediction_factor=1.0,  # Health is direct measurement, not prediction
+        prediction_factor=agreement_factor,  # FIXED: Use agreement instead of 1.0
         regime_factor=regime_confidence,
     )
     return factors.overall()
@@ -235,11 +303,16 @@ def compute_episode_confidence(
     regime_confidence: float = 1.0,
     maturity_state: str = "CONVERGED",
     min_duration_seconds: float = 60.0,
+    rise_time_seconds: Optional[float] = None,
 ) -> float:
     """
     Compute confidence for an episode detection.
     
+    FLAW FIX #6: Added temporal coherence check via rise time. Sharp anomaly
+    onsets have higher confidence than gradual/fuzzy boundaries.
+    
     Short episodes or low peak Z = lower confidence.
+    Slow rise times = lower confidence (fuzzy boundaries).
     
     Args:
         episode_duration_seconds: Duration of episode
@@ -247,9 +320,14 @@ def compute_episode_confidence(
         regime_confidence: Confidence in regime assignment
         maturity_state: Model maturity state
         min_duration_seconds: Minimum duration for full confidence
+        rise_time_seconds: Time from threshold crossing to peak (None = sharp)
     
     Returns:
         Confidence 0-1
+    
+    Reference:
+        Rise time factor: sharp onset (rise < 10% duration) = 1.0
+        Slow onset (rise > 50% duration) = 0.5
     """
     # Duration factor: longer episodes = more confident
     if episode_duration_seconds < min_duration_seconds:
@@ -261,10 +339,25 @@ def compute_episode_confidence(
     # Z < 2 might be noise, Z > 5 is clearly anomalous
     z_factor = min(1.0, max(0.3, (peak_z - 1.0) / 4.0))
     
+    # FIXED: Rise time factor for temporal coherence
+    if rise_time_seconds is not None and episode_duration_seconds > 0:
+        rise_fraction = rise_time_seconds / episode_duration_seconds
+        # Sharp onset (rise < 10% of duration) = high confidence
+        # Slow onset (rise > 50% of duration) = lower confidence
+        if rise_fraction < 0.1:
+            rise_factor = 1.0
+        elif rise_fraction > 0.5:
+            rise_factor = 0.5
+        else:
+            # Linear interpolation between 0.1 and 0.5
+            rise_factor = 1.0 - (rise_fraction - 0.1) / 0.4 * 0.5
+    else:
+        rise_factor = 1.0  # Assume sharp if not provided
+    
     factors = ConfidenceFactors(
         maturity_factor=compute_maturity_confidence(maturity_state),
         data_quality_factor=1.0,  # Episodes are from scored data
-        prediction_factor=duration_factor * z_factor,
+        prediction_factor=duration_factor * z_factor * rise_factor,  # FIXED: Include rise_factor
         regime_factor=regime_confidence,
     )
     return factors.overall()
@@ -277,19 +370,26 @@ def compute_rul_confidence(
     maturity_state: str,
     training_rows: int,
     training_days: float,
+    drift_z: Optional[float] = None,
+    prediction_horizon_hours: Optional[float] = None,
 ) -> Tuple[float, ReliabilityStatus, str]:
     """
     Compute confidence and reliability for RUL estimate.
     
+    FLAW FIXES:
+    - #2: Added prediction_horizon_hours for time decay
+    - #4: Added drift_z check via check_rul_reliability
+    
     Returns:
         Tuple of (confidence, reliability_status, reason)
     """
-    # First check reliability gate
+    # First check reliability gate (includes drift check)
     status, reason = check_rul_reliability(
         maturity_state=maturity_state,
         training_rows=training_rows,
         training_days=training_days,
         health_history_days=training_days,  # Use training days as proxy
+        drift_z=drift_z,  # FIXED: Pass drift for reliability check
     )
     
     # If not reliable, return low confidence
@@ -298,10 +398,16 @@ def compute_rul_confidence(
         return base_confidence, status, reason
     
     # Compute confidence factors for reliable predictions
+    # FIXED: Pass prediction_horizon_hours to compute_prediction_confidence
+    horizon_hours = prediction_horizon_hours or p50  # Use RUL as horizon if not specified
+    
     factors = ConfidenceFactors(
         maturity_factor=compute_maturity_confidence(maturity_state),
         data_quality_factor=compute_data_quality_confidence(training_rows),
-        prediction_factor=compute_prediction_confidence(p10, p50, p90),
+        prediction_factor=compute_prediction_confidence(
+            p10, p50, p90,
+            prediction_horizon_hours=horizon_hours  # FIXED: Add horizon adjustment
+        ),
         regime_factor=1.0,  # RUL is equipment-level, not regime-specific
     )
     

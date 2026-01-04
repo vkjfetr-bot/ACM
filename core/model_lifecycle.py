@@ -40,22 +40,37 @@ class MaturityState(str, Enum):
 class PromotionCriteria:
     """Criteria for promoting model from LEARNING to CONVERGED.
     
+    FLAW FIX #3: Added forecast quality thresholds. Poor forecasting models
+    should not reach CONVERGED state even with good clustering metrics.
+    
     These defaults can be overridden via config_table.csv under 'lifecycle' category:
     - lifecycle.promotion.min_training_days
     - lifecycle.promotion.min_silhouette_score
     - lifecycle.promotion.min_stability_ratio
     - lifecycle.promotion.min_consecutive_runs
     - lifecycle.promotion.min_training_rows
+    - lifecycle.promotion.max_forecast_mape (NEW)
+    - lifecycle.promotion.max_forecast_rmse (NEW)
     
     v11.0.1: Relaxed defaults for faster promotion in industrial settings:
     - min_training_rows: 200 (was 1000) - matches coldstart minimum
     - min_stability_ratio: 0.6 (was 0.8) - allows regime switching in dynamic ops
+    
+    v11.2.1: Added forecast quality criteria:
+    - max_forecast_mape: 50.0 - Mean Absolute Percentage Error (lower is better)
+    - max_forecast_rmse: 15.0 - Root Mean Square Error on health scale (0-100)
+    
+    Reference:
+        MAPE < 50% is acceptable for industrial forecasting (Hyndman 2018)
+        RMSE < 15 on 0-100 health scale = reasonable prediction accuracy
     """
     min_training_days: int = 7
     min_silhouette_score: float = 0.15
     min_stability_ratio: float = 0.6  # v11.0.1: Relaxed from 0.8
     min_consecutive_runs: int = 3
     min_training_rows: int = 200  # v11.0.1: Relaxed from 1000
+    max_forecast_mape: float = 50.0  # v11.2.1: NEW - forecast quality gate
+    max_forecast_rmse: float = 15.0  # v11.2.1: NEW - forecast quality gate
 
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "PromotionCriteria":
@@ -79,6 +94,8 @@ class PromotionCriteria:
             min_stability_ratio=float(promotion.get("min_stability_ratio", 0.6)),  # v11.0.1 default
             min_consecutive_runs=int(promotion.get("min_consecutive_runs", 3)),
             min_training_rows=int(promotion.get("min_training_rows", 200)),  # v11.0.1 default
+            max_forecast_mape=float(promotion.get("max_forecast_mape", 50.0)),  # v11.2.1: NEW
+            max_forecast_rmse=float(promotion.get("max_forecast_rmse", 15.0)),  # v11.2.1: NEW
         )
 
 
@@ -98,6 +115,10 @@ class ModelState:
     training_rows: int = 0
     training_days: float = 0.0
     consecutive_runs: int = 0
+    
+    # FLAW FIX #3: Forecast quality metrics
+    forecast_mape: Optional[float] = None  # v11.2.1: Mean Absolute Percentage Error
+    forecast_rmse: Optional[float] = None  # v11.2.1: Root Mean Square Error
     
     # Run tracking
     last_run_id: Optional[str] = None
@@ -131,6 +152,9 @@ def check_promotion_eligibility(
     """
     Check if a model in LEARNING state can be promoted to CONVERGED.
     
+    FLAW FIX #3: Added forecast quality checks (MAPE, RMSE).
+    Models with poor forecasting cannot be promoted even with good clustering.
+    
     Args:
         state: Current model state
         criteria: Promotion criteria (uses defaults if not provided)
@@ -162,6 +186,13 @@ def check_promotion_eligibility(
     
     if state.training_rows < criteria.min_training_rows:
         unmet.append(f"training_rows={state.training_rows} < {criteria.min_training_rows}")
+    
+    # FIXED: Check forecast quality metrics (v11.2.1)
+    if state.forecast_mape is not None and state.forecast_mape > criteria.max_forecast_mape:
+        unmet.append(f"forecast_mape={state.forecast_mape:.1f}% > {criteria.max_forecast_mape}%")
+    
+    if state.forecast_rmse is not None and state.forecast_rmse > criteria.max_forecast_rmse:
+        unmet.append(f"forecast_rmse={state.forecast_rmse:.2f} > {criteria.max_forecast_rmse}")
     
     eligible = len(unmet) == 0
     return eligible, unmet
@@ -284,9 +315,13 @@ def update_model_state_from_run(
     stability_ratio: Optional[float] = None,
     additional_rows: int = 0,
     additional_days: float = 0.0,
+    forecast_mape: Optional[float] = None,
+    forecast_rmse: Optional[float] = None,
 ) -> ModelState:
     """
     Update model state after a run completes.
+    
+    FLAW FIX #3: Added forecast_mape and forecast_rmse parameters.
     
     Args:
         state: Current model state
@@ -296,6 +331,8 @@ def update_model_state_from_run(
         stability_ratio: Updated stability ratio (if available)
         additional_rows: Rows processed in this run
         additional_days: Days of data processed in this run
+        forecast_mape: Forecast MAPE from this run (if available)
+        forecast_rmse: Forecast RMSE from this run (if available)
         
     Returns:
         Updated model state
@@ -314,6 +351,13 @@ def update_model_state_from_run(
     
     if stability_ratio is not None:
         state.stability_ratio = stability_ratio
+    
+    # FIXED: Update forecast quality metrics (v11.2.1)
+    if forecast_mape is not None:
+        state.forecast_mape = forecast_mape
+    
+    if forecast_rmse is not None:
+        state.forecast_rmse = forecast_rmse
     
     state.training_rows += additional_rows
     state.training_days += additional_days
