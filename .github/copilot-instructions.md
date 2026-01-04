@@ -23,6 +23,13 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 
 **Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
 
+**v11.2.2 Analytical Fixes** (2026-01-04):
+- **CRITICAL AUDIT COMPLETED**: See `docs/ACM_V11_ANALYTICAL_AUDIT.md` for comprehensive review
+- P0 FIX #1: Circular weight tuning guard - `require_external_labels` defaults to True
+- P0 FIX #4: Confidence calculation changed from geometric to harmonic mean
+- P0 FIX #10: Tightened promotion criteria (silhouette 0.15→0.40, stability 0.6→0.75)
+- See `docs/ACM_V11_ANALYTICAL_FIXES.md` for migration guide and configuration
+
 **v11.0.0 New Features**:
 - ONLINE/OFFLINE pipeline mode separation (--mode auto/online/offline)
 - MaturityState lifecycle (COLDSTART -> LEARNING -> CONVERGED -> DEPRECATED)
@@ -30,7 +37,7 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 - RUL reliability gating (NOT_RELIABLE when model not CONVERGED)
 - UNKNOWN regime (label=-1) for low-confidence assignments
 - Confidence columns in ACM_RUL, ACM_HealthTimeline, ACM_Anomaly_Events
-- Promotion criteria (7 days, 0.15 silhouette, 3 runs) for model maturity
+- ~~Promotion criteria (7 days, 0.15 silhouette, 3 runs)~~ **v11.2.2: TIGHTENED to 0.40 silhouette, 5 runs**
 
 ---
 
@@ -642,12 +649,14 @@ pytest tests/test_observability.py
 | Document | Purpose |
 |----------|---------|
 | `README.md` | Product overview, setup, running ACM |
+| `docs/ACM_V11_ANALYTICAL_AUDIT.md` | **CRITICAL: Comprehensive analytical review (12 flaws identified)** |
+| `docs/ACM_V11_ANALYTICAL_FIXES.md` | **v11.2.2 P0 fixes implementation guide** |
 | `docs/ACM_SYSTEM_OVERVIEW.md` | Architecture, module map, data flow |
 | `docs/OBSERVABILITY.md` | Observability stack (traces, metrics, logs, profiling) |
 | `docs/SOURCE_CONTROL_PRACTICES.md` | Git workflow, branching, releases |
 | `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` | Authoritative SQL table definitions |
 | `docs/GRAFANA_DASHBOARD_QUERIES.md` | **Validated Grafana SQL queries and chart configs** |
-| `utils/version.py` | Current version and release notes |
+| `utils/version.py` | Current version (v11.2.2) and release notes |
 | `docs/OMR_DETECTOR.md` | Overall Model Residual detector |
 | `docs/COLDSTART_MODE.md` | Cold-start strategy for sparse data |
 | `docs/EQUIPMENT_IMPORT_PROCEDURE.md` | How to add new equipment |
