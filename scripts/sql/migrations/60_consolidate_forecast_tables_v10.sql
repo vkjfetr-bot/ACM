@@ -26,7 +26,8 @@
  *   - ACM_RUL
  *   - ACM_ForecastingState
  * 
- * Rollback: Run 60_rollback_to_v9.sql to restore v9 schema
+ * NOTE: This migration is historical and part of v10.0.0 release
+ * No rollback script available - system is now at v11.0.0
  * Estimated Time: <5 minutes
  * Author: ACM Development Team
  * Date: 2025-12-04
@@ -380,9 +381,6 @@ PRINT '  1. Run: scripts/sql/migrations/61_adaptive_config_v10.sql';
 PRINT '  2. Update code: deploy v10.0.0 to application server';
 PRINT '  3. Test: python scripts/sql_batch_runner.py --equip FD_FAN --max-batches 10';
 PRINT '';
-PRINT 'ROLLBACK (if needed):';
-PRINT '  1. Run: scripts/sql/migrations/60_rollback_to_v9.sql';
-PRINT '  2. Checkout: git checkout v9.0.0';
-PRINT '  3. Redeploy: v9.0.0 code to application server';
+PRINT 'NOTE: Rollback to v9 not supported (system now at v11.0.0)';
 PRINT '';
 GO
