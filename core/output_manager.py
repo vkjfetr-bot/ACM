@@ -1139,11 +1139,18 @@ class OutputManager:
     def write_pca_loadings(self, df: pd.DataFrame, run_id: str = None) -> int:
         """Write PCA loadings to ACM_PCA_Loadings table.
         
-        Schema: RunID, EquipID, EntryDateTime, ComponentNo, ComponentID, 
-                Sensor, FeatureName, Loading, CreatedAt
+        Actual Table Schema (verified from INFORMATION_SCHEMA):
+            ID BIGINT IDENTITY (auto)
+            RunID UNIQUEIDENTIFIER NOT NULL
+            EquipID INT NOT NULL
+            ComponentIndex INT (nullable)
+            SensorName NVARCHAR (nullable)
+            Loading FLOAT NOT NULL
+            AbsLoading FLOAT NOT NULL
+            CreatedAt DATETIME2 NOT NULL
         
         Args:
-            df: DataFrame with columns: RunID, EntryDateTime, ComponentNo, Sensor, Loading
+            df: DataFrame with columns for PCA loadings data
             run_id: Run ID (optional, can come from df)
         
         Returns:
@@ -1157,6 +1164,25 @@ class OutputManager:
         try:
             sql_df = df.copy()
             
+            # Map source columns to actual table schema
+            # Source may have: ComponentNo/ComponentID -> ComponentIndex
+            # Source may have: Sensor/FeatureName -> SensorName
+            if 'ComponentIndex' not in sql_df.columns:
+                if 'ComponentNo' in sql_df.columns:
+                    sql_df['ComponentIndex'] = sql_df['ComponentNo']
+                elif 'ComponentID' in sql_df.columns:
+                    sql_df['ComponentIndex'] = sql_df['ComponentID']
+                else:
+                    sql_df['ComponentIndex'] = 0  # Default
+                    
+            if 'SensorName' not in sql_df.columns:
+                if 'Sensor' in sql_df.columns:
+                    sql_df['SensorName'] = sql_df['Sensor']
+                elif 'FeatureName' in sql_df.columns:
+                    sql_df['SensorName'] = sql_df['FeatureName']
+                else:
+                    sql_df['SensorName'] = 'unknown'  # Default
+            
             # Ensure required columns
             if 'EquipID' not in sql_df.columns:
                 sql_df['EquipID'] = self.equip_id
@@ -1164,16 +1190,25 @@ class OutputManager:
                 if not (run_id or self.run_id):
                     raise ValueError("RunID is required but not set")
                 sql_df['RunID'] = run_id or self.run_id
-            if 'EntryDateTime' not in sql_df.columns:
-                sql_df['EntryDateTime'] = datetime.now()
-            if 'ComponentID' not in sql_df.columns and 'ComponentNo' in sql_df.columns:
-                sql_df['ComponentID'] = sql_df['ComponentNo']
-            if 'FeatureName' not in sql_df.columns and 'Sensor' in sql_df.columns:
-                sql_df['FeatureName'] = sql_df['Sensor']
             
-            # Select only the columns the table expects
-            keep_cols = ['RunID', 'EquipID', 'EntryDateTime', 'ComponentNo', 'ComponentID', 
-                         'Sensor', 'FeatureName', 'Loading']
+            # Calculate AbsLoading from Loading (required NOT NULL column)
+            if 'AbsLoading' not in sql_df.columns:
+                if 'Loading' in sql_df.columns:
+                    sql_df['AbsLoading'] = sql_df['Loading'].abs()
+                else:
+                    Console.warn("write_pca_loadings: Missing 'Loading' column, cannot compute AbsLoading",
+                                component="OUTPUT", equip_id=self.equip_id)
+                    return 0
+            
+            # Handle NaN values in AbsLoading - replace with 0.0 since NOT NULL
+            sql_df['AbsLoading'] = sql_df['AbsLoading'].fillna(0.0)
+            sql_df['Loading'] = sql_df['Loading'].fillna(0.0)
+            
+            if 'CreatedAt' not in sql_df.columns:
+                sql_df['CreatedAt'] = datetime.now()
+            
+            # Select only the columns the table expects (matching actual schema)
+            keep_cols = ['RunID', 'EquipID', 'ComponentIndex', 'SensorName', 'Loading', 'AbsLoading', 'CreatedAt']
             sql_df = sql_df[[c for c in keep_cols if c in sql_df.columns]]
             
             return self._bulk_insert_sql('ACM_PCA_Loadings', sql_df)
@@ -1654,20 +1689,33 @@ class OutputManager:
             required=True
         )
         
-        # Also write run-level summary to ACM_Episodes
+        # Also write individual episodes to ACM_Episodes (actual table schema)
+        # ACM_Episodes stores per-episode data, NOT run summaries
         if not episodes_df.empty:
             try:
-                summary = pd.DataFrame([{
-                    'RunID': self.run_id,
-                    'EquipID': self.equip_id or 0,
-                    'EpisodeCount': len(episodes_df),
-                    'MedianDurationMinutes': episodes_df.get('duration_s', pd.Series([0])).median() / 60.0 if 'duration_s' in episodes_df.columns else 0.0,
-                    'MaxFusedZ': episodes_df.get('peak_fused_z', pd.Series([0])).max() if 'peak_fused_z' in episodes_df.columns else 0.0,
-                    'AvgFusedZ': episodes_df.get('avg_fused_z', pd.Series([0])).mean() if 'avg_fused_z' in episodes_df.columns else 0.0
-                }])
-                self._bulk_insert_sql('ACM_Episodes', summary)
+                # Build episode records matching actual table schema
+                episode_records = []
+                for idx, row in episodes_df.iterrows():
+                    episode_records.append({
+                        'RunID': self.run_id,
+                        'EquipID': self.equip_id or 0,
+                        'EpisodeID': int(row.get('episode_id', idx + 1)),
+                        'StartTime': row.get('start_ts', datetime.now()),
+                        'EndTime': row.get('end_ts', None),
+                        'DurationSeconds': float(row.get('duration_s', 0)) if pd.notna(row.get('duration_s')) else None,
+                        'DurationHours': float(row.get('duration_s', 0)) / 3600.0 if pd.notna(row.get('duration_s')) else None,
+                        'RecordCount': int(row.get('n_samples', 1)) if pd.notna(row.get('n_samples')) else 1,
+                        'Culprits': str(row.get('culprits', ''))[:500] if pd.notna(row.get('culprits')) else None,
+                        'PrimaryDetector': str(row.get('dominant_sensor', 'UNKNOWN'))[:100] if pd.notna(row.get('dominant_sensor')) else 'UNKNOWN',
+                        'Severity': str(row.get('severity', 'UNKNOWN'))[:50],
+                        'RegimeLabel': int(row.get('regime_label', 0)) if pd.notna(row.get('regime_label')) else None,
+                        'RegimeState': str(row.get('regime_state', ''))[:50] if pd.notna(row.get('regime_state')) else None,
+                    })
+                if episode_records:
+                    summary_df = pd.DataFrame(episode_records)
+                    self._bulk_insert_sql('ACM_Episodes', summary_df)
             except Exception as summary_err:
-                Console.warn(f"Failed to write summary to ACM_Episodes: {summary_err}", component="EPISODES", equip_id=self.equip_id, run_id=self.run_id, episode_count=len(episodes_df), error_type=type(summary_err).__name__)
+                Console.warn(f"Failed to write to ACM_Episodes: {summary_err}", component="EPISODES", equip_id=self.equip_id, run_id=self.run_id, episode_count=len(episodes_df), error_type=type(summary_err).__name__)
         
         return result
     
@@ -2129,10 +2177,12 @@ class OutputManager:
             return 0
     
     def write_pca_model(self, model_row: Dict[str, Any]) -> int:
-        """Write PCA model metadata to ACM_PCA_Model table.
+        """Write PCA model metadata to ACM_PCA_Models table.
+        
+        v11.1.5: Maps legacy model_row keys to current ACM_PCA_Models schema.
         
         Args:
-            model_row: Dict with model metadata
+            model_row: Dict with model metadata (legacy keys from write_pca_outputs)
             
         Returns:
             Number of rows written
@@ -2140,17 +2190,52 @@ class OutputManager:
         if not self._check_sql_health() or not model_row:
             return 0
         try:
-            row = dict(model_row)
-            row['RunID'] = self.run_id
-            row['EquipID'] = self.equip_id or 0
+            # v11.1.5: Map legacy model_row keys to ACM_PCA_Models schema
+            # Legacy keys: RunID, EquipID, EntryDateTime, NComponents, TargetVar, VarExplainedJSON, 
+            #              ScalingSpecJSON, ModelVersion, TrainStartEntryDateTime, TrainEndEntryDateTime
+            # Schema: RunID, EquipID, ModelVersion, NComponents, ExplainedVarianceRatio, TrainSamples,
+            #         TrainFeatures, ScalerMeanJson, ScalerScaleJson, ComponentsJson, CreatedAt
+            
+            # Extract ModelVersion as integer (strip 'v' prefix and parse major version)
+            model_version_str = str(model_row.get('ModelVersion', '1'))
+            if model_version_str.startswith('v'):
+                # Parse version string like 'v10.1.0' -> extract major version 10
+                try:
+                    model_version = int(model_version_str.lstrip('v').split('.')[0])
+                except ValueError:
+                    model_version = 1
+            else:
+                try:
+                    model_version = int(model_version_str)
+                except ValueError:
+                    model_version = 1
+            
+            # Parse VarExplainedJSON to get explained variance ratio
+            var_json_str = model_row.get('VarExplainedJSON', '[]')
+            try:
+                import json
+                var_list = json.loads(var_json_str) if isinstance(var_json_str, str) else var_json_str
+                explained_var_ratio = float(sum(var_list)) if var_list else None
+            except (json.JSONDecodeError, TypeError):
+                explained_var_ratio = None
+            
+            row = {
+                'RunID': self.run_id,
+                'EquipID': self.equip_id or 0,
+                'ModelVersion': model_version,
+                'NComponents': int(model_row.get('NComponents', 0)),
+                'ExplainedVarianceRatio': explained_var_ratio,
+                'TrainSamples': None,  # Not in legacy model_row
+                'TrainFeatures': None,  # Not in legacy model_row
+                'ScalerMeanJson': None,  # Not in legacy model_row
+                'ScalerScaleJson': model_row.get('ScalingSpecJSON'),
+                'ComponentsJson': None,  # Not in legacy model_row
+                'CreatedAt': datetime.now()
+            }
             return self.write_table('ACM_PCA_Models', pd.DataFrame([row]), delete_existing=True)
         except Exception as e:
             Console.warn(f"write_pca_model failed: {e}", component="OUTPUT", error=str(e)[:200])
             return 0
-    
-    # =========================================================================
-    # NEW TABLE WRITE METHODS (Dec 25, 2025 - v11 completion)
-    # =========================================================================
     
     def write_detector_correlation(self, detector_correlations: Dict[str, Dict[str, float]]) -> int:
         """Write detector correlation matrix to ACM_DetectorCorrelation.
@@ -2637,7 +2722,7 @@ class OutputManager:
             
             insert_sql = """
                 INSERT INTO dbo.ACM_RunMetrics 
-                (RunID, EquipID, MetricName, MetricValue, Timestamp)
+                (RunID, EquipID, MetricName, MetricValue, CreatedAt)
                 VALUES (?, ?, ?, ?, ?)
             """
             

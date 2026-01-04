@@ -450,10 +450,18 @@ python -c "import sys; print(sys.version)"
 - **Timer output** uses `Console.section/status` (console-only, not logged)
 
 ### Grafana Dashboard Rules
+- **Reference doc**: `docs/GRAFANA_DASHBOARD_QUERIES.md` - authoritative query reference
 - Time series: Return raw `DATETIME` columns (not `FORMAT()` strings)
-- Order: `ORDER BY time ASC` for time series
+- Order: `ORDER BY time ASC` for time series panels
 - Time filter: `WHERE Timestamp BETWEEN $__timeFrom() AND $__timeTo()`
 - spanNulls: Use threshold in ms (e.g., `3600000`) not `true/false`
+- **Pie Charts**: Use `metric` for labels, `value` for counts (both column names matter)
+- **Numeric columns**: Keep as integers for value mappings (don't cast RegimeLabel to string)
+- **Column Names**: ALWAYS verify against `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md`
+  - `HealthIndex` (NOT HealthPercent)
+  - `ForecastHealth` in ACM_HealthForecast (NOT ForecastValue)
+  - `P10_LowerBound`, `P90_UpperBound` in ACM_RUL (NOT LowerBound/UpperBound)
+- **Latest Run queries**: Use subquery `WHERE RunID = (SELECT TOP 1 RunID ... ORDER BY ID DESC)`
 
 ---
 
@@ -632,12 +640,13 @@ pytest tests/test_observability.py
 ## Key Knowledge Base Documents
 
 | Document | Purpose |
-|----------|---------||
+|----------|---------|
 | `README.md` | Product overview, setup, running ACM |
 | `docs/ACM_SYSTEM_OVERVIEW.md` | Architecture, module map, data flow |
 | `docs/OBSERVABILITY.md` | Observability stack (traces, metrics, logs, profiling) |
 | `docs/SOURCE_CONTROL_PRACTICES.md` | Git workflow, branching, releases |
 | `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` | Authoritative SQL table definitions |
+| `docs/GRAFANA_DASHBOARD_QUERIES.md` | **Validated Grafana SQL queries and chart configs** |
 | `utils/version.py` | Current version and release notes |
 | `docs/OMR_DETECTOR.md` | Overall Model Residual detector |
 | `docs/COLDSTART_MODE.md` | Cold-start strategy for sparse data |

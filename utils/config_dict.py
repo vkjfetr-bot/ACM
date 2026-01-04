@@ -72,7 +72,7 @@ class ConfigDict(MutableMapping):
         # Compute and store config signature
         signature = cfg.compute_signature()
         cfg._data["_signature"] = signature
-        Console.info(f"Config signature: {signature}", component="CFG")
+        Console.info(f"Config signature: {signature}", component="CONFIG")
         
         return cfg
     
@@ -83,7 +83,7 @@ class ConfigDict(MutableMapping):
         with asset-specific overrides (EquipID=equip_id).
         """
         if not path.exists():
-            Console.warn(f"CSV config not found: {path}", component="CFG")
+            Console.warn(f"CSV config not found: {path}", component="CONFIG")
             return {}
         
         try:
@@ -143,7 +143,7 @@ class ConfigDict(MutableMapping):
             return config
         
         except Exception as e:
-            Console.error(f"Failed to load CSV config from {path}: {e}", component="CFG")
+            Console.error(f"Failed to load CSV config from {path}: {e}", component="CONFIG")
             return {}
     
     @classmethod
@@ -160,7 +160,7 @@ class ConfigDict(MutableMapping):
         
         # If SQL config is empty, seed from CSV defaults
         if not data and csv_fallback:
-            Console.warn(f"No SQL config found for equip_id={equip_id}, loading CSV defaults", component="CFG")
+            Console.warn(f"No SQL config found for equip_id={equip_id}, loading CSV defaults", component="CONFIG")
             temp_cfg = cls.from_csv(csv_fallback, equip_id=equip_id)
             data = temp_cfg.to_dict()
             # Optionally: seed SQL table from CSV here
@@ -220,7 +220,7 @@ class ConfigDict(MutableMapping):
             return config
         
         except Exception as e:
-            Console.error(f"Failed to load SQL config for equip_id={equip_id}: {e}", component="CFG")
+            Console.error(f"Failed to load SQL config for equip_id={equip_id}: {e}", component="CONFIG")
             return {}
     
     def update_param(self, key_path: str, value: Any, reason: str, run_id: Optional[str] = None, updated_by: str = "SYSTEM") -> None:
@@ -263,15 +263,15 @@ class ConfigDict(MutableMapping):
         if self._mode == "csv" and self._csv_path and self._equip_id is not None:
             try:
                 self._write_to_csv(category, param_path, value, updated_by, reason, run_id)
-                Console.info(f"Updated {key_path}={value} (reason: {reason}, persisted to CSV)", component="CFG")
-                Console.info(f"Config signature updated to {new_signature}", component="CFG")
+                Console.info(f"Updated {key_path}={value} (reason: {reason}, persisted to CSV)", component="CONFIG")
+                Console.info(f"Config signature updated to {new_signature}", component="CONFIG")
                 
                 # Trigger cache invalidation callback if registered
                 if self._update_callback:
                     self._update_callback(key_path, value)
                 
             except Exception as e:
-                Console.error(f"Failed to persist config update to CSV: {e}", component="CFG")
+                Console.error(f"Failed to persist config update to CSV: {e}", component="CONFIG")
                 raise
         
         elif self._mode == "sql" and self._sql_client and self._equip_id is not None:
@@ -306,18 +306,18 @@ class ConfigDict(MutableMapping):
                     "OldValue": json.dumps(old_value) if old_value is not None else None
                 }
                 self._sql_client.call_proc("dbo.usp_UpdateConfigParam", params)
-                Console.info(f"Updated {key_path}={value} (reason: {reason})", component="CFG")
-                Console.info(f"Config signature updated to {new_signature}", component="CFG")
+                Console.info(f"Updated {key_path}={value} (reason: {reason})", component="CONFIG")
+                Console.info(f"Config signature updated to {new_signature}", component="CONFIG")
                 
                 # Trigger cache invalidation callback if registered
                 if self._update_callback:
                     self._update_callback(key_path, value)
                 
             except Exception as e:
-                Console.error(f"Failed to persist config update to SQL: {e}", component="CFG")
+                Console.error(f"Failed to persist config update to SQL: {e}", component="CONFIG")
                 raise
         else:
-            Console.warn(f"Updated {key_path}={value} in-memory only (not persisted)", component="CFG")
+            Console.warn(f"Updated {key_path}={value} in-memory only (not persisted)", component="CONFIG")
     
     def compute_signature(self) -> str:
         """
@@ -528,12 +528,12 @@ def load_config(
         )
         if cfg_dict:
             equip_label = f"{equipment_name} (EquipID={equip_id})" if equip_id > 0 else "global defaults"
-            Console.info(f"Loaded config from SQL for {equip_label}", component="CFG")
+            Console.info(f"Loaded config from SQL for {equip_label}", component="CONFIG")
             return ConfigDict(cfg_dict, mode="sql", equip_id=equip_id)
     except Exception as e:
         Console.warn(
             f"Could not load config from SQL: {e}",
-            component="CFG",
+            component="CONFIG",
             equipment=equipment_name,
             equip_id=equip_id,
             error=str(e)
@@ -545,7 +545,7 @@ def load_config(
         cfg_result = ConfigDict.from_csv(csv_path, equip_id=equip_id)
         Console.info(
             f"Config loaded: source={source} | equip={equipment_name} (EquipID={equip_id})",
-            component="CFG"
+            component="CONFIG"
         )
         return cfg_result
     

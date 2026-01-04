@@ -573,7 +573,9 @@ class ForecastEngine:
             'rul_p90': rul_estimate.p90_upper_bound,
             'rul_mean': rul_estimate.mean_rul,
             'rul_std': rul_estimate.std_rul,
-            'failure_prob_horizon': rul_estimate.failure_probability
+            'failure_prob_horizon': rul_estimate.failure_probability,
+            'failure_threshold': failure_threshold,  # v11.1.5: Add for ACM_FailureForecast.ThresholdUsed
+            'forecast_method': 'HoltWinters'  # v11.1.5: Add for ACM_FailureForecast.Method
         }
     
     def _get_model_maturity_state(self) -> Tuple[str, int, float]:
@@ -740,6 +742,8 @@ class ForecastEngine:
                 'FailureProb': failure_probs,
                 'SurvivalProb': survival_probs,
                 'HazardRate': hazard_rates,
+                'ThresholdUsed': forecast_results.get('failure_threshold', 70.0),  # v11.1.5: Required NOT NULL column
+                'Method': forecast_results.get('forecast_method', 'HoltWinters'),  # v11.1.5: Required NOT NULL column
                 'CreatedAt': datetime.now()
             })
             
@@ -1298,6 +1302,21 @@ class ForecastEngine:
                 return None
             
             df = pd.DataFrame(forecast_records)
+            
+            # v11.1.5: Filter out NULL ForecastValue rows before inserting to SQL
+            # ACM_SensorForecast.ForecastValue is NOT NULL, so we must exclude NaN/NULL
+            initial_count = len(df)
+            df = df.dropna(subset=['ForecastValue'])
+            if len(df) < initial_count:
+                Console.warn(f"Dropped {initial_count - len(df)} rows with NULL ForecastValue",
+                             component="FORECAST", equip_id=self.equip_id,
+                             dropped=initial_count - len(df), remaining=len(df))
+            
+            if df.empty:
+                Console.warn("All sensor forecasts had NULL ForecastValue - nothing to write",
+                             component="FORECAST", equip_id=self.equip_id)
+                return None
+            
             Console.info(
                 f"Generated {len(df)} sensor forecast points for {df['SensorName'].nunique()} sensors over {forecast_horizon_hours:.0f}h",
                 component="FORECAST", equip_id=self.equip_id, points=len(df),

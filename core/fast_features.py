@@ -9,10 +9,15 @@ existing pipeline. We'll extend it iteratively.
 """
 from __future__ import annotations
 
+import warnings
 from typing import Any, List, Optional, Tuple, Literal, Dict
 import inspect
 import numpy as np
 import pandas as pd
+
+# Suppress NumPy divide-by-zero warnings from correlation calculations on constant columns
+# These are expected when sensors have zero variance (constant values) and produce NaN correlations
+warnings.filterwarnings("ignore", message="invalid value encountered in divide", category=RuntimeWarning)
 from utils.timer import Timer
 from core.observability import Span, Console
 

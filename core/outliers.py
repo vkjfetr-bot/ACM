@@ -179,18 +179,28 @@ class GMMDetector:
 
             # Use config for trial parameters
             cov_type = self.gmm_cfg.get("covariance_type", "diag")
-            reg_covar = float(self.gmm_cfg.get("reg_covar", 1e-3)) # Increased default for stability
+            reg_covar = float(self.gmm_cfg.get("reg_covar", 1e-2)) # Increased default for stability (1e-2)
             
             # If BIC search is enabled, find best k
             if self.gmm_cfg.get("enable_bic_search", True) and safe_k > 2:
                 bics = []
                 k_range = range(max(2, self.gmm_cfg.get("k_min", 2)), min(safe_k, self.gmm_cfg.get("k_max", 5)) + 1)
+                bic_failed = False
                 for k_test in k_range:
-                    gm_test = GaussianMixture(n_components=k_test, covariance_type=cov_type, reg_covar=reg_covar, random_state=17)
-                    gm_test.fit(Xs)
-                    bics.append(gm_test.bic(Xs))
-                safe_k = k_range[np.argmin(bics)]
-                Console.info(f"BIC search selected k={safe_k}", component="GMM")
+                    try:
+                        gm_test = GaussianMixture(n_components=k_test, covariance_type=cov_type, reg_covar=reg_covar, random_state=17)
+                        gm_test.fit(Xs)
+                        bics.append(gm_test.bic(Xs))
+                    except ValueError as e:
+                        Console.warn(f"BIC search k={k_test} failed: {str(e)[:100]}", component="GMM")
+                        bics.append(float('inf'))  # Mark as worst option
+                        bic_failed = True
+                if bics and min(bics) < float('inf'):
+                    safe_k = k_range[np.argmin(bics)]
+                    Console.info(f"BIC search selected k={safe_k}", component="GMM")
+                elif bic_failed:
+                    Console.warn("All BIC search attempts failed; using k=2 with fallback", component="GMM")
+                    safe_k = 2
 
             # Simplified trial with configured parameters
             trials = [dict(covariance_type=cov_type, reg_covar=reg_covar)]

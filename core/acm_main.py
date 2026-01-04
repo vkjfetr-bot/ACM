@@ -1,4 +1,4 @@
-# core/acm_main.py
+﻿# core/acm_main.py
 from __future__ import annotations
 
 import gc
@@ -373,22 +373,23 @@ def _load_config(sql_client: Any, equipment_name: str) -> Dict[str, Any]:
     try:
         cursor = sql_client.cursor()
         
-        # Load config for this specific equipment ONLY (no EquipID=0 fallback)
+        # Load config with cascading: global defaults (EquipID=0) then equipment-specific overrides
+        # Equipment-specific params override global params with same ParamPath
         cursor.execute("""
             SELECT ParamPath, ParamValue, ValueType
             FROM ACM_Config
-            WHERE EquipID = ?
-            ORDER BY ParamPath ASC
+            WHERE EquipID IN (0, ?)
+            ORDER BY EquipID ASC, ParamPath ASC
         """, (equip_id,))
         
         rows = cursor.fetchall()
         if not rows:
             raise RuntimeError(
                 f"No config found in ACM_Config for equipment '{equipment_name}' (EquipID={equip_id}).\n"
-                f"Populate ACM_Config with equipment-specific settings before running ACM."
+                f"Populate ACM_Config with global (EquipID=0) and/or equipment-specific settings before running ACM."
             )
         
-        # Build config dict from rows
+        # Build config dict from rows - later rows (equipment-specific) override earlier (global)
         cfg_dict: Dict[str, Any] = {}
         for param_path, param_value, value_type in rows:
             # Parse value based on type
@@ -413,11 +414,11 @@ def _load_config(sql_client: Any, equipment_name: str) -> Dict[str, Any]:
                 d = d[part]
             d[parts[-1]] = value
         
-        Console.info(f"Config loaded from SQL for {equipment_name} (EquipID={equip_id}, {len(rows)} params)", component="CFG")
+        Console.info(f"Config loaded from SQL for {equipment_name} (EquipID={equip_id}, {len(rows)} params)", component="CONFIG")
         return ConfigDict(cfg_dict, mode="sql", equip_id=equip_id)
         
     except Exception as e:
-        Console.error(f"Failed to load config from SQL: {e}", component="CFG",
+        Console.error(f"Failed to load config from SQL: {e}", component="CONFIG",
                       equipment=equipment_name, equip_id=equip_id, error=str(e))
         raise RuntimeError(f"Config loading failed: {e}. Ensure ACM_Config table is populated for EquipID={equip_id}.")
 
@@ -684,7 +685,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         invalid_intervals.append(f"threshold_update_interval={threshold_update_interval}")
         threshold_update_interval = 1
     if invalid_intervals:
-        Console.warn(f"Invalid intervals defaulted to 1: {', '.join(invalid_intervals)}", component="CFG")
+        Console.warn(f"Invalid intervals defaulted to 1: {', '.join(invalid_intervals)}", component="CONFIG")
     
     # Set observability context (equipment info only - no batch coupling)
     set_acm_context(
@@ -727,6 +728,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     cache_payload: Optional[Dict[str, Any]] = None
     regime_quality_ok: bool = True
     refit_requested: bool = False
+    sql_log_sink: Optional[Any] = None  # SQL log sink for cleanup in finally block
 
     # Heuristic ETAs (adjust via config if needed)
     eta_load = float((cfg.get("hints") or {}).get("eta_load_sec", 30))
@@ -805,7 +807,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     # - Imported internal/private OTEL APIs (_SPAN_KEY)
     # - Was fragile and hard to maintain
     # Instead, correlation between batch runner and ACM runs is via:
-    # - Consistent acm.run_id, acm.batch_num, acm.equipment attributes
+    # - Consistent acm.run_id, acm.run_count, acm.equipment attributes
     # - These can be queried in Tempo/Loki without complex trace linking
     
     if tracer and hasattr(tracer, 'start_as_current_span'):
@@ -817,7 +819,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 "acm.equipment": equip,
                 "acm.equip_id": equip_id,
                 "acm.run_id": run_id,
-                "acm.batch_num": batch_num,
+                "acm.run_count": run_count,
             }
         )
         root_span = _span_ctx.__enter__()
@@ -869,7 +871,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             train = ensure_local_index(train)
             score = ensure_local_index(score)
             
-            # Deduplicate indices early to prevent O(n²) performance and silent data loss
+            # Deduplicate indices early to prevent O(nÂ²) performance and silent data loss
             train, train_dups = deduplicate_index(train, "TRAIN", equip)
             score, score_dups = deduplicate_index(score, "SCORE", equip)
             meta.dup_timestamps_removed = int(train_dups + score_dups)
@@ -1024,7 +1026,17 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         regime_state_version = 0
         regime_loaded_from_state = False  # v11.2: Boolean flag replaces "STATE_LOADED" string sentinel
         col_meds = None
+        cached_models = None  # v11.2: Initialize to avoid UnboundLocalError (Rule #6)
+        cached_manifest = None
+        previous_weights = None  # v11.2: Initialize for fusion pipeline (Rule #6)
+        reuse_models = False  # v11.2: Disable file-based caching; models persist to SQL (Rule #6)
         det_flags = get_detector_enable_flags(cfg)
+        # Extract detector enable flags for use throughout pipeline
+        ar1_enabled = det_flags["ar1_enabled"]
+        pca_enabled = det_flags["pca_enabled"]
+        iforest_enabled = det_flags["iforest_enabled"]
+        gmm_enabled = det_flags["gmm_enabled"]
+        omr_enabled = det_flags["omr_enabled"]
         use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested and not force_retraining
         
         with T.section("models.load"):
@@ -1078,9 +1090,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # Check if we need to fit detectors
         detectors_missing = not all([
-            ar1_detector or not det_flags["ar1_enabled"],
-            pca_detector or not det_flags["pca_enabled"],
-            iforest_detector or not det_flags["iforest_enabled"],
+            ar1_detector or not ar1_enabled,
+            pca_detector or not pca_enabled,
+            iforest_detector or not iforest_enabled,
         ])
         
         if detectors_missing and not ALLOWS_MODEL_REFIT:
@@ -1108,11 +1120,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # Validate all enabled detectors are present
         missing = []
-        if det_flags["ar1_enabled"] and not ar1_detector: missing.append("ar1")
-        if det_flags["pca_enabled"] and not pca_detector: missing.append("pca")
-        if det_flags["iforest_enabled"] and not iforest_detector: missing.append("iforest")
-        if det_flags["gmm_enabled"] and not gmm_detector: missing.append("gmm")
-        if det_flags["omr_enabled"] and not omr_detector: missing.append("omr")
+        if ar1_enabled and not ar1_detector: missing.append("ar1")
+        if pca_enabled and not pca_detector: missing.append("pca")
+        if iforest_enabled and not iforest_detector: missing.append("iforest")
+        if gmm_enabled and not gmm_detector: missing.append("gmm")
+        if omr_enabled and not omr_detector: missing.append("omr")
         
         if missing:
             Console.error(f"Detector initialization failed: {missing}", component="MODEL", equip=equip)
@@ -2050,7 +2062,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         sensor_cols = [c for c in raw_score.columns 
                                       if raw_score[c].dtype in ['float64', 'float32', 'int64', 'int32']]
                         if sensor_cols:
-                            # Calculate target max rows: 10K total (not 10K timestamps × N sensors!)
+                            # Calculate target max rows: 10K total (not 10K timestamps Ã— N sensors!)
                             # With N sensors, we can have at most 10000/N timestamps
                             max_total_rows = 10000
                             max_timestamps = max(100, max_total_rows // len(sensor_cols))
@@ -2299,7 +2311,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 if _OBSERVABILITY_AVAILABLE and run_start_time:
                     duration_seconds = (run_completion_time - run_start_time).total_seconds()
                     record_run(equip, outcome or "OK", duration_seconds)
-                    record_batch_processed(equip, duration_seconds, rows_read, (outcome or "ok").lower())
+                    record_batch_processed(equip, rows=rows_read, duration_seconds=duration_seconds, outcome=(outcome or "ok").lower())
                     if run_metadata.get("avg_health_index") is not None:
                         record_health_score(equip, float(run_metadata["avg_health_index"]))
                     if outcome == "FAIL":

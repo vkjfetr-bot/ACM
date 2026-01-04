@@ -966,6 +966,8 @@ def _fit_hdbscan_scaled(
     4. Robust to outliers - won't distort regime boundaries
     5. Hierarchical - provides cluster stability/persistence metrics
     
+    v11.1.7: Added subsampling for large datasets to prevent O(n²) memory issues
+    
     Args:
         X: Feature matrix (n_samples, n_features)
         cfg: Configuration dictionary
@@ -987,24 +989,47 @@ def _fit_hdbscan_scaled(
         X_scaled = scaler.fit_transform(X)
     
     n_samples, n_features = X_scaled.shape
-    if n_samples == 0:
+    
+    # v11.1.7: PERFORMANCE FIX - Subsample for large datasets
+    # HDBSCAN has O(n²) memory/time complexity, becomes very slow >10k samples
+    hdb_cfg = _cfg_get(cfg, "regimes.hdbscan", {}) or {}
+    max_fit_samples = int(hdb_cfg.get("max_fit_samples", 8000))  # Cap at 8k for reasonable performance
+    
+    subsample_indices = None
+    if n_samples > max_fit_samples:
+        Console.info(f"Subsampling for HDBSCAN: {n_samples} -> {max_fit_samples} samples", component="REGIME")
+        # Stratified random sampling to preserve distribution
+        np.random.seed(42)
+        subsample_indices = np.random.choice(n_samples, max_fit_samples, replace=False)
+        subsample_indices.sort()  # Maintain temporal order
+        X_fit = X_scaled[subsample_indices]
+    else:
+        X_fit = X_scaled
+    
+    n_fit_samples = len(X_fit)
+    if n_fit_samples == 0:
         raise ValueError("Cannot fit regime model on an empty dataset")
-    if n_samples < 10:
-        raise ValueError(f"HDBSCAN requires at least 10 samples (got {n_samples})")
+    if n_fit_samples < 10:
+        raise ValueError(f"HDBSCAN requires at least 10 samples (got {n_fit_samples})")
     
     # HDBSCAN config with sensible defaults for industrial data
-    hdb_cfg = _cfg_get(cfg, "regimes.hdbscan", {}) or {}
-    # min_cluster_size: minimum samples to form a cluster (5-15% of data is good)
-    min_cluster_size = int(hdb_cfg.get("min_cluster_size", max(10, n_samples // 20)))
+    # BUGFIX v11.1.7: min_cluster_size was WAY too high (5% of data = 1649 samples)
+    # For operating regimes, we want to detect clusters of 50-500 samples minimum
+    # Using 1-2% of FIT data or 30-100 samples, whichever is larger
+    # min_cluster_size: minimum samples to form a cluster 
+    # Default: max(30, min(100, 2% of fit data)) - reasonable for regime detection
+    default_min_cluster = max(30, min(100, n_fit_samples // 50))
+    min_cluster_size = int(hdb_cfg.get("min_cluster_size", default_min_cluster))
     # min_samples: samples in neighborhood for core point (controls noise sensitivity)
-    min_samples = int(hdb_cfg.get("min_samples", max(3, min_cluster_size // 4)))
+    # Default: smaller value to reduce noise sensitivity
+    min_samples = int(hdb_cfg.get("min_samples", max(3, min_cluster_size // 5)))
     cluster_selection_epsilon = float(hdb_cfg.get("cluster_selection_epsilon", 0.0))
     cluster_selection_method = str(hdb_cfg.get("cluster_selection_method", "eom"))
     metric = str(hdb_cfg.get("metric", "euclidean"))
     allow_single_cluster = bool(hdb_cfg.get("allow_single_cluster", True))
     
     # Ensure min_cluster_size doesn't exceed sample count
-    min_cluster_size = min(min_cluster_size, max(5, n_samples // 3))
+    min_cluster_size = min(min_cluster_size, max(5, n_fit_samples // 3))
     min_samples = min(min_samples, min_cluster_size)
     
     Console.info(
@@ -1024,13 +1049,13 @@ def _fit_hdbscan_scaled(
             gen_min_span_tree=True,  # For stability metrics
             prediction_data=True,  # Enable approximate_predict for scoring
         )
-        clusterer.fit(X_scaled)
+        clusterer.fit(X_fit)  # v11.1.7: Fit on subsampled data
         
         labels = clusterer.labels_
         unique_labels = np.unique(labels)
         n_clusters = len(unique_labels[unique_labels >= 0])
         n_noise = int(np.sum(labels == -1))
-        noise_ratio = n_noise / n_samples
+        noise_ratio = n_noise / n_fit_samples
         
         Console.info(
             f"HDBSCAN found {n_clusters} clusters, {n_noise} noise points ({noise_ratio:.1%})",
@@ -1075,7 +1100,7 @@ def _fit_hdbscan_scaled(
             non_noise_mask = labels >= 0
             if np.sum(non_noise_mask) > n_clusters + 1:
                 try:
-                    sil_non_noise = silhouette_score(X_scaled[non_noise_mask], labels[non_noise_mask])
+                    sil_non_noise = silhouette_score(X_fit[non_noise_mask], labels[non_noise_mask])
                     # Penalize by noise ratio: if 30% noise, score drops by 30%
                     adjusted_sil = sil_non_noise * (1.0 - noise_ratio)
                     quality_score = float(adjusted_sil)
@@ -1092,7 +1117,7 @@ def _fit_hdbscan_scaled(
         if n_clusters == 0:
             low_quality = True
             quality_notes.append("no_clusters_found")
-        if noise_ratio > 0.6:
+        if noise_ratio > 0.5:  # v11.1.7: Reduced from 0.6 to 0.5
             low_quality = True
             quality_notes.append(f"high_noise_ratio_{noise_ratio:.1%}")
         if quality_score < 0.05 and n_clusters > 1:
@@ -1106,7 +1131,8 @@ def _fit_hdbscan_scaled(
             )
         
         # Compute cluster centroids for prediction (HDBSCAN doesn't store these)
-        cluster_centroids = _compute_hdbscan_centroids(X_scaled, labels)
+        # v11.1.7: Use X_fit (subsampled) for centroid computation
+        cluster_centroids = _compute_hdbscan_centroids(X_fit, labels)
         
         Console.info(
             f"HDBSCAN complete: {n_clusters} clusters, validity={quality_score:.3f} ({quality_metric})",
@@ -1230,12 +1256,61 @@ def fit_regime_model(
                 except Exception:
                     pass
         except Exception as e:
-            Console.error(f"GMM also failed: {e}. No clustering available.", component="REGIME")
-            raise RuntimeError(f"All clustering methods failed. Last error: {e}")
+            Console.warn(f"GMM also failed: {e}. Trying KMeans fallback.", component="REGIME")
     
-    # v11.1.0: No more KMeans fallback - HDBSCAN and GMM are the only options
+    # ========== TRY KMEANS AS FINAL FALLBACK (v11.1.7) ==========
+    # KMeans is fast, reliable, and always produces clusters
     if model is None:
-        raise RuntimeError("Clustering failed: Neither HDBSCAN nor GMM produced a valid model")
+        try:
+            from sklearn.cluster import KMeans
+            Console.info("Using KMeans clustering (final fallback)", component="REGIME")
+            
+            X_arr = train_basis.to_numpy(dtype=float, copy=False)
+            X_arr = _finite_impute_inplace(X_arr)
+            if not bool(basis_meta.get("basis_normalized", False)):
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X_arr)
+            else:
+                scaler = _IdentityScaler()
+                X_scaled = scaler.transform(X_arr)
+            
+            # Auto-k selection using silhouette score
+            kmeans_cfg = _cfg_get(cfg, "regimes.kmeans", {}) or {}
+            k_min = int(kmeans_cfg.get("k_min", 2))
+            k_max = int(kmeans_cfg.get("k_max", 6))
+            
+            best_kmeans = None
+            best_k = 2
+            best_score = -1.0
+            quality_sweep = []
+            
+            for k in range(k_min, k_max + 1):
+                try:
+                    km = KMeans(n_clusters=k, n_init=10, max_iter=300, random_state=42)
+                    labels = km.fit_predict(X_scaled)
+                    if len(np.unique(labels)) >= 2:
+                        sil = silhouette_score(X_scaled, labels)
+                        quality_sweep.append((k, float(sil)))
+                        if sil > best_score:
+                            best_score = sil
+                            best_k = k
+                            best_kmeans = km
+                except Exception:
+                    continue
+            
+            if best_kmeans is not None:
+                model = best_kmeans
+                exemplars = best_kmeans.cluster_centers_
+                best_metric = "silhouette"
+                low_quality = best_score < 0.15
+                basis_meta["clustering_method"] = "kmeans"
+                Console.info(f"KMeans complete: k={best_k}, silhouette={best_score:.3f}", component="REGIME")
+            else:
+                raise RuntimeError("KMeans failed to produce valid clusters")
+                
+        except Exception as e:
+            Console.error(f"All clustering methods failed: {e}", component="REGIME")
+            raise RuntimeError(f"All clustering methods failed. Last error: {e}")
 
     # ========== Quality Assessment ==========
     quality_cfg = _cfg_get(cfg, "regimes.quality", {})

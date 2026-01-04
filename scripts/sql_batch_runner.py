@@ -207,7 +207,7 @@ class SQLBatchRunner:
             Console.warn(f"Could not read config {param_path} for EquipID={equip_id}: {e}", component="CONFIG", equip_id=equip_id, param_path=param_path, error=str(e))
         return default_value
 
-    def _set_tick_minutes(self, equip_id: int, minutes: int) -> None:
+    def _set_tick_minutes(self, equip_id: int, minutes: int, log: bool = True) -> None:
         """Upsert runtime.tick_minutes in ACM_Config for the equipment (patched: no Category/ChangeReason)."""
         try:
             with self._get_sql_connection() as conn:
@@ -226,9 +226,10 @@ class SQLBatchRunner:
                         (equip_id, str(minutes))
                     )
                 conn.commit()
-                Console.info(f"Set runtime.tick_minutes={minutes} for EquipID={equip_id}", component="CFG", tick_minutes=minutes, equip_id=equip_id)
+                if log:
+                    Console.info(f"Set tick_minutes={minutes} for EquipID={equip_id}", component="CONFIG", tick_minutes=minutes, equip_id=equip_id)
         except Exception as e:
-            Console.warn(f"Could not set runtime.tick_minutes for EquipID={equip_id}: {e}", component="CFG", equip_id=equip_id, error=str(e), error_type=type(e).__name__)
+            Console.warn(f"Could not set tick_minutes for EquipID={equip_id}: {e}", component="CONFIG", equip_id=equip_id, error=str(e), error_type=type(e).__name__)
 
     def _infer_tick_minutes_from_raw(self, equip_name: str, target_rows_per_batch: int = 5000) -> int:
         """Infer a reasonable tick size (minutes) from historian stats."""
@@ -259,13 +260,13 @@ class SQLBatchRunner:
             max_tick = int(os.getenv("ACM_SQL_MAX_TICK_MINUTES", "1440"))  # allow up to 24h windows
             inferred = max(min_tick, min(inferred, max_tick))
 
+            clamped = inferred == max_tick
             Console.info(
                 f"Inferred tick_minutes={inferred} for {equip_name} "
-                f"(rows={total_rows}, minutes={total_minutes:.1f}, cadence={cadence_minutes:.2f}m)",
-                component="CONFIG", tick_minutes=inferred, equipment=equip_name, total_rows=total_rows
+                f"(rows={total_rows}, minutes={total_minutes:.1f}, cadence={cadence_minutes:.2f}m)"
+                + (f" [clamped to max={max_tick}]" if clamped else ""),
+                component="CONFIG", tick_minutes=inferred, equipment=equip_name, total_rows=total_rows, clamped=clamped
             )
-            if inferred == max_tick:
-                Console.warn("Clamped by ACM_SQL_MAX_TICK_MINUTES; override env var to expand further", component="CONFIG", max_tick=max_tick)
             return inferred
         except Exception as e:
             Console.warn(f"Could not infer tick_minutes from raw table for {equip_name}: {e}", component="CONFIG", equipment=equip_name, error=str(e), error_type=type(e).__name__)
@@ -281,7 +282,6 @@ class SQLBatchRunner:
         try:
             tables_list = sorted(ALLOWED_TABLES)
             total_tables = len(tables_list)
-            Console.info(f"Truncating {total_tables} ACM output tables for EquipID={equip_id}...", component="RESET", equip_id=equip_id, total_tables=total_tables)
             
             # Large tables that need batched deletion (can have millions of rows)
             large_tables = {
@@ -291,9 +291,13 @@ class SQLBatchRunner:
                 'ACM_FailureForecast', 'ACM_Scores_Wide'
             }
             
+            # Track deletions for summary
+            tables_cleared = 0
+            total_rows_deleted = 0
+            significant_deletions: list[tuple[str, int]] = []  # Tables with >100 rows
+            
             with self._get_sql_connection() as conn:
                 cur = conn.cursor()
-                deleted_count = 0
                 for idx, table in enumerate(tables_list, 1):
                     try:
                         # Check if table exists and has EquipID column
@@ -308,20 +312,22 @@ class SQLBatchRunner:
                         # For large tables, use batched delete to avoid massive transaction log
                         if table in large_tables:
                             batch_size = 50000
-                            total_deleted = 0
+                            table_deleted = 0
                             while True:
                                 cur.execute(
                                     f"DELETE TOP ({batch_size}) FROM dbo.{table} WHERE EquipID = ?",
                                     (equip_id,),
                                 )
                                 rows = cur.rowcount
-                                total_deleted += rows
+                                table_deleted += rows
                                 conn.commit()  # Commit each batch to release transaction log
                                 if rows < batch_size:
                                     break
-                            if total_deleted > 0:
-                                deleted_count += 1
-                                Console.info(f"Deleted {total_deleted:,} rows from {table}", component="RESET", table=table, rows=total_deleted)
+                            if table_deleted > 0:
+                                tables_cleared += 1
+                                total_rows_deleted += table_deleted
+                                if table_deleted > 100:
+                                    significant_deletions.append((table, table_deleted))
                         else:
                             # Small tables - single delete
                             cur.execute(
@@ -330,14 +336,28 @@ class SQLBatchRunner:
                             )
                             rows_deleted = cur.rowcount
                             if rows_deleted > 0:
-                                deleted_count += 1
+                                tables_cleared += 1
+                                total_rows_deleted += rows_deleted
+                                if rows_deleted > 100:
+                                    significant_deletions.append((table, rows_deleted))
                             conn.commit()
                     except Exception as tbl_err:
-                        Console.warn(f"Failed to truncate {table} for EquipID={equip_id}: {tbl_err}", component="RESET", table=table, equip_id=equip_id, error=str(tbl_err), error_type=type(tbl_err).__name__)
-                    # Progress indicator every 10 tables (console only, not Loki)
-                    if idx % 10 == 0:
-                        Console.status(f"  Cold-start reset: {idx}/{total_tables} tables processed...")
-            Console.ok(f"Cold-start reset complete: cleared {deleted_count} ACM output tables for EquipID={equip_id}", component="RESET", equip_id=equip_id, deleted_count=deleted_count)
+                        Console.warn(f"Failed to truncate {table}: {tbl_err}", component="RESET", table=table, equip_id=equip_id, error=str(tbl_err), error_type=type(tbl_err).__name__)
+            
+            # Single summary message
+            if significant_deletions:
+                # Sort by row count descending, show top 5
+                significant_deletions.sort(key=lambda x: x[1], reverse=True)
+                top_tables = ", ".join(f"{t}={r:,}" for t, r in significant_deletions[:5])
+                Console.ok(
+                    f"Cold-start reset: cleared {tables_cleared} tables ({total_rows_deleted:,} rows) for EquipID={equip_id} [top: {top_tables}]",
+                    component="RESET", equip_id=equip_id, tables_cleared=tables_cleared, total_rows=total_rows_deleted
+                )
+            else:
+                Console.ok(
+                    f"Cold-start reset: cleared {tables_cleared} tables ({total_rows_deleted:,} rows) for EquipID={equip_id}",
+                    component="RESET", equip_id=equip_id, tables_cleared=tables_cleared, total_rows=total_rows_deleted
+                )
         except Exception as e:
             Console.warn(f"Failed to truncate outputs for EquipID={equip_id}: {e}", component="RESET", equip_id=equip_id, error=str(e), error_type=type(e).__name__)
 
@@ -988,12 +1008,12 @@ class SQLBatchRunner:
                 Console.info(f"Starting from beginning for {equip_name} - performing full reset", component="RESET", equipment=equip_name)
                 inferred = self._infer_tick_minutes_from_raw(equip_name)
                 self.tick_minutes = inferred
-                self._set_tick_minutes(equip_id, inferred)
+                # Don't log here - will log final value after max_batches adjustment
+                self._set_tick_minutes(equip_id, inferred, log=False)
                 self._truncate_outputs_for_equip(equip_id)
-                # CRITICAL: Delete ALL existing models (SQL + filesystem) so first batch
+                # CRITICAL: Delete ALL existing models from SQL ModelRegistry so first batch
                 # starts with fresh coldstart training. This ensures batch 0 trains new models,
                 # and subsequent batches evolve those models incrementally.
-                Console.info(f"Deleting all existing models (SQL + filesystem) for {equip_name}", component="RESET", equipment=equip_name)
                 self._delete_models_for_equip(equip_id)
                 self._reset_progress_to_beginning(equip_id)
             else:
@@ -1010,12 +1030,18 @@ class SQLBatchRunner:
                         new_tick = int(math.ceil(total_minutes / self.max_batches)) or self.tick_minutes
                         if new_tick > self.tick_minutes:
                             Console.info(
-                                f"[CONFIG] {equip_name}: Adjusting tick_minutes from {self.tick_minutes} "
-                                f"to {new_tick} to honor max-batches={self.max_batches} (applies to coldstart AND batches)",
+                                f"{equip_name}: Adjusted tick_minutes {self.tick_minutes} -> {new_tick} for max-batches={self.max_batches}",
                                 component="CONFIG", equipment=equip_name, old_tick=self.tick_minutes, new_tick=new_tick, max_batches=self.max_batches
                             )
                             self.tick_minutes = new_tick
-                            self._set_tick_minutes(equip_id, new_tick)
+                            # Don't log again - already logged in the message above
+                            self._set_tick_minutes(equip_id, new_tick, log=False)
+                    else:
+                        # Log final tick if no adjustment was needed
+                        Console.info(f"{equip_name}: Using tick_minutes={self.tick_minutes}", component="CONFIG", equipment=equip_name, tick_minutes=self.tick_minutes)
+            elif self.start_from_beginning and not resume:
+                # Log final tick if no max_batches adjustment
+                Console.info(f"{equip_name}: Using tick_minutes={self.tick_minutes}", component="CONFIG", equipment=equip_name, tick_minutes=self.tick_minutes)
         else:
             Console.warn(f"{equip_name}: EquipID not found in dbo.Equipment; downstream writes will fail", component="PRECHECK", equipment=equip_name)
 

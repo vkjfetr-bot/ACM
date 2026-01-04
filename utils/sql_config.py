@@ -59,16 +59,16 @@ def get_equipment_config(
         try:
             cfg = _load_config_from_sql(equipment_code)
             if cfg:
-                Console.info(f"Loaded config from SQL for equipment: {equipment_code or 'GLOBAL'}", component="CFG")
+                Console.info(f"Loaded config from SQL for equipment: {equipment_code or 'GLOBAL'}", component="CONFIG")
                 return cfg
         except Exception as e:
-            Console.warn(f"Failed to load config from SQL: {e}", component="CFG")
+            Console.warn(f"Failed to load config from SQL: {e}", component="CONFIG")
             if not fallback_to_csv:
                 raise
     
     # Fallback to CSV
     if fallback_to_csv:
-        Console.info(f"Loading config from CSV (fallback)", component="CFG")
+        Console.info(f"Loading config from CSV (fallback)", component="CONFIG")
         from utils.config_dict import ConfigDict
         csv_path = Path("configs") / "config_table.csv"
         if not csv_path.exists():
@@ -91,7 +91,7 @@ def _load_config_from_sql(equipment_code: Optional[str] = None) -> Optional[Dict
         client = SQLClient.from_ini('acm')
         client.connect()
     except Exception as e:
-        Console.warn(f"Cannot connect to ACM database: {e}", component="CFG")
+        Console.warn(f"Cannot connect to ACM database: {e}", component="CONFIG")
         return None
     
     try:
@@ -100,7 +100,7 @@ def _load_config_from_sql(equipment_code: Optional[str] = None) -> Optional[Dict
         if equipment_code:
             equip_id = _get_equipment_id(client, equipment_code)
             if equip_id is None:
-                Console.warn(f"Equipment {equipment_code} not found in Equipment table. Using global defaults.", component="CFG")
+                Console.warn(f"Equipment {equipment_code} not found in Equipment table. Using global defaults.", component="CONFIG")
         
         # Query config: global defaults + equipment overrides
         cursor = client.cursor()
@@ -142,7 +142,7 @@ def _load_config_from_sql(equipment_code: Optional[str] = None) -> Optional[Dict
         cursor.close()
         
         if not rows:
-            Console.warn("No config found in ACM_Config table", component="CFG")
+            Console.warn("No config found in ACM_Config table", component="CONFIG")
             return None
         
         # Convert flat param paths to nested dict
@@ -311,7 +311,7 @@ def update_equipment_config(
         client.conn.commit()
         cursor.close()
         
-        Console.info(f"Updated config: {param_path} = {value_str} for {equipment_code or 'GLOBAL'}", component="CFG")
+        Console.info(f"Updated config: {param_path} = {value_str} for {equipment_code or 'GLOBAL'}", component="CONFIG")
     
     finally:
         client.close()

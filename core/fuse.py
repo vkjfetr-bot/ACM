@@ -951,6 +951,17 @@ class Fuser:
                 except Exception:
                     pass
 
+            # PERF-FIX (v11.1.7): Precompute global baseline statistics for feature attribution
+            # This avoids recomputing median/MAD for each episode (was causing 700s+ overhead)
+            global_feature_medians: Optional[pd.Series] = None
+            global_feature_mads: Optional[pd.Series] = None
+            if original_features is not None and not original_features.empty:
+                numeric_cols = original_features.select_dtypes(include=[np.number])
+                if not numeric_cols.empty:
+                    global_feature_medians = numeric_cols.median()
+                    global_feature_mads = (numeric_cols - global_feature_medians).abs().median()
+                    global_feature_mads = global_feature_mads.replace(0, 1e-6)  # Avoid div by zero
+
             rows = []
             for i, (s, e) in enumerate(merged):
                 start_ts = idx[max(0, s)]
@@ -989,26 +1000,25 @@ class Fuser:
                 culprits_raw = primary_detector
                 if 'pca' in primary_detector or 'mhal' in primary_detector:
                     # P2-FIX (v11.1.6): Improved PCA attribution using absolute deviation
+                    # PERF-FIX (v11.1.7): Use precomputed global median/MAD instead of per-episode computation
                     # For proper attribution, we look at which features deviate most from baseline
                     # This is a heuristic approximation of reconstruction error contribution
                     episode_features = original_features.iloc[s:e+1]
                     top_feature: Optional[str] = None
-                    if not episode_features.empty:
+                    if not episode_features.empty and global_feature_medians is not None and global_feature_mads is not None:
                         numeric_cols = episode_features.select_dtypes(include=[np.number])
                         if not numeric_cols.empty:
-                            # Compute z-scores for each feature in the episode window
-                            # Then find which feature has highest absolute average deviation
-                            feature_medians = numeric_cols.median()
-                            feature_mads = (numeric_cols - feature_medians).abs().median()
-                            feature_mads = feature_mads.replace(0, 1e-6)  # Avoid div by zero
-                            
-                            # Calculate mean absolute z-score per feature
-                            feature_z = (numeric_cols - feature_medians) / feature_mads
-                            feature_abs_mean_z = feature_z.abs().mean()
-                            feature_abs_mean_z = feature_abs_mean_z.dropna()
-                            
-                            if not feature_abs_mean_z.empty:
-                                top_feature = str(feature_abs_mean_z.idxmax())
+                            # Use precomputed global baseline for z-score calculation (PERF-FIX)
+                            # Filter to only columns we have precomputed stats for
+                            common_cols = [c for c in numeric_cols.columns if c in global_feature_medians.index]
+                            if common_cols:
+                                # Calculate z-scores using global baseline
+                                feature_z = (numeric_cols[common_cols] - global_feature_medians[common_cols]) / global_feature_mads[common_cols]
+                                feature_abs_mean_z = feature_z.abs().mean()
+                                feature_abs_mean_z = feature_abs_mean_z.dropna()
+                                
+                                if not feature_abs_mean_z.empty:
+                                    top_feature = str(feature_abs_mean_z.idxmax())
                     if top_feature:
                         culprit_sensor = Fuser._get_base_sensor(top_feature)
                         culprits_raw = f"{primary_detector}({culprit_sensor})"
