@@ -23,7 +23,7 @@ Confidence Sources:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 import numpy as np
 
 from core.observability import Console
