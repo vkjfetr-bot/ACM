@@ -270,30 +270,61 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     report.equipment = equip
     
     # Parse timestamps
-    start_ts = pd.Timestamp(start_time)
-    end_ts = pd.Timestamp(end_time)
-    report.analysis_window = {"start": start_ts, "end": end_ts}
+    try:
+        start_ts = pd.Timestamp(start_time)
+        end_ts = pd.Timestamp(end_time)
+        report.analysis_window = {"start": start_ts, "end": end_ts}
+    except Exception as e:
+        raise ValueError(f"Invalid timestamp format: {e}. Use ISO format: YYYY-MM-DDTHH:MM:SS")
+    
+    # Validate time range
+    if start_ts >= end_ts:
+        raise ValueError(f"Start time ({start_ts}) must be before end time ({end_ts})")
     
     # Connect to SQL
     print("Connecting to SQL Server...")
-    sql_client = SQLClient.from_ini('acm')
-    sql_client.connect()
+    try:
+        sql_client = SQLClient.from_ini('acm')
+        sql_client.connect()
+    except Exception as e:
+        raise RuntimeError(f"Failed to connect to SQL Server: {e}. Check configs/sql_connection.ini")
     
     # Load config
     print(f"Loading config for {equip}...")
-    cursor = sql_client.get_cursor()
-    cursor.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equip,))
-    row = cursor.fetchone()
-    if not row:
-        raise ValueError(f"Equipment '{equip}' not found in database")
-    equip_id = row[0]
+    try:
+        cursor = sql_client.get_cursor()
+        cursor.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equip,))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Equipment '{equip}' not found in database")
+        equip_id = row[0]
+    except Exception as e:
+        sql_client.close()
+        raise ValueError(f"Failed to load equipment: {e}")
     
     # Load configuration from SQL
-    cfg_dict = ConfigDict.from_sql(sql_client, equip)
-    cfg = dict(cfg_dict)
+    try:
+        cfg_dict = ConfigDict.from_sql(sql_client, equip)
+        cfg = dict(cfg_dict)
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Failed to load configuration: {e}")
     
     # Load data
-    train, score, meta = load_data(sql_client, equip_id, start_ts, end_ts)
+    try:
+        train, score, meta = load_data(sql_client, equip_id, start_ts, end_ts)
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Failed to load data: {e}")
+    
+    # Validate data
+    if len(train) == 0 or len(score) == 0:
+        sql_client.close()
+        raise ValueError(f"Insufficient data: train={len(train)} rows, score={len(score)} rows")
+    
+    if len(train.columns) == 0:
+        sql_client.close()
+        raise ValueError("No numeric sensor columns found in data")
     
     report.data_summary = {
         "Train Rows": len(train),
@@ -305,18 +336,25 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Data Contract Validation
     print("\nValidating data contract...")
-    contract = DataContract(
-        required_sensors=[],
-        optional_sensors=list(meta['kept_cols']),
-        timestamp_col='EntryDateTime',
-        min_rows=10,
-        max_null_fraction=0.5,
-        equip_id=equip_id,
-        equip_code=equip,
-    )
-    validation = contract.validate(score)
-    if not validation.passed:
-        raise ValueError(f"Data contract validation failed: {validation.issues}")
+    try:
+        contract = DataContract(
+            required_sensors=[],
+            optional_sensors=list(meta['kept_cols']),
+            timestamp_col='EntryDateTime',
+            min_rows=10,
+            max_null_fraction=0.5,
+            equip_id=equip_id,
+            equip_code=equip,
+        )
+        validation = contract.validate(score)
+        if not validation.passed:
+            sql_client.close()
+            raise ValueError(f"Data contract validation failed: {validation.issues}")
+    except ValueError:
+        raise
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Data validation error: {e}")
     
     # Store raw data for regime detection
     raw_train = train.copy()
@@ -324,80 +362,107 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Build features
     print("\nBuilding features...")
-    train_features = fast_features.compute_all_features(train, cfg)
-    score_features = fast_features.compute_all_features(score, cfg)
-    
-    # Impute missing values
-    low_var_threshold = 1e-4
-    train_features, score_features, _ = fast_features.impute_features(
-        train_features, score_features, low_var_threshold, None, None, equip_id, equip
-    )
-    
-    print(f"  Train features: {train_features.shape}")
-    print(f"  Score features: {score_features.shape}")
+    try:
+        train_features = fast_features.compute_all_features(train, cfg)
+        score_features = fast_features.compute_all_features(score, cfg)
+        
+        # Impute missing values
+        low_var_threshold = 1e-4
+        train_features, score_features, _ = fast_features.impute_features(
+            train_features, score_features, low_var_threshold, None, None, equip_id, equip
+        )
+        
+        print(f"  Train features: {train_features.shape}")
+        print(f"  Score features: {score_features.shape}")
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Feature engineering failed: {e}")
     
     # Fit detectors
     print("\nFitting detectors...")
-    det_flags = get_detector_enable_flags(cfg)
-    fit_result = fit_all_detectors(
-        train=train_features,
-        cfg=cfg,
-        **det_flags,
-        output_manager=None,
-        sql_client=sql_client,
-        run_id=None,
-        equip_id=equip_id,
-        equip=equip,
-    )
-    
-    ar1_detector = fit_result["ar1_detector"]
-    pca_detector = fit_result["pca_detector"]
-    iforest_detector = fit_result["iforest_detector"]
-    gmm_detector = fit_result["gmm_detector"]
-    omr_detector = fit_result["omr_detector"]
-    
-    print(f"  Detectors fitted: AR1, PCA, IForest, GMM, OMR")
+    try:
+        det_flags = get_detector_enable_flags(cfg)
+        fit_result = fit_all_detectors(
+            train=train_features,
+            cfg=cfg,
+            **det_flags,
+            output_manager=None,
+            sql_client=sql_client,
+            run_id=None,
+            equip_id=equip_id,
+            equip=equip,
+        )
+        
+        ar1_detector = fit_result["ar1_detector"]
+        pca_detector = fit_result["pca_detector"]
+        iforest_detector = fit_result["iforest_detector"]
+        gmm_detector = fit_result["gmm_detector"]
+        omr_detector = fit_result["omr_detector"]
+        
+        print(f"  Detectors fitted: AR1, PCA, IForest, GMM, OMR")
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Detector fitting failed: {e}")
     
     # Score data with detectors
     print("\nScoring with detectors...")
-    frame, omr_contributions = score_all_detectors(
-        data=score_features,
-        ar1_detector=ar1_detector,
-        pca_detector=pca_detector,
-        iforest_detector=iforest_detector,
-        gmm_detector=gmm_detector,
-        omr_detector=omr_detector,
-        **det_flags,
-    )
+    try:
+        frame, omr_contributions = score_all_detectors(
+            data=score_features,
+            ar1_detector=ar1_detector,
+            pca_detector=pca_detector,
+            iforest_detector=iforest_detector,
+            gmm_detector=gmm_detector,
+            omr_detector=omr_detector,
+            **det_flags,
+        )
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Detector scoring failed: {e}")
     
     # Build regime basis
     print("\nDetecting operating regimes...")
-    regime_basis_train, regime_basis_score, regime_basis_meta = regimes.build_feature_basis(
-        train_features=train_features,
-        score_features=score_features,
-        raw_train=raw_train,
-        raw_score=raw_score,
-        pca_detector=pca_detector,
-        cfg=cfg,
-    )
+    try:
+        regime_basis_train, regime_basis_score, regime_basis_meta = regimes.build_feature_basis(
+            train_features=train_features,
+            score_features=score_features,
+            raw_train=raw_train,
+            raw_score=raw_score,
+            pca_detector=pca_detector,
+            cfg=cfg,
+        )
+    except Exception as e:
+        print(f"  Warning: Regime basis building failed: {e}")
+        regime_basis_train = regime_basis_score = None
+        regime_basis_meta = {}
     
     # Fit regime model
-    regime_ctx = {
-        "regime_basis_train": regime_basis_train,
-        "regime_basis_score": regime_basis_score,
-        "basis_meta": regime_basis_meta,
-        "regime_model": None,
-        "regime_basis_hash": None,
-        "X_train": train_features,
-        "allow_discovery": True,
-    }
+    regime_model = None
+    score_regime_labels = None
+    train_regime_labels = None
+    regime_quality_ok = False
     
-    regime_out = regimes.label(score_features, regime_ctx, {"frame": frame}, cfg)
-    frame = regime_out.get("frame", frame)
-    regime_model = regime_out.get("regime_model")
-    score_regime_labels = regime_out.get("regime_labels")
-    train_regime_labels = regime_out.get("regime_labels_train")
-    regime_quality_ok = regime_out.get("regime_quality_ok", False)
+    if regime_basis_train is not None:
+        try:
+            regime_ctx = {
+                "regime_basis_train": regime_basis_train,
+                "regime_basis_score": regime_basis_score,
+                "basis_meta": regime_basis_meta,
+                "regime_model": None,
+                "regime_basis_hash": None,
+                "X_train": train_features,
+                "allow_discovery": True,
+            }
+            
+            regime_out = regimes.label(score_features, regime_ctx, {"frame": frame}, cfg)
+            frame = regime_out.get("frame", frame)
+            regime_model = regime_out.get("regime_model")
+            score_regime_labels = regime_out.get("regime_labels")
+            train_regime_labels = regime_out.get("regime_labels_train")
+            regime_quality_ok = regime_out.get("regime_quality_ok", False)
+        except Exception as e:
+            print(f"  Warning: Regime detection failed: {e}")
+            regime_model = None
     
     if regime_model:
         n_regimes = len(regime_model.cluster_centers_)
@@ -423,34 +488,37 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Calibrate scores
     print("\nCalibrating detector scores...")
-    
-    # Score train data for calibration
-    train_frame, _ = score_all_detectors(
-        data=train_features,
-        ar1_detector=ar1_detector,
-        pca_detector=pca_detector,
-        iforest_detector=iforest_detector,
-        gmm_detector=gmm_detector,
-        omr_detector=omr_detector,
-        **det_flags,
-    )
-    
-    cal_q = cfg.get("thresholds", {}).get("q", 0.98)
-    self_tune_cfg = cfg.get("thresholds", {}).get("self_tune", {})
-    use_per_regime = cfg.get("fusion", {}).get("per_regime", False) and regime_quality_ok
-    
-    fit_regimes = train_regime_labels if use_per_regime else None
-    transform_regimes = score_regime_labels if use_per_regime else None
-    
-    frame, calibrators_dict = calibrate_all_detectors(
-        train_frame=train_frame,
-        score_frame=frame,
-        cal_q=cal_q,
-        self_tune_cfg=self_tune_cfg,
-        fit_regimes=fit_regimes,
-        transform_regimes=transform_regimes,
-        omr_enabled=det_flags.get('omr_enabled', False),
-    )
+    try:
+        # Score train data for calibration
+        train_frame, _ = score_all_detectors(
+            data=train_features,
+            ar1_detector=ar1_detector,
+            pca_detector=pca_detector,
+            iforest_detector=iforest_detector,
+            gmm_detector=gmm_detector,
+            omr_detector=omr_detector,
+            **det_flags,
+        )
+        
+        cal_q = cfg.get("thresholds", {}).get("q", 0.98)
+        self_tune_cfg = cfg.get("thresholds", {}).get("self_tune", {})
+        use_per_regime = cfg.get("fusion", {}).get("per_regime", False) and regime_quality_ok
+        
+        fit_regimes = train_regime_labels if use_per_regime else None
+        transform_regimes = score_regime_labels if use_per_regime else None
+        
+        frame, calibrators_dict = calibrate_all_detectors(
+            train_frame=train_frame,
+            score_frame=frame,
+            cal_q=cal_q,
+            self_tune_cfg=self_tune_cfg,
+            fit_regimes=fit_regimes,
+            transform_regimes=transform_regimes,
+            omr_enabled=det_flags.get('omr_enabled', False),
+        )
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Score calibration failed: {e}")
     
     # Compute detector statistics
     detector_cols = ['ar1_z', 'pca_spe_z', 'pca_t2_z', 'iforest_z', 'gmm_z', 'omr_z']
@@ -466,26 +534,30 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Fusion
     print("\nRunning fusion pipeline...")
-    from core.fuse import run_fusion_pipeline
-    
-    fusion_result = run_fusion_pipeline(
-        frame=frame,
-        train_frame=train_frame,
-        score_data=score_features,
-        train_data=train_features,
-        cfg=cfg,
-        score_regime_labels=score_regime_labels,
-        train_regime_labels=train_regime_labels,
-        output_manager=None,
-        previous_weights=None,
-        equip=equip,
-    )
-    
-    frame["fused"] = fusion_result.fused_scores
-    episodes = fusion_result.episodes
-    fusion_weights = fusion_result.weights_used
-    
-    print(f"  Episodes detected: {len(episodes)}")
+    try:
+        from core.fuse import run_fusion_pipeline
+        
+        fusion_result = run_fusion_pipeline(
+            frame=frame,
+            train_frame=train_frame,
+            score_data=score_features,
+            train_data=train_features,
+            cfg=cfg,
+            score_regime_labels=score_regime_labels,
+            train_regime_labels=train_regime_labels,
+            output_manager=None,
+            previous_weights=None,
+            equip=equip,
+        )
+        
+        frame["fused"] = fusion_result.fused_scores
+        episodes = fusion_result.episodes
+        fusion_weights = fusion_result.weights_used
+        
+        print(f"  Episodes detected: {len(episodes)}")
+    except Exception as e:
+        sql_client.close()
+        raise RuntimeError(f"Fusion pipeline failed: {e}")
     
     # Extract episode info
     if len(episodes) > 0:
@@ -501,49 +573,56 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Drift detection
     print("\nComputing drift metrics...")
-    score_out = {"frame": frame}
-    score_out = drift.compute(score_features, score_out, cfg)
-    frame = score_out["frame"]
-    
-    if 'drift_z' in frame.columns:
-        drift_z = frame['drift_z'].iloc[-1] if len(frame) > 0 else 0
-        drift_status = 'DRIFTING' if drift_z > 2.0 else 'STABLE'
-        report.drift = {
-            'status': drift_status,
-            'drift_z': float(drift_z),
-            'multi_drift': 'STABLE',  # Simplified for distilled version
-        }
+    try:
+        score_out = {"frame": frame}
+        score_out = drift.compute(score_features, score_out, cfg)
+        frame = score_out["frame"]
+        
+        if 'drift_z' in frame.columns:
+            drift_z = frame['drift_z'].iloc[-1] if len(frame) > 0 else 0
+            drift_status = 'DRIFTING' if drift_z > 2.0 else 'STABLE'
+            report.drift = {
+                'status': drift_status,
+                'drift_z': float(drift_z),
+                'multi_drift': 'STABLE',  # Simplified for distilled version
+            }
+    except Exception as e:
+        print(f"  Warning: Drift computation failed: {e}")
+        report.drift = {'status': 'UNKNOWN', 'drift_z': 0.0, 'multi_drift': 'UNKNOWN'}
     
     # Health computation
     print("\nComputing health scores...")
-    
-    if 'fused' in frame.columns:
-        health_scores = []
-        for z_score in frame['fused']:
-            health = compute_health_from_z(z_score)
-            health_scores.append(health)
-        
-        frame['health'] = health_scores
-        
-        current_health = health_scores[-1] if health_scores else 0
-        avg_health = np.mean(health_scores) if health_scores else 0
-        
-        # Determine trend (simple: last 10% vs first 10%)
-        if len(health_scores) > 10:
-            early = np.mean(health_scores[:len(health_scores)//10])
-            late = np.mean(health_scores[-len(health_scores)//10:])
-            trend = 'IMPROVING' if late > early else 'DEGRADING' if late < early else 'STABLE'
-        else:
-            trend = 'STABLE'
-        
-        status = 'CRITICAL' if current_health < 50 else 'WARNING' if current_health < 70 else 'GOOD'
-        
-        report.health = {
-            'current': current_health,
-            'average': avg_health,
-            'trend': trend,
-            'status': status,
-        }
+    try:
+        if 'fused' in frame.columns:
+            health_scores = []
+            for z_score in frame['fused']:
+                health = compute_health_from_z(z_score)
+                health_scores.append(health)
+            
+            frame['health'] = health_scores
+            
+            current_health = health_scores[-1] if health_scores else 0
+            avg_health = np.mean(health_scores) if health_scores else 0
+            
+            # Determine trend (simple: last 10% vs first 10%)
+            if len(health_scores) > 10:
+                early = np.mean(health_scores[:len(health_scores)//10])
+                late = np.mean(health_scores[-len(health_scores)//10:])
+                trend = 'IMPROVING' if late > early else 'DEGRADING' if late < early else 'STABLE'
+            else:
+                trend = 'STABLE'
+            
+            status = 'CRITICAL' if current_health < 50 else 'WARNING' if current_health < 70 else 'GOOD'
+            
+            report.health = {
+                'current': current_health,
+                'average': avg_health,
+                'trend': trend,
+                'status': status,
+            }
+    except Exception as e:
+        print(f"  Warning: Health computation failed: {e}")
+        report.health = {'current': 0, 'average': 0, 'trend': 'UNKNOWN', 'status': 'UNKNOWN'}
     
     # RUL Forecasting (simplified - just use ForecastEngine)
     print("\nForecasting RUL...")
