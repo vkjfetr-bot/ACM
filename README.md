@@ -4,6 +4,26 @@ ACM V11 is a multi-detector pipeline for autonomous asset condition monitoring. 
 
 **Current Version:** v11.0.0 - Production Release with Typed Contracts & Maturity Lifecycle
 
+## 🎯 Quick Start: ACM Distilled (Analytics-Only)
+
+For quick analytical investigations without product engineering overhead, use the distilled version:
+
+```bash
+python acm_distilled.py --equip FD_FAN \
+    --start-time "2024-01-01T00:00:00" \
+    --end-time "2024-01-31T23:59:59"
+```
+
+**ACM Distilled** focuses purely on answering the 6 fundamental questions:
+1. What is wrong? → Multi-detector anomaly scores
+2. When did it start? → Episode detection with timestamps  
+3. Which sensors? → Culprit attribution
+4. Which operating mode? → Regime identification
+5. What will happen? → RUL forecast
+6. How severe? → Health scoring
+
+See [README_DISTILLED.md](README_DISTILLED.md) for complete documentation.
+
 For a complete, implementation-level walkthrough (architecture, modules, configs, operations, and reasoning), see `docs/ACM_SYSTEM_OVERVIEW.md`.
 
 ### Recent Updates (Dec 2025)
