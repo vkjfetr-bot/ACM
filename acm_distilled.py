@@ -189,7 +189,7 @@ class AnalyticsReport:
         return "\n".join(lines)
 
 
-def load_data(sql_client: SQLClient, equip_id: int, start_time: pd.Timestamp, end_time: pd.Timestamp) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
+def load_data(sql_client: SQLClient, equip_code: str, start_time: pd.Timestamp, end_time: pd.Timestamp) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
     """Load training and scoring data from SQL"""
     print(f"Loading data from {start_time} to {end_time}...")
     
@@ -197,20 +197,20 @@ def load_data(sql_client: SQLClient, equip_id: int, start_time: pd.Timestamp, en
     total_duration = end_time - start_time
     train_end = start_time + total_duration * 0.6
     
-    cursor = sql_client.get_cursor()
+    # Data table name is {EquipCode}_Data
+    data_table = f"{equip_code}_Data"
     
-    # Load training data
+    cursor = sql_client.cursor()
+    
+    # Load training data - use parameterized query for dates only (table name can't be parameterized)
     cursor.execute(
-        """
-        SELECT * FROM (
-            SELECT TOP 10000 * 
-            FROM dbo.vw_HistorianData
-            WHERE EquipID = ? AND EntryDateTime >= ? AND EntryDateTime < ?
-            ORDER BY EntryDateTime ASC
-        ) AS TrainData
+        f"""
+        SELECT TOP 10000 * 
+        FROM dbo.[{data_table}]
+        WHERE EntryDateTime >= ? AND EntryDateTime < ?
         ORDER BY EntryDateTime ASC
         """,
-        (equip_id, start_time, train_end)
+        (start_time, train_end)
     )
     
     train_cols = [col[0] for col in cursor.description]
@@ -219,16 +219,13 @@ def load_data(sql_client: SQLClient, equip_id: int, start_time: pd.Timestamp, en
     
     # Load scoring data
     cursor.execute(
-        """
-        SELECT * FROM (
-            SELECT TOP 10000 * 
-            FROM dbo.vw_HistorianData
-            WHERE EquipID = ? AND EntryDateTime >= ? AND EntryDateTime <= ?
-            ORDER BY EntryDateTime ASC
-        ) AS ScoreData
+        f"""
+        SELECT TOP 10000 * 
+        FROM dbo.[{data_table}]
+        WHERE EntryDateTime >= ? AND EntryDateTime <= ?
         ORDER BY EntryDateTime ASC
         """,
-        (equip_id, train_end, end_time)
+        (train_end, end_time)
     )
     
     score_cols = [col[0] for col in cursor.description]
@@ -281,19 +278,44 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Load config
     print(f"Loading config for {equip}...")
-    cursor = sql_client.get_cursor()
+    cursor = sql_client.cursor()
     cursor.execute("SELECT EquipID FROM Equipment WHERE EquipCode = ?", (equip,))
     row = cursor.fetchone()
     if not row:
         raise ValueError(f"Equipment '{equip}' not found in database")
     equip_id = row[0]
     
+    # Create a new RunID by inserting into ACM_Runs
+    print("Creating new ACM run...")
+    cursor.execute("""
+        INSERT INTO ACM_Runs (RunID, EquipID, EquipName, StartedAt, HealthStatus)
+        OUTPUT INSERTED.RunID
+        VALUES (NEWID(), ?, ?, GETDATE(), 'RUNNING')
+    """, (equip_id, equip))
+    run_row = cursor.fetchone()
+    run_id = str(run_row[0]) if run_row else None
+    cursor.connection.commit()
+    print(f"  RunID: {run_id}")
+    
     # Load configuration from SQL
     cfg_dict = ConfigDict.from_sql(sql_client, equip)
     cfg = dict(cfg_dict)
     
-    # Load data
-    train, score, meta = load_data(sql_client, equip_id, start_ts, end_ts)
+    # Ensure default fusion weights if not loaded
+    if "fusion" not in cfg or "weights" not in cfg.get("fusion", {}):
+        cfg["fusion"] = {
+            "weights": {
+                "ar1_z": 0.20,
+                "pca_spe_z": 0.30,
+                "pca_t2_z": 0.20,
+                "iforest_z": 0.15,
+                "gmm_z": 0.05,
+                "omr_z": 0.10,
+            }
+        }
+    
+    # Load data (using equip code for table name)
+    train, score, meta = load_data(sql_client, equip, start_ts, end_ts)
     
     report.data_summary = {
         "Train Rows": len(train),
@@ -324,8 +346,9 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Build features
     print("\nBuilding features...")
-    train_features = fast_features.compute_all_features(train, cfg)
-    score_features = fast_features.compute_all_features(score, cfg)
+    window = cfg.get('feature_window', 16)
+    train_features = fast_features.compute_basic_features(train, window=window)
+    score_features = fast_features.compute_basic_features(score, window=window)
     
     # Impute missing values
     low_var_threshold = 1e-4
@@ -345,7 +368,7 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
         **det_flags,
         output_manager=None,
         sql_client=sql_client,
-        run_id=None,
+        run_id=run_id,
         equip_id=equip_id,
         equip=equip,
     )
@@ -360,6 +383,7 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     
     # Score data with detectors
     print("\nScoring with detectors...")
+    print(f"  det_flags: {det_flags}")
     frame, omr_contributions = score_all_detectors(
         data=score_features,
         ar1_detector=ar1_detector,
@@ -369,6 +393,7 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
         omr_detector=omr_detector,
         **det_flags,
     )
+    print(f"  Frame columns after scoring: {list(frame.columns)}")
     
     # Build regime basis
     print("\nDetecting operating regimes...")
@@ -549,14 +574,14 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     print("\nForecasting RUL...")
     
     # Create minimal OutputManager for forecast engine
-    output_mgr = OutputManager(sql_client=sql_client, run_id=None, equip_id=equip_id)
+    output_mgr = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id)
     output_mgr.equipment = equip
     
     forecast_engine = ForecastEngine(
         sql_client=sql_client,
         output_manager=output_mgr,
         equip_id=equip_id,
-        run_id=None,
+        run_id=run_id,
         config=cfg,
         model_state=None,
     )
@@ -585,9 +610,14 @@ def run_analytics(equip: str, start_time: str, end_time: str) -> AnalyticsReport
     if omr_contributions is not None and len(omr_contributions) > 0:
         # Use OMR contributions
         for sensor, contrib in list(omr_contributions.items())[:10]:
+            # Handle both scalar and Series values
+            if isinstance(contrib, pd.Series):
+                contrib_val = float(contrib.iloc[0]) if len(contrib) > 0 else 0.0
+            else:
+                contrib_val = float(contrib) if contrib is not None else 0.0
             report.top_culprits.append({
                 'name': sensor,
-                'contribution': float(contrib),
+                'contribution': contrib_val,
             })
     else:
         # Fallback: use sensor z-scores from raw data

@@ -349,7 +349,7 @@ class MultivariateSensorForecaster:
             for ts in timestamps:
                 for sensor in sensors:
                     records.append({
-                        'Timestamp': ts,
+                            'ForecastTime': ts,
                         'SensorName': sensor,
                         'ForecastValue': float(forecast_df.loc[ts, sensor]),
                         'CiLower': float(lower.loc[ts, sensor]),
@@ -427,7 +427,7 @@ class MultivariateSensorForecaster:
                 ci_width = 1.96 * current_std * np.sqrt(1 + hours_ahead / 24)
                 
                 records.append({
-                    'Timestamp': last_timestamp + timedelta(hours=hours_ahead),
+                    'ForecastTime': last_timestamp + timedelta(hours=hours_ahead),
                     'SensorName': sensor,
                     'ForecastValue': float(forecast_value),
                     'CiLower': float(forecast_value - ci_width),

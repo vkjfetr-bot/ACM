@@ -1059,6 +1059,7 @@ class Fuser:
                 end_regime = -1
                 spans_transition = False
                 regime_context = "unknown"
+                severity_multiplier = 1.0  # v11.3.0: Severity adjustment factor
                 
                 if regime_labels is not None and len(regime_labels) > e:
                     episode_regimes = regime_labels[s:e+1]
@@ -1071,15 +1072,33 @@ class Fuser:
                     unique_regimes = np.unique(episode_regimes)
                     spans_transition = len(unique_regimes) > 1
                     
-                    # Determine regime context for filtering
+                    # v11.3.0: Classify transition type instead of dismissing as false positive
+                    # Rule R3: Pre-fault and post-fault are DISTINCT regimes
                     if spans_transition:
-                        # Episode spans regime transition - may be false positive
-                        regime_context = "transition"
+                        # Episode spans regime change - determine what kind
+                        if peak_fused_z > 5.0:
+                            # High z-score during transition = health state change (fault)
+                            regime_context = "health_degradation"
+                            severity_multiplier = 1.2  # BOOST severity - this is important!
+                        elif avg_fused_z < 2.5:
+                            # Low average z-score during transition = normal mode switch
+                            regime_context = "operating_mode"
+                            severity_multiplier = 0.9  # REDUCE severity - expected behavior
+                        else:
+                            # Moderate z-score = ambiguous, classify as health transition
+                            regime_context = "health_transition"
+                            severity_multiplier = 1.1
                     elif len(unique_regimes) == 1:
                         # Single regime - genuine anomaly within stable operating mode
                         regime_context = "stable"
+                        severity_multiplier = 1.0
                     else:
                         regime_context = "unknown"
+                        severity_multiplier = 1.0
+                    
+                    # Apply severity adjustment to peak and average z-scores
+                    peak_fused_z = peak_fused_z * severity_multiplier
+                    avg_fused_z = avg_fused_z * severity_multiplier
                 
                 rows.append({
                     "start_ts": start_ts, 

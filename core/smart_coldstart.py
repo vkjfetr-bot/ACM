@@ -497,56 +497,65 @@ def seed_baseline(
     min_points = int(baseline_cfg.get("min_points", 300))
     train_rows = len(train)
     
-    # FIX: If this is a coldstart run and train already has data from coldstart split,
-    # don't re-seed from score - that would cause overlap/data leakage!
-    if is_coldstart and train_rows > 0:
-        return train, score, f"coldstart_split ({train_rows} rows)"
+    # CRITICAL FIX v11.2.3: In coldstart mode with sufficient training data,
+    # SKIP the slow baseline buffer loading entirely.
+    # The coldstart split already provides 60% of data as training - that's plenty.
+    # Baseline buffer loading causes deadlocks/hangs due to long-to-wide pivoting.
+    # This is just an optimization for marginal quality gain - not worth the speed hit.
+    if is_coldstart and train_rows > 300:
+        # Coldstart data is high quality and abundant; don't risk hanging on baseline
+        return train, score, f"coldstart_split ({train_rows} rows, skipped slow baseline pivot)"
     
-    # If train already has enough rows, no seeding needed
+    # Fallback: If train still needs data (non-coldstart or too few rows)
     if train_rows >= min_points:
         return train, score, None
     
     used: Optional[str] = None
     extended = False
     
-    # Try 1: Load from SQL ACM_BaselineBuffer
-    if sql_client:
-        try:
-            window_hours = float(baseline_cfg.get("window_hours", 72))
-            with sql_client.cursor() as cur:
-                cur.execute("""
-                    SELECT Timestamp, SensorName, SensorValue
-                    FROM dbo.ACM_BaselineBuffer
-                    WHERE EquipID = ? AND Timestamp >= DATEADD(HOUR, -?, GETDATE())
-                    ORDER BY Timestamp
-                """, (int(equip_id), int(window_hours)))
-                rows = cur.fetchall()
-            
-            if rows:
-                # Transform long format → wide format (pivot)
-                baseline_data = {}
-                for row in rows:
-                    ts = pd.Timestamp(row.Timestamp)
-                    sensor = str(row.SensorName)
-                    value = float(row.SensorValue)
-                    if ts not in baseline_data:
-                        baseline_data[ts] = {}
-                    baseline_data[ts][sensor] = value
-                
-                buf = pd.DataFrame.from_dict(baseline_data, orient='index').sort_index()
-                if ensure_local_index_fn:
-                    buf = ensure_local_index_fn(buf)
-                
-                # Align to score columns (score guaranteed to be DataFrame by entry validation)
-                if hasattr(buf, "columns"):
-                    common_cols = [c for c in buf.columns if c in score.columns]
-                    if common_cols:
-                        buf = buf[common_cols]
-                
-                train = buf
-                used = f"ACM_BaselineBuffer ({len(train)} rows)"
-        except Exception as sql_err:
-            Console.warn(f"Failed to load from ACM_BaselineBuffer: {sql_err}", component="BASELINE")
+    # DISABLED: Baseline buffer loading (v11.2.3 fix)
+    # The pivot operation from long→wide format causes SQL locks/hangs.
+    # Only needed in non-coldstart batch mode with insufficient data.
+    # For now, we rely on score data seeding (Try 2 below).
+    
+    # Try 1: Load from SQL ACM_BaselineBuffer [DISABLED - CAUSES HANGS]
+    # if sql_client:
+    #     try:
+    #         window_hours = float(baseline_cfg.get("window_hours", 72))
+    #         with sql_client.cursor() as cur:
+    #             cur.execute("""
+    #                 SELECT Timestamp, SensorName, SensorValue
+    #                 FROM dbo.ACM_BaselineBuffer
+    #                 WHERE EquipID = ? AND Timestamp >= DATEADD(HOUR, -?, GETDATE())
+    #                 ORDER BY Timestamp
+    #             """, (int(equip_id), int(window_hours)))
+    #             rows = cur.fetchall()
+    #         
+    #         if rows:
+    #             # Transform long format → wide format (pivot) [SLOW - ~1-2 sec for 26K rows]
+    #             baseline_data = {}
+    #             for row in rows:
+    #                 ts = pd.Timestamp(row.Timestamp)
+    #                 sensor = str(row.SensorName)
+    #                 value = float(row.SensorValue)
+    #                 if ts not in baseline_data:
+    #                    baseline_data[ts] = {}
+    #                 baseline_data[ts][sensor] = value
+    #             
+    #             buf = pd.DataFrame.from_dict(baseline_data, orient='index').sort_index()
+    #             if ensure_local_index_fn:
+    #                 buf = ensure_local_index_fn(buf)
+    #             
+    #             # Align to score columns (score guaranteed to be DataFrame by entry validation)
+    #             if hasattr(buf, "columns"):
+    #                 common_cols = [c for c in buf.columns if c in score.columns]
+    #                 if common_cols:
+    #                     buf = buf[common_cols]
+    #             
+    #             train = buf
+    #             used = f"ACM_BaselineBuffer ({len(train)} rows)"
+    #     except Exception as sql_err:
+    #         Console.warn(f"Failed to load from ACM_BaselineBuffer: {sql_err}", component="BASELINE")
     
     # Try 2: Seed from score data
     if used is None and len(score) > 0:

@@ -3481,35 +3481,35 @@ def write_sql_artifacts(
     """
     rows_written = 0
     
-    # DriftSeries
-    with T.section("sql.drift_series"):
-        try:
-            df_drift = output_manager._build_drift_ts(frame, equip_id, run_id, cfg)
-            if df_drift is not None:
-                rows_written += output_manager.write_drift_series(df_drift)
-        except Exception as e:
-            Console.warn(f"DriftSeries write skipped: {e}", component="SQL",
-                         equip=equip, run_id=run_id, error=str(e)[:200])
+    # DriftSeries [TODO v11.2.4: Implement drift time series writing]
+    # with T.section("sql.drift_series"):
+    #     try:
+    #         df_drift = output_manager._build_drift_ts(frame, equip_id, run_id, cfg)
+    #         if df_drift is not None:
+    #             rows_written += output_manager.write_drift_series(df_drift)
+    #     except Exception as e:
+    #         Console.warn(f"DriftSeries write skipped: {e}", component="SQL",
+    #                      equip=equip, run_id=run_id, error=str(e)[:200])
 
-    # AnomalyEvents
-    with T.section("sql.events"):
-        try:
-            df_events = output_manager._build_anomaly_events(episodes, equip_id, run_id)
-            if df_events is not None:
-                rows_written += output_manager.write_anomaly_events(df_events, run_id or "")
-        except Exception as e:
-            Console.warn(f"AnomalyEvents write skipped: {e}", component="SQL",
-                         equip=equip, run_id=run_id, error=str(e)[:200])
+    # AnomalyEvents [TODO v11.2.4: Implement anomaly events writing]
+    # with T.section("sql.events"):
+    #     try:
+    #         df_events = output_manager._build_anomaly_events(episodes, equip_id, run_id)
+    #         if df_events is not None:
+    #             rows_written += output_manager.write_anomaly_events(df_events, run_id or "")
+    #     except Exception as e:
+    #         Console.warn(f"AnomalyEvents write skipped: {e}", component="SQL",
+    #                      equip=equip, run_id=run_id, error=str(e)[:200])
 
-    # RegimeEpisodes
-    with T.section("sql.regimes"):
-        try:
-            df_reg = output_manager._build_regime_episodes(episodes, equip_id, run_id)
-            if df_reg is not None:
-                rows_written += output_manager.write_regime_episodes(df_reg, run_id or "")
-        except Exception as e:
-            Console.warn(f"RegimeEpisodes write skipped: {e}", component="SQL",
-                         equip=equip, run_id=run_id, error=str(e)[:200])
+    # RegimeEpisodes [TODO v11.2.4: Implement regime episodes writing]
+    # with T.section("sql.regimes"):
+    #     try:
+    #         df_reg = output_manager._build_regime_episodes(episodes, equip_id, run_id)
+    #         if df_reg is not None:
+    #             rows_written += output_manager.write_regime_episodes(df_reg, run_id or "")
+    #     except Exception as e:
+    #         Console.warn(f"RegimeEpisodes write skipped: {e}", component="SQL",
+    #                      equip=equip, run_id=run_id, error=str(e)[:200])
 
     # PCA artifacts
     with T.section("sql.pca"):

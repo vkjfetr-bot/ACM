@@ -939,11 +939,19 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             f"dup_removed={getattr(meta, 'dup_timestamps_removed', 0)}"
         )
         T.log("data_split_complete", train_rows=train.shape[0], train_cols=train.shape[1], score_rows=score.shape[0], score_cols=score.shape[1])
+        
+        # DIAGNOSTIC: Confirm we reach this point
+        Console.status("CHECKPOINT 1: Data loading complete, about to start baseline seeding")
+        import sys
+        sys.stdout.flush()
 
         # ===== Adaptive Rolling Baseline (cold-start helper) =====
         with T.section("baseline.seed"):
-            Console.status(f"Seeding baseline for {equip}...")
+            Console.status(f"CHECKPOINT 2: Entering baseline.seed section for {equip}...")
+            sys.stdout.flush()
             try:
+                Console.status(f"CHECKPOINT 3: About to call seed_baseline() function")
+                sys.stdout.flush()
                 train, score, baseline_source = seed_baseline(
                     train.copy(), 
                     score.copy(), 
@@ -1143,6 +1151,34 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 raw_train=raw_train, raw_score=raw_score,
                 pca_detector=pca_detector, cfg=cfg,
             )
+            
+            # v11.3.0: ADD HEALTH-STATE FEATURES FOR REGIME CLUSTERING
+            # Pre-fault and post-fault equipment are DISTINCT regimes
+            # Include health degradation indicators in regime feature basis
+            try:
+                if basis_train is not None and basis_score is not None:
+                    # Prepare detector scores for health state computation
+                    detector_cols = {}
+                    if 'ar1_z' in train.columns:
+                        detector_cols['ar1_z'] = train['ar1_z'].values
+                    if 'pca_spe_z' in train.columns:
+                        detector_cols['pca_spe_z'] = train['pca_spe_z'].values
+                    if 'pca_t2_z' in train.columns:
+                        detector_cols['pca_t2_z'] = train['pca_t2_z'].values
+                    
+                    # Only add health features if detectors available
+                    if detector_cols:
+                        basis_train = regimes._add_health_state_features(basis_train, detector_cols)
+                        basis_score = regimes._add_health_state_features(basis_score, detector_cols)
+                        basis_meta["health_state_features_added"] = True
+                        Console.ok("Health-state features integrated into regime basis (v11.3.0)", component="REGIME")
+                    else:
+                        basis_meta["health_state_features_added"] = False
+            except Exception as health_e:
+                Console.warn(f"Health-state features failed (continuing with operating-only basis): {health_e}", 
+                           component="REGIME", error=str(health_e)[:100])
+                basis_meta["health_state_features_added"] = False
+            
             # Schema hash ensures regimes are STATIC once discovered
             regime_cfg_str = str(cfg.get("regimes", {}))
             schema_str = ",".join(sorted(basis_train.columns)) + "|" + regime_cfg_str
@@ -1838,7 +1874,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             except Exception as e:
                 Console.warn(f"Health labelling skipped: {e}", component="REGIME")
         if "regime_label" in frame.columns and "regime_state" not in frame.columns:
-            frame["regime_state"] = frame["regime_label"].map(lambda _: "unknown")
+            # Map regime labels to descriptive state names
+            # -1 = UNKNOWN (low confidence), 0+ = named regimes
+            frame["regime_state"] = frame["regime_label"].map(
+                lambda lbl: "unknown" if lbl == -1 else f"regime_{lbl}"
+            )
         
         # REG-06: Transient state detection
         if "regime_label" in frame.columns:

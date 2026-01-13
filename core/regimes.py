@@ -100,6 +100,16 @@ CONDITION_TAG_KEYWORDS = [
     "acoustic", "ultrasonic", "noise",
 ]
 
+# v11.3.0: HEALTH-STATE VARIABLES FOR REGIME DEFINITION
+# Rule R3: Pre-fault and post-fault equipment are DISTINCT regimes
+# Health degradation is now tracked as part of regime structure, not filtered out
+HEALTH_STATE_KEYWORDS = [
+    # Synthetic health indicators (computed from detectors)
+    "health_ensemble_z", "health_trend", "health_quartile",
+    # Degradation markers
+    "degradation", "fatigue", "wear",
+]
+
 
 class ModelVersionMismatch(Exception):
     """Raised when a cached regime model version differs from the expected version."""
@@ -239,6 +249,86 @@ def _stable_int_hash(arr: np.ndarray) -> int:
     return int.from_bytes(digest[:8], byteorder="little", signed=False)
 
 
+def _add_health_state_features(
+    features_df: pd.DataFrame,
+    detector_scores: Dict[str, np.ndarray]
+) -> pd.DataFrame:
+    """
+    Add health-state variables to regime clustering input.
+    
+    v11.3.0: Health state is now part of regime definition, not excluded.
+    This allows clustering to distinguish:
+    - Same operating mode but different health state (pre-fault vs degraded)
+    - Normal transitions vs fault-driven transitions
+    
+    Rule R3 (v11.3.0): Pre-fault and post-fault equipment are DISTINCT regimes.
+    Equipment at Health=95% is fundamentally different from Health=20%, even
+    at identical load/speed. These are separate operating regimes.
+    
+    Args:
+        features_df: DataFrame with operating variables (load, speed, etc.)
+        detector_scores: Dict mapping detector names to z-score arrays
+        
+    Returns:
+        DataFrame with both operating and health-state variables
+    """
+    features_with_health = features_df.copy()
+    
+    # HEALTH-STATE VARIABLES (v11.3.0)
+    # These capture equipment degradation state and are now integral to regimes
+    
+    # 1. Ensemble Anomaly Score (normalized health indicator)
+    # Combines AR1, PCA-SPE, PCA-T2 for robust health assessment
+    ensemble_components = []
+    for col in ['ar1_z', 'pca_spe_z', 'pca_t2_z']:
+        if col in detector_scores:
+            arr = np.asarray(detector_scores[col], dtype=float)
+            ensemble_components.append(arr)
+    
+    if ensemble_components:
+        ensemble_z = np.nanmean(ensemble_components, axis=0)
+        # Clamp to [-3, 3] to avoid outliers distorting clustering
+        ensemble_z_clipped = np.clip(ensemble_z, -3.0, 3.0)
+        features_with_health['health_ensemble_z'] = ensemble_z_clipped
+        
+        # 2. Health Degradation Trend (20-point rolling mean of ensemble)
+        # Captures sustained degradation (not transient spikes)
+        trend_series = pd.Series(ensemble_z_clipped)
+        trend = trend_series.rolling(window=20, min_periods=5, center=False).mean()
+        trend_filled = trend.fillna(method='bfill').fillna(method='ffill').fillna(0)
+        trend_clipped = np.clip(trend_filled.values, -3.0, 3.0)
+        features_with_health['health_trend'] = trend_clipped
+        
+        # 3. Health State Quartile (binned health level: 0=healthy, 3=critical)
+        # Assigns each point to a health quartile based on ensemble score distribution
+        try:
+            quartiles = pd.qcut(
+                ensemble_z_clipped,
+                q=4,
+                labels=[0, 1, 2, 3],
+                duplicates='drop'
+            )
+            health_quartile = quartiles.astype(float).fillna(0)
+        except Exception:
+            # If qcut fails (e.g., all same value), use simple binning
+            health_quartile = np.clip(ensemble_z_clipped / 3.0 + 1.5, 0, 3).astype(float)
+        
+        features_with_health['health_quartile'] = health_quartile
+        
+        Console.info(
+            f"Added health-state features: ensemble_z, trend, quartile (v11.3.0)",
+            component="REGIME",
+            n_samples=len(features_with_health)
+        )
+    else:
+        Console.warn(
+            "Could not compute health-state features: missing detector scores",
+            component="REGIME"
+        )
+    
+    return features_with_health
+
+
 def _finite_impute_inplace(X: np.ndarray) -> np.ndarray:
     """Impute non-finite values using ROBUST statistics (median)."""
     X = _as_f32(X)
@@ -361,6 +451,12 @@ class RegimeModel:
     v11.1.0: Supports HDBSCAN (primary) and GMM (fallback) only.
     HDBSCAN provides density-based clustering with native noise handling (label=-1).
     
+    v11.1.8: ENSEMBLE MODE - HDBSCAN + GMM fallback for noise points.
+    When HDBSCAN marks a point as noise (low strength), GMM assigns it to
+    the nearest cluster instead of marking UNKNOWN. This ensures ALL points
+    get a regime assignment while still benefiting from HDBSCAN's density-based
+    cluster discovery.
+    
     K-Means has been removed as of v11.1.0 - HDBSCAN and GMM are superior for
     industrial regime detection due to varying density handling and probabilistic
     assignment capabilities.
@@ -381,6 +477,8 @@ class RegimeModel:
     training_distance_distribution_: Optional[np.ndarray] = None  # For diagnostic
     # v11.1.6 FIX #4: Stable label mapping for HDBSCAN (new_label -> stable_label)
     label_map_: Optional[Dict[int, int]] = None
+    # v11.1.8: Fallback GMM model for HDBSCAN noise points (ensemble clustering)
+    fallback_model_: Optional[GaussianMixture] = None
     
     @property
     def cluster_centers_(self) -> np.ndarray:
@@ -1187,6 +1285,7 @@ def fit_regime_model(
     best_metric = "none"
     quality_sweep: List[Tuple[Any, float]] = []
     low_quality = False
+    fallback_gmm: Optional[GaussianMixture] = None  # v11.1.8: Ensemble fallback for HDBSCAN noise
     
     # ========== TRY HDBSCAN FIRST (Primary) ==========
     if clustering_method == "hdbscan" and HDBSCAN_AVAILABLE and len(train_basis) >= 10:
@@ -1209,20 +1308,55 @@ def fit_regime_model(
             
             if hdb_model is not None and best_k >= 1:
                 model = hdb_model
+                hdbscan_scaler = scaler  # Keep reference for GMM fallback
                 basis_meta["clustering_method"] = "hdbscan"
                 basis_meta["hdbscan_n_clusters"] = best_k
                 basis_meta["hdbscan_noise_count"] = int(np.sum(hdb_model.labels_ == -1))
                 basis_meta["hdbscan_noise_ratio"] = float(np.sum(hdb_model.labels_ == -1) / len(hdb_model.labels_))
+                
+                # v11.1.8: ENSEMBLE MODE - Fit GMM fallback for noise point assignment
+                # When HDBSCAN marks a point as noise/low-strength, GMM assigns it
+                fallback_cfg = _cfg_get(cfg, "regimes.clustering", {}) or {}
+                use_ensemble = bool(fallback_cfg.get("use_ensemble_fallback", True))
+                if use_ensemble and best_k >= 1:
+                    try:
+                        X_arr = train_basis.to_numpy(dtype=float, copy=False)
+                        X_arr = _finite_impute_inplace(X_arr)
+                        X_scaled = hdbscan_scaler.transform(X_arr)
+                        
+                        # Fit GMM with same k as HDBSCAN found
+                        from sklearn.mixture import GaussianMixture
+                        fallback_gmm = GaussianMixture(
+                            n_components=best_k,
+                            covariance_type="full",
+                            n_init=3,
+                            max_iter=200,
+                            random_state=42,
+                        )
+                        fallback_gmm.fit(X_scaled)
+                        basis_meta["ensemble_fallback"] = "gmm"
+                        basis_meta["ensemble_gmm_converged"] = bool(fallback_gmm.converged_)
+                        Console.info(
+                            f"ENSEMBLE: GMM fallback fitted with k={best_k} for noise point assignment",
+                            component="REGIME"
+                        )
+                    except Exception as gmm_e:
+                        Console.warn(f"GMM fallback fitting failed: {gmm_e}", component="REGIME")
+                        fallback_gmm = None
+                else:
+                    fallback_gmm = None
                 
                 # If HDBSCAN produced low quality AND we have GMM fallback, try GMM
                 if low_quality and use_gmm_fallback:
                     Console.warn("HDBSCAN produced low-quality clustering, trying GMM fallback", component="REGIME")
                     model = None
                     exemplars = None
+                    fallback_gmm = None  # Clear ensemble if switching to pure GMM
                     
         except Exception as e:
             Console.warn(f"HDBSCAN failed: {e}. Trying fallback.", component="REGIME")
             model = None
+            fallback_gmm = None
     elif clustering_method == "hdbscan" and not HDBSCAN_AVAILABLE:
         Console.warn("HDBSCAN requested but not installed. Falling back to GMM.", component="REGIME")
     elif clustering_method == "hdbscan" and len(train_basis) < 10:
@@ -1395,6 +1529,8 @@ def fit_regime_model(
         meta["hdbscan_noise_count"] = basis_meta["hdbscan_noise_count"]
     if "hdbscan_noise_ratio" in basis_meta:
         meta["hdbscan_noise_ratio"] = basis_meta["hdbscan_noise_ratio"]
+    if "ensemble_fallback" in basis_meta:
+        meta["ensemble_fallback"] = basis_meta["ensemble_fallback"]
         
     regime_model = RegimeModel(
         scaler=scaler,
@@ -1405,6 +1541,7 @@ def fit_regime_model(
         train_hash=train_hash,
         meta=meta,
         exemplars_=exemplars,  # v11.1.0: Store centroids for HDBSCAN prediction
+        fallback_model_=fallback_gmm,  # v11.1.8: Ensemble GMM fallback for noise points
     )
     
     # v11.1.6 FIX #3: Compute and store calibrated training distance threshold
@@ -1472,18 +1609,35 @@ def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
         # HDBSCAN: Use approximate_predict for new points
         try:
             labels, strengths = hdbscan.approximate_predict(model.clustering_model, X_scaled)
-            # Low-strength predictions become UNKNOWN (-1)
-            # Threshold at 0.1 strength (very low confidence)
+            
+            # v11.1.8: ENSEMBLE MODE - Use GMM fallback for low-strength predictions
+            # Instead of marking as UNKNOWN, assign using GMM
             low_strength_mask = strengths < 0.1
-            if np.any(low_strength_mask):
+            if np.any(low_strength_mask) and model.fallback_model_ is not None:
+                labels = labels.copy()
+                # Use GMM to assign low-strength points
+                gmm_labels = model.fallback_model_.predict(X_scaled[low_strength_mask])
+                labels[low_strength_mask] = gmm_labels
+                n_fallback = int(np.sum(low_strength_mask))
+                Console.info(
+                    f"ENSEMBLE: GMM assigned {n_fallback}/{len(labels)} low-strength points",
+                    component="REGIME"
+                )
+            elif np.any(low_strength_mask):
+                # No GMM fallback available - mark as UNKNOWN (legacy behavior)
                 labels = labels.copy()
                 labels[low_strength_mask] = UNKNOWN_REGIME_LABEL
+                
             return labels.astype(int, copy=False)
         except Exception as e:
             # Fallback: assign to nearest centroid
             Console.warn(f"HDBSCAN approximate_predict failed: {e}, using centroid fallback", component="REGIME")
             if model.exemplars_ is not None and len(model.exemplars_) > 0:
                 labels = pairwise_distances_argmin(X_scaled, model.exemplars_, axis=1)
+                return labels.astype(int, copy=False)
+            elif model.fallback_model_ is not None:
+                # Use GMM fallback if available
+                labels = model.fallback_model_.predict(X_scaled)
                 return labels.astype(int, copy=False)
             else:
                 Console.warn("HDBSCAN prediction failed, returning UNKNOWN", component="REGIME")
@@ -1556,43 +1710,60 @@ def predict_regime_with_confidence(
             # Confidence = prediction strength (0-1)
             confidence = np.clip(strengths, 0.0, 1.0)
             
-            # v11.1.6 FIX #3: Use CALIBRATED threshold, not arbitrary 0.1
-            if unknown_enabled:
-                # For HDBSCAN, use strength threshold calibrated from training
-                # Default calibration: strength < 0.1 means P(in-cluster) < 10%
-                # But also check distance to centroid against training distribution
+            # v11.1.8: ENSEMBLE MODE - Use GMM fallback for low-strength predictions
+            # Instead of marking as UNKNOWN, assign using GMM
+            strength_threshold = float(unknown_cfg.get("hdbscan_strength_min", 0.1))
+            low_strength_mask = strengths < strength_threshold
+            
+            if np.any(low_strength_mask) and model.fallback_model_ is not None:
+                # Use GMM to assign low-strength points
+                labels = labels.copy()
+                gmm_labels = model.fallback_model_.predict(X_scaled[low_strength_mask])
+                gmm_proba = model.fallback_model_.predict_proba(X_scaled[low_strength_mask])
+                gmm_confidence = np.max(gmm_proba, axis=1)
+                
+                labels[low_strength_mask] = gmm_labels
+                confidence[low_strength_mask] = gmm_confidence * 0.8  # Discount GMM confidence slightly
+                
+                n_fallback = int(np.sum(low_strength_mask))
+                Console.info(
+                    f"ENSEMBLE: GMM assigned {n_fallback}/{len(labels)} low-strength points with avg conf={np.mean(gmm_confidence):.2f}",
+                    component="REGIME"
+                )
+            elif unknown_enabled and np.any(low_strength_mask):
+                # No GMM fallback - mark as UNKNOWN (legacy behavior)
+                # Also check distance threshold
                 if centers.size > 0 and distance_threshold < float("inf"):
-                    # Compute actual distances to assigned centroids
                     point_distances = np.array([
                         np.linalg.norm(X_scaled[i] - centers[labels[i]]) if 0 <= labels[i] < len(centers)
                         else float("inf")
                         for i in range(len(X_scaled))
                     ])
-                    # Mark as UNKNOWN if beyond training support
                     distance_unknown_mask = point_distances > distance_threshold
                 else:
                     distance_unknown_mask = np.zeros(len(labels), dtype=bool)
                 
-                # Also mark low-strength predictions as UNKNOWN
-                strength_threshold = float(unknown_cfg.get("hdbscan_strength_min", 0.1))
-                strength_unknown_mask = strengths < strength_threshold
-                
-                # Combine both criteria
-                unknown_mask = distance_unknown_mask | strength_unknown_mask
+                unknown_mask = distance_unknown_mask | low_strength_mask
                 
                 if np.any(unknown_mask):
                     labels = labels.copy()
                     labels[unknown_mask] = UNKNOWN_REGIME_LABEL
                     Console.info(
                         f"Marked {np.sum(unknown_mask)}/{len(labels)} points as UNKNOWN "
-                        f"(distance: {np.sum(distance_unknown_mask)}, strength: {np.sum(strength_unknown_mask)})",
+                        f"(distance: {np.sum(distance_unknown_mask)}, strength: {np.sum(low_strength_mask)})",
                         component="REGIME"
                     )
             return labels, confidence
         except Exception as e:
             Console.warn(f"HDBSCAN confidence prediction failed: {e}", component="REGIME")
-            # Fallback to centroid distance method with calibrated threshold
-            if model.exemplars_ is not None and len(model.exemplars_) > 0:
+            # Fallback to centroid distance method OR GMM if available
+            if model.fallback_model_ is not None:
+                # v11.1.8: Use GMM fallback
+                labels = model.fallback_model_.predict(X_scaled).astype(int, copy=False)
+                proba = model.fallback_model_.predict_proba(X_scaled)
+                confidence = np.max(proba, axis=1) * 0.8  # Discount
+                return labels, confidence
+            elif model.exemplars_ is not None and len(model.exemplars_) > 0:
                 labels = pairwise_distances_argmin(X_scaled, model.exemplars_, axis=1).astype(int, copy=False)
                 labels = model.apply_label_map(labels)
                 distances = np.linalg.norm(X_scaled - model.exemplars_[labels], axis=1)
