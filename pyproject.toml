@@ -57,6 +57,10 @@ observability = [
 ]
 # For optional Rust bridge builds (if you decide to ship a wheel later)
 rust = ["maturin>=1.6"]
+# Installer wizard dependencies
+installer = [
+  "questionary>=2.0",
+]
 
 [tool.ruff]
 line-length = 100
