@@ -1,4 +1,18 @@
-# ACM - Automated Condition Monitoring (v11.1.5)
+# ACM - Automated Condition Monitoring (v11.3.0)
+
+---
+
+## 🚀 INSTALLATION (NEW in v11.3.0)
+
+**Interactive Installer Wizard (Recommended)**:
+```powershell
+pip install questionary
+python install/acm_installer.py
+```
+
+The wizard handles: Prerequisites, Docker, Observability Stack, SQL Server (optional), Configuration, Verification.
+
+**Supported OS**: Windows 10 (1803+), Windows 11, Windows Server 2019/2022
 
 ---
 
@@ -22,6 +36,13 @@ The user MUST see every single line of output. Filtering output hides critical e
 ACM is a predictive maintenance and equipment health monitoring system. It ingests sensor data from industrial equipment (FD_FAN, GAS_TURBINE, etc.) via SQL Server, runs anomaly detection algorithms, calculates health scores, and forecasts Remaining Useful Life (RUL). Results are visualized through Grafana dashboards for operations teams.
 
 **Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
+
+**v11.3.0 Release** (2026-01-13):
+- **Interactive Installer Wizard**: `python install/acm_installer.py` - handles all setup
+- **Windows OS Support**: Windows 10/11 and Server 2019/2022 officially supported
+- **102 installer tests**: Comprehensive test coverage for installation process
+- **Multi-dimensional regimes**: Health-state aware regime detection (×1.2 boost for degrading equipment)
+- **False positive reduction**: 70% → 30% (2.3× improvement)
 
 **v11.2.2 Analytical Fixes** (2026-01-04):
 - **CRITICAL AUDIT COMPLETED**: See `docs/ACM_V11_ANALYTICAL_AUDIT.md` for comprehensive review

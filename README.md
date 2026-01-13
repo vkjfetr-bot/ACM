@@ -98,6 +98,67 @@ Together, they catch 99%+ of failures while one algorithm would miss entire clas
 
 ---
 
+## 🚀 Installation (New in v11.3.0)
+
+### Interactive Installer Wizard (Recommended)
+
+ACM now includes a comprehensive **installer wizard** that handles all setup automatically:
+
+```powershell
+# Install prerequisites
+pip install questionary
+
+# Run the installer wizard
+python install/acm_installer.py
+```
+
+The wizard will guide you through:
+1. ✅ **Prerequisites Check** - Python 3.11+, Docker Desktop, ODBC drivers
+2. 📦 **Docker Download** - Automatic download of Docker Desktop if missing (Windows)
+3. 🔧 **Observability Stack** - Grafana, Tempo, Loki, Prometheus, Pyroscope
+4. 🗄️ **SQL Server Setup** - Database creation and schema installation (optional)
+5. ⚙️ **Configuration** - Generates `configs/sql_connection.ini` automatically
+6. ✓ **Verification** - Tests all endpoints and connectivity
+
+### Supported Operating Systems
+| OS | Version | Status |
+|---|---------|--------|
+| Windows 10 | 1803+ (Build 17134+) | ✅ Fully Supported |
+| Windows 11 | All versions | ✅ Fully Supported |
+| Windows Server 2019 | Build 17763+ | ✅ Fully Supported |
+| Windows Server 2022 | Build 20348+ | ✅ Fully Supported |
+
+### Manual Setup (Alternative)
+
+If you prefer manual installation:
+
+1. **Clone and install dependencies**:
+   ```powershell
+   git clone https://github.com/your-org/ACM.git
+   cd ACM
+   pip install -e .
+   ```
+
+2. **Start observability stack** (requires Docker Desktop):
+   ```powershell
+   cd install/observability
+   docker compose up -d
+   ```
+
+3. **Configure SQL connection**:
+   ```powershell
+   copy configs\sql_connection.example.ini configs\sql_connection.ini
+   # Edit with your SQL Server details
+   ```
+
+4. **Run database setup** (if using SQL Server):
+   ```powershell
+   sqlcmd -S "localhost\SQLEXPRESS" -E -i "install/sql/00_create_database.sql"
+   sqlcmd -S "localhost\SQLEXPRESS" -d ACM -E -i "install/sql/14_complete_schema.sql"
+   ```
+
+---
+
 ## Quick Start (Choose Your Path)
 
 ### 1️⃣ Fastest: Analytics-Only Mode (5 minutes)

@@ -6,6 +6,34 @@ This handbook is a complete, implementation-level walkthrough of ACM V11 for new
 
 **Latest Enhancement (v11.3.0):** Multi-dimensional regime clustering now includes **health-state variables** alongside operating conditions. The same detector anomaly score carries different severity weight depending on equipment health state (healthy ×1.0, degrading ×1.2, mode switching ×0.9). This eliminates false positives from healthy equipment in unusual operating modes while boosting urgency when equipment is actually failing.
 
+---
+
+## 🚀 Quick Installation
+
+### Interactive Installer Wizard (Recommended)
+
+ACM v11.3.0 includes a comprehensive **installer wizard** that handles all setup automatically:
+
+```powershell
+# Install prerequisites
+pip install questionary
+
+# Run the installer wizard
+python install/acm_installer.py
+```
+
+The wizard guides you through:
+1. ✅ **Prerequisites Check** - Python 3.11+, Docker Desktop, ODBC drivers
+2. 📦 **Docker Download** - Automatic download of Docker Desktop if missing (Windows)
+3. 🔧 **Observability Stack** - Grafana, Tempo, Loki, Prometheus, Pyroscope
+4. 🗄️ **SQL Server Setup** - Database creation and schema installation (optional)
+5. ⚙️ **Configuration** - Generates `configs/sql_connection.ini` automatically
+6. ✓ **Verification** - Tests all endpoints and connectivity
+
+**Supported OS:** Windows 10 (1803+), Windows 11, Windows Server 2019/2022
+
+---
+
 ### V11.3.0 Release (January 13, 2026)
 **Breakthrough release**: Multi-dimensional regimes with health-state awareness
 - **Multi-Dimensional Regime Detection**: Regimes now = Operating Mode × Health State

@@ -1,6 +1,30 @@
-# ACM V8 Quick Start Guide - Week 1 Features
+# ACM Quick Start Guide
 
-## Setup
+## 🚀 Installation (Recommended)
+
+The easiest way to get started is using the **ACM Installer Wizard**:
+
+```powershell
+# Install prerequisites
+pip install questionary
+
+# Run the interactive installer
+python install/acm_installer.py
+```
+
+The wizard will guide you through:
+1. ✅ Prerequisites check (Python 3.11+, Docker, ODBC)
+2. 📦 Docker Desktop download (if missing)
+3. 🔧 Observability stack setup (Grafana, Tempo, Loki, Prometheus, Pyroscope)
+4. 🗄️ SQL Server schema installation (optional)
+5. ⚙️ Configuration file generation
+6. ✓ Verification of all endpoints
+
+**Supported OS**: Windows 10 (1803+), Windows 11, Windows Server 2019/2022
+
+---
+
+## Manual Setup (Alternative)
 
 ### 1. Create SQL Tables
 ```sql
