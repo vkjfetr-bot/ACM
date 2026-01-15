@@ -59,8 +59,31 @@ def get_connection(cfg: dict, include_db: bool = True) -> pyodbc.Connection:
     return pyodbc.connect(conn_str, autocommit=True)
 
 
-def run_file(path: Path, conn: pyodbc.Connection) -> None:
+def rewrite_sql_for_database(sql_text: str, database: str) -> str:
+    """Rewrite hardcoded ACM database references to the target database name."""
+    if not database:
+        return sql_text
+    db = database.strip()
+    if not db:
+        return sql_text
+
+    # Replace only database-level references; avoid touching table prefixes like ACM_*.
+    replacements = {
+        r"(?i)\bUSE\s+\[ACM\]": f"USE [{db}]",
+        r"(?i)\bCREATE\s+DATABASE\s+\[ACM\]": f"CREATE DATABASE [{db}]",
+        r"(?i)\bALTER\s+DATABASE\s+\[ACM\]": f"ALTER DATABASE [{db}]",
+        r"(?i)DB_ID\s*\(\s*N?'ACM'\s*\)": f"DB_ID(N'{db}')",
+    }
+
+    for pattern, replacement in replacements.items():
+        sql_text = re.sub(pattern, replacement, sql_text)
+
+    return sql_text
+
+
+def run_file(path: Path, conn: pyodbc.Connection, database: str) -> None:
     sql_text = path.read_text(encoding="utf-8")
+    sql_text = rewrite_sql_for_database(sql_text, database)
     batches = load_batches(sql_text)
     cur = conn.cursor()
     for batch in batches:
@@ -115,11 +138,13 @@ def main() -> None:
         missing_list = ", ".join(str(m) for m in missing)
         raise SystemExit(f"Missing SQL files: {missing_list}")
 
+    target_db = cfg.get("database") or "ACM"
+
     # Create database first (connect without database to avoid 4060)
     Console.info("Connecting to SQL Server (without database) to ensure ACM exists")
     conn_master = get_connection(cfg, include_db=False)
     Console.info(f"Running {paths[0].name}")
-    run_file(paths[0], conn_master)
+    run_file(paths[0], conn_master, target_db)
     conn_master.close()
 
     # Run remaining scripts against the ACM database
@@ -127,7 +152,7 @@ def main() -> None:
     conn_acm = get_connection(cfg, include_db=True)
     for p in paths[1:]:
         Console.info(f"Running {p.name}")
-        run_file(p, conn_acm)
+        run_file(p, conn_acm, target_db)
     conn_acm.close()
     Console.info("ACM installation completed successfully")
 

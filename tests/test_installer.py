@@ -718,6 +718,30 @@ class TestErrorHandling:
         ])
         assert "error message" in stderr or code == 0
 
+    def test_record_issue_appends_error(self, installer_module, fresh_state):
+        """Test record_issue records errors and prints details."""
+        with patch.object(installer_module, 'print_error') as mock_error:
+            with patch.object(installer_module, 'print_info') as mock_info:
+                with patch.object(installer_module, 'print_solutions') as mock_solutions:
+                    installer_module.record_issue(
+                        fresh_state,
+                        "Test failure",
+                        details="Something went wrong",
+                        solutions=["Fix A", "Fix B"]
+                    )
+
+        assert len(fresh_state.errors) == 1
+        assert "Test failure" in fresh_state.errors[0]
+        mock_error.assert_called_once()
+        mock_info.assert_called_once()
+        mock_solutions.assert_called_once()
+
+    def test_format_command(self, installer_module):
+        """Test format_command formatting."""
+        cmd = ["python", "-m", "pip", "install", "-e", "."]
+        formatted = installer_module.format_command(cmd)
+        assert "python -m pip install -e ." == formatted
+
 
 # ============================================================================
 # TEST: INTEGRATION SCENARIOS (MOCKED)

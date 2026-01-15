@@ -152,6 +152,11 @@ class InstallState:
 console = Console()
 
 
+def format_command(cmd: List[str]) -> str:
+    """Format a command list for readable output."""
+    return " ".join(str(part) for part in cmd)
+
+
 def print_header():
     """Print the installer header."""
     console.print()
@@ -190,6 +195,33 @@ def print_error(message: str):
 def print_info(message: str):
     """Print an info message."""
     console.print(f"[blue]ℹ[/blue] {message}")
+
+
+def print_solutions(title: str, solutions: List[str]):
+    """Print a list of suggested solutions."""
+    if not solutions:
+        return
+    console.print(f"[bold]Possible fixes for {title}:[/bold]")
+    for solution in solutions:
+        console.print(f"  • {solution}")
+
+
+def record_issue(
+    state: InstallState,
+    title: str,
+    details: Optional[str] = None,
+    solutions: Optional[List[str]] = None
+):
+    """Record an issue with optional details and solutions."""
+    message = title
+    if details:
+        message = f"{title} | Details: {details}"
+    state.errors.append(message)
+    print_error(title)
+    if details:
+        print_info(f"Details: {details}")
+    if solutions:
+        print_solutions(title, solutions)
 
 
 def run_command(
@@ -327,6 +359,25 @@ def run_prerequisites_check(state: InstallState) -> bool:
             all_critical_ok = False
         
         table.add_row(name, status, details)
+
+        if not ok and name == "ODBC Driver":
+            print_warning("SQL Server ODBC driver not found")
+            print_solutions(
+                "SQL Server ODBC driver not found",
+                [
+                    "Install ODBC Driver 18 for SQL Server: https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server",
+                    "Restart the installer after installation",
+                ]
+            )
+        elif not ok and name == "sqlcmd":
+            print_warning("sqlcmd is not installed")
+            print_solutions(
+                "sqlcmd is not installed",
+                [
+                    "Install 'Microsoft ODBC Driver and Command Line Utilities for SQL Server'",
+                    "Ensure sqlcmd is on PATH after installation",
+                ]
+            )
         
         # Update state
         if name == "Python":
@@ -339,14 +390,37 @@ def run_prerequisites_check(state: InstallState) -> bool:
             state.odbc_driver = details
     
     console.print(table)
+
+    if state.errors:
+        console.print()
+        console.print(Panel(
+            "\n".join(f"• {err}" for err in state.errors),
+            title="Issues Detected",
+            border_style="red"
+        ))
     console.print()
     
     if not state.python_ok:
-        print_error(f"Python {PYTHON_MIN_VERSION[0]}.{PYTHON_MIN_VERSION[1]}+ is required")
+        record_issue(
+            state,
+            f"Python {PYTHON_MIN_VERSION[0]}.{PYTHON_MIN_VERSION[1]}+ is required",
+            details=f"Detected Python {sys.version_info[0]}.{sys.version_info[1]}",
+            solutions=[
+                "Install Python 3.11+ from https://www.python.org/downloads/",
+                "Ensure the correct Python is on PATH or run the installer with the 3.11+ interpreter",
+            ]
+        )
         return False
     
     if not state.docker_ok:
-        print_warning("Docker is not installed")
+        record_issue(
+            state,
+            "Docker is not installed",
+            solutions=[
+                "Install Docker Desktop: https://www.docker.com/products/docker-desktop/",
+                "After installation, reboot if Docker prompts for it",
+            ]
+        )
         if platform.system() == "Windows":
             print_info("Download Docker Desktop: https://www.docker.com/products/docker-desktop/")
             
@@ -359,7 +433,14 @@ def run_prerequisites_check(state: InstallState) -> bool:
         return False
     
     if not state.docker_running:
-        print_warning("Docker Desktop is installed but not running")
+        record_issue(
+            state,
+            "Docker Desktop is installed but not running",
+            solutions=[
+                "Start Docker Desktop and wait for the whale icon to show 'Running'",
+                "If it fails to start, check WSL2/Hyper-V is enabled and restart Docker Desktop",
+            ]
+        )
         print_info("Please start Docker Desktop and run this installer again")
         return False
     
@@ -431,7 +512,15 @@ def setup_python_environment(state: InstallState) -> bool:
                 ])
                 
                 if code != 0:
-                    print_error(f"Failed to create venv: {stderr}")
+                    record_issue(
+                        state,
+                        "Failed to create virtual environment",
+                        details=stderr.strip() if stderr else "python -m venv failed",
+                        solutions=[
+                            "Ensure the Python installation includes venv support",
+                            "Try running with an elevated shell if permissions are restricted",
+                        ]
+                    )
                     return False
                 
                 progress.update(task, description="Virtual environment created!")
@@ -471,7 +560,9 @@ def setup_python_environment(state: InstallState) -> bool:
         ])
         
         if code != 0:
-            print_warning(f"pip install -e . failed, trying requirements approach")
+            print_warning("pip install -e . failed, trying direct dependency install")
+            if stderr:
+                print_info(stderr.strip())
             # Fallback: install core deps directly
             deps = [
                 "numpy>=1.26", "pandas>=2.2", "scikit-learn>=1.4",
@@ -482,6 +573,18 @@ def setup_python_environment(state: InstallState) -> bool:
             code, stdout, stderr = run_command([
                 pip_executable, "-m", "pip", "install"
             ] + deps)
+            if code != 0:
+                record_issue(
+                    state,
+                    "Python dependency installation failed",
+                    details=stderr.strip() if stderr else "pip returned a non-zero exit code",
+                    solutions=[
+                        f"Upgrade pip: {format_command([pip_executable, '-m', 'pip', 'install', '--upgrade', 'pip'])}",
+                        "Check internet/proxy settings and retry",
+                        "Run the installer from an activated virtual environment",
+                    ]
+                )
+                return False
         
         progress.update(task, description="Installing telemetry dependencies...")
         
@@ -492,6 +595,16 @@ def setup_python_environment(state: InstallState) -> bool:
             "opentelemetry-sdk>=1.25", 
             "opentelemetry-exporter-otlp-proto-http>=1.25"
         ])
+
+        if code2 != 0:
+            print_warning("Telemetry dependencies failed to install")
+            print_solutions(
+                "Telemetry dependencies failed to install",
+                [
+                    "Check internet/proxy settings and retry later",
+                    "You can install them manually once online",
+                ]
+            )
     
     state.deps_installed = True
     print_success("Python dependencies installed!")
@@ -513,7 +626,15 @@ def setup_observability(state: InstallState) -> bool:
     # Check if docker-compose.yaml exists
     compose_file = DOCKER_COMPOSE_DIR / "docker-compose.yaml"
     if not compose_file.exists():
-        print_error(f"docker-compose.yaml not found at: {compose_file}")
+        record_issue(
+            state,
+            "docker-compose.yaml not found",
+            details=str(compose_file),
+            solutions=[
+                "Verify the repository is complete and the observability folder exists",
+                "Re-clone the repo or restore install/observability/docker-compose.yaml",
+            ]
+        )
         return False
     
     console.print()
@@ -569,8 +690,16 @@ def setup_observability(state: InstallState) -> bool:
         )
         
         if code != 0:
-            print_error(f"Failed to start observability stack")
-            console.print(f"[red]{stderr}[/red]")
+            record_issue(
+                state,
+                "Failed to start observability stack",
+                details=stderr.strip() if stderr else "docker compose up -d failed",
+                solutions=[
+                    "Ensure Docker Desktop is running and has enough resources",
+                    f"Run manually: {format_command(['docker', 'compose', 'up', '-d'])}",
+                    f"Check logs: {format_command(['docker', 'compose', 'logs', '--no-color'])}",
+                ]
+            )
             return False
         
         progress.update(task, description="Waiting for containers to be healthy...")
@@ -652,6 +781,14 @@ def setup_observability(state: InstallState) -> bool:
         print_success("Observability stack is running!")
     else:
         print_warning("Some services may still be starting up")
+        print_solutions(
+            "Observability services not ready",
+            [
+                "Wait 1-2 minutes and re-check service health",
+                f"Check container status: {format_command(['docker', 'compose', 'ps'])}",
+                f"Check logs: {format_command(['docker', 'compose', 'logs', '--no-color'])}",
+            ]
+        )
     
     console.print()
     console.print(Panel(
@@ -746,8 +883,16 @@ def setup_sql_server(state: InstallState) -> bool:
         ).ask():
             run_sql_setup(state)
     else:
-        print_error("SQL Server connection failed")
-        print_info("Check your connection settings and try again")
+        record_issue(
+            state,
+            "SQL Server connection failed",
+            solutions=[
+                "Verify server name/instance and database name",
+                "Ensure TCP/IP is enabled and SQL Server allows remote connections",
+                "Check firewall rules for the SQL Server port",
+                "Confirm credentials for SQL Authentication",
+            ]
+        )
         return False
     
     return True
@@ -778,6 +923,14 @@ def create_sql_config(state: InstallState):
 def test_sql_connection(state: InstallState) -> bool:
     """Test SQL Server connection."""
     if not state.odbc_driver:
+        record_issue(
+            state,
+            "Cannot test SQL connection: ODBC driver not configured",
+            solutions=[
+                "Install ODBC Driver 18 for SQL Server",
+                "Re-run prerequisites check after installation",
+            ]
+        )
         return False
     
     try:
@@ -806,6 +959,14 @@ def test_sql_connection(state: InstallState) -> bool:
         return True
     except Exception as e:
         print_error(f"Connection error: {e}")
+        print_solutions(
+            "SQL connection error",
+            [
+                "Verify SQL Server is running",
+                "Check that the server name includes the correct instance",
+                "Try connecting with sqlcmd to validate credentials",
+            ]
+        )
         return False
 
 
@@ -836,6 +997,16 @@ def run_sql_setup(state: InstallState):
             print_error("Database setup failed")
             if stderr:
                 console.print(f"[red]{stderr}[/red]")
+            if stdout:
+                console.print(stdout)
+            print_solutions(
+                "Database setup failed",
+                [
+                    "Review the error output above for the failing SQL script",
+                    "Confirm sql_connection.ini uses the correct server/database",
+                    "Re-run: python install/install_acm.py --ini-section acm",
+                ]
+            )
 
 
 # ============================================================================
