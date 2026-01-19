@@ -46,6 +46,7 @@ from core.detector_orchestrator import (
     calibrate_all_detectors,
     get_detector_enable_flags,
     compute_stable_feature_hash,
+    reconcile_detector_flags_with_loaded_models,
 )
 from core.pipeline_types import DataContract
 from core.forecast_engine import ForecastEngine

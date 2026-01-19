@@ -769,8 +769,8 @@ class Fuser:
                 
                 if pairs_correlated > 0:
                     Console.info(
-                        f"FLAW-4 Fix: {pairs_correlated}/{pairs_checked} detector pairs "
-                        f"correlated, weight adjustments applied",
+                        f"{pairs_correlated}/{pairs_checked} detector pairs correlated, "
+                        f"weight adjustments applied",
                         component="FUSE", pairs_checked=pairs_checked, pairs_correlated=pairs_correlated
                     )
             except Exception as ce:

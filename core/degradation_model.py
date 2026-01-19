@@ -1,12 +1,15 @@
 ﻿"""
-Degradation Models for Health Forecasting (v10.0.0)
+Degradation Models for Health Forecasting (v11.3.0)
 
-Implements trend-based degradation models with uncertainty quantification.
-Replaces duplicate logic from forecasting.py (lines 2095-2749).
+Centralizes degradation trend fitting and forecast uncertainty used by
+ForecastEngine. This module provides pluggable model implementations, with
+regime-conditioned defaults, and keeps the forecasting pipeline free of
+duplicate model logic.
 
 Key Features:
 - Abstract base class for pluggable degradation models
 - Holt's linear trend with adaptive smoothing
+- Regime-conditioned degradation modeling (per-regime Holt + global fallback)
 - Uncertainty growth via residual analysis
 - Incremental updates for online learning
 - Research-backed parameter bounds
@@ -19,10 +22,9 @@ References:
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
-from scipy import optimize
 
 from core.observability import Console
 
@@ -92,12 +94,12 @@ class BaseDegradationModel(ABC):
         pass
     
     @abstractmethod
-    def get_parameters(self) -> Dict[str, float]:
+    def get_parameters(self) -> Dict[str, Any]:
         """Export model state for persistence"""
         pass
     
     @abstractmethod
-    def set_parameters(self, params: Dict[str, float]) -> None:
+    def set_parameters(self, params: Dict[str, Any]) -> None:
         """Restore model state from saved parameters"""
         pass
 
@@ -202,12 +204,21 @@ class LinearTrendModel(BaseDegradationModel):
         self.n_fitted = n
         
         # Compute time intervals
+        # v11.3.1 FIX: Track first gap separately for accurate trend initialization
+        first_gap_hours: float = 1.0
         if isinstance(health_series.index, pd.DatetimeIndex):
             time_diffs = health_series.index.to_series().diff().dt.total_seconds() / 3600.0
             self.dt_hours = float(time_diffs.median()) if len(time_diffs) > 0 else 1.0
             if not np.isfinite(self.dt_hours) or self.dt_hours <= 0:
                 self.dt_hours = 1.0
             self.last_timestamp = health_series.index[-1]
+            # v11.3.1: Use ACTUAL first gap for trend initialization (not median)
+            # The first two observations may have different spacing than the median
+            if n > 1:
+                first_gap_seconds = (health_series.index[1] - health_series.index[0]).total_seconds()
+                first_gap_hours = first_gap_seconds / 3600.0
+                if not np.isfinite(first_gap_hours) or first_gap_hours <= 0:
+                    first_gap_hours = self.dt_hours
         else:
             self.dt_hours = 1.0
             self.last_timestamp = None
@@ -218,8 +229,10 @@ class LinearTrendModel(BaseDegradationModel):
         is_flatline = (span < self.flatline_epsilon) or (variance < self.flatline_epsilon ** 2)
         
         # Initialize level and trend
+        # v11.3.1 FIX: Use actual first gap, not median dt_hours
+        # This prevents Nx errors when first interval differs from median
         self.level = float(health_values.iloc[0])
-        self.trend = (float(health_values.iloc[1]) - float(health_values.iloc[0])) / self.dt_hours if n > 1 else 0.0
+        self.trend = (float(health_values.iloc[1]) - float(health_values.iloc[0])) / first_gap_hours if n > 1 else 0.0
         
         if is_flatline:
             self.trend = 0.0
@@ -427,7 +440,7 @@ class LinearTrendModel(BaseDegradationModel):
         
         self.n_fitted += 1
     
-    def get_parameters(self) -> Dict[str, float]:
+    def get_parameters(self) -> Dict[str, Any]:
         """Export model state for persistence to ACM_ForecastingState"""
         return {
             "alpha": self.alpha,
@@ -439,7 +452,7 @@ class LinearTrendModel(BaseDegradationModel):
             "n_fitted": float(self.n_fitted)
         }
     
-    def set_parameters(self, params: Dict[str, float]) -> None:
+    def set_parameters(self, params: Dict[str, Any]) -> None:
         """Restore model state from saved parameters"""
         self.alpha = params.get("alpha", 0.3)
         self.beta = params.get("beta", 0.1)
@@ -481,9 +494,12 @@ class LinearTrendModel(BaseDegradationModel):
                 return series  # Near-constant, no outliers
             z_scores = np.abs((series - series.mean()) / std)
         else:
-            # Modified Z-score using MAD (robust to contaminated data)
-            # Scale factor 0.6745 makes MAD comparable to std for normal distribution
-            z_scores = 0.6745 * np.abs(series - median) / mad
+            # v11.3.1 FIX: Use consistent MAD-to-sigma scaling
+            # For normal distribution: sigma = MAD * 1.4826
+            # This makes z-scores comparable to standard z-scores
+            # Previously used 0.6745 * |x - median| / MAD which inverts the scaling
+            sigma_robust = mad * 1.4826
+            z_scores = np.abs(series - median) / sigma_robust
         
         outliers = z_scores > n_std
         
@@ -540,7 +556,9 @@ class LinearTrendModel(BaseDegradationModel):
         
         # Use the LAST jump (most recent maintenance)
         last_jump_idx = jump_indices[-1]
-        last_jump_loc = health_series.index.get_loc(last_jump_idx)
+        last_jump_loc = int(health_series.index.get_indexer(pd.Index([last_jump_idx]))[0])
+        if last_jump_loc < 0:
+            return health_series
         
         # Check if we have enough post-jump samples
         post_jump_samples = len(health_series) - last_jump_loc - 1
@@ -550,7 +568,9 @@ class LinearTrendModel(BaseDegradationModel):
             if len(jump_indices) > 1:
                 # Try second-to-last jump
                 second_last_jump_idx = jump_indices[-2]
-                second_last_loc = health_series.index.get_loc(second_last_jump_idx)
+                second_last_loc = int(health_series.index.get_indexer(pd.Index([second_last_jump_idx]))[0])
+                if second_last_loc < 0:
+                    return health_series
                 post_second_samples = len(health_series) - second_last_loc - 1
                 if post_second_samples >= min_post_jump_samples:
                     Console.info(
@@ -575,18 +595,20 @@ class LinearTrendModel(BaseDegradationModel):
         Console.info(
             f"HEALTH-JUMP: Maintenance reset detected at {last_jump_idx}. "
             f"Health jumped {pre_jump_health:.1f}% -> {post_jump_health:.1f}% (+{jump_magnitude:.1f}%). "
-            f"Using {post_jump_samples} post-jump samples for trend fitting.",
+            f"Using {post_jump_samples + 1} post-jump samples for trend fitting.",
             component="DEGRADE"
         )
         
-        # Return only post-jump data
-        return health_series.iloc[last_jump_loc + 1:]
+        # v11.3.1 FIX: Include the post-jump value (the new high health reading)
+        # diff() places the jump flag at the DESTINATION index, so iloc[last_jump_loc]
+        # is the new high value we want to keep as baseline for trend fitting
+        return health_series.iloc[last_jump_loc:]
 
     def _adaptive_smoothing(self, health_values: pd.Series) -> Tuple[float, float]:
         """
         Adaptive alpha/beta tuning via expanding-window time-series cross-validation.
         
-        OPTIMIZED (v10.2.1):
+        Optimized implementation:
         - Coarse-to-fine grid search: 4x4 initial grid, then refine around best
         - Max 10 CV folds (not n//20) for speed
         - Vectorized Holt's inner loop using numpy
@@ -662,7 +684,14 @@ class LinearTrendModel(BaseDegradationModel):
         step_size: int,
         n: int
     ) -> float:
-        """Compute CV error using vectorized Holt's filter"""
+        """
+        Compute CV error using vectorized Holt's filter.
+        
+        v11.3.1 FIX: Evaluate at multiple horizons with decay weighting.
+        RUL depends on trajectory accuracy (when health crosses threshold),
+        not just endpoint accuracy. Short-term horizons are weighted more heavily
+        since early errors compound into later forecasts.
+        """
         cv_errors = []
         trend_clamp = self.max_trend_per_hour * self.dt_hours
         
@@ -686,10 +715,29 @@ class LinearTrendModel(BaseDegradationModel):
                 elif trend < -trend_clamp:
                     trend = -trend_clamp
             
-            # Forecast h steps ahead
-            forecast = level + forecast_horizon * trend
-            actual = health_arr[train_end + forecast_horizon - 1]
-            cv_errors.append(abs(forecast - actual))
+            # v11.3.1 FIX: Evaluate at multiple horizons with decay weighting
+            # Short-term accuracy matters more for RUL trajectory estimation
+            # Weights: h=1 (40%), h=h/4 (30%), h=h/2 (20%), h=h (10%)
+            horizons_to_check = [
+                1,
+                max(1, forecast_horizon // 4),
+                max(1, forecast_horizon // 2),
+                forecast_horizon
+            ]
+            weights = [0.4, 0.3, 0.2, 0.1]
+            
+            weighted_error = 0.0
+            total_weight = 0.0
+            for h, w in zip(horizons_to_check, weights):
+                target_idx = train_end + h - 1
+                if target_idx < n:
+                    forecast_h = level + h * trend
+                    actual_h = health_arr[target_idx]
+                    weighted_error += w * abs(forecast_h - actual_h)
+                    total_weight += w
+            
+            if total_weight > 0:
+                cv_errors.append(weighted_error / total_weight)
         
         return float(np.mean(cv_errors)) if cv_errors else float("inf")
     
@@ -745,3 +793,274 @@ class LinearTrendModel(BaseDegradationModel):
         
         mae = float(np.mean(errors)) if len(errors) > 0 else float("inf")
         return mae
+
+
+class RegimeConditionedTrendModel(BaseDegradationModel):
+    """
+    Regime-conditioned degradation model.
+
+    Fits a LinearTrendModel per regime and keeps a global fallback model.
+    The active regime model is selected by `current_regime` at prediction time.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.3,
+        beta: float = 0.1,
+        max_trend_per_hour: float = 5.0,
+        enable_adaptive: bool = True,
+        min_samples_for_adaptive: int = 30,
+        min_samples_per_regime: int = 30,
+        include_unknown: bool = False
+    ):
+        self.alpha = alpha
+        self.beta = beta
+        self.max_trend_per_hour = max_trend_per_hour
+        self.enable_adaptive = enable_adaptive
+        self.min_samples_for_adaptive = min_samples_for_adaptive
+        self.min_samples_per_regime = min_samples_per_regime
+        self.include_unknown = include_unknown
+
+        self.global_model = LinearTrendModel(
+            alpha=alpha,
+            beta=beta,
+            max_trend_per_hour=max_trend_per_hour,
+            enable_adaptive=enable_adaptive,
+            min_samples_for_adaptive=min_samples_for_adaptive
+        )
+        self.regime_models: Dict[int, LinearTrendModel] = {}
+        self.current_regime: Optional[int] = None
+
+    def set_current_regime(self, regime_label: Optional[int]) -> None:
+        self.current_regime = regime_label
+
+    def _get_active_model(self) -> LinearTrendModel:
+        if self.current_regime is not None and self.current_regime in self.regime_models:
+            return self.regime_models[self.current_regime]
+        return self.global_model
+
+    @property
+    def level(self) -> float:
+        return self._get_active_model().level
+
+    @property
+    def trend(self) -> float:
+        return self._get_active_model().trend
+
+    @property
+    def std_error(self) -> float:
+        return self._get_active_model().std_error
+
+    @property
+    def dt_hours(self) -> float:
+        return self._get_active_model().dt_hours
+
+    def fit(self, health_series: pd.Series, regime_series: Optional[pd.Series] = None) -> None:
+        """
+        Fit global model and per-regime models.
+
+        Args:
+            health_series: Time-indexed health values
+            regime_series: Regime label series aligned to health_series
+        """
+        self.global_model.fit(health_series)
+
+        if regime_series is None:
+            Console.warn("No regime series provided; using global degradation model only", component="DEGRADE")
+            return
+
+        if len(regime_series) != len(health_series):
+            Console.warn(
+                "Regime series length mismatch; using global degradation model only",
+                component="DEGRADE",
+                health_len=len(health_series),
+                regime_len=len(regime_series)
+            )
+            return
+
+        self.regime_models = {}
+
+        regime_series = pd.Series(regime_series.values, index=health_series.index)
+        valid_mask = regime_series.notna()
+        if not self.include_unknown:
+            valid_mask &= (regime_series != -1)
+
+        for regime_label in regime_series[valid_mask].unique():
+            regime_mask = (regime_series == regime_label)
+            if not self.include_unknown:
+                regime_mask &= (regime_series != -1)
+
+            if int(regime_label) == -1 and not self.include_unknown:
+                continue
+
+            if regime_mask.sum() < self.min_samples_per_regime:
+                continue
+
+            # v11.3.1 FIX: Use longest contiguous segment instead of scattered samples
+            # Holt's method assumes sequential data; non-contiguous samples create
+            # artificial jumps that inflate trend estimates
+            regime_health = self._get_longest_contiguous_segment(health_series, regime_mask)
+            
+            if len(regime_health) < self.min_samples_per_regime:
+                Console.info(
+                    f"Regime {regime_label}: longest contiguous segment too short "
+                    f"({len(regime_health)} < {self.min_samples_per_regime}), skipping",
+                    component="DEGRADE"
+                )
+                continue
+            
+            model = LinearTrendModel(
+                alpha=self.alpha,
+                beta=self.beta,
+                max_trend_per_hour=self.max_trend_per_hour,
+                enable_adaptive=self.enable_adaptive,
+                min_samples_for_adaptive=self.min_samples_for_adaptive
+            )
+            model.fit(regime_health)
+            self.regime_models[int(regime_label)] = model
+
+        Console.info(
+            f"Fitted regime-conditioned model with {len(self.regime_models)} regimes",
+            component="DEGRADE",
+            regimes=len(self.regime_models)
+        )
+
+    def predict(
+        self,
+        steps: int,
+        dt_hours: float,
+        confidence_level: float = 0.95
+    ) -> DegradationForecast:
+        return self._get_active_model().predict(
+            steps=steps,
+            dt_hours=dt_hours,
+            confidence_level=confidence_level
+        )
+
+    def update_incremental(self, new_observation: float) -> None:
+        self.global_model.update_incremental(new_observation)
+        active_model = self._get_active_model()
+        if active_model is not self.global_model:
+            active_model.update_incremental(new_observation)
+
+    def get_parameters(self) -> Dict[str, Any]:
+        return {
+            "version": "regime_conditioned_v1",
+            "global": self.global_model.get_parameters(),
+            "regimes": {str(k): v.get_parameters() for k, v in self.regime_models.items()},
+            "current_regime": self.current_regime,
+            "min_samples_per_regime": self.min_samples_per_regime,
+            "include_unknown": self.include_unknown
+        }
+
+    def set_parameters(self, params: Dict[str, Any]) -> None:
+        # Backward-compatible: if params look like LinearTrendModel, load into global model
+        if "global" not in params and "regimes" not in params:
+            self.global_model.set_parameters(params)
+            self.regime_models = {}
+            self.current_regime = None
+            return
+
+        global_params = params.get("global", {})
+        if isinstance(global_params, dict):
+            self.global_model.set_parameters(global_params)
+
+        regime_params = params.get("regimes", {})
+        if not isinstance(regime_params, dict):
+            regime_params = {}
+        self.regime_models = {}
+        for key, model_params in regime_params.items():
+            try:
+                label = int(key)
+            except ValueError:
+                continue
+            model = LinearTrendModel(
+                alpha=self.alpha,
+                beta=self.beta,
+                max_trend_per_hour=self.max_trend_per_hour,
+                enable_adaptive=self.enable_adaptive,
+                min_samples_for_adaptive=self.min_samples_for_adaptive
+            )
+            model.set_parameters(model_params)
+            self.regime_models[label] = model
+
+        current_regime = params.get("current_regime", None)
+        self.current_regime = int(current_regime) if current_regime is not None else None
+        self.min_samples_per_regime = int(params.get("min_samples_per_regime", self.min_samples_per_regime))
+        self.include_unknown = bool(params.get("include_unknown", self.include_unknown))
+
+    def get_regime_degradation_rates(self) -> Dict[int, float]:
+        """Return per-regime degradation rates (trend per hour)."""
+        rates = {label: model.trend for label, model in self.regime_models.items()}
+        return rates
+
+    def _get_longest_contiguous_segment(
+        self, 
+        health_series: pd.Series, 
+        regime_mask: pd.Series
+    ) -> pd.Series:
+        """
+        v11.3.1 FIX: Extract longest contiguous run where regime_mask is True.
+        
+        ANALYTICAL PRINCIPLE:
+        Holt's exponential smoothing assumes sequential observations:
+            L[t] = α*y[t] + (1-α)*(L[t-1] + T[t-1])
+            T[t] = β*(L[t] - L[t-1]) + (1-β)*T[t-1]
+        
+        The term (L[t] - L[t-1]) represents the ONE-STEP level change.
+        When filtering by regime, we get scattered, non-contiguous samples.
+        
+        Example of the problem:
+            t=1: health=95%, regime=0  (included)
+            t=2: health=94%, regime=1  (excluded)
+            t=3: health=85%, regime=0  (included)
+        
+        Holt sees [95%, 85%] as "adjacent" → computes -10%/step trend
+        But actual regime 0 trend might be -1%/step (the 10% drop was during regime 1!)
+        
+        SOLUTION:
+        Use only the longest contiguous segment of the regime.
+        This ensures all observations are truly sequential.
+        
+        Args:
+            health_series: Full time-indexed health series
+            regime_mask: Boolean mask indicating regime membership
+        
+        Returns:
+            Longest contiguous segment of health_series where regime_mask is True
+        """
+        if len(health_series) == 0 or regime_mask.sum() == 0:
+            return pd.Series(dtype=float)
+        
+        mask_arr = regime_mask.values.astype(bool)
+        n = len(mask_arr)
+        
+        # Find contiguous segments using run-length encoding
+        # A segment starts where mask changes from False to True
+        # A segment ends where mask changes from True to False
+        best_start = 0
+        best_length = 0
+        current_start = -1
+        current_length = 0
+        
+        for i in range(n):
+            if mask_arr[i]:
+                if current_start < 0:
+                    current_start = i
+                current_length += 1
+            else:
+                if current_length > best_length:
+                    best_length = current_length
+                    best_start = current_start
+                current_start = -1
+                current_length = 0
+        
+        # Check final segment
+        if current_length > best_length:
+            best_length = current_length
+            best_start = current_start
+        
+        if best_length == 0:
+            return pd.Series(dtype=float)
+        
+        return health_series.iloc[best_start:best_start + best_length]

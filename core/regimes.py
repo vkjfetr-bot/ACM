@@ -46,12 +46,17 @@ try:
 except Exception:  # pragma: no cover - scipy optional in some deployments
     _median_filter = None
 
-REGIME_MODEL_VERSION = "3.0"  # v11.1.6: P0 fixes for analytical correctness
+REGIME_MODEL_VERSION = "3.1"  # v11.3.1: Removed UNKNOWN regime concept
 
-# V11: UNKNOWN regime label for low-confidence assignments
-# Rule #3: No forced assignment when confidence is low
-# Rule #14: UNKNOWN is a valid system output
-UNKNOWN_REGIME_LABEL = -1
+# v11.3.1: DEPRECATED - UNKNOWN_REGIME_LABEL (-1) is no longer produced
+# Equipment is ALWAYS in some physical operating state. Instead of UNKNOWN:
+# - label: Always assigned to nearest cluster (equipment IS in a state)
+# - confidence: Low for sparse/novel regions (how sure we are)
+# - is_novel: True if point was in sparse region (candidate for new regime discovery)
+#
+# This constant remains for backward compatibility with legacy code that may
+# check for -1, but new code should never produce it.
+UNKNOWN_REGIME_LABEL = -1  # DEPRECATED: Do not produce this value
 
 # =============================================================================
 # TAG TAXONOMY: Explicit classification of sensor types for regime clustering
@@ -1096,11 +1101,54 @@ def _fit_hdbscan_scaled(
     subsample_indices = None
     if n_samples > max_fit_samples:
         Console.info(f"Subsampling for HDBSCAN: {n_samples} -> {max_fit_samples} samples", component="REGIME")
-        # Stratified random sampling to preserve distribution
+        # v11.3.1 FIX: TIME-STRATIFIED subsampling to preserve rare regime structure
+        # Random subsampling can fragment short-lived regimes (startup/shutdown)
+        # by scattering their samples across the subsample, breaking density connectivity.
+        # Time-stratified sampling takes proportional samples from each time window,
+        # ensuring short events remain contiguous in the subsample.
         np.random.seed(42)
-        subsample_indices = np.random.choice(n_samples, max_fit_samples, replace=False)
-        subsample_indices.sort()  # Maintain temporal order
+        
+        # Divide into time windows and sample proportionally from each
+        n_windows = min(100, max(10, n_samples // 500))  # 10-100 windows
+        window_size = n_samples // n_windows
+        samples_per_window = max_fit_samples // n_windows
+        
+        subsample_indices = []
+        for w in range(n_windows):
+            start = w * window_size
+            end = min(start + window_size, n_samples) if w < n_windows - 1 else n_samples
+            window_n = end - start
+            
+            # Take proportional samples from this window, preserving contiguity
+            # For small windows (potential transients), take MORE samples
+            n_take = min(window_n, max(samples_per_window, window_n // 2))
+            
+            if n_take >= window_n:
+                # Take all samples from this window
+                subsample_indices.extend(range(start, end))
+            else:
+                # Subsample with contiguous bias: prefer keeping runs together
+                # Use regular spacing instead of random to preserve temporal structure
+                step = window_n / n_take
+                for i in range(n_take):
+                    subsample_indices.append(start + int(i * step))
+        
+        # Deduplicate and sort
+        subsample_indices = sorted(set(subsample_indices))
+        
+        # Trim to max_fit_samples if we overshot
+        if len(subsample_indices) > max_fit_samples:
+            step = len(subsample_indices) / max_fit_samples
+            subsample_indices = [subsample_indices[int(i * step)] for i in range(max_fit_samples)]
+        
+        subsample_indices = np.array(subsample_indices)
         X_fit = X_scaled[subsample_indices]
+        
+        Console.info(
+            f"Time-stratified subsampling: {n_samples} -> {len(subsample_indices)} samples "
+            f"across {n_windows} windows",
+            component="REGIME"
+        )
     else:
         X_fit = X_scaled
     
@@ -1111,23 +1159,40 @@ def _fit_hdbscan_scaled(
         raise ValueError(f"HDBSCAN requires at least 10 samples (got {n_fit_samples})")
     
     # HDBSCAN config with sensible defaults for industrial data
-    # BUGFIX v11.1.7: min_cluster_size was WAY too high (5% of data = 1649 samples)
-    # For operating regimes, we want to detect clusters of 50-500 samples minimum
-    # Using 1-2% of FIT data or 30-100 samples, whichever is larger
-    # min_cluster_size: minimum samples to form a cluster 
-    # Default: max(30, min(100, 2% of fit data)) - reasonable for regime detection
-    default_min_cluster = max(30, min(100, n_fit_samples // 50))
+    # v11.3.1 FIX: Use ABSOLUTE min_cluster_size, not percentage-based
+    #
+    # PROBLEM with percentage-based (5% of data):
+    #   - 100,000 samples -> 5000 min_cluster -> startup (500 pts) = NOISE
+    #   - Rare regimes get absorbed into dominant clusters or labeled noise
+    #
+    # SOLUTION: Absolute threshold preserves rare regimes
+    #   - min_cluster_size = 30-50 allows startup/shutdown clusters to form
+    #   - Configurable via regimes.hdbscan.min_cluster_size_absolute
+    #
+    # RATIONALE:
+    #   - Startup event = ~10-30 minutes = 10-180 samples (at 1/min to 1/10s)
+    #   - We want at least 30 samples to form a stable cluster
+    #   - Upper cap of 100 prevents requiring too many samples
+    #
+    absolute_min_cluster = int(hdb_cfg.get("min_cluster_size_absolute", 30))
+    max_min_cluster = int(hdb_cfg.get("min_cluster_size_max", 100))
+    
+    # Use absolute threshold, capped at max
+    default_min_cluster = min(absolute_min_cluster, max_min_cluster)
     min_cluster_size = int(hdb_cfg.get("min_cluster_size", default_min_cluster))
+    
     # min_samples: samples in neighborhood for core point (controls noise sensitivity)
-    # Default: smaller value to reduce noise sensitivity
-    min_samples = int(hdb_cfg.get("min_samples", max(3, min_cluster_size // 5)))
+    # Lower value = more points become core points = better for detecting small clusters
+    # v11.3.1: Reduced default from min_cluster_size//5 to max(3, min_cluster_size//10)
+    # to improve sensitivity to transient regimes
+    min_samples = int(hdb_cfg.get("min_samples", max(3, min_cluster_size // 10)))
     cluster_selection_epsilon = float(hdb_cfg.get("cluster_selection_epsilon", 0.0))
     cluster_selection_method = str(hdb_cfg.get("cluster_selection_method", "eom"))
     metric = str(hdb_cfg.get("metric", "euclidean"))
     allow_single_cluster = bool(hdb_cfg.get("allow_single_cluster", True))
     
-    # Ensure min_cluster_size doesn't exceed sample count
-    min_cluster_size = min(min_cluster_size, max(5, n_fit_samples // 3))
+    # Ensure min_cluster_size doesn't exceed sample count, but keep absolute floor
+    min_cluster_size = min(min_cluster_size, max(absolute_min_cluster, n_fit_samples // 3))
     min_samples = min(min_samples, min_cluster_size)
     
     Console.info(
@@ -1605,28 +1670,34 @@ def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
     X_scaled = np.asarray(X_scaled, dtype=np.float64, order="C")
     
     # v11.1.0: Support HDBSCAN and GMM only
+    # v11.3.1: Always assign to a cluster - never return UNKNOWN (-1)
+    # Equipment is always in SOME operating state
     if model.is_hdbscan:
         # HDBSCAN: Use approximate_predict for new points
         try:
             labels, strengths = hdbscan.approximate_predict(model.clustering_model, X_scaled)
+            labels = labels.astype(int, copy=True)  # Make mutable copy
             
-            # v11.1.8: ENSEMBLE MODE - Use GMM fallback for low-strength predictions
-            # Instead of marking as UNKNOWN, assign using GMM
+            # v11.3.1: Always assign low-strength points to nearest centroid
+            # They ARE in some operating state, we just have lower confidence
             low_strength_mask = strengths < 0.1
-            if np.any(low_strength_mask) and model.fallback_model_ is not None:
-                labels = labels.copy()
-                # Use GMM to assign low-strength points
-                gmm_labels = model.fallback_model_.predict(X_scaled[low_strength_mask])
-                labels[low_strength_mask] = gmm_labels
-                n_fallback = int(np.sum(low_strength_mask))
-                Console.info(
-                    f"ENSEMBLE: GMM assigned {n_fallback}/{len(labels)} low-strength points",
-                    component="REGIME"
-                )
-            elif np.any(low_strength_mask):
-                # No GMM fallback available - mark as UNKNOWN (legacy behavior)
-                labels = labels.copy()
-                labels[low_strength_mask] = UNKNOWN_REGIME_LABEL
+            if np.any(low_strength_mask):
+                if model.fallback_model_ is not None:
+                    # Use GMM for better assignment
+                    gmm_labels = model.fallback_model_.predict(X_scaled[low_strength_mask])
+                    labels[low_strength_mask] = gmm_labels
+                elif model.exemplars_ is not None and len(model.exemplars_) > 0:
+                    # Assign to nearest centroid
+                    centroid_labels = pairwise_distances_argmin(
+                        X_scaled[low_strength_mask], model.exemplars_, axis=1
+                    )
+                    labels[low_strength_mask] = centroid_labels
+                n_novel = int(np.sum(low_strength_mask))
+                if n_novel > 0:
+                    Console.info(
+                        f"Assigned {n_novel}/{len(labels)} low-strength points to nearest cluster",
+                        component="REGIME"
+                    )
                 
             return labels.astype(int, copy=False)
         except Exception as e:
@@ -1640,8 +1711,9 @@ def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
                 labels = model.fallback_model_.predict(X_scaled)
                 return labels.astype(int, copy=False)
             else:
-                Console.warn("HDBSCAN prediction failed, returning UNKNOWN", component="REGIME")
-                return np.full(len(X_scaled), UNKNOWN_REGIME_LABEL, dtype=int)
+                # v11.3.1: Last resort - assign all to cluster 0 with warning
+                Console.warn("No clustering method available, assigning all to regime 0", component="REGIME")
+                return np.zeros(len(X_scaled), dtype=int)
     else:
         # GaussianMixture uses predict() directly
         labels = model.clustering_model.predict(X_scaled)
@@ -1653,17 +1725,15 @@ def predict_regime_with_confidence(
     basis_df: pd.DataFrame,
     cfg: Dict[str, Any],
     training_distances: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Predict regime labels with confidence scores.
+    Predict regime labels with confidence scores and novelty flags.
     
-    v11.1.6 FIX #3: Uses CALIBRATED acceptance threshold from training data.
-    
-    V11 Rule #3: No forced assignment when confidence is low.
-    V11 Rule #14: UNKNOWN is a valid system output.
-    
-    The correct question for UNKNOWN is: "Is this point within the training
-    support of any regime?" - NOT "Is probability > 1/k?".
+    v11.3.1: MAJOR CHANGE - No longer produces UNKNOWN_REGIME_LABEL (-1).
+    Equipment is ALWAYS in some operating state. Instead:
+    - label: Always assigned to a valid cluster (nearest centroid for sparse regions)
+    - confidence: How confident we are in the assignment (low for sparse/novel regions)
+    - is_novel: True if point would have been UNKNOWN under old logic (sparse region)
     
     Args:
         model: Fitted RegimeModel (should have training_distance_threshold_ set)
@@ -1672,14 +1742,14 @@ def predict_regime_with_confidence(
         training_distances: Deprecated - use model.training_distance_threshold_
     
     Returns:
-        Tuple of (labels, confidence_scores)
-        - labels: int array, -1 = UNKNOWN regime (outside training support)
+        Tuple of (labels, confidence_scores, is_novel)
+        - labels: int array, always >= 0 (never -1)
         - confidence_scores: float array 0-1, lower = less confident
+        - is_novel: bool array, True = sparse/novel region (candidate for new regime)
     """
     from sklearn.metrics import pairwise_distances
     
     unknown_cfg = _cfg_get(cfg, "regimes.unknown", {}) or {}
-    unknown_enabled = bool(unknown_cfg.get("enabled", True))
     distance_percentile = float(unknown_cfg.get("distance_percentile", 95.0))
     
     # Align features
@@ -1688,21 +1758,21 @@ def predict_regime_with_confidence(
     X_scaled = model.scaler.transform(aligned_arr)
     X_scaled = np.asarray(X_scaled, dtype=np.float64, order="C")
     centers = model.cluster_centers_
+    n_samples = len(X_scaled)
+    
+    # Initialize outputs
+    is_novel = np.zeros(n_samples, dtype=bool)
     
     # v11.1.6 FIX #3: Get calibrated threshold from model (set during training)
-    # Fall back to runtime computation if not cached
     distance_threshold = model.training_distance_threshold_
     if distance_threshold is None or not np.isfinite(distance_threshold):
-        # Runtime fallback: use 95th percentile of current distances as proxy
-        # This is less accurate than training-derived threshold but better than 1/k
-        distance_threshold = float("inf")  # Will be refined below
+        distance_threshold = float("inf")
     
-    # v11.1.0: Get labels and confidence based on model type
     if model.is_hdbscan:
         # HDBSCAN: Use approximate_predict for probabilistic confidence
         try:
             labels, strengths = hdbscan.approximate_predict(model.clustering_model, X_scaled)
-            labels = labels.astype(int, copy=False)
+            labels = labels.astype(int, copy=True)
             
             # v11.1.6 FIX #4: Apply label mapping if available
             labels = model.apply_label_map(labels)
@@ -1710,117 +1780,102 @@ def predict_regime_with_confidence(
             # Confidence = prediction strength (0-1)
             confidence = np.clip(strengths, 0.0, 1.0)
             
-            # v11.1.8: ENSEMBLE MODE - Use GMM fallback for low-strength predictions
-            # Instead of marking as UNKNOWN, assign using GMM
+            # v11.3.1: Identify novel points (low strength = sparse region)
             strength_threshold = float(unknown_cfg.get("hdbscan_strength_min", 0.1))
             low_strength_mask = strengths < strength_threshold
             
-            if np.any(low_strength_mask) and model.fallback_model_ is not None:
-                # Use GMM to assign low-strength points
-                labels = labels.copy()
-                gmm_labels = model.fallback_model_.predict(X_scaled[low_strength_mask])
-                gmm_proba = model.fallback_model_.predict_proba(X_scaled[low_strength_mask])
-                gmm_confidence = np.max(gmm_proba, axis=1)
+            # Also check distance threshold for novelty
+            if centers.size > 0 and distance_threshold < float("inf"):
+                # Compute distances to assigned centroids
+                # Handle invalid labels by clamping to valid range
+                valid_labels = np.clip(labels, 0, len(centers) - 1)
+                point_distances = np.linalg.norm(X_scaled - centers[valid_labels], axis=1)
+                distance_novel_mask = point_distances > distance_threshold
+                is_novel = low_strength_mask | distance_novel_mask
+            else:
+                is_novel = low_strength_mask.copy()
+            
+            # v11.3.1: Always assign - use GMM or nearest centroid for novel points
+            if np.any(is_novel):
+                if model.fallback_model_ is not None:
+                    # Use GMM for better assignment
+                    gmm_labels = model.fallback_model_.predict(X_scaled[is_novel])
+                    gmm_proba = model.fallback_model_.predict_proba(X_scaled[is_novel])
+                    gmm_confidence = np.max(gmm_proba, axis=1)
+                    
+                    labels[is_novel] = gmm_labels
+                    # Discount confidence for novel points (they're in sparse regions)
+                    confidence[is_novel] = gmm_confidence * 0.5
+                elif model.exemplars_ is not None and len(model.exemplars_) > 0:
+                    # Assign to nearest centroid
+                    centroid_labels = pairwise_distances_argmin(
+                        X_scaled[is_novel], model.exemplars_, axis=1
+                    )
+                    labels[is_novel] = centroid_labels
+                    # Low confidence for centroid fallback
+                    confidence[is_novel] = 0.3
                 
-                labels[low_strength_mask] = gmm_labels
-                confidence[low_strength_mask] = gmm_confidence * 0.8  # Discount GMM confidence slightly
-                
-                n_fallback = int(np.sum(low_strength_mask))
+                n_novel = int(np.sum(is_novel))
                 Console.info(
-                    f"ENSEMBLE: GMM assigned {n_fallback}/{len(labels)} low-strength points with avg conf={np.mean(gmm_confidence):.2f}",
+                    f"Identified {n_novel}/{n_samples} novel points (assigned to nearest cluster)",
                     component="REGIME"
                 )
-            elif unknown_enabled and np.any(low_strength_mask):
-                # No GMM fallback - mark as UNKNOWN (legacy behavior)
-                # Also check distance threshold
-                if centers.size > 0 and distance_threshold < float("inf"):
-                    point_distances = np.array([
-                        np.linalg.norm(X_scaled[i] - centers[labels[i]]) if 0 <= labels[i] < len(centers)
-                        else float("inf")
-                        for i in range(len(X_scaled))
-                    ])
-                    distance_unknown_mask = point_distances > distance_threshold
-                else:
-                    distance_unknown_mask = np.zeros(len(labels), dtype=bool)
-                
-                unknown_mask = distance_unknown_mask | low_strength_mask
-                
-                if np.any(unknown_mask):
-                    labels = labels.copy()
-                    labels[unknown_mask] = UNKNOWN_REGIME_LABEL
-                    Console.info(
-                        f"Marked {np.sum(unknown_mask)}/{len(labels)} points as UNKNOWN "
-                        f"(distance: {np.sum(distance_unknown_mask)}, strength: {np.sum(low_strength_mask)})",
-                        component="REGIME"
-                    )
-            return labels, confidence
+            
+            return labels, confidence, is_novel
+            
         except Exception as e:
             Console.warn(f"HDBSCAN confidence prediction failed: {e}", component="REGIME")
             # Fallback to centroid distance method OR GMM if available
             if model.fallback_model_ is not None:
-                # v11.1.8: Use GMM fallback
                 labels = model.fallback_model_.predict(X_scaled).astype(int, copy=False)
                 proba = model.fallback_model_.predict_proba(X_scaled)
-                confidence = np.max(proba, axis=1) * 0.8  # Discount
-                return labels, confidence
+                confidence = np.max(proba, axis=1) * 0.8
+                return labels, confidence, is_novel
             elif model.exemplars_ is not None and len(model.exemplars_) > 0:
                 labels = pairwise_distances_argmin(X_scaled, model.exemplars_, axis=1).astype(int, copy=False)
                 labels = model.apply_label_map(labels)
                 distances = np.linalg.norm(X_scaled - model.exemplars_[labels], axis=1)
                 
-                # Use calibrated threshold
                 if distance_threshold < float("inf"):
                     confidence = np.clip(1.0 - (distances / max(distance_threshold * 2, 1e-6)), 0.0, 1.0)
-                    unknown_mask = distances > distance_threshold
-                    if np.any(unknown_mask):
-                        labels = labels.copy()
-                        labels[unknown_mask] = UNKNOWN_REGIME_LABEL
+                    is_novel = distances > distance_threshold
                 else:
                     threshold = np.percentile(distances, 95) if len(distances) > 0 else 1.0
                     confidence = np.clip(1.0 - (distances / max(threshold, 1e-6)), 0.0, 1.0)
-                return labels, confidence
+                return labels, confidence, is_novel
             else:
-                return np.full(len(X_scaled), UNKNOWN_REGIME_LABEL, dtype=int), np.zeros(len(X_scaled))
+                # v11.3.1: Last resort - assign all to cluster 0
+                Console.warn("No clustering method available, assigning all to regime 0", component="REGIME")
+                return np.zeros(n_samples, dtype=int), np.full(n_samples, 0.1), np.ones(n_samples, dtype=bool)
     else:
         # GMM: Use predict_proba for probabilistic confidence
         labels = model.clustering_model.predict(X_scaled).astype(int, copy=False)
-        labels = model.apply_label_map(labels)  # v11.1.6 FIX #4
+        labels = model.apply_label_map(labels)
         proba = model.clustering_model.predict_proba(X_scaled)
-        # Confidence = max probability
         confidence = proba.max(axis=1)
         
-        # v11.1.6 FIX #3: Use CALIBRATED distance threshold instead of 1/k heuristic
-        if unknown_enabled and centers.size > 0:
-            # Compute actual distances to assigned centroids
-            point_distances = np.array([
-                np.linalg.norm(X_scaled[i] - centers[labels[i]]) if 0 <= labels[i] < len(centers)
-                else float("inf")
-                for i in range(len(X_scaled))
-            ])
+        # v11.3.1: Identify novel points based on distance threshold
+        if centers.size > 0:
+            valid_labels = np.clip(labels, 0, len(centers) - 1)
+            point_distances = np.linalg.norm(X_scaled - centers[valid_labels], axis=1)
             
-            # Primary criterion: distance outside training support
             if distance_threshold < float("inf"):
-                unknown_mask = point_distances > distance_threshold
+                is_novel = point_distances > distance_threshold
             else:
-                # Fallback: probability below uniform random (this is the old heuristic)
-                # Only used if training threshold not available
+                # Fallback: low probability indicates novel
                 prob_threshold = 1.0 / max(model.n_clusters, 1)
-                unknown_mask = confidence < prob_threshold * 1.5
-                Console.warn(
-                    "Using fallback 1/k probability threshold for UNKNOWN detection. "
-                    "For calibrated thresholds, ensure model.training_distance_threshold_ is set.",
+                is_novel = confidence < prob_threshold * 1.5
+            
+            # Discount confidence for novel points
+            confidence[is_novel] = confidence[is_novel] * 0.5
+            
+            if np.any(is_novel):
+                Console.info(
+                    f"Identified {np.sum(is_novel)}/{n_samples} novel points",
                     component="REGIME"
                 )
-            
-            if np.any(unknown_mask):
-                labels = labels.copy()
-                labels[unknown_mask] = UNKNOWN_REGIME_LABEL
-                Console.info(
-                    f"Marked {np.sum(unknown_mask)}/{len(labels)} points as UNKNOWN regime",
-                    component="REGIME", unknown_count=int(np.sum(unknown_mask))
-                )
     
-    return labels, confidence
+    return labels, confidence, is_novel
 
 
 def update_health_labels(
@@ -2944,7 +2999,7 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
             regime_model.train_hash = basis_hash
 
         # V11: Use confidence-aware prediction for score data
-        # Training data uses standard prediction (no UNKNOWN during training)
+        # Training data uses standard prediction (no novel detection during training)
         train_labels = predict_regime(regime_model, basis_train)
         
         # Compute training distances for establishing threshold
@@ -2957,8 +3012,9 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
             train_scaled - centers[train_labels], axis=1
         )
         
-        # Score data gets confidence-aware prediction (may assign UNKNOWN)
-        score_labels, score_confidence = predict_regime_with_confidence(
+        # v11.3.1: Score data gets confidence + novelty detection
+        # Returns 3-tuple: (labels, confidence, is_novel)
+        score_labels, score_confidence, score_is_novel = predict_regime_with_confidence(
             regime_model, basis_score, cfg, training_distances=train_distances
         )
         
@@ -2996,7 +3052,8 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
         out["regime_labels_train"] = train_labels
         out["regime_labels"] = score_labels
         out["regime_confidence"] = score_confidence  # V11: Assignment confidence
-        out["regime_unknown_count"] = int(np.sum(score_labels == UNKNOWN_REGIME_LABEL))  # V11
+        out["regime_is_novel"] = score_is_novel  # v11.3.1: Novelty flag
+        out["regime_novel_count"] = int(np.sum(score_is_novel))  # v11.3.1: Count of novel points
         derived_k = regime_model.meta.get("best_k")
         if derived_k is None:
             derived_k = regime_model.n_clusters  # v11.1.0: Property works for HDBSCAN/GMM
@@ -3020,6 +3077,7 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
         if frame is not None:
             frame["regime_label"] = score_labels
             frame["regime_confidence"] = score_confidence  # V11: Add confidence to frame
+            frame["regime_is_novel"] = score_is_novel  # v11.3.1: Add novelty flag
             out["frame"] = frame
         return out
 

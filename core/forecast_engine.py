@@ -1,5 +1,5 @@
 ﻿"""
-Forecast Engine Orchestrator (v10.0.0)
+Forecast Engine Orchestrator (v11.3.0)
 
 Unified forecasting and RUL estimation engine replacing duplicate logic from:
 - forecasting.py (2816-2943 lines)
@@ -10,7 +10,7 @@ Orchestrates the complete forecasting workflow:
 2. Load/restore persistent state with optimistic locking
 3. Load adaptive configuration (equipment-specific overrides)
 4. Check for auto-tuning trigger (data volume threshold)
-5. Fit degradation model (Holt's exponential smoothing)
+5. Fit degradation model (regime-conditioned Holt)
 6. Generate health forecast with uncertainty
 7. Estimate RUL via Monte Carlo simulation
 8. Compute failure probabilities and statistics
@@ -19,11 +19,12 @@ Orchestrates the complete forecasting workflow:
 11. Save all outputs to SQL via OutputManager
 12. Update persistent state
 
-v10.1.0 Enhancements:
+v11.3.0 Updates:
 - Regime-conditioned forecasting with per-regime degradation rates
 - OMR/drift context integration for forecast confidence adjustment
 - Per-regime RUL estimates and hazard rates
 - Unified ACM_ForecastContext table for complete diagnostic context
+ - Regime-conditioned degradation is now the default forecasting path
 
 References:
 - All module-specific references in respective files
@@ -31,20 +32,11 @@ References:
 
 Future R&D Entrypoints (M15):
 ---------------------------------
-TODO: FAULT_FAMILY_PREDICTION - Classify failure modes into fault families
-      - Table: ACM_FaultFamilies (FaultID, EquipID, FaultName, SensorSignature, DetectionMethod)
-      - Method: _predict_fault_family() using sensor attribution clusters
-      - Integration: Add FaultFamily column to ACM_RUL after sensor attribution step
       
-TODO: EPISODE_CLUSTERING - Group similar anomaly episodes for pattern mining
-      - Table: ACM_BehaviourDeviation (EpisodeID, ClusterID, ClusterLabel, SimilarityScore)
-      - Method: _cluster_episodes() using episode diagnostics features
-      - Integration: Post-process ACM_EpisodeDiagnostics after forecasting complete
-      
-TODO: MULTIVARIATE_DEGRADATION - Extend LinearTrendModel to vector autoregression
+TODO: MULTIVARIATE_DEGRADATION - Extend RegimeConditionedTrendModel to vector autoregression
       - Model: VARDegradationModel handling correlated sensor degradation
       - Method: _fit_var_model() for sensor-level multivariate forecasting
-      - Integration: Replace LinearTrendModel when multi-sensor data available
+    - Integration: Replace regime-conditioned trend when multi-sensor data available
       
 TODO: CAUSAL_ATTRIBUTION - Pearl-style counterfactual sensor importance
       - Method: _compute_counterfactual_rul() in SensorAttributor
@@ -59,11 +51,11 @@ import numpy as np
 import pandas as pd
 
 from core.health_tracker import HealthTimeline, HealthQuality, DataSummary
-from core.degradation_model import LinearTrendModel
-from core.failure_probability import compute_failure_statistics, health_to_failure_probability
+from core.degradation_model import RegimeConditionedTrendModel
+from core.failure_probability import compute_failure_statistics
 from core.rul_estimator import RULEstimator, RULEstimate
 from core.sensor_attribution import SensorAttributor
-from core.metrics import compute_comprehensive_metrics, log_metrics_summary, compute_forecast_diagnostics, log_forecast_diagnostics
+from core.metrics import compute_forecast_diagnostics, log_forecast_diagnostics
 from core.state_manager import StateManager, AdaptiveConfigManager, ForecastingState
 from core.output_manager import OutputManager
 from core.observability import Console, Span
@@ -76,11 +68,39 @@ from core.confidence import (
 # V11 CRITICAL-1: Only import MaturityState, NOT load_model_state_from_sql
 # Model state is passed from acm_main to avoid race conditions
 from core.model_lifecycle import MaturityState
+from typing import cast
 
 
 # ========================================================================
-# v10.1.0: Regime-Conditioned Forecasting Support
+# v11.3.0: Regime-Conditioned Forecasting Support
 # ========================================================================
+
+def _mann_kendall_trend_direction(
+    y: np.ndarray,
+    threshold_tau: float = 0.1,
+    alpha: float = 0.05,
+    positive_label: str = 'Increasing',
+    negative_label: str = 'Decreasing',
+    stable_label: str = 'Stable',
+    unknown_label: str = 'Unknown'
+) -> str:
+    """Detect monotonic trend using Mann-Kendall test with explicit labels."""
+    n = len(y)
+    if n < 8:
+        return unknown_label
+
+    try:
+        from scipy.stats import kendalltau
+        x = np.arange(n)
+        result = cast(Tuple[float, float], kendalltau(x, y))
+        tau = float(result[0])
+        p_value = float(result[1])
+
+        if p_value < alpha and abs(tau) > threshold_tau:
+            return positive_label if tau > 0 else negative_label
+        return stable_label
+    except Exception:
+        return unknown_label
 
 @dataclass
 class RegimeStats:
@@ -288,12 +308,84 @@ class ForecastEngine:
                     # TODO: Implement grid search tuning in future PR
                     # For now, use configured values
                 
-                # Step 5: Fit degradation model
-                degradation_model = self._fit_degradation_model(health_df, forecast_config, state)
+                # Step 5: Build regime context + fit degradation model
+                dt_hours_context = float(forecast_config.get('dt_hours', 1.0))
+                regime_series, regime_coverage, current_regime = self._load_regime_series_for_health(
+                    health_df, dt_hours_context, forecast_config
+                )
+                # Enforce regime eligibility policy (min samples, unknown handling)
+                eligible_labels: Optional[set] = None
+                if regime_series is not None:
+                    include_unknown = bool(forecast_config.get('forecast.regime_conditioned.include_unknown', False))
+                    min_samples_per_regime = int(forecast_config.get('forecast.regime_conditioned.min_samples_per_regime', 30))
+                    series_counts = regime_series.dropna().astype(int).value_counts()
+                    unknown_count = int(series_counts.get(-1, 0)) if len(series_counts) > 0 else 0
+                    if not include_unknown and -1 in series_counts.index:
+                        series_counts = series_counts.drop(index=-1)
+                    eligible_labels = set(series_counts[series_counts >= min_samples_per_regime].index.tolist())
+
+                    if unknown_count > 0 and (not include_unknown or unknown_count < min_samples_per_regime):
+                        Console.info(
+                            "Unknown regime excluded from transitions due to policy",
+                            component="FORECAST",
+                            equip_id=self.equip_id,
+                            unknown_count=unknown_count,
+                            min_samples_per_regime=min_samples_per_regime,
+                            include_unknown=include_unknown
+                        )
+
+                    if eligible_labels is not None and len(eligible_labels) == 0:
+                        Console.warn(
+                            "No eligible regimes for transition modeling; falling back to global RUL",
+                            component="FORECAST",
+                            equip_id=self.equip_id,
+                            min_samples_per_regime=min_samples_per_regime
+                        )
+                        eligible_labels = None
+
+                transition_context = self._build_regime_transition_context(
+                    regime_series,
+                    forecast_config,
+                    eligible_labels=eligible_labels
+                )
+
+                degradation_model = self._fit_degradation_model(
+                    health_df, forecast_config, state, regime_series=regime_series
+                )
+                degradation_model.set_current_regime(current_regime)
+
+                regime_rates_by_label = degradation_model.get_regime_degradation_rates()
+                label_to_index = transition_context.get('label_to_index', {})
+                rates_by_index: Optional[Dict[int, float]] = {}
+                for label, idx in label_to_index.items():
+                    if label in regime_rates_by_label:
+                        rates_by_index[idx] = float(regime_rates_by_label[label])
+
+                current_regime_index = label_to_index.get(current_regime, None)
+                transition_matrix = transition_context.get('transition_matrix')
+                if current_regime_index is None:
+                    transition_matrix = None
+                    rates_by_index = None
+                    if current_regime is not None:
+                        Console.warn(
+                            "Current regime not eligible for transition modeling; using global RUL",
+                            component="FORECAST",
+                            equip_id=self.equip_id,
+                            current_regime=current_regime
+                        )
+
+                regime_context = {
+                    'regime_series': regime_series,
+                    'regime_coverage': regime_coverage,
+                    'current_regime': current_regime,
+                    'current_regime_index': current_regime_index,
+                    'transition_matrix': transition_matrix,
+                    'regime_rates_by_index': rates_by_index,
+                }
                 
                 # Step 6: Generate forecast and estimate RUL
                 forecast_results = self._generate_forecast_and_rul(
-                    health_df, degradation_model, forecast_config
+                    health_df, degradation_model, forecast_config, regime_context=regime_context
                 )
                 
                 # Step 6b: Compute forecast diagnostics (M9)
@@ -316,22 +408,19 @@ class ForecastEngine:
                     forecast_results, sensor_attributions, diagnostics, data_summary
                 )
                 
-                # Step 9b (v10.1.0): Regime-conditioned forecasting
-                # Only run if regime data is available and feature is enabled
-                enable_regime_forecasting = bool(forecast_config.get('enable_regime_conditioned', True))
-                if enable_regime_forecasting:
-                    try:
-                        regime_tables = self._run_regime_conditioned_forecasting(
-                            health_df=health_df,
-                            degradation_model=degradation_model,
-                            forecast_config=forecast_config,
-                            forecast_results=forecast_results
-                        )
-                        tables_written.extend(regime_tables)
-                    except Exception as e:
-                        # Non-fatal: regime forecasting is optional enhancement
-                        Console.warn(f"Regime-conditioned forecasting skipped: {e}",
-                                     component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
+                # Step 9b (v11.3.0): Regime-conditioned forecasting outputs
+                try:
+                    regime_tables = self._run_regime_conditioned_forecasting(
+                        health_df=health_df,
+                        degradation_model=degradation_model,
+                        forecast_config=forecast_config,
+                        forecast_results=forecast_results
+                    )
+                    tables_written.extend(regime_tables)
+                except Exception as e:
+                    # Non-fatal: regime-conditioned outputs are supplementary
+                    Console.warn(f"Regime-conditioned forecasting skipped: {e}",
+                                 component="FORECAST", equip_id=self.equip_id, run_id=self.run_id)
                 
                 # Step 10: Update state with diagnostics (M9)
                 state.model_coefficients_json = degradation_model.get_parameters()
@@ -429,6 +518,18 @@ class ForecastEngine:
             config['forecast_horizon_hours'] = 168.0
         if 'forecast_resolution_hours' not in config:
             config['forecast_resolution_hours'] = None  # Will use dt_hours from data
+
+        # Regime-conditioned forecasting guardrails (defaults)
+        if 'forecast.regime_conditioned.min_samples_per_regime' not in config:
+            config['forecast.regime_conditioned.min_samples_per_regime'] = 30
+        if 'forecast.regime_conditioned.min_regime_coverage' not in config:
+            config['forecast.regime_conditioned.min_regime_coverage'] = 0.80
+        if 'forecast.regime_conditioned.include_unknown' not in config:
+            config['forecast.regime_conditioned.include_unknown'] = False
+        if 'forecast.regime_conditioned.max_transition_states' not in config:
+            config['forecast.regime_conditioned.max_transition_states'] = 12
+        if 'forecast.regime_conditioned.max_regime_gap_hours' not in config:
+            config['forecast.regime_conditioned.max_regime_gap_hours'] = 0.0
         
         # Alias for backward compatibility
         config['max_forecast_hours'] = config.get('max_forecast_hours', config['forecast_horizon_hours'])
@@ -442,29 +543,181 @@ class ForecastEngine:
         )
         
         return config
+
+    def _load_regime_series_for_health(
+        self,
+        health_df: pd.DataFrame,
+        dt_hours: float,
+        forecast_config: Dict[str, Any]
+    ) -> Tuple[Optional[pd.Series], float, Optional[int]]:
+        """Load and align regime labels to the health timeline."""
+        if health_df is None or len(health_df) == 0:
+            return None, 0.0, None
+
+        try:
+            start_ts = pd.to_datetime(health_df['Timestamp'].min())
+            end_ts = pd.to_datetime(health_df['Timestamp'].max())
+
+            query = """
+                SELECT Timestamp, RegimeLabel
+                FROM ACM_RegimeTimeline
+                WHERE EquipID = ? AND Timestamp BETWEEN ? AND ?
+                ORDER BY Timestamp ASC
+            """
+
+            with self.sql_client.get_cursor() as cur:
+                cur.execute(query, (self.equip_id, start_ts, end_ts))
+                rows = cur.fetchall()
+
+            if not rows:
+                return None, 0.0, None
+
+            regime_df = pd.DataFrame(rows, columns=['Timestamp', 'RegimeLabel'])
+            regime_df['Timestamp'] = pd.to_datetime(regime_df['Timestamp'])
+            regime_df = regime_df.sort_values('Timestamp')
+
+            health_times = pd.DataFrame({'Timestamp': pd.to_datetime(health_df['Timestamp'])})
+            max_regime_gap = float(forecast_config.get('forecast.regime_conditioned.max_regime_gap_hours', 0.0))
+            tolerance_hours = max(2.0 * float(dt_hours), 0.0)
+            if max_regime_gap > 0:
+                tolerance_hours = min(tolerance_hours, max_regime_gap)
+            tolerance = pd.Timedelta(hours=tolerance_hours)
+
+            aligned = pd.merge_asof(
+                health_times.sort_values('Timestamp'),
+                regime_df,
+                on='Timestamp',
+                direction='backward',
+                tolerance=tolerance
+            )
+
+            regime_series = aligned['RegimeLabel']
+            coverage = float(regime_series.notna().mean()) if len(regime_series) > 0 else 0.0
+            current_regime = None
+            if regime_series.notna().any():
+                current_regime = int(regime_series.dropna().iloc[-1])
+
+            min_coverage = float(forecast_config.get('forecast.regime_conditioned.min_regime_coverage', 0.80))
+            if coverage < min_coverage:
+                Console.warn(
+                    "Regime coverage below threshold; using global degradation model",
+                    component="FORECAST",
+                    equip_id=self.equip_id,
+                    coverage=coverage,
+                    min_coverage=min_coverage
+                )
+                return None, coverage, current_regime
+
+            return regime_series, coverage, current_regime
+        except Exception as e:
+            Console.warn(f"Failed to align regime series: {e}",
+                         component="FORECAST", equip_id=self.equip_id)
+            return None, 0.0, None
+
+    def _build_regime_transition_context(
+        self,
+        regime_series: Optional[pd.Series],
+        forecast_config: Dict[str, Any],
+        eligible_labels: Optional[set] = None
+    ) -> Dict[str, Any]:
+        """Build transition matrix and label mapping for regime-aware forecasting."""
+        context: Dict[str, Any] = {
+            'transition_matrix': None,
+            'label_to_index': {},
+            'index_to_label': {},
+            'transition_sequence': None,
+        }
+
+        if regime_series is None or len(regime_series) == 0:
+            return context
+
+        include_unknown = bool(forecast_config.get('forecast.regime_conditioned.include_unknown', False))
+        max_states = int(forecast_config.get('forecast.regime_conditioned.max_transition_states', 12))
+
+        series = regime_series.dropna().astype(int)
+        if not include_unknown:
+            series = series[series != -1]
+
+        if eligible_labels is not None:
+            series = series[series.isin(eligible_labels)]
+
+        if series.empty:
+            return context
+
+        # Limit number of states by frequency
+        if series.nunique() > max_states:
+            top_labels = series.value_counts().head(max_states).index.tolist()
+            series = series[series.isin(top_labels)]
+
+        labels = sorted(series.unique().tolist())
+        label_to_index = {label: idx for idx, label in enumerate(labels)}
+        index_to_label = {idx: label for label, idx in label_to_index.items()}
+        sequence = series.map(label_to_index).values.astype(int)
+
+        # Build transition counts with Laplace smoothing (add 1 per state)
+        n_states = len(labels)
+        transition_counts = np.ones((n_states, n_states), dtype=float)
+        for i in range(len(sequence) - 1):
+            from_state = sequence[i]
+            to_state = sequence[i + 1]
+            if 0 <= from_state < n_states and 0 <= to_state < n_states:
+                transition_counts[from_state, to_state] += 1.0
+
+        row_sums = transition_counts.sum(axis=1, keepdims=True)
+        transition_matrix = transition_counts / row_sums
+
+        context.update({
+            'transition_matrix': transition_matrix,
+            'label_to_index': label_to_index,
+            'index_to_label': index_to_label,
+            'transition_sequence': sequence
+        })
+
+        return context
     
     def _fit_degradation_model(
         self,
         health_df: pd.DataFrame,
         forecast_config: Dict[str, Any],
-        state: ForecastingState
-    ) -> LinearTrendModel:
+        state: ForecastingState,
+        regime_series: Optional[pd.Series] = None
+    ) -> RegimeConditionedTrendModel:
         """Fit degradation model with warm-start from previous state"""
         with Span("forecast.fit_degradation", n_samples=len(health_df)):
             # Create model with adaptive config
-            model = LinearTrendModel(
+            model = RegimeConditionedTrendModel(
                 alpha=float(forecast_config.get('alpha', 0.3)),
                 beta=float(forecast_config.get('beta', 0.1)),
                 max_trend_per_hour=float(forecast_config.get('max_trend_per_hour', 5.0)),
-                enable_adaptive=bool(forecast_config.get('enable_adaptive_smoothing', True))
+                enable_adaptive=bool(forecast_config.get('enable_adaptive_smoothing', True)),
+                min_samples_for_adaptive=int(forecast_config.get('min_samples_for_adaptive', 30)),
+                min_samples_per_regime=int(forecast_config.get('forecast.regime_conditioned.min_samples_per_regime', 30)),
+                include_unknown=bool(forecast_config.get('forecast.regime_conditioned.include_unknown', False))
             )
             
             # Warm-start from previous state if available
+            # Guard: only warm-start if cached regime set matches current regime set
             if state.model_coefficients_json:
                 try:
-                    model.set_parameters(state.model_coefficients_json)
-                    Console.info("Warm-started degradation model from previous state",
-                                 component="FORECAST", equip_id=self.equip_id)
+                    cached_params = state.model_coefficients_json
+                    cached_regimes = set()
+                    if isinstance(cached_params, dict) and 'regimes' in cached_params:
+                        cached_regimes = set(int(k) for k in cached_params['regimes'].keys())
+                    current_regimes = set()
+                    if regime_series is not None:
+                        current_regimes = set(regime_series.dropna().astype(int).unique().tolist())
+                    if cached_regimes and current_regimes and cached_regimes != current_regimes:
+                        Console.warn(
+                            "Skipping warm-start: regime set changed since last run",
+                            component="FORECAST",
+                            equip_id=self.equip_id,
+                            cached_regimes=sorted(cached_regimes),
+                            current_regimes=sorted(current_regimes)
+                        )
+                    else:
+                        model.set_parameters(cached_params)
+                        Console.info("Warm-started degradation model from previous state",
+                                     component="FORECAST", equip_id=self.equip_id)
                 except Exception as e:
                     Console.warn(f"Failed to warm-start model: {e}",
                                  component="FORECAST", equip_id=self.equip_id, error=str(e))
@@ -476,15 +729,16 @@ class ForecastEngine:
             )
             
             # Fit model
-            model.fit(health_series)
+            model.fit(health_series, regime_series=regime_series)
             
             return model
     
     def _generate_forecast_and_rul(
         self,
         health_df: pd.DataFrame,
-        degradation_model: LinearTrendModel,
-        forecast_config: Dict[str, Any]
+        degradation_model: RegimeConditionedTrendModel,
+        forecast_config: Dict[str, Any],
+        regime_context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Generate health forecast and RUL estimate"""
         # Extract config values
@@ -492,7 +746,7 @@ class ForecastEngine:
         confidence_level = float(forecast_config.get('confidence_min', 0.80))
         n_simulations = int(forecast_config.get('monte_carlo_simulations', 1000))
         
-        # ADAPTIVE FORECAST HORIZON (v10.1.0, Issue #11)
+        # ADAPTIVE FORECAST HORIZON (v11.3.0)
         # Set horizon = max(7 days, 3 * estimated_RUL) to forecast into the "interesting" region
         # Fast-degrading equipment needs shorter horizons, slow degradation needs longer
         base_horizon_hours = float(forecast_config.get('forecast_horizon_hours', 168.0))
@@ -538,7 +792,7 @@ class ForecastEngine:
             dt_hours=dt_hours
         )
         
-        # Estimate RUL via Monte Carlo
+        # Estimate RUL via Monte Carlo (regime-aware)
         current_health = float(health_df['HealthIndex'].iloc[-1])
         
         with Span("forecast.estimate_rul", current_health=int(current_health), n_simulations=n_simulations):
@@ -548,11 +802,22 @@ class ForecastEngine:
                 n_simulations=n_simulations,
                 confidence_level=confidence_level
             )
-            
+
+            transition_matrix = None
+            regime_rates_by_index = None
+            current_regime_index = None
+            if regime_context is not None:
+                transition_matrix = regime_context.get('transition_matrix')
+                regime_rates_by_index = regime_context.get('regime_rates_by_index')
+                current_regime_index = regime_context.get('current_regime_index')
+
             rul_estimate = rul_estimator.estimate_rul(
                 current_health=current_health,
                 dt_hours=dt_hours,
-                max_horizon_hours=max_forecast_hours
+                max_horizon_hours=max_forecast_hours,
+                regime_transition_matrix=transition_matrix,
+                regime_degradation_rates=regime_rates_by_index,
+                current_regime=current_regime_index
             )
         
         # Note: Sensor attributions are loaded separately in run_forecast() via _load_sensor_attributions()
@@ -575,7 +840,9 @@ class ForecastEngine:
             'rul_std': rul_estimate.std_rul,
             'failure_prob_horizon': rul_estimate.failure_probability,
             'failure_threshold': failure_threshold,  # v11.1.5: Add for ACM_FailureForecast.ThresholdUsed
-            'forecast_method': 'HoltWinters'  # v11.1.5: Add for ACM_FailureForecast.Method
+            'forecast_method': 'RegimeConditionedHolt',  # v11.1.5: Add for ACM_FailureForecast.Method
+            'model_trend': degradation_model.trend,  # v11.3.0: Fitted trend per dt_hours
+            'model_dt_hours': degradation_model.dt_hours  # v11.3.0: Model time step
         }
     
     def _get_model_maturity_state(self) -> Tuple[str, int, float]:
@@ -722,7 +989,7 @@ class ForecastEngine:
                 'CiLower': forecast_lower,          # SQL column name (not LowerBound)
                 'CiUpper': forecast_upper,          # SQL column name (not UpperBound)
                 'ForecastStd': forecast_std,
-                'Method': 'ExponentialSmoothing',
+                'Method': 'RegimeConditionedHolt',
                 'CreatedAt': datetime.now()
             })
             
@@ -743,7 +1010,7 @@ class ForecastEngine:
                 'SurvivalProb': survival_probs,
                 'HazardRate': hazard_rates,
                 'ThresholdUsed': forecast_results.get('failure_threshold', 70.0),  # v11.1.5: Required NOT NULL column
-                'Method': forecast_results.get('forecast_method', 'HoltWinters'),  # v11.1.5: Required NOT NULL column
+                'Method': forecast_results.get('forecast_method', 'RegimeConditionedHolt'),  # v11.1.5: Required NOT NULL column
                 'CreatedAt': datetime.now()
             })
             
@@ -795,19 +1062,16 @@ class ForecastEngine:
             else:
                 health_level = 'CRITICAL'
             
-            # TrendSlope: Derived from forecast values (health units per hour)
-            forecast_values_arr = forecast_results.get('forecast_values', [])
-            if len(forecast_values_arr) >= 2:
-                # Simple linear slope from first to last forecast point
-                delta_health = forecast_values_arr[-1] - forecast_values_arr[0]
-                n_steps = len(forecast_values_arr)
-                # Estimate hours based on validated timestamps
-                if len(validated_timestamps) >= 2:
-                    delta_time = (validated_timestamps[-1] - validated_timestamps[0]).total_seconds() / 3600
-                    trend_slope = delta_health / max(delta_time, 1.0) if delta_time > 0 else 0.0
-                else:
-                    trend_slope = 0.0
-            else:
+            # TrendSlope: Use fitted model trend directly (health units per dt_hours)
+            # Avoid simple delta which diverges from model fit
+            trend_slope = 0.0
+            try:
+                # model_trend is per dt_hours; convert to per-hour
+                model_trend = forecast_results.get('model_trend', 0.0)
+                model_dt = forecast_results.get('model_dt_hours', 1.0)
+                if model_dt and model_dt > 0:
+                    trend_slope = float(model_trend) / float(model_dt)
+            except Exception:
                 trend_slope = 0.0
             
             # DataQuality: From diagnostics or data_summary
@@ -881,7 +1145,7 @@ class ForecastEngine:
                 Console.info(f"Wrote sensor forecasts for {len(sensor_attributions)} sensors",
                              component="FORECAST", equip_id=self.equip_id, sensors=len(sensor_attributions))
             
-            # v10.1.0: Multivariate forecasting with VAR model
+            # v11.3.0: Multivariate forecasting with VAR model
             # Only run if sensor data exists (same table as _generate_sensor_forecasts)
             enable_multivariate = self.config_mgr.get_config(
                 self.equip_id, 'forecasting.multivariate.enabled', True
@@ -940,12 +1204,12 @@ class ForecastEngine:
     def _run_regime_conditioned_forecasting(
         self,
         health_df: pd.DataFrame,
-        degradation_model: LinearTrendModel,
+        degradation_model: RegimeConditionedTrendModel,
         forecast_config: Dict[str, Any],
         forecast_results: Dict[str, Any]
     ) -> List[str]:
         """
-        Run regime-conditioned forecasting extension (v10.1.0).
+        Run regime-conditioned forecasting extension (v11.3.0).
         
         This method:
         1. Creates RegimeConditionedForecaster instance
@@ -1087,9 +1351,15 @@ class ForecastEngine:
             
             from scipy import stats
             
-            # Only forecast top N sensors to keep table size manageable
+            # Only forecast top N sensors by contribution to keep table size manageable
+            # Sort by failure_contribution descending to ensure we forecast the most relevant sensors
             max_sensors = min(10, len(sensor_attributions))
-            top_sensors = sensor_attributions[:max_sensors]
+            sorted_attributions = sorted(
+                sensor_attributions,
+                key=lambda x: getattr(x, 'failure_contribution', 0.0) or 0.0,
+                reverse=True
+            )
+            top_sensors = sorted_attributions[:max_sensors]
             
             if not top_sensors:
                 Console.warn("No sensor attributions available for forecasting",
@@ -1252,17 +1522,23 @@ class ForecastEngine:
                         forecast_times = [series.index[-1] + timedelta(hours=dt_hours * (i + 1)) for i in range(n_steps)]
                         forecast = pd.Series(forecast_values, index=forecast_times)
                     
-                    # 95% confidence interval
+                    # 95% confidence interval with uncertainty growth (v11.3.0)
+                    # Forecast uncertainty grows with horizon per Holt's formula:
+                    # σ(h) = σ_residual * sqrt(1 + h * α²)
+                    # Using α = 0.3 (smoothing level)
                     z_score = 1.96
-                    forecast_lower = forecast - (z_score * residual_std)
-                    forecast_upper = forecast + (z_score * residual_std)
+                    alpha_sq = 0.09  # 0.3^2
+                    step_indices = np.arange(1, n_steps + 1)
+                    growth_factors = np.sqrt(1.0 + step_indices * alpha_sq)
+                    forecast_lower = forecast - (z_score * residual_std * growth_factors)
+                    forecast_upper = forecast + (z_score * residual_std * growth_factors)
                     
-                    # Detect trend direction using Mann-Kendall test (v10.1.0)
+                    # Detect trend direction using Mann-Kendall test (v11.3.0)
                     # Mann-Kendall is robust to outliers and doesn't assume linearity
                     # Reference: Mann (1945), Kendall (1975)
                     recent_window = series.tail(168)  # Last week
                     if len(recent_window) >= 24:
-                        trend_direction = self._mann_kendall_trend(recent_window.values)
+                        trend_direction = _mann_kendall_trend_direction(recent_window.values)
                     else:
                         trend_direction = 'Unknown'
                     
@@ -1330,59 +1606,8 @@ class ForecastEngine:
                           error_type=type(e).__name__, error_msg=str(e)[:500])
             return None
 
-    def _mann_kendall_trend(
-        self,
-        y: np.ndarray,
-        threshold_tau: float = 0.1,
-        alpha: float = 0.05
-    ) -> str:
-        """
-        Detect monotonic trend using Mann-Kendall test.
-        
-        Mann-Kendall is non-parametric and robust to:
-        - Non-normal distributions
-        - Outliers  
-        - Missing values
-        - Serial correlation (with variance correction)
-        
-        The test computes Kendall's tau correlation between data and time.
-        
-        Reference:
-        - Mann (1945): Nonparametric tests against trend
-        - Kendall (1975): Rank Correlation Methods
-        
-        Args:
-            y: Time series values (chronological order)
-            threshold_tau: Minimum |tau| for practical significance (default 0.1)
-            alpha: Significance level (default 0.05)
-        
-        Returns:
-            'Increasing', 'Decreasing', 'Stable', or 'Unknown'
-        """
-        n = len(y)
-        if n < 8:
-            return 'Unknown'
-        
-        try:
-            from scipy.stats import kendalltau
-            
-            x = np.arange(n)
-            result = kendalltau(x, y)
-            tau = float(result.statistic) if hasattr(result, 'statistic') else float(result[0])
-            p_value = float(result.pvalue) if hasattr(result, 'pvalue') else float(result[1])
-            
-            # Check both statistical AND practical significance
-            if p_value < alpha and abs(tau) > threshold_tau:
-                return 'Increasing' if tau > 0 else 'Decreasing'
-            else:
-                return 'Stable'
-                
-        except Exception:
-            return 'Unknown'
-
-
 # ========================================================================
-# v10.1.0: Regime-Conditioned Forecasting Extension
+# v11.3.0: Regime-Conditioned Forecasting Extension
 # ========================================================================
 
 class RegimeConditionedForecaster:
@@ -1501,18 +1726,26 @@ class RegimeConditionedForecaster:
             return self._regime_stats
         
         try:
-            # Query historical health + regime data
+            # Query historical health + regime data with tolerance-based matching
+            # Use OUTER APPLY with time window to handle timestamp offsets between tables
             query = """
                 SELECT 
-                    rt.RegimeLabel,
+                    regime.RegimeLabel,
                     ht.Timestamp,
                     ht.HealthIndex,
                     ht.FusedZ
                 FROM ACM_HealthTimeline ht
-                JOIN ACM_RegimeTimeline rt 
-                    ON ht.EquipID = rt.EquipID AND ht.Timestamp = rt.Timestamp
+                OUTER APPLY (
+                    SELECT TOP 1 rt.RegimeLabel
+                    FROM ACM_RegimeTimeline rt
+                    WHERE rt.EquipID = ht.EquipID
+                      AND rt.Timestamp BETWEEN DATEADD(minute, -30, ht.Timestamp) 
+                                           AND DATEADD(minute, 30, ht.Timestamp)
+                    ORDER BY ABS(DATEDIFF(second, rt.Timestamp, ht.Timestamp))
+                ) regime
                 WHERE ht.EquipID = ?
                   AND ht.Timestamp >= DATEADD(day, -?, GETDATE())
+                  AND regime.RegimeLabel IS NOT NULL
                 ORDER BY ht.Timestamp ASC
             """
             
@@ -1541,7 +1774,7 @@ class RegimeConditionedForecaster:
                     continue
                 
                 # Compute degradation rate using Theil-Sen robust regression with bootstrap CI
-                # This replaces the naive median-of-rates which amplifies noise (v10.1.0)
+                # This replaces the naive median-of-rates which amplifies noise (v11.3.0)
                 regime_df = regime_df.sort_values('Timestamp')
                 health_values = regime_df['HealthIndex'].values
                 
@@ -1591,7 +1824,7 @@ class RegimeConditionedForecaster:
                 else:
                     health_state = 'healthy'
                 
-                # Regime-adjusted failure threshold using Weibull survival model (v10.1.0)
+                # Regime-adjusted failure threshold using Weibull survival model (v11.3.0)
                 # Instead of ad-hoc 5/10 point adjustments, compute threshold that gives
                 # equivalent risk across regimes based on degradation rate and uncertainty
                 # Reference: ISO 13381-1:2015 - Prognostics risk-based thresholds
@@ -1646,7 +1879,7 @@ class RegimeConditionedForecaster:
     def estimate_rul_by_regime(
         self,
         current_health: float,
-        degradation_model: LinearTrendModel,
+        degradation_model: RegimeConditionedTrendModel,
         current_regime: Optional[int] = None,
         forecast_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -1698,14 +1931,15 @@ class RegimeConditionedForecaster:
         # Per-regime RUL estimates
         rul_by_regime = {}
         for regime_label, stats in regime_stats.items():
-            # Create regime-adjusted estimator with empirical noise (v10.1.0)
+            # Create regime-adjusted estimator with empirical noise (v11.3.0)
             # Use R-squared from bootstrap fit - low R^2 = high noise
             # This replaces arbitrary noise_factor=1+rate*10
             noise_from_fit = 1.0 + (1.0 - stats.degradation_r_squared) * 3.0  # Scale by fit quality
+            regime_n_sims = max(500, n_simulations // 2)  # Minimum 500 for Monte Carlo precision
             regime_estimator = RULEstimator(
                 degradation_model=degradation_model,
                 failure_threshold=stats.failure_threshold,
-                n_simulations=n_simulations // 2,  # Fewer sims per regime for speed
+                n_simulations=regime_n_sims,
                 confidence_level=confidence_level,
                 noise_factor=noise_from_fit  # Empirical noise from fit quality
             )
@@ -1732,7 +1966,7 @@ class RegimeConditionedForecaster:
         rul_conditioned = rul_global  # Default to global
         if current_regime is not None and current_regime in regime_stats:
             stats = regime_stats[current_regime]
-            # Use empirical noise from fit quality (v10.1.0)
+            # Use empirical noise from fit quality (v11.3.0)
             noise_from_fit = 1.0 + (1.0 - stats.degradation_r_squared) * 2.0
             conditioned_estimator = RULEstimator(
                 degradation_model=degradation_model,
@@ -1748,12 +1982,15 @@ class RegimeConditionedForecaster:
             )
         
         # Compute regime hazards for time series output
+        context = self.load_forecast_context()
         regime_hazards = self._compute_regime_hazards(
             current_health=current_health,
             degradation_model=degradation_model,
             regime_stats=regime_stats,
             max_horizon=max_horizon,
-            dt_hours=dt_hours
+            dt_hours=dt_hours,
+            current_drift_z=context.current_drift_z,
+            current_omr_z=context.current_omr_z
         )
         
         return {
@@ -1761,7 +1998,8 @@ class RegimeConditionedForecaster:
             'rul_by_regime': rul_by_regime,
             'rul_conditioned': rul_conditioned,
             'regime_hazards': regime_hazards,
-            'current_regime': current_regime
+            'current_regime': current_regime,
+            'current_health': current_health
         }
     
     def write_regime_conditioned_outputs(
@@ -1785,20 +2023,41 @@ class RegimeConditionedForecaster:
             # ACM_RUL_ByRegime
             rul_by_regime = rul_results.get('rul_by_regime', {})
             if rul_by_regime:
+                now_ts = datetime.now()
                 df_rul = pd.DataFrame([
-                    {'RegimeLabel': regime, **stats}
+                    {
+                        'EquipID': self.equip_id,
+                        'RunID': self.run_id,
+                        'RegimeLabel': regime,
+                        **stats,
+                        'CreatedAt': now_ts
+                    }
                     for regime, stats in rul_by_regime.items()
                 ])
-                self.output_manager.write_rul_by_regime(
-                    self.equip_id, self.run_id, df_rul
+                self.output_manager.write_dataframe(
+                    df_rul,
+                    artifact_name='acm_rul_by_regime',
+                    sql_table='ACM_RUL_ByRegime',
+                    add_created_at=False
                 )
                 tables_written.append('ACM_RUL_ByRegime')
             
             # ACM_RegimeHazard
             regime_hazards = rul_results.get('regime_hazards')
             if regime_hazards is not None and not regime_hazards.empty:
-                self.output_manager.write_regime_hazard(
-                    self.equip_id, self.run_id, regime_hazards
+                hazards_df = regime_hazards.copy()
+                hazards_df['EquipID'] = self.equip_id
+                hazards_df['RunID'] = self.run_id
+                if 'DriftAtTime' not in hazards_df.columns:
+                    hazards_df['DriftAtTime'] = None
+                if 'OMR_Z_AtTime' not in hazards_df.columns:
+                    hazards_df['OMR_Z_AtTime'] = None
+                hazards_df['CreatedAt'] = datetime.now()
+                self.output_manager.write_dataframe(
+                    hazards_df,
+                    artifact_name='acm_regime_hazard',
+                    sql_table='ACM_RegimeHazard',
+                    add_created_at=False
                 )
                 tables_written.append('ACM_RegimeHazard')
             
@@ -1807,9 +2066,11 @@ class RegimeConditionedForecaster:
                 forecast_context = self.load_forecast_context()
             
             context_df = pd.DataFrame([{
+                'EquipID': self.equip_id,
+                'RunID': self.run_id,
                 'Timestamp': datetime.now(),
                 'ForecastHorizon_Hours': float(self.config.get('max_forecast_hours', 720.0)),
-                'CurrentHealth': rul_results['rul_conditioned'].p50_median if hasattr(rul_results.get('rul_conditioned'), 'p50_median') else 0.0,
+                'CurrentHealth': float(rul_results.get('current_health', 0.0)),
                 'CurrentRegime': forecast_context.current_regime,
                 'RegimeConfidence': forecast_context.regime_confidence,
                 'CurrentOMR_Z': forecast_context.current_omr_z,
@@ -1822,11 +2083,15 @@ class RegimeConditionedForecaster:
                 'ModelConfidence': forecast_context.regime_confidence,
                 'ActiveDefects': forecast_context.active_defects,
                 'TopContributor': forecast_context.omr_top_contributors[0]['sensor'] if forecast_context.omr_top_contributors else None,
-                'Notes': forecast_context.retraining_reason
+                'Notes': forecast_context.retraining_reason,
+                'CreatedAt': datetime.now()
             }])
-            
-            self.output_manager.write_forecast_context(
-                self.equip_id, self.run_id, context_df
+
+            self.output_manager.write_dataframe(
+                context_df,
+                artifact_name='acm_forecast_context',
+                sql_table='ACM_ForecastContext',
+                add_created_at=False
             )
             tables_written.append('ACM_ForecastContext')
             
@@ -1939,34 +2204,19 @@ class RegimeConditionedForecaster:
             if len(rows) < 10:
                 return 'unknown'
             
-            # Use Mann-Kendall test for trend detection (v10.1.0)
+            # Use Mann-Kendall test for trend detection (v11.3.0)
             y = np.array([r[0] for r in rows])
-            return self._mann_kendall_trend(y, threshold_tau=0.1)
+            return _mann_kendall_trend_direction(
+                y,
+                threshold_tau=0.1,
+                positive_label='improving',
+                negative_label='degrading',
+                stable_label='Stable',
+                unknown_label='Unknown'
+            )
                 
         except Exception:
             return 'unknown'
-    
-    def _mann_kendall_trend(
-        self,
-        y: np.ndarray,
-        threshold_tau: float = 0.1,
-        alpha: float = 0.05
-    ) -> str:
-        """Detect monotonic trend using Mann-Kendall test (see ForecastEngine for full docs)."""
-        n = len(y)
-        if n < 8:
-            return 'Unknown'
-        try:
-            from scipy.stats import kendalltau
-            x = np.arange(n)
-            result = kendalltau(x, y)
-            tau = float(result.statistic) if hasattr(result, 'statistic') else float(result[0])
-            p_value = float(result.pvalue) if hasattr(result, 'pvalue') else float(result[1])
-            if p_value < alpha and abs(tau) > threshold_tau:
-                return 'improving' if tau > 0 else 'degrading'
-            return 'Stable'
-        except Exception:
-            return 'Unknown'
     
     def _count_active_defects(self) -> int:
         """Count active sensor defects."""
@@ -1990,10 +2240,15 @@ class RegimeConditionedForecaster:
         """Check if model retraining is recommended based on drift indicators."""
         reasons = []
         
+        # Load thresholds from config with sensible defaults
+        # Allows equipment-specific calibration via ACM_AdaptiveConfig
+        drift_z_threshold = float(self.config.get('retraining.drift_z_threshold', 3.0))
+        omr_z_threshold = float(self.config.get('retraining.omr_z_threshold', 4.0))
+        
         # High drift suggests distribution shift
         drift_z = omr_drift.get('drift_z')
-        if drift_z is not None and drift_z > 3.0:
-            reasons.append(f"High drift detected (Z={drift_z:.2f})")
+        if drift_z is not None and drift_z > drift_z_threshold:
+            reasons.append(f"High drift detected (Z={drift_z:.2f} > {drift_z_threshold})")
         
         # Increasing drift trend
         if omr_drift.get('drift_trend') == 'increasing':
@@ -2001,23 +2256,26 @@ class RegimeConditionedForecaster:
         
         # High OMR with increasing trend
         omr_z = omr_drift.get('omr_z')
-        if omr_z is not None and omr_z > 4.0 and omr_drift.get('omr_trend') == 'increasing':
-            reasons.append(f"OMR elevated and increasing (Z={omr_z:.2f})")
+        if omr_z is not None and omr_z > omr_z_threshold and omr_drift.get('omr_trend') == 'increasing':
+            reasons.append(f"OMR elevated and increasing (Z={omr_z:.2f} > {omr_z_threshold})")
         
         if reasons:
             return True, '; '.join(reasons)
         return False, None
     
     def _estimate_data_quality(self) -> float:
-        """Estimate data quality score 0-1."""
-        # Based on recent data gaps and completeness
+        """Estimate data quality score 0-1 based on completeness, gaps, and coverage."""
         if self.sql_client is None:
             return 0.5
         
         try:
+            # Check NULL ratio, gap frequency, and sample density
             query = """
-                SELECT COUNT(*) as Cnt,
-                       COUNT(CASE WHEN HealthIndex IS NULL THEN 1 END) as NullCnt
+                SELECT 
+                    COUNT(*) as TotalRows,
+                    COUNT(CASE WHEN HealthIndex IS NULL THEN 1 END) as NullCnt,
+                    MIN(Timestamp) as MinTS,
+                    MAX(Timestamp) as MaxTS
                 FROM ACM_HealthTimeline
                 WHERE EquipID = ?
                   AND Timestamp >= DATEADD(day, -7, GETDATE())
@@ -2026,10 +2284,37 @@ class RegimeConditionedForecaster:
                 cur.execute(query, (self.equip_id,))
                 row = cur.fetchone()
             
-            if row and row[0] > 0:
-                null_ratio = row[1] / row[0]
-                return max(0.0, 1.0 - null_ratio * 2)  # Penalize nulls
-            return 0.5
+            if not row or row[0] == 0:
+                return 0.5
+            
+            total_rows = row[0]
+            null_cnt = row[1]
+            min_ts = row[2]
+            max_ts = row[3]
+            
+            # Factor 1: NULL ratio penalty (0-0.3)
+            null_ratio = null_cnt / total_rows if total_rows > 0 else 0
+            null_penalty = min(0.3, null_ratio * 0.6)
+            
+            # Factor 2: Coverage check - expected vs actual samples
+            # Assume hourly cadence as baseline (168 samples per week)
+            if min_ts and max_ts:
+                expected_hours = (max_ts - min_ts).total_seconds() / 3600
+                expected_samples = max(1, expected_hours)  # At least 1 sample per hour expected
+                coverage_ratio = min(1.0, total_rows / expected_samples)
+                coverage_penalty = (1.0 - coverage_ratio) * 0.4  # Up to 0.4 penalty for sparse data
+            else:
+                coverage_penalty = 0.2
+            
+            # Factor 3: Minimum sample threshold
+            min_samples_penalty = 0.0
+            if total_rows < 24:  # Less than 1 day of hourly data
+                min_samples_penalty = 0.3
+            elif total_rows < 72:  # Less than 3 days
+                min_samples_penalty = 0.1
+            
+            quality = max(0.0, 1.0 - null_penalty - coverage_penalty - min_samples_penalty)
+            return float(quality)
             
         except Exception:
             return 0.5
@@ -2037,68 +2322,86 @@ class RegimeConditionedForecaster:
     def _compute_regime_hazards(
         self,
         current_health: float,
-        degradation_model: LinearTrendModel,
+        degradation_model: RegimeConditionedTrendModel,
         regime_stats: Dict[int, RegimeStats],
         max_horizon: float,
-        dt_hours: float
+        dt_hours: float,
+        current_drift_z: Optional[float] = None,
+        current_omr_z: Optional[float] = None
     ) -> pd.DataFrame:
         """
         Compute hazard rates per regime over forecast horizon.
         
+        Uses empirical survival from health trajectory when Weibull fit is unreliable.
+        Drift/OMR are point-in-time metrics and only included for the first timestep.
+        
         Returns DataFrame for ACM_RegimeHazard with columns:
         - RegimeLabel, Timestamp, HazardRate, SurvivalProb, CumulativeHazard,
-          FailureProb, HealthAtTime
+          FailureProb, HealthAtTime, DriftAtTime, OMR_Z_AtTime
         """
         records = []
         base_time = datetime.now()
         
-        # Generate baseline forecast
+        # Generate forecasts per regime
         max_steps = int(max_horizon / dt_hours)
-        forecast = degradation_model.predict(steps=max_steps, dt_hours=dt_hours)
-        
-        # Import Weibull hazard model for proper survival analysis (v10.1.0)
-        from core.failure_probability import WeibullHazardModel
+        prior_regime = degradation_model.current_regime
         
         for regime_label, stats in regime_stats.items():
-            # Initialize Weibull model for this regime
-            # Fit from historical health data if available, else use defaults
-            weibull = WeibullHazardModel(
-                shape=2.0,  # Typical wear-out shape
-                scale=max(168.0, abs(1.0 / max(stats.degradation_rate, 1e-6)))  # Estimate scale from rate
-            )
+            degradation_model.set_current_regime(regime_label)
+            forecast = degradation_model.predict(steps=max_steps, dt_hours=dt_hours)
             
-            # If we have enough forecast data, fit Weibull parameters
-            if len(forecast.point_forecast) >= 10:
-                weibull.fit_from_degradation(
-                    forecast.point_forecast[:min(100, len(forecast.point_forecast))],
-                    failure_threshold=stats.failure_threshold,
-                    dt_hours=dt_hours
-                )
+            # Use empirical survival from health trajectory
+            # This is more reliable than fitting Weibull with limited data
+            # Survival = P(health > threshold at time t)
+            health_forecast = forecast.point_forecast
+            std_error = max(forecast.std_error, 1e-6)
+            failure_threshold = stats.failure_threshold
             
-            for i in range(0, max_steps, max(1, max_steps // 50)):  # Sample 50 points
+            for step_idx, i in enumerate(range(0, max_steps, max(1, max_steps // 50))):  # Sample 50 points
                 forecast_time = base_time + timedelta(hours=i * dt_hours)
-                health_at_time = forecast.point_forecast[i] if i < len(forecast.point_forecast) else stats.health_mean
+                health_at_time = health_forecast[i] if i < len(health_forecast) else stats.health_mean
                 
-                # Use proper Weibull hazard model (v10.1.0)
-                # Time is hours from now
-                t = max(1.0, i * dt_hours)
-                hazard_rate = float(weibull.hazard_rate(np.array([t]))[0])
+                # Empirical survival: P(health > threshold) using normal CDF
+                # Uncertainty grows with horizon
+                horizon_factor = np.sqrt(1.0 + i * 0.01)  # Uncertainty growth
+                effective_std = std_error * horizon_factor
                 
-                # Get Weibull survival/failure probabilities directly
-                survival_prob = float(weibull.survival_probability(np.array([t]))[0])
-                failure_prob = float(weibull.failure_probability(np.array([t]))[0])
+                # Z-score: how many std above threshold
+                z_score = (health_at_time - failure_threshold) / effective_std
+                
+                # Survival probability from standard normal CDF
+                from scipy.stats import norm
+                survival_prob = float(norm.cdf(z_score))
+                failure_prob = 1.0 - survival_prob
+                
+                # Hazard rate: instantaneous failure rate = f(t) / S(t)
+                # Approximate: delta_failure_prob / (delta_t * survival_prob)
+                if survival_prob > 0.001:
+                    # Use slope of failure probability
+                    hazard_rate = failure_prob / (max(1.0, i * dt_hours) * survival_prob)
+                else:
+                    hazard_rate = 1.0  # Cap at 1.0 for near-certain failure
                 
                 # Cumulative hazard: -ln(S(t))
                 cumulative_hazard = -np.log(max(survival_prob, 1e-10))
                 
+                # Drift/OMR are point-in-time metrics, not projectable
+                # Only include for first timestep; NULL for future steps
+                drift_at_time = float(current_drift_z) if (step_idx == 0 and current_drift_z is not None) else None
+                omr_at_time = float(current_omr_z) if (step_idx == 0 and current_omr_z is not None) else None
+                
                 records.append({
                     'RegimeLabel': regime_label,
                     'Timestamp': forecast_time,
-                    'HazardRate': float(hazard_rate),
+                    'HazardRate': float(np.clip(hazard_rate, 0.0, 10.0)),  # Clamp to reasonable range
                     'SurvivalProb': float(survival_prob),
                     'CumulativeHazard': float(cumulative_hazard),
                     'FailureProb': float(failure_prob),
-                    'HealthAtTime': float(health_at_time)
+                    'HealthAtTime': float(health_at_time),
+                    'DriftAtTime': drift_at_time,
+                    'OMR_Z_AtTime': omr_at_time
                 })
+
+        degradation_model.set_current_regime(prior_regime)
         
         return pd.DataFrame(records) if records else pd.DataFrame()

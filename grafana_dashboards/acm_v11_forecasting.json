@@ -26,12 +26,12 @@
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
       "id": 1,
       "panels": [],
-      "title": "⏱️ REMAINING USEFUL LIFE",
+      "title": "REMAINING USEFUL LIFE",
       "type": "row"
     },
     {
       "datasource": { "type": "mssql", "uid": "${datasource}" },
-      "description": "Current RUL estimate with confidence bounds",
+      "description": "Current RUL estimate (P50 median) - hours until predicted failure",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -74,7 +74,7 @@
     },
     {
       "datasource": { "type": "mssql", "uid": "${datasource}" },
-      "description": "Latest RUL prediction details",
+      "description": "Latest RUL prediction with confidence bounds and method",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -145,7 +145,7 @@
     },
     {
       "datasource": { "type": "mssql", "uid": "${datasource}" },
-      "description": "Top sensors driving RUL prediction",
+      "description": "Top sensors driving RUL prediction with contribution percentage",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -190,7 +190,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT Sensor, Contribution FROM (SELECT TOP 1 TopSensor1 AS Sensor, COALESCE(TopSensor1Contribution, 0.33) AS Contribution FROM ACM_RUL WHERE EquipID = $equipment AND TopSensor1 IS NOT NULL ORDER BY CreatedAt DESC) AS S1 UNION ALL SELECT Sensor, Contribution FROM (SELECT TOP 1 TopSensor2 AS Sensor, COALESCE(TopSensor2Contribution, 0.25) AS Contribution FROM ACM_RUL WHERE EquipID = $equipment AND TopSensor2 IS NOT NULL ORDER BY CreatedAt DESC) AS S2 UNION ALL SELECT Sensor, Contribution FROM (SELECT TOP 1 TopSensor3 AS Sensor, COALESCE(TopSensor3Contribution, 0.20) AS Contribution FROM ACM_RUL WHERE EquipID = $equipment AND TopSensor3 IS NOT NULL ORDER BY CreatedAt DESC) AS S3",
+          "rawSql": "SELECT Sensor, Contribution FROM (\n  SELECT TOP 1 TopSensor1 AS Sensor, COALESCE(TopSensor1Contribution, 0.33) AS Contribution \n  FROM ACM_RUL WHERE EquipID = $equipment AND TopSensor1 IS NOT NULL ORDER BY CreatedAt DESC\n) AS S1 \nUNION ALL \nSELECT Sensor, Contribution FROM (\n  SELECT TOP 1 TopSensor2 AS Sensor, COALESCE(TopSensor2Contribution, 0.25) AS Contribution \n  FROM ACM_RUL WHERE EquipID = $equipment AND TopSensor2 IS NOT NULL ORDER BY CreatedAt DESC\n) AS S2 \nUNION ALL \nSELECT Sensor, Contribution FROM (\n  SELECT TOP 1 TopSensor3 AS Sensor, COALESCE(TopSensor3Contribution, 0.20) AS Contribution \n  FROM ACM_RUL WHERE EquipID = $equipment AND TopSensor3 IS NOT NULL ORDER BY CreatedAt DESC\n) AS S3",
           "refId": "A"
         }
       ],
@@ -207,7 +207,7 @@
     },
     {
       "datasource": { "type": "mssql", "uid": "${datasource}" },
-      "description": "Projected health trajectory with confidence bounds",
+      "description": "Projected health trajectory with confidence bounds. Shows historical forecast from latest run.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -284,16 +284,16 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n  Timestamp AS time,\n  ForecastHealth AS 'Health Forecast',\n  CiUpper AS 'Upper Bound',\n  CiLower AS 'Lower Bound'\nFROM ACM_HealthForecast\nWHERE EquipID = $equipment\n  AND Timestamp BETWEEN DATEADD(DAY, -1, $__timeFrom()) AND DATEADD(DAY, 7, $__timeTo())\nORDER BY Timestamp ASC",
+          "rawSql": "WITH LatestRun AS (\n  SELECT TOP 1 RunID \n  FROM ACM_HealthForecast \n  WHERE EquipID = $equipment \n  ORDER BY CreatedAt DESC\n)\nSELECT \n  f.Timestamp AS time,\n  f.ForecastHealth AS 'Health Forecast',\n  f.CiUpper AS 'Upper Bound',\n  f.CiLower AS 'Lower Bound'\nFROM ACM_HealthForecast f\nJOIN LatestRun lr ON f.RunID = lr.RunID\nWHERE f.EquipID = $equipment\nORDER BY f.Timestamp ASC",
           "refId": "A"
         }
       ],
-      "title": "Health Forecast (7-Day Projection)",
+      "title": "Health Forecast (Latest Run Projection)",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "mssql", "uid": "${datasource}" },
-      "description": "Forecasted health at key horizons",
+      "description": "Forecasted health at key horizons from latest forecast run",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -335,7 +335,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH LatestRun AS (\n  SELECT TOP 1 RunID FROM ACM_HealthForecast WHERE EquipID = $equipment ORDER BY Timestamp DESC\n)\nSELECT '24h' AS Horizon, ROUND(AVG(ForecastHealth), 1) AS 'Predicted Health'\nFROM ACM_HealthForecast f\nJOIN LatestRun lr ON f.RunID = lr.RunID\nWHERE EquipID = $equipment\n  AND Timestamp BETWEEN GETDATE() AND DATEADD(HOUR, 24, GETDATE())\nUNION ALL\nSELECT '72h', ROUND(AVG(ForecastHealth), 1)\nFROM ACM_HealthForecast f\nJOIN LatestRun lr ON f.RunID = lr.RunID\nWHERE EquipID = $equipment\n  AND Timestamp BETWEEN DATEADD(HOUR, 48, GETDATE()) AND DATEADD(HOUR, 96, GETDATE())\nUNION ALL\nSELECT '168h', ROUND(AVG(ForecastHealth), 1)\nFROM ACM_HealthForecast f\nJOIN LatestRun lr ON f.RunID = lr.RunID\nWHERE EquipID = $equipment\n  AND Timestamp BETWEEN DATEADD(HOUR, 144, GETDATE()) AND DATEADD(HOUR, 192, GETDATE())",
+          "rawSql": "WITH LatestRun AS (\n  SELECT TOP 1 RunID, MIN(Timestamp) AS BaseTime\n  FROM ACM_HealthForecast \n  WHERE EquipID = $equipment \n  GROUP BY RunID\n  ORDER BY MAX(CreatedAt) DESC\n),\nForecastData AS (\n  SELECT \n    f.Timestamp,\n    f.ForecastHealth,\n    DATEDIFF(HOUR, lr.BaseTime, f.Timestamp) AS HoursAhead\n  FROM ACM_HealthForecast f\n  JOIN LatestRun lr ON f.RunID = lr.RunID\n  WHERE f.EquipID = $equipment\n)\nSELECT '24h' AS Horizon, ROUND(AVG(ForecastHealth), 1) AS 'Predicted Health'\nFROM ForecastData WHERE HoursAhead BETWEEN 20 AND 28\nUNION ALL\nSELECT '72h', ROUND(AVG(ForecastHealth), 1)\nFROM ForecastData WHERE HoursAhead BETWEEN 68 AND 76\nUNION ALL\nSELECT '168h', ROUND(AVG(ForecastHealth), 1)\nFROM ForecastData WHERE HoursAhead BETWEEN 164 AND 172",
           "refId": "A"
         }
       ],
@@ -347,12 +347,12 @@
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
       "id": 8,
       "panels": [],
-      "title": "⚠️ FAILURE FORECAST",
+      "title": "FAILURE FORECAST",
       "type": "row"
     },
     {
       "datasource": { "type": "mssql", "uid": "${datasource}" },
-      "description": "Probability of failure over time",
+      "description": "Probability of failure over time from latest forecast run",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -407,7 +407,7 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n  Timestamp AS time,\n  FailureProbability AS 'Failure Probability'\nFROM ACM_FailureForecast\nWHERE EquipID = $equipment\n  AND Timestamp BETWEEN $__timeFrom() AND DATEADD(DAY, 7, $__timeTo())\nORDER BY Timestamp ASC",
+          "rawSql": "WITH LatestRun AS (\n  SELECT TOP 1 RunID \n  FROM ACM_FailureForecast \n  WHERE EquipID = $equipment \n  ORDER BY CreatedAt DESC\n)\nSELECT \n  f.Timestamp AS time,\n  f.FailureProb AS 'Failure Probability'\nFROM ACM_FailureForecast f\nJOIN LatestRun lr ON f.RunID = lr.RunID\nWHERE f.EquipID = $equipment\nORDER BY f.Timestamp ASC",
           "refId": "A"
         }
       ],
@@ -415,8 +415,153 @@
       "type": "timeseries"
     },
     {
+      "datasource": { "type": "mssql", "uid": "${datasource}" },
+      "description": "Failure probability at key time horizons",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "center",
+            "cellOptions": { "type": "color-background" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "#73BF69", "value": null },
+              { "color": "#FADE2A", "value": 0.2 },
+              { "color": "#FF9830", "value": 0.4 },
+              { "color": "#C4162A", "value": 0.6 }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Horizon" },
+            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 29 },
+      "id": 12,
+      "options": {
+        "cellHeight": "lg",
+        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": { "type": "mssql", "uid": "${datasource}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH LatestRun AS (\n  SELECT TOP 1 RunID, MIN(Timestamp) AS BaseTime\n  FROM ACM_FailureForecast \n  WHERE EquipID = $equipment \n  GROUP BY RunID\n  ORDER BY MAX(CreatedAt) DESC\n),\nForecastData AS (\n  SELECT \n    f.Timestamp,\n    f.FailureProb,\n    DATEDIFF(HOUR, lr.BaseTime, f.Timestamp) AS HoursAhead\n  FROM ACM_FailureForecast f\n  JOIN LatestRun lr ON f.RunID = lr.RunID\n  WHERE f.EquipID = $equipment\n)\nSELECT '24h' AS Horizon, ROUND(MAX(FailureProb), 3) AS 'Failure Prob'\nFROM ForecastData WHERE HoursAhead BETWEEN 0 AND 24\nUNION ALL\nSELECT '72h', ROUND(MAX(FailureProb), 3)\nFROM ForecastData WHERE HoursAhead BETWEEN 0 AND 72\nUNION ALL\nSELECT '168h', ROUND(MAX(FailureProb), 3)\nFROM ForecastData WHERE HoursAhead BETWEEN 0 AND 168",
+          "refId": "A"
+        }
+      ],
+      "title": "Failure Probability at Horizons",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "mssql", "uid": "${datasource}" },
+      "description": "Current failure risk status based on latest RUL prediction",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "from": 0, "result": { "color": "#C4162A", "text": "CRITICAL" }, "to": 24 }, "type": "range" },
+            { "options": { "from": 24, "result": { "color": "#FF9830", "text": "WARNING" }, "to": 72 }, "type": "range" },
+            { "options": { "from": 72, "result": { "color": "#FADE2A", "text": "CAUTION" }, "to": 168 }, "type": "range" },
+            { "options": { "from": 168, "result": { "color": "#73BF69", "text": "HEALTHY" }, "to": 999999 }, "type": "range" }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "#C4162A", "value": null },
+              { "color": "#FF9830", "value": 24 },
+              { "color": "#FADE2A", "value": 72 },
+              { "color": "#73BF69", "value": 168 }
+            ]
+          },
+          "unit": "h"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 6, "x": 8, "y": 29 },
+      "id": 13,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": { "type": "mssql", "uid": "${datasource}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT TOP 1 COALESCE(P50_Median, RUL_Hours) AS RUL\nFROM ACM_RUL\nWHERE EquipID = $equipment\nORDER BY CreatedAt DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Risk Status",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "mssql", "uid": "${datasource}" },
+      "description": "Summary of forecast data availability",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Last Updated" },
+            "properties": [{ "id": "unit", "value": "dateTimeAsLocal" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 29 },
+      "id": 14,
+      "options": {
+        "cellHeight": "md",
+        "footer": { "countRows": false, "enablePagination": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": { "type": "mssql", "uid": "${datasource}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  'RUL Predictions' AS Metric,\n  COUNT(*) AS Records,\n  MAX(CreatedAt) AS 'Last Updated'\nFROM ACM_RUL WHERE EquipID = $equipment\nUNION ALL\nSELECT 'Health Forecast', COUNT(*), MAX(CreatedAt)\nFROM ACM_HealthForecast WHERE EquipID = $equipment\nUNION ALL\nSELECT 'Failure Forecast', COUNT(*), MAX(CreatedAt)\nFROM ACM_FailureForecast WHERE EquipID = $equipment",
+          "refId": "A"
+        }
+      ],
+      "title": "Forecast Data Summary",
+      "type": "table"
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 },
       "id": 10,
       "panels": [],
       "title": "📉 RUL HISTORY",
@@ -424,7 +569,7 @@
     },
     {
       "datasource": { "type": "mssql", "uid": "${datasource}" },
-      "description": "RUL predictions over time",
+      "description": "RUL predictions over time with confidence bounds",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -443,7 +588,7 @@
             "insertNulls": false,
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "pointSize": 6,
+            "pointSize": 8,
             "scaleDistribution": { "type": "linear" },
             "showPoints": "always",
             "spanNulls": false,
@@ -486,7 +631,7 @@
           }
         ]
       },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 38 },
       "id": 11,
       "options": {
         "legend": { "calcs": ["min", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
@@ -499,12 +644,78 @@
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT \n  CreatedAt AS time,\n  P50_Median AS 'P50 Median',\n  P10_LowerBound AS 'P10 Lower',\n  P90_UpperBound AS 'P90 Upper'\nFROM ACM_RUL\nWHERE EquipID = $equipment\n  AND P50_Median IS NOT NULL\nORDER BY CreatedAt ASC",
+          "rawSql": "SELECT \n  CreatedAt AS time,\n  P50_Median AS 'P50 Median',\n  P10_LowerBound AS 'P10 Lower',\n  P90_UpperBound AS 'P90 Upper'\nFROM ACM_RUL\nWHERE EquipID = $equipment\n  AND P50_Median IS NOT NULL\n  AND CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nORDER BY CreatedAt ASC",
           "refId": "A"
         }
       ],
       "title": "RUL Prediction History",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "mssql", "uid": "${datasource}" },
+      "description": "Historical RUL predictions table",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Time" },
+            "properties": [{ "id": "unit", "value": "dateTimeAsLocal" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "P50" },
+            "properties": [
+              { "id": "unit", "value": "h" },
+              { "id": "custom.cellOptions", "value": { "mode": "gradient", "type": "color-background" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "#C4162A", "value": null },
+                    { "color": "#FF9830", "value": 24 },
+                    { "color": "#FADE2A", "value": 72 },
+                    { "color": "#73BF69", "value": 168 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Confidence" },
+            "properties": [{ "id": "unit", "value": "percentunit" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 48 },
+      "id": 15,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "enablePagination": true, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Time" }]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": { "type": "mssql", "uid": "${datasource}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  CreatedAt AS 'Time',\n  Method,\n  ROUND(P10_LowerBound, 1) AS P10,\n  ROUND(P50_Median, 1) AS P50,\n  ROUND(P90_UpperBound, 1) AS P90,\n  Confidence,\n  MaturityState,\n  HealthLevel\nFROM ACM_RUL\nWHERE EquipID = $equipment\nORDER BY CreatedAt DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "RUL History Table",
+      "type": "table"
     }
   ],
   "refresh": "5m",
@@ -530,14 +741,14 @@
       {
         "current": {},
         "datasource": { "type": "mssql", "uid": "${datasource}" },
-        "definition": "SELECT EquipCode AS __text, EquipID AS __value FROM Equipment WHERE EquipID IN (SELECT DISTINCT EquipID FROM ACM_RUL) ORDER BY EquipCode",
+        "definition": "SELECT EquipCode AS __text, EquipID AS __value FROM Equipment WHERE EquipID IN (SELECT DISTINCT EquipID FROM ACM_RUL UNION SELECT DISTINCT EquipID FROM ACM_HealthForecast) ORDER BY EquipCode",
         "hide": 0,
         "includeAll": false,
         "label": "Equipment",
         "multi": false,
         "name": "equipment",
         "options": [],
-        "query": "SELECT EquipCode AS __text, EquipID AS __value FROM Equipment WHERE EquipID IN (SELECT DISTINCT EquipID FROM ACM_RUL) ORDER BY EquipCode",
+        "query": "SELECT EquipCode AS __text, EquipID AS __value FROM Equipment WHERE EquipID IN (SELECT DISTINCT EquipID FROM ACM_RUL UNION SELECT DISTINCT EquipID FROM ACM_HealthForecast) ORDER BY EquipCode",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -546,11 +757,11 @@
       }
     ]
   },
-  "time": { "from": "now-30d", "to": "now" },
+  "time": { "from": "now-30d", "to": "now+7d" },
   "timepicker": {},
   "timezone": "",
   "title": "ACM V11 - Forecasting",
   "uid": "acm-v11-forecasting",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

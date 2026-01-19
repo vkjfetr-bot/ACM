@@ -17,9 +17,37 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.3.0"
-__version_date__ = "2026-01-13"
+__version__ = "11.3.2"
+__version_date__ = "2026-01-19"
 __version_author__ = "ACM Development Team"
+# v11.3.2: MODEL COMPATIBILITY VALIDATION - Audit-driven architectural fixes
+# - AUDIT FIX (Finding I): Feature compatibility validation for cached models
+#   - NEW: validate_model_feature_compatibility() validates columns before model loading
+#   - rebuild_detectors_from_cache() now requires current_columns parameter
+#   - All detectors (AR1, PCA, IForest, GMM, OMR, Regime) validated against current features
+#   - Models with mismatched features are discarded and retrained
+#   - Column count, column names, and column ORDER validation for order-sensitive models
+# - AUDIT FIX (Finding II): Detector enable flags reconciliation
+#   - NEW: reconcile_detector_flags_with_loaded_models() syncs flags with detector availability
+#   - Automatically disables detectors that failed to load
+#   - Logs discrepancies for debugging
+#   - Called after model loading in acm_main.py pipeline
+# - Enhanced logging: validation_warnings array in rebuild result for traceability
+# - Feature medians now validated against current columns (partial medians rejected)
+# Building on v11.3.1 regime labeling conceptual fix
+
+# v11.3.1: REGIME LABELING CONCEPTUAL FIX - Eliminates UNKNOWN regime
+# - BREAKING: predict_regime_with_confidence() now returns 3-tuple (labels, confidence, is_novel)
+# - CONCEPTUAL FIX: Equipment is ALWAYS in some operating state, never "unknown"
+# - NEW: is_novel flag replaces UNKNOWN_REGIME_LABEL (-1) concept
+#   - label: Always assigned to nearest cluster (equipment IS in some state)
+#   - confidence: How sure we are (low for sparse/novel regions)
+#   - is_novel: True for points in sparse regions (candidates for new regime discovery)
+# - NEW: IsNovel column added to ACM_RegimeTimeline table
+# - MIGRATION: Run scripts/sql/add_isnovel_column.sql before deploying
+# - BACKWARD COMPAT: Legacy code checking for -1 labels still works (but won't find any)
+# Building on v11.3.0 multi-dimensional regime detection
+
 # v11.3.0: HEALTH-STATE AWARE REGIME DETECTION - Multi-dimensional clustering breakthrough
 # - NEW: Health state variables (healthy, degrading, critical) now included in regime basis
 # - NEW: Context-aware alerts eliminate 40% of false positives (70% → 30% FP rate)

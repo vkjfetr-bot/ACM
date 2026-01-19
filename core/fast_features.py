@@ -270,9 +270,26 @@ def rolling_mean_std(df: pd.DataFrame, window: int, cols: Optional[List[str]] = 
 
 
 def rolling_skew_kurt(df: pd.DataFrame, window: int, cols: Optional[List[str]] = None, min_periods: int = 1,
-                      return_type: Literal["pandas", "polars"] = "pandas") -> pd.DataFrame:
+                      return_type: Literal["pandas", "polars"] = "pandas",
+                      skew_clip: float = 100.0, kurt_clip: float = 1000.0) -> pd.DataFrame:
     """Compute rolling skewness and kurtosis for specified columns.
     Returns DataFrame with both metrics per column.
+    
+    Args:
+        df: Input DataFrame
+        window: Rolling window size
+        cols: Columns to compute (default: all)
+        min_periods: Minimum periods for rolling calculation
+        return_type: Output format ("pandas" or "polars")
+        skew_clip: Max absolute skewness value (default: 100). Values beyond this are
+                   typically numerical artifacts from near-constant windows.
+        kurt_clip: Max absolute kurtosis value (default: 1000). Real-world kurtosis
+                   rarely exceeds 100; values > 1000 indicate numerical instability.
+    
+    Note:
+        Kurtosis clipping prevents overflow in downstream calculations (e.g., AR1 detector)
+        when computing variance on features with pathological values from near-constant
+        sensor windows (e.g., sensor_47 with 61% zeros produces kurtosis ~1e50).
     """
     if cols is None:
         cols = list(df.columns)
@@ -282,14 +299,29 @@ def rolling_skew_kurt(df: pd.DataFrame, window: int, cols: Optional[List[str]] =
         exprs = []
         for c in cols:
             # Corrected: Use positional argument for window size
-            exprs.append(pl.col(c).rolling_skew(window, bias=False).alias(f"{c}_skew"))
-            exprs.append(pl.col(c).rolling_kurtosis(window, fisher=True).alias(f"{c}_kurt"))
+            # Clip to prevent numerical overflow downstream
+            exprs.append(
+                pl.col(c).rolling_skew(window, bias=False)
+                .clip(-skew_clip, skew_clip)
+                .alias(f"{c}_skew")
+            )
+            exprs.append(
+                pl.col(c).rolling_kurtosis(window, fisher=True)
+                .clip(-kurt_clip, kurt_clip)
+                .alias(f"{c}_kurt")
+            )
         pl_out = df.select(exprs)
         return pl_out if return_type == "polars" else pl_out.to_pandas()
 
     pdf = _to_pandas(df)
     skew = pdf[cols].rolling(window=window, min_periods=min_periods).skew()
     kurt = pdf[cols].rolling(window=window, min_periods=min_periods).kurt()
+    
+    # Clip extreme values to prevent numerical overflow in downstream calculations
+    # (e.g., AR1 detector variance calculation on features with kurtosis ~1e50)
+    skew = skew.clip(-skew_clip, skew_clip)
+    kurt = kurt.clip(-kurt_clip, kurt_clip)
+    
     skew.columns = [c + "_skew" for c in skew.columns]
     kurt.columns = [c + "_kurt" for c in kurt.columns]
     return pd.concat([skew, kurt], axis=1)

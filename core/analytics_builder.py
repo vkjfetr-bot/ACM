@@ -414,7 +414,11 @@ class AnalyticsBuilder:
             return None
     
     def generate_regime_timeline(self, scores_df: pd.DataFrame) -> pd.DataFrame:
-        """Generate regime timeline with confidence."""
+        """Generate regime timeline with confidence and novelty flag.
+        
+        v11.3.1: Added IsNovel column for points that are in sparse/novel regions.
+        These points have valid regime assignments but lower confidence.
+        """
         regimes = pd.to_numeric(scores_df['regime_label'], errors='coerce').astype('Int64')
         ts_series = normalize_timestamp_series(scores_df.index)
         
@@ -427,6 +431,13 @@ class AnalyticsBuilder:
         
         if 'regime_confidence' in scores_df.columns:
             result['AssignmentConfidence'] = scores_df['regime_confidence'].round(3).values
+        
+        # v11.3.1: Add novelty flag - indicates point is in sparse/novel region
+        if 'regime_is_novel' in scores_df.columns:
+            result['IsNovel'] = scores_df['regime_is_novel'].astype(bool).values
+        else:
+            # Backward compatibility: default to False
+            result['IsNovel'] = False
         
         if 'regime_version' in scores_df.columns:
             result['RegimeVersion'] = scores_df['regime_version'].values

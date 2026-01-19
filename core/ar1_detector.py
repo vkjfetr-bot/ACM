@@ -77,11 +77,23 @@ class AR1Detector:
         near_constant_cols = []
         clamped_cols = []
         insufficient_cols = []
+        overflow_cols = []  # Track columns with values that would overflow variance
+        
+        # Maximum value threshold for safe variance computation in float64
+        # Values > 1e150 will overflow when squared (1e300 > float64 max ~1.8e308)
+        MAX_SAFE_VALUE = 1e150
         
         for c in X.columns:
-            col = X[c].to_numpy(copy=False, dtype=np.float32)
+            col = X[c].to_numpy(copy=False, dtype=np.float64)  # Use float64 for stability
             finite = np.isfinite(col)
             x = col[finite]
+            
+            # Detect and handle extreme values that would cause overflow
+            max_abs_val = np.abs(x).max() if x.size > 0 else 0.0
+            if max_abs_val > MAX_SAFE_VALUE:
+                overflow_cols.append((c, max_abs_val))
+                # Clip values to prevent overflow, but still fit the model
+                x = np.clip(x, -MAX_SAFE_VALUE, MAX_SAFE_VALUE)
             
             if x.size < MIN_AR1_SAMPLES:
                 # ROBUST: Use median instead of mean for baseline
@@ -90,7 +102,7 @@ class AR1Detector:
                     mu = 0.0
                 phi = 0.0
                 self.phimap[c] = (phi, mu)
-                resid = (x - mu) if x.size else np.array([0.0], dtype=np.float32)
+                resid = (x - mu) if x.size else np.array([0.0], dtype=np.float64)
                 # ROBUST: Use MAD instead of std
                 if resid.size > 0:
                     mad = float(np.median(np.abs(resid - np.median(resid))))
@@ -127,7 +139,7 @@ class AR1Detector:
             self.phimap[c] = (phi, mu)
             
             # Compute TRAIN residuals & std for normalization during score()
-            x_shift = np.empty_like(x, dtype=np.float32)
+            x_shift = np.empty_like(x, dtype=np.float64)
             x_shift[0] = mu
             x_shift[1:] = x[:-1]
             pred = (x_shift - mu) * phi + mu
@@ -140,6 +152,10 @@ class AR1Detector:
             self.sdmap[c] = max(sd, self._sd_floor)
         
         # Emit batched warnings (single SQL insert instead of 100s)
+        if overflow_cols:
+            n = len(overflow_cols)
+            sample = [(c, f"{v:.1e}") for c, v in overflow_cols[:3]]
+            Console.warn(f"{n} columns with extreme values (clipped to +/-1e150): {sample}{'...' if n > 3 else ''}", component="AR1")
         if near_constant_cols:
             n = len(near_constant_cols)
             sample = near_constant_cols[:3]

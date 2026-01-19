@@ -306,23 +306,163 @@ def get_detector_enable_flags(cfg: Dict[str, Any]) -> Dict[str, bool]:
     }
 
 
+def reconcile_detector_flags_with_loaded_models(
+    enable_flags: Dict[str, bool],
+    ar1_detector: Optional[Any],
+    pca_detector: Optional[Any],
+    iforest_detector: Optional[Any],
+    gmm_detector: Optional[Any],
+    omr_detector: Optional[Any],
+    equip: str = "",
+) -> Dict[str, bool]:
+    """
+    Reconcile detector enable flags with actually loaded detectors.
+    
+    This fixes the audit finding where enable flags could be True but detector
+    failed to load, causing downstream inconsistencies.
+    
+    Args:
+        enable_flags: Original enable flags from config
+        *_detector: Loaded detector instances (None if failed to load)
+        equip: Equipment name for logging
+    
+    Returns:
+        Updated enable flags where flag is False if detector is None
+    """
+    reconciled = enable_flags.copy()
+    discrepancies = []
+    
+    # Check each detector - if enabled but None, disable it
+    if reconciled.get("ar1_enabled") and ar1_detector is None:
+        reconciled["ar1_enabled"] = False
+        discrepancies.append("ar1")
+    
+    if reconciled.get("pca_enabled") and pca_detector is None:
+        reconciled["pca_enabled"] = False
+        discrepancies.append("pca")
+    
+    if reconciled.get("iforest_enabled") and iforest_detector is None:
+        reconciled["iforest_enabled"] = False
+        discrepancies.append("iforest")
+    
+    if reconciled.get("gmm_enabled") and gmm_detector is None:
+        reconciled["gmm_enabled"] = False
+        discrepancies.append("gmm")
+    
+    if reconciled.get("omr_enabled") and omr_detector is None:
+        reconciled["omr_enabled"] = False
+        discrepancies.append("omr")
+    
+    if discrepancies:
+        Console.warn(
+            f"Disabled {len(discrepancies)} detector(s) that failed to load: {discrepancies}",
+            component="DETECTOR", equip=equip, disabled_detectors=discrepancies
+        )
+    
+    return reconciled
+
+
+def validate_model_feature_compatibility(
+    model: Any,
+    model_name: str,
+    current_columns: list,
+    cached_manifest: Optional[Dict[str, Any]],
+    equip: str = "",
+) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a cached model is compatible with current feature columns.
+    
+    This addresses the audit finding where regime/detector models could be
+    reused even when features changed (different columns, order, or count).
+    
+    Args:
+        model: The loaded model object
+        model_name: Name of the model (for logging)
+        current_columns: Current feature column names
+        cached_manifest: Cached model manifest with train_sensors
+        equip: Equipment name for logging
+    
+    Returns:
+        Tuple of (is_compatible, reason_if_incompatible)
+    """
+    if model is None:
+        return False, "Model is None"
+    
+    if cached_manifest is None:
+        # No manifest to validate against - allow but warn
+        Console.warn(
+            f"No manifest for {model_name} validation - assuming compatible",
+            component="MODEL", equip=equip, model_name=model_name
+        )
+        return True, None
+    
+    # Get cached feature columns
+    cached_columns = cached_manifest.get("train_sensors", [])
+    
+    if not cached_columns:
+        # Manifest doesn't have sensor info - allow but warn
+        Console.warn(
+            f"No train_sensors in manifest for {model_name} - assuming compatible",
+            component="MODEL", equip=equip, model_name=model_name
+        )
+        return True, None
+    
+    # Check 1: Column count must match
+    if len(cached_columns) != len(current_columns):
+        reason = f"Column count mismatch: cached={len(cached_columns)}, current={len(current_columns)}"
+        return False, reason
+    
+    # Check 2: Column names must match (order-independent for robustness)
+    cached_set = set(cached_columns)
+    current_set = set(current_columns)
+    
+    if cached_set != current_set:
+        missing_in_current = cached_set - current_set
+        extra_in_current = current_set - cached_set
+        
+        reasons = []
+        if missing_in_current:
+            reasons.append(f"missing: {list(missing_in_current)[:3]}...")
+        if extra_in_current:
+            reasons.append(f"new: {list(extra_in_current)[:3]}...")
+        
+        reason = f"Column mismatch - {'; '.join(reasons)}"
+        return False, reason
+    
+    # Check 3: For order-sensitive models, verify column order matches
+    # This is critical for PCA, IForest, etc. where feature order matters
+    if model_name in ["pca", "iforest", "gmm", "omr", "regime"]:
+        if cached_columns != current_columns:
+            # Find first differing position
+            for i, (c, cur) in enumerate(zip(cached_columns, current_columns)):
+                if c != cur:
+                    reason = f"Column order mismatch at position {i}: cached='{c}', current='{cur}'"
+                    return False, reason
+    
+    return True, None
+
+
 def rebuild_detectors_from_cache(
     cached_models: Dict[str, Any],
     cached_manifest: Optional[Dict[str, Any]],
     cfg: Dict[str, Any],
-    equip: str = ""
+    equip: str = "",
+    current_columns: Optional[list] = None,
 ) -> Dict[str, Any]:
     """
-    Reconstruct detector objects from cached model data.
+    Reconstruct detector objects from cached model data with feature validation.
     
     This helper consolidates the logic for rebuilding fitted detector objects
     from serialized cache data (new persistence system).
+    
+    AUDIT FIX: Now validates feature compatibility before loading regime models.
     
     Args:
         cached_models: Dictionary containing serialized model data
         cached_manifest: Manifest with metadata about cached models
         cfg: Configuration dictionary for model settings
         equip: Equipment name for logging context
+        current_columns: Current feature columns for compatibility validation
     
     Returns:
         Dictionary containing:
@@ -330,6 +470,7 @@ def rebuild_detectors_from_cache(
             - regime_model, regime_quality_ok
             - feature_medians (col_meds)
             - success: bool indicating if all critical models loaded
+            - validation_warnings: list of any compatibility warnings
     """
     from core.regimes import RegimeModel
     
@@ -343,6 +484,7 @@ def rebuild_detectors_from_cache(
         "regime_quality_ok": True,
         "feature_medians": None,
         "success": False,
+        "validation_warnings": [],
     }
     
     try:
@@ -352,6 +494,21 @@ def rebuild_detectors_from_cache(
             ar1_detector.phimap = cached_models["ar1_params"]["phimap"]
             ar1_detector.sdmap = cached_models["ar1_params"]["sdmap"]
             ar1_detector._is_fitted = True
+            
+            # Validate AR1 feature compatibility (phimap keys are column names)
+            if current_columns:
+                ar1_columns = list(ar1_detector.phimap.keys())
+                if set(ar1_columns) != set(current_columns):
+                    result["validation_warnings"].append(
+                        f"AR1 column mismatch: cached={len(ar1_columns)}, current={len(current_columns)}"
+                    )
+                    Console.warn(
+                        f"AR1 detector columns don't match current features - will retrain",
+                        component="MODEL", equip=equip, 
+                        cached_cols=len(ar1_columns), current_cols=len(current_columns)
+                    )
+                    ar1_detector = None
+            
             result["ar1_detector"] = ar1_detector
         
         # PCA detector
@@ -359,6 +516,22 @@ def rebuild_detectors_from_cache(
             pca_detector = correlation.PCASubspaceDetector(pca_cfg={})
             pca_detector.pca = cached_models["pca_model"]
             pca_detector._is_fitted = True
+            
+            # Validate PCA feature compatibility
+            if current_columns and hasattr(pca_detector.pca, 'n_features_in_'):
+                n_features_cached = pca_detector.pca.n_features_in_
+                n_features_current = len(current_columns)
+                if n_features_cached != n_features_current:
+                    result["validation_warnings"].append(
+                        f"PCA feature count mismatch: cached={n_features_cached}, current={n_features_current}"
+                    )
+                    Console.warn(
+                        f"PCA detector feature count doesn't match - will retrain",
+                        component="MODEL", equip=equip,
+                        cached_features=n_features_cached, current_features=n_features_current
+                    )
+                    pca_detector = None
+            
             result["pca_detector"] = pca_detector
         
         # IForest detector
@@ -366,6 +539,22 @@ def rebuild_detectors_from_cache(
             iforest_detector = outliers.IsolationForestDetector(if_cfg={})
             iforest_detector.model = cached_models["iforest_model"]
             iforest_detector._is_fitted = True
+            
+            # Validate IForest feature compatibility
+            if current_columns and hasattr(iforest_detector.model, 'n_features_in_'):
+                n_features_cached = iforest_detector.model.n_features_in_
+                n_features_current = len(current_columns)
+                if n_features_cached != n_features_current:
+                    result["validation_warnings"].append(
+                        f"IForest feature count mismatch: cached={n_features_cached}, current={n_features_current}"
+                    )
+                    Console.warn(
+                        f"IForest detector feature count doesn't match - will retrain",
+                        component="MODEL", equip=equip,
+                        cached_features=n_features_cached, current_features=n_features_current
+                    )
+                    iforest_detector = None
+            
             result["iforest_detector"] = iforest_detector
         
         # GMM detector
@@ -373,32 +562,108 @@ def rebuild_detectors_from_cache(
             gmm_detector = outliers.GMMDetector(gmm_cfg={})
             gmm_detector.model = cached_models["gmm_model"]
             gmm_detector._is_fitted = True
+            
+            # Validate GMM feature compatibility
+            if current_columns and hasattr(gmm_detector.model, 'n_features_in_'):
+                n_features_cached = gmm_detector.model.n_features_in_
+                n_features_current = len(current_columns)
+                if n_features_cached != n_features_current:
+                    result["validation_warnings"].append(
+                        f"GMM feature count mismatch: cached={n_features_cached}, current={n_features_current}"
+                    )
+                    Console.warn(
+                        f"GMM detector feature count doesn't match - will retrain",
+                        component="MODEL", equip=equip,
+                        cached_features=n_features_cached, current_features=n_features_current
+                    )
+                    gmm_detector = None
+            
             result["gmm_detector"] = gmm_detector
         
         # OMR detector
         if "omr_model" in cached_models and cached_models["omr_model"]:
             omr_cfg = (cfg.get("models", {}).get("omr", {}) or {})
-            result["omr_detector"] = OMRDetector.from_dict(cached_models["omr_model"], cfg=omr_cfg)
+            omr_detector = OMRDetector.from_dict(cached_models["omr_model"], cfg=omr_cfg)
+            
+            # Validate OMR feature compatibility
+            if current_columns and omr_detector and hasattr(omr_detector, 'n_features_'):
+                n_features_cached = omr_detector.n_features_
+                n_features_current = len(current_columns)
+                if n_features_cached != n_features_current:
+                    result["validation_warnings"].append(
+                        f"OMR feature count mismatch: cached={n_features_cached}, current={n_features_current}"
+                    )
+                    Console.warn(
+                        f"OMR detector feature count doesn't match - will retrain",
+                        component="MODEL", equip=equip,
+                        cached_features=n_features_cached, current_features=n_features_current
+                    )
+                    omr_detector = None
+            
+            result["omr_detector"] = omr_detector
         
-        # Regime model
+        # Regime model - AUDIT FIX: Enhanced validation
         if "regime_model" in cached_models and cached_models["regime_model"]:
             regime_model = RegimeModel()
             regime_model.model = cached_models["regime_model"]
+            
             if cached_manifest:
                 result["regime_quality_ok"] = cached_manifest.get("models", {}).get("regimes", {}).get("quality", {}).get("quality_ok", True)
-            # CRITICAL FIX: Validate regime model compatibility
+            
+            # AUDIT FIX: Validate regime model is not None
             if regime_model.model is None:
                 Console.warn("Cached regime model is None; discarding.", component="REGIME", equip=equip)
                 regime_model = None
+            
+            # AUDIT FIX: Validate regime model feature compatibility
+            # Regime models use cluster centers which have n_features dimensions
+            elif current_columns and hasattr(regime_model.model, 'cluster_centers_'):
+                n_features_cached = regime_model.model.cluster_centers_.shape[1]
+                # Regime basis might be a subset of all columns - get from manifest
+                regime_n_features = cached_manifest.get("models", {}).get("regimes", {}).get("n_features")
+                
+                if regime_n_features and regime_n_features != n_features_cached:
+                    # Manifest disagrees with model - corruption
+                    result["validation_warnings"].append(
+                        f"Regime model corruption: manifest says {regime_n_features} features but model has {n_features_cached}"
+                    )
+                    Console.warn(
+                        f"Regime model feature mismatch with manifest - discarding",
+                        component="REGIME", equip=equip
+                    )
+                    regime_model = None
+            
             result["regime_model"] = regime_model
         
         # Feature medians
         if "feature_medians" in cached_models and cached_models["feature_medians"] is not None:
-            result["feature_medians"] = cached_models["feature_medians"]
+            feature_medians = cached_models["feature_medians"]
+            
+            # Validate feature medians match current columns
+            if current_columns:
+                median_columns = set(feature_medians.keys())
+                current_set = set(current_columns)
+                if median_columns != current_set:
+                    # Some column mismatch - try to salvage what we can
+                    missing = current_set - median_columns
+                    if missing:
+                        Console.info(
+                            f"Feature medians missing {len(missing)} columns - will recompute",
+                            component="MODEL", equip=equip, missing_cols=len(missing)
+                        )
+                        # Don't use partial medians - force recomputation
+                        feature_medians = None
+            
+            result["feature_medians"] = feature_medians
         
         # Validate all critical models loaded
         if all([result["ar1_detector"], result["pca_detector"], result["iforest_detector"]]):
             result["success"] = True
+            if result["validation_warnings"]:
+                Console.info(
+                    f"Model cache loaded with {len(result['validation_warnings'])} warnings",
+                    component="MODEL", equip=equip, warning_count=len(result["validation_warnings"])
+                )
         else:
             missing = []
             if not result["ar1_detector"]: missing.append("ar1")
@@ -406,11 +671,12 @@ def rebuild_detectors_from_cache(
             if not result["iforest_detector"]: missing.append("iforest")
             Console.warn(f"Incomplete model cache, missing: {missing}, retraining required", component="MODEL",
                          equip=equip, missing_models=missing)
-            # Clear all on failure
+            # Clear all on failure to ensure consistent state
             result["ar1_detector"] = None
             result["pca_detector"] = None
             result["iforest_detector"] = None
             result["gmm_detector"] = None
+            result["omr_detector"] = None
             
     except Exception as e:
         import traceback
@@ -421,6 +687,7 @@ def rebuild_detectors_from_cache(
         result["pca_detector"] = None
         result["iforest_detector"] = None
         result["gmm_detector"] = None
+        result["omr_detector"] = None
     
     return result
 

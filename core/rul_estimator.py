@@ -103,7 +103,10 @@ class RULEstimator:
         self,
         current_health: float,
         dt_hours: float = 1.0,
-        max_horizon_hours: float = 720.0
+        max_horizon_hours: float = 720.0,
+        regime_transition_matrix: Optional[np.ndarray] = None,
+        regime_degradation_rates: Optional[Dict[int, float]] = None,
+        current_regime: Optional[int] = None
     ) -> RULEstimate:
         """
         Estimate RUL via Monte Carlo simulation.
@@ -154,7 +157,11 @@ class RULEstimator:
                 baseline_forecast=baseline_forecast.point_forecast,
                 model_std=model_std,
                 dt_hours=dt_hours,
-                max_steps=max_steps
+                max_steps=max_steps,
+                regime_transition_matrix=regime_transition_matrix,
+                regime_degradation_rates=regime_degradation_rates,
+                current_regime=current_regime,
+                current_health=current_health
             )
         
         # Compute quantiles with sub-span for analytics (v10.3.0)
@@ -202,7 +209,8 @@ class RULEstimator:
         max_steps: int,
         regime_transition_matrix: Optional[np.ndarray] = None,
         regime_degradation_rates: Optional[Dict[int, float]] = None,
-        current_regime: Optional[int] = None
+        current_regime: Optional[int] = None,
+        current_health: Optional[float] = None
     ) -> np.ndarray:
         """
         Run Monte Carlo simulations with stochastic noise and regime transitions.
@@ -281,21 +289,21 @@ class RULEstimator:
             
             # Add stochastic noise to baseline forecast
             noise = np.random.normal(0, model_std, len(baseline_forecast))
-            health_trajectory = baseline_forecast.copy()
+            health_trajectory = np.zeros_like(baseline_forecast, dtype=float)
+            start_health = current_health if current_health is not None else float(baseline_forecast[0])
+            health_trajectory[0] = float(start_health) + float(noise[0])
             
             # Simulate with regime transitions if model provided
             if regime_transition_matrix is not None and regime_degradation_rates is not None and n_regimes > 0:
                 for t in range(1, len(health_trajectory)):
                     # Apply regime-specific degradation adjustment
                     regime_rate = regime_degradation_rates.get(sim_regime, 0.0)
-                    baseline_rate = (baseline_forecast[t] - baseline_forecast[t-1]) / dt_hours if t > 0 else 0.0
-                    
-                    # Blend baseline with regime-specific rate
-                    if abs(regime_rate) > 1e-6:
-                        health_trajectory[t] = health_trajectory[t-1] + regime_rate * dt_hours + noise[t]
-                    else:
-                        health_trajectory[t] = baseline_forecast[t] + noise[t]
-                    
+                    baseline_rate = (baseline_forecast[t] - baseline_forecast[t - 1]) / dt_hours
+
+                    # Use regime rate when available; fall back to baseline rate
+                    applied_rate = regime_rate if abs(regime_rate) > 1e-6 else baseline_rate
+                    health_trajectory[t] = health_trajectory[t - 1] + applied_rate * dt_hours + noise[t]
+
                     # Sample regime transition (semi-Markov)
                     if sim_regime < n_regimes:
                         transition_probs = regime_transition_matrix[sim_regime]
