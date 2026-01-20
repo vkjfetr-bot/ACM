@@ -140,7 +140,7 @@ Many P0 items were addressed in v11.2.2 (see docs/ACM_V11_ANALYTICAL_FIXES.md), 
 
 ---
 
-### 6) Calibration and thresholding are sensitive to contaminated training windows
+### 6) Calibration and thresholding are sensitive to contaminated training windows ✅ FIXED v11.3.3
 **Risk**: Training windows can contain anomalies; calibration and thresholds derived from such windows become too permissive.
 
 **Primary references**: core/adaptive_thresholds.py; core/fuse.py; core/analytics_builder.py
@@ -148,9 +148,16 @@ Many P0 items were addressed in v11.2.2 (see docs/ACM_V11_ANALYTICAL_FIXES.md), 
 **Impact**:
 - Increased false negatives and delayed detection.
 
-**Mitigation**:
-- Introduce anomaly-exclusion for calibration windows (e.g., trim by z-score or episode flags).
-- Use robust statistics (median/MAD) consistently for scaling.
+**Mitigation** (IMPLEMENTED v11.3.3):
+- ✅ NEW: `CalibrationContaminationFilter` class in core/fuse.py
+- ✅ Filters anomalous samples BEFORE computing calibration statistics
+- ✅ Multiple robust methods: `iterative_mad` (default), `iqr`, `z_trim`, `hybrid`
+- ✅ Integrated into `ScoreCalibrator.fit()` and `AdaptiveThresholdCalculator`
+- ✅ Safety guards: max 30% exclusion, min 50 samples retained, convergence detection
+- ✅ Config: `thresholds.contamination_filter.enabled` (default: True)
+- ✅ Config: `thresholds.contamination_filter.method` (default: iterative_mad)
+- ✅ Config: `thresholds.contamination_filter.z_threshold` (default: 4.0)
+- Uses robust statistics (median/MAD) consistently throughout
 
 ---
 
@@ -231,7 +238,7 @@ Many P0 items were addressed in v11.2.2 (see docs/ACM_V11_ANALYTICAL_FIXES.md), 
 3. Re-tune HDBSCAN min_cluster_size with transient-aware thresholds.
 
 **Short-Term (P1)**
-4. Add anomaly-trimmed calibration/thresholding.
+4. ~~Add anomaly-trimmed calibration/thresholding.~~ ✅ DONE v11.3.3 - CalibrationContaminationFilter
 5. Introduce windowed seasonality detection.
 6. Audit fusion correlation discounting and dynamic correlation handling.
 

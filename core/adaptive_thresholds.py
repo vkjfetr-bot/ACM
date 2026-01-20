@@ -10,6 +10,7 @@ Key Features:
 - Hybrid approach combining both methods
 - Per-regime threshold calculation
 - Robust to outliers and non-normal distributions
+- v11.3.3: Contamination filtering before threshold calculation
 
 Usage:
     calc = AdaptiveThresholdCalculator()
@@ -27,6 +28,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# v11.3.3: Import contamination filter for consistent filtering
+from core.fuse import CalibrationContaminationFilter, ContaminationFilterResult
+
 
 class AdaptiveThresholdCalculator:
     """
@@ -34,17 +38,34 @@ class AdaptiveThresholdCalculator:
     
     Replaces hardcoded thresholds (e.g., FusedZ >= 3.0) with data-driven values
     that adapt to each equipment's actual operating distribution.
+    
+    v11.3.3: Now applies contamination filtering before threshold calculation
+    to address Analytics Audit Finding #6.
     """
     
-    def __init__(self, min_samples: int = 100):
+    def __init__(
+        self,
+        min_samples: int = 100,
+        contamination_filter_enabled: bool = True,
+        contamination_filter_method: str = 'iterative_mad',
+        contamination_filter_z_threshold: float = 4.0,
+    ):
         """
         Initialize the threshold calculator.
         
         Args:
             min_samples: Minimum number of samples required for reliable calculation.
                         If fewer samples, fallback to default threshold.
+            contamination_filter_enabled: Whether to filter contaminated samples (v11.3.3)
+            contamination_filter_method: Method for contamination filtering
+            contamination_filter_z_threshold: Z-threshold for contamination filtering
         """
         self.min_samples = min_samples
+        self.contamination_filter_enabled = contamination_filter_enabled
+        self.contamination_filter_method = contamination_filter_method
+        self.contamination_filter_z_threshold = contamination_filter_z_threshold
+        # Track last filter result for diagnostics
+        self.last_filter_result_: Optional[ContaminationFilterResult] = None
         
     def calculate_fused_threshold(
         self,
@@ -97,6 +118,32 @@ class AdaptiveThresholdCalculator:
                 f"using fallback threshold"
             )
             return fallback_threshold
+        
+        # =========================================================================
+        # v11.3.3: CONTAMINATION FILTERING (Analytics Audit Finding #6)
+        # Filter anomalous samples BEFORE calculating thresholds to prevent
+        # contaminated training windows from producing permissive thresholds.
+        # =========================================================================
+        if self.contamination_filter_enabled and len(train_fused_z) >= 50:
+            contam_filter = CalibrationContaminationFilter(
+                method=self.contamination_filter_method,
+                z_threshold=self.contamination_filter_z_threshold,
+            )
+            filter_result = contam_filter.filter(train_fused_z)
+            self.last_filter_result_ = filter_result
+            train_fused_z = filter_result.filtered_data
+            
+            if filter_result.n_excluded > 0:
+                logger.info(
+                    f"Contamination filter ({self.contamination_filter_method}): excluded "
+                    f"{filter_result.n_excluded}/{filter_result.n_original} samples "
+                    f"({filter_result.exclusion_rate:.1%})"
+                )
+        else:
+            self.last_filter_result_ = None
+        # =========================================================================
+        # END CONTAMINATION FILTERING
+        # =========================================================================
             
         # Per-regime calculation
         if regime_labels is not None:

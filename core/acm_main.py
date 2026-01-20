@@ -1113,25 +1113,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 except Exception as e:
                     Console.warn(f"Failed to load regime state: {e}", component="REGIME")
 
-        # AUDIT FIX: Reconcile enable flags with actually loaded detectors
-        # This ensures consistency between config-based flags and runtime detector availability
-        reconciled_flags = reconcile_detector_flags_with_loaded_models(
-            enable_flags=det_flags,
-            ar1_detector=ar1_detector,
-            pca_detector=pca_detector,
-            iforest_detector=iforest_detector,
-            gmm_detector=gmm_detector,
-            omr_detector=omr_detector,
-            equip=equip,
-        )
-        # Update local enable flags with reconciled values
-        ar1_enabled = reconciled_flags["ar1_enabled"]
-        pca_enabled = reconciled_flags["pca_enabled"]
-        iforest_enabled = reconciled_flags["iforest_enabled"]
-        gmm_enabled = reconciled_flags["gmm_enabled"]
-        omr_enabled = reconciled_flags["omr_enabled"]
-
-        # Check if we need to fit detectors.
+        # Check if we need to fit detectors using ORIGINAL config-based flags.
+        # NOTE: Reconciliation happens AFTER fitting, not before - otherwise we skip training!
         detectors_missing = not all([
             ar1_detector or not ar1_enabled,
             pca_detector or not pca_enabled,
@@ -1160,6 +1143,25 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 omr_detector = fit_result["omr_detector"]
                 pca_train_spe = fit_result["pca_train_spe"]
                 pca_train_t2 = fit_result["pca_train_t2"]
+
+        # AUDIT FIX: Reconcile enable flags with actually loaded/fitted detectors
+        # This ensures consistency between config-based flags and runtime detector availability
+        # NOTE: This MUST happen AFTER fitting, not before - otherwise we skip training!
+        reconciled_flags = reconcile_detector_flags_with_loaded_models(
+            enable_flags=det_flags,
+            ar1_detector=ar1_detector,
+            pca_detector=pca_detector,
+            iforest_detector=iforest_detector,
+            gmm_detector=gmm_detector,
+            omr_detector=omr_detector,
+            equip=equip,
+        )
+        # Update local enable flags with reconciled values for downstream scoring
+        ar1_enabled = reconciled_flags["ar1_enabled"]
+        pca_enabled = reconciled_flags["pca_enabled"]
+        iforest_enabled = reconciled_flags["iforest_enabled"]
+        gmm_enabled = reconciled_flags["gmm_enabled"]
+        omr_enabled = reconciled_flags["omr_enabled"]
 
         # Validate all enabled detectors are present.
         missing = []
@@ -1645,11 +1647,33 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
 
         # ===== Phase 6: Calibration (z-score normalization) =====
         # Fit calibrators on TRAIN data, transform SCORE data.
+        # v11.3.3: Now includes contamination filtering for robust calibration.
         with T.section("calibrate"):
             cal_q = float((cfg or {}).get("thresholds", {}).get("q", 0.98))
             self_tune_cfg = (cfg or {}).get("thresholds", {}).get("self_tune", {})
             use_per_regime = (cfg.get("fusion", {}) or {}).get("per_regime", False)
             quality_ok = bool(use_per_regime and regime_quality_ok and train_regime_labels is not None and score_regime_labels is not None)
+            
+            # v11.3.3: Add contamination filter config to self_tune_cfg for ScoreCalibrator
+            # This addresses Analytics Audit Finding #6: contaminated training windows
+            contam_filter_cfg = (cfg or {}).get("thresholds", {}).get("contamination_filter", {})
+            if contam_filter_cfg:
+                self_tune_cfg["contamination_filter"] = {
+                    "enabled": contam_filter_cfg.get("enabled", True),
+                    "method": contam_filter_cfg.get("method", "iterative_mad"),
+                    "z_threshold": float(contam_filter_cfg.get("z_threshold", 4.0)),
+                    "max_iterations": int(contam_filter_cfg.get("max_iterations", 10)),
+                    "min_retained_ratio": float(contam_filter_cfg.get("min_retained_ratio", 0.70)),
+                }
+            else:
+                # Default: enable contamination filtering with iterative MAD
+                self_tune_cfg["contamination_filter"] = {
+                    "enabled": True,
+                    "method": "iterative_mad",
+                    "z_threshold": 4.0,
+                    "max_iterations": 10,
+                    "min_retained_ratio": 0.70,
+                }
             
             # Score TRAIN data with all fitted detectors.
             pca_cached = (pca_train_spe, pca_train_t2) if pca_train_spe is not None else None
@@ -1729,24 +1753,33 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
             cal_omr = calibrators_dict.get("omr_z")
 
             # Compute TRAIN z-scores for PCA metrics (needed for SQL metadata).
-            # Robust to cache reuse because train_frame is always computed.
-            pca_train_spe_z = cal_pca_spe.transform(
-                train_frame["pca_spe"].to_numpy(dtype=np.float32), regime_labels=fit_regimes
-            )
-            pca_train_t2_z = cal_pca_t2.transform(
-                train_frame["pca_t2"].to_numpy(dtype=np.float32), regime_labels=fit_regimes
-            )
-            spe_p95_train = float(np.nanpercentile(pca_train_spe_z, 95))
-            t2_p95_train = float(np.nanpercentile(pca_train_t2_z, 95))
+            # Only compute if PCA is enabled and calibrators exist.
+            spe_p95_train = 0.0
+            t2_p95_train = 0.0
+            if pca_enabled and cal_pca_spe is not None and "pca_spe" in train_frame.columns:
+                pca_train_spe_z = cal_pca_spe.transform(
+                    train_frame["pca_spe"].to_numpy(dtype=np.float32), regime_labels=fit_regimes
+                )
+                spe_p95_train = float(np.nanpercentile(pca_train_spe_z, 95))
+            if pca_enabled and cal_pca_t2 is not None and "pca_t2" in train_frame.columns:
+                pca_train_t2_z = cal_pca_t2.transform(
+                    train_frame["pca_t2"].to_numpy(dtype=np.float32), regime_labels=fit_regimes
+                )
+                t2_p95_train = float(np.nanpercentile(pca_train_t2_z, 95))
             
-            calibrators: List[Tuple[str, fuse.ScoreCalibrator]] = [
-                ("ar1_z", cal_ar),
-                ("pca_spe_z", cal_pca_spe),
-                ("pca_t2_z", cal_pca_t2),
-                ("iforest_z", cal_if),
-                ("gmm_z", cal_gmm),
-            ]
-            if omr_enabled and "omr_raw" in frame.columns:
+            # Build calibrators list, filtering out None entries
+            calibrators: List[Tuple[str, fuse.ScoreCalibrator]] = []
+            if ar1_enabled and cal_ar is not None:
+                calibrators.append(("ar1_z", cal_ar))
+            if pca_enabled and cal_pca_spe is not None:
+                calibrators.append(("pca_spe_z", cal_pca_spe))
+            if pca_enabled and cal_pca_t2 is not None:
+                calibrators.append(("pca_t2_z", cal_pca_t2))
+            if iforest_enabled and cal_if is not None:
+                calibrators.append(("iforest_z", cal_if))
+            if gmm_enabled and cal_gmm is not None:
+                calibrators.append(("gmm_z", cal_gmm))
+            if omr_enabled and cal_omr is not None and "omr_raw" in frame.columns:
                 calibrators.append(("omr_z", cal_omr))
 
             # Generate per-regime threshold transparency table.

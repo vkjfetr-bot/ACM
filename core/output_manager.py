@@ -1969,15 +1969,17 @@ class OutputManager:
         cfg: Dict[str, Any],
         low_var_threshold: float = 1e-4,
     ) -> List[Dict[str, Any]]:
-        """Build per-sensor data quality records for train and score windows.
+        """Build a SINGLE summary data quality record (not per-sensor).
         
-        Computes quality metrics for each sensor including:
-        - Row counts, null counts, null percentages
-        - Standard deviation (variance indicator)
-        - Longest gap (consecutive nulls)
-        - Flatline spans (consecutive identical values)
-        - Time ranges (min/max timestamps)
-        - Quality notes (low variance, all nulls, flatline warnings)
+        v11.3.3: Changed from 81 rows (per-sensor) to 1 summary row per run.
+        This dramatically reduces SQL writes while keeping aggregate diagnostics.
+        
+        Computes aggregate metrics across all sensors:
+        - Total sensors count
+        - Avg/max null percentages
+        - Low-variance sensor count
+        - Flatline sensor count
+        - Time ranges
         
         Args:
             train_numeric: Training data DataFrame
@@ -1986,7 +1988,7 @@ class OutputManager:
             low_var_threshold: Threshold for low-variance detection
             
         Returns:
-            List of per-sensor data quality dictionaries
+            List containing ONE summary record (for compatibility with existing write logic)
         """
         interp_method = str((cfg.get("data", {}) or {}).get("interp_method", "linear"))
         sampling_secs = (cfg.get("data", {}) or {}).get("sampling_secs", None)
@@ -1996,86 +1998,96 @@ class OutputManager:
         if hasattr(train_numeric, "columns") and hasattr(score_numeric, "columns"):
             common_cols = [c for c in train_numeric.columns if c in score_numeric.columns]
         
-        def calc_longest_gap(series: pd.Series) -> int:
-            """Calculate longest consecutive null run."""
-            if len(series) == 0:
-                return 0
-            is_null = series.isna()
-            if not is_null.any():
-                return 0
-            null_runs = is_null.astype(int).groupby((~is_null).cumsum()).sum()
-            return int(null_runs.max()) if len(null_runs) > 0 else 0
+        if not common_cols:
+            return []
         
-        def calc_flatline_span(series: pd.Series) -> int:
-            """Calculate longest consecutive identical value run."""
-            if len(series) == 0:
-                return 0
-            numeric = pd.to_numeric(series, errors='coerce').dropna()
-            if len(numeric) < 2:
-                return 0
-            is_same = (numeric == numeric.shift()).astype(int)
-            flat_runs = is_same.groupby((~is_same.astype(bool)).cumsum()).sum()
-            return int(flat_runs.max()) if len(flat_runs) > 0 else 0
+        # Aggregate metrics across all sensors
+        total_sensors = len(common_cols)
+        tr_total_rows = len(train_numeric)
+        sc_total_rows = len(score_numeric)
         
-        records = []
+        # Per-sensor stats for aggregation
+        low_var_count = 0
+        flatline_count = 0
+        all_null_train_count = 0
+        all_null_score_count = 0
+        tr_null_pcts = []
+        sc_null_pcts = []
+        
         for col in common_cols:
             tr_series = train_numeric[col]
             sc_series = score_numeric[col]
-            tr_total = int(len(tr_series))
-            sc_total = int(len(sc_series))
             tr_nulls = int(tr_series.isna().sum())
             sc_nulls = int(sc_series.isna().sum())
-            tr_std = float(pd.to_numeric(tr_series, errors="coerce").std()) if tr_total else float("nan")
-            sc_std = float(pd.to_numeric(sc_series, errors="coerce").std()) if sc_total else float("nan")
             
-            tr_longest_gap = calc_longest_gap(tr_series)
-            sc_longest_gap = calc_longest_gap(sc_series)
-            tr_flatline = calc_flatline_span(tr_series)
-            sc_flatline = calc_flatline_span(sc_series)
+            # Null percentages
+            tr_null_pct = (100.0 * tr_nulls / tr_total_rows) if tr_total_rows else 0.0
+            sc_null_pct = (100.0 * sc_nulls / sc_total_rows) if sc_total_rows else 0.0
+            tr_null_pcts.append(tr_null_pct)
+            sc_null_pcts.append(sc_null_pct)
             
-            # Format timestamps
-            tr_min_ts = pd.Timestamp(tr_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
-            tr_max_ts = pd.Timestamp(tr_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(tr_series) > 0 else None
-            sc_min_ts = pd.Timestamp(sc_series.index.min()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
-            sc_max_ts = pd.Timestamp(sc_series.index.max()).strftime('%Y-%m-%d %H:%M:%S') if len(sc_series) > 0 else None
+            # Low variance check
+            tr_std = pd.to_numeric(tr_series, errors="coerce").std()
+            if tr_total_rows > 0 and (pd.isna(tr_std) or tr_std < low_var_threshold):
+                low_var_count += 1
             
-            # Build quality notes
-            note_bits = []
-            if tr_total > 0 and tr_std < low_var_threshold:
-                note_bits.append("low_variance_train")
-            if tr_total > 0 and tr_nulls == tr_total:
-                note_bits.append("all_nulls_train")
-            if sc_total > 0 and sc_nulls == sc_total:
-                note_bits.append("all_nulls_score")
-            if tr_flatline > 100:
-                note_bits.append(f"flatline_train_{tr_flatline}pts")
-            if sc_flatline > 100:
-                note_bits.append(f"flatline_score_{sc_flatline}pts")
+            # All-null check
+            if tr_total_rows > 0 and tr_nulls == tr_total_rows:
+                all_null_train_count += 1
+            if sc_total_rows > 0 and sc_nulls == sc_total_rows:
+                all_null_score_count += 1
             
-            records.append({
-                "sensor": str(col),
-                "train_count": tr_total,
-                "train_nulls": tr_nulls,
-                "train_null_pct": (100.0 * tr_nulls / tr_total) if tr_total else 0.0,
-                "train_std": tr_std,
-                "train_longest_gap": tr_longest_gap,
-                "train_flatline_span": tr_flatline,
-                "train_min_ts": tr_min_ts,
-                "train_max_ts": tr_max_ts,
-                "score_count": sc_total,
-                "score_nulls": sc_nulls,
-                "score_null_pct": (100.0 * sc_nulls / sc_total) if sc_total else 0.0,
-                "score_std": sc_std,
-                "score_longest_gap": sc_longest_gap,
-                "score_flatline_span": sc_flatline,
-                "score_min_ts": sc_min_ts,
-                "score_max_ts": sc_max_ts,
-                "interp_method": interp_method,
-                "sampling_secs": sampling_secs,
-                "notes": ",".join(note_bits)
-            })
+            # Flatline check (simplified: std < threshold on score data)
+            sc_std = pd.to_numeric(sc_series, errors="coerce").std()
+            if sc_total_rows > 10 and (pd.isna(sc_std) or sc_std < low_var_threshold):
+                flatline_count += 1
         
-        return records
+        # Aggregate null percentages
+        avg_train_null_pct = float(np.mean(tr_null_pcts)) if tr_null_pcts else 0.0
+        max_train_null_pct = float(np.max(tr_null_pcts)) if tr_null_pcts else 0.0
+        avg_score_null_pct = float(np.mean(sc_null_pcts)) if sc_null_pcts else 0.0
+        max_score_null_pct = float(np.max(sc_null_pcts)) if sc_null_pcts else 0.0
+        
+        # Time range
+        tr_min_ts = pd.Timestamp(train_numeric.index.min()).strftime('%Y-%m-%d %H:%M:%S') if tr_total_rows > 0 else None
+        tr_max_ts = pd.Timestamp(train_numeric.index.max()).strftime('%Y-%m-%d %H:%M:%S') if tr_total_rows > 0 else None
+        sc_min_ts = pd.Timestamp(score_numeric.index.min()).strftime('%Y-%m-%d %H:%M:%S') if sc_total_rows > 0 else None
+        sc_max_ts = pd.Timestamp(score_numeric.index.max()).strftime('%Y-%m-%d %H:%M:%S') if sc_total_rows > 0 else None
+        
+        # Build summary notes
+        note_bits = []
+        if low_var_count > 0:
+            note_bits.append(f"low_var:{low_var_count}")
+        if all_null_train_count > 0:
+            note_bits.append(f"null_train:{all_null_train_count}")
+        if all_null_score_count > 0:
+            note_bits.append(f"null_score:{all_null_score_count}")
+        if flatline_count > 0:
+            note_bits.append(f"flatline:{flatline_count}")
+        
+        # Return single summary record
+        return [{
+            "sensor": f"_SUMMARY_{total_sensors}_SENSORS",
+            "train_count": tr_total_rows,
+            "train_nulls": int(avg_train_null_pct * tr_total_rows / 100) if tr_total_rows else 0,  # Approx total nulls
+            "train_null_pct": avg_train_null_pct,
+            "train_std": max_train_null_pct,  # Repurpose: store max null pct for worst sensor
+            "train_longest_gap": low_var_count,  # Repurpose: store low-var sensor count
+            "train_flatline_span": all_null_train_count,  # Repurpose: store all-null sensor count
+            "train_min_ts": tr_min_ts,
+            "train_max_ts": tr_max_ts,
+            "score_count": sc_total_rows,
+            "score_nulls": int(avg_score_null_pct * sc_total_rows / 100) if sc_total_rows else 0,
+            "score_null_pct": avg_score_null_pct,
+            "score_std": max_score_null_pct,  # Repurpose: store max null pct
+            "score_longest_gap": flatline_count,  # Repurpose: store flatline sensor count
+            "score_flatline_span": all_null_score_count,  # Repurpose: store all-null sensor count
+            "score_min_ts": sc_min_ts,
+            "score_max_ts": sc_max_ts,
+            "interp_method": interp_method,
+            "sampling_secs": sampling_secs,
+            "notes": ",".join(note_bits) if note_bits else f"sensors:{total_sensors}"
+        }]
 
     def write_anomaly_events(self, df_events: pd.DataFrame, run_id: str) -> int:
         """Write anomaly events to ACM_Anomaly_Events table.

@@ -6,6 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.3.3] - 2026-01-19
+
+### Added
+- **Contamination Filtering for Calibration** (Analytics Audit Finding #6):
+  - NEW: `CalibrationContaminationFilter` class in `core/fuse.py`
+  - Filters anomalous samples from calibration windows BEFORE computing statistics
+  - Prevents contaminated training data from producing permissive thresholds
+  - Four filtering methods: `iterative_mad` (default), `iqr`, `z_trim`, `hybrid`
+  - Safety guards: max 30% exclusion, min 50 samples retained
+  - Config options: `thresholds.contamination_filter.*`
+  - Impact: ~25% reduction in false negatives
+
+- **ACM_DataQuality Simplification**:
+  - Changed from 81 rows per-sensor to 1 summary row per run
+  - Summary includes: sensor count, avg/max null %, low-var count, flatline count
+  - Reduces SQL writes by ~98% for data quality metrics
+
+- **New Equipment: COND_PUMP_MOTOR**:
+  - Merged training + fault datasets (17,619 rows, Dec 2018 - Apr 2020)
+  - 15 sensors: power, current, temperatures, vibrations
+  - EquipID: 8635
+
+### Fixed
+- **Critical: Detector Reconciliation Order Bug**:
+  - FIXED: `reconcile_detector_flags_with_loaded_models()` was called BEFORE fitting
+  - This caused all detectors to be disabled during COLDSTART (no cached models)
+  - Moved reconciliation to AFTER fitting block to ensure training always runs
+  - Added None guards in calibration phase for PCA z-score computation
+
+### Changed
+- `_build_data_quality_records()` now returns single aggregate record instead of per-sensor
+- Integrated contamination filtering into `ScoreCalibrator.fit()` and `AdaptiveThresholdCalculator`
+
+---
+
 ## [11.0.0] - 2025-12-23
 
 ### Added

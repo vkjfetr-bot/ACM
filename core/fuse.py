@@ -1,6 +1,11 @@
 # core/fuse.py
 """
 Score fusion, calibration (global or per-regime), and episode detection.
+
+v11.3.3 (2026-01-19): Added CalibrationContaminationFilter for robust calibration.
+- Implements anomaly-exclusion from calibration windows
+- Multiple filtering strategies: IQR, iterative MAD, z-score trim, hybrid
+- Addresses analytics audit finding #6: contaminated training windows
 """
 from __future__ import annotations
 
@@ -13,6 +18,437 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr  # type: ignore
 from sklearn.metrics import average_precision_score, roc_curve  # type: ignore
+
+
+# =============================================================================
+# CALIBRATION CONTAMINATION FILTER (v11.3.3 - Analytics Audit Finding #6)
+# =============================================================================
+
+@dataclass
+class ContaminationFilterResult:
+    """Result from contamination filtering."""
+    filtered_data: np.ndarray      # Cleaned data for calibration
+    excluded_mask: np.ndarray      # Boolean mask of excluded points (True = excluded)
+    n_original: int                # Original sample count
+    n_filtered: int                # Samples after filtering
+    n_excluded: int                # Samples excluded
+    exclusion_rate: float          # Proportion excluded (n_excluded / n_original)
+    method: str                    # Filtering method used
+    threshold_used: float          # Threshold value used for exclusion
+    iterations: int                # Number of iterations (for iterative methods)
+    converged: bool                # Whether iterative method converged
+    diagnostics: Dict[str, Any]    # Additional method-specific diagnostics
+
+
+class CalibrationContaminationFilter:
+    """
+    Filters anomalous/contaminated samples from calibration data.
+    
+    Analytics Audit Finding #6: Training windows can contain anomalies.
+    Calibration and thresholds derived from contaminated windows become
+    too permissive, leading to increased false negatives and delayed detection.
+    
+    Mitigation: Introduce anomaly-exclusion for calibration windows using
+    robust statistics (median/MAD) consistently for scaling.
+    
+    Supported methods:
+        - 'iqr': Interquartile Range exclusion (robust, fast)
+        - 'iterative_mad': Iterative MAD-based trimming (most robust)
+        - 'z_trim': Single-pass z-score trimming using MAD
+        - 'hybrid': Combination of IQR pre-filter + iterative MAD refinement
+        - 'none': No filtering (bypass, for testing)
+    
+    Usage:
+        filter = CalibrationContaminationFilter(method='iterative_mad')
+        result = filter.filter(raw_scores)
+        # Use result.filtered_data for calibration
+    """
+    
+    # Default exclusion bounds (z-score equivalent)
+    DEFAULT_Z_THRESHOLD = 4.0  # Exclude points > 4 MAD-sigma from median
+    
+    # Maximum exclusion rate - if exceeded, warn and use fallback
+    MAX_EXCLUSION_RATE = 0.30  # Don't exclude more than 30%
+    
+    # Minimum samples to retain after filtering
+    MIN_RETAINED_SAMPLES = 50
+    
+    def __init__(
+        self,
+        method: str = 'iterative_mad',
+        z_threshold: float = 4.0,
+        iqr_multiplier: float = 2.5,
+        max_iterations: int = 10,
+        convergence_tol: float = 0.001,
+        min_retained_ratio: float = 0.70,
+    ):
+        """
+        Initialize the contamination filter.
+        
+        Args:
+            method: Filtering method ('iqr', 'iterative_mad', 'z_trim', 'hybrid', 'none')
+            z_threshold: Z-score threshold for exclusion (MAD-scaled)
+            iqr_multiplier: IQR multiplier for IQR method (default 2.5 = ~3.5σ for normal)
+            max_iterations: Maximum iterations for iterative methods
+            convergence_tol: Convergence tolerance (median change) for iterative methods
+            min_retained_ratio: Minimum ratio of samples to retain (0.70 = keep at least 70%)
+        """
+        valid_methods = {'iqr', 'iterative_mad', 'z_trim', 'hybrid', 'none'}
+        if method not in valid_methods:
+            Console.warn(
+                f"Unknown contamination filter method '{method}', using 'iterative_mad'",
+                component="CAL.FILTER", requested=method, valid=list(valid_methods)
+            )
+            method = 'iterative_mad'
+        
+        self.method = method
+        self.z_threshold = float(z_threshold)
+        self.iqr_multiplier = float(iqr_multiplier)
+        self.max_iterations = int(max_iterations)
+        self.convergence_tol = float(convergence_tol)
+        self.min_retained_ratio = float(min_retained_ratio)
+    
+    def filter(self, x: np.ndarray) -> ContaminationFilterResult:
+        """
+        Filter contaminated samples from calibration data.
+        
+        Args:
+            x: Raw score array to filter
+            
+        Returns:
+            ContaminationFilterResult with filtered data and diagnostics
+        """
+        # Clean input: remove NaN/Inf
+        x = np.asarray(x, dtype=np.float64)
+        finite_mask = np.isfinite(x)
+        x_finite = x[finite_mask]
+        n_original = len(x_finite)
+        
+        if n_original < self.MIN_RETAINED_SAMPLES:
+            Console.warn(
+                f"Too few samples ({n_original}) for contamination filtering - bypassing",
+                component="CAL.FILTER", n_samples=n_original, min_required=self.MIN_RETAINED_SAMPLES
+            )
+            return self._bypass_result(x_finite, "insufficient_samples")
+        
+        if self.method == 'none':
+            return self._bypass_result(x_finite, "disabled")
+        
+        # Dispatch to method
+        if self.method == 'iqr':
+            return self._filter_iqr(x_finite)
+        elif self.method == 'iterative_mad':
+            return self._filter_iterative_mad(x_finite)
+        elif self.method == 'z_trim':
+            return self._filter_z_trim(x_finite)
+        elif self.method == 'hybrid':
+            return self._filter_hybrid(x_finite)
+        else:
+            return self._bypass_result(x_finite, "unknown_method")
+    
+    def _bypass_result(self, x: np.ndarray, reason: str) -> ContaminationFilterResult:
+        """Create a bypass result (no filtering)."""
+        return ContaminationFilterResult(
+            filtered_data=x,
+            excluded_mask=np.zeros(len(x), dtype=bool),
+            n_original=len(x),
+            n_filtered=len(x),
+            n_excluded=0,
+            exclusion_rate=0.0,
+            method='none',
+            threshold_used=0.0,
+            iterations=0,
+            converged=True,
+            diagnostics={'bypass_reason': reason},
+        )
+    
+    def _filter_iqr(self, x: np.ndarray) -> ContaminationFilterResult:
+        """
+        IQR-based contamination filter.
+        
+        Excludes points outside [Q1 - k*IQR, Q3 + k*IQR] where k = iqr_multiplier.
+        For normal data, k=1.5 excludes ~0.7%, k=2.5 excludes ~0.035%.
+        
+        Pros: Very fast, no iterations, well-understood
+        Cons: May not handle heavy-tailed distributions well
+        """
+        q1 = np.percentile(x, 25)
+        q3 = np.percentile(x, 75)
+        iqr = q3 - q1
+        
+        # Handle degenerate case
+        if iqr < 1e-9:
+            Console.warn(
+                "IQR near zero - distribution is constant, bypassing filter",
+                component="CAL.FILTER", method="iqr", iqr=iqr
+            )
+            return self._bypass_result(x, "degenerate_iqr")
+        
+        lower_bound = q1 - self.iqr_multiplier * iqr
+        upper_bound = q3 + self.iqr_multiplier * iqr
+        
+        # Create exclusion mask (True = excluded)
+        excluded_mask = (x < lower_bound) | (x > upper_bound)
+        
+        # Check exclusion rate
+        result = self._apply_exclusion_with_guards(
+            x, excluded_mask, method='iqr',
+            threshold_used=self.iqr_multiplier,
+            diagnostics={
+                'q1': float(q1), 'q3': float(q3), 'iqr': float(iqr),
+                'lower_bound': float(lower_bound), 'upper_bound': float(upper_bound),
+            }
+        )
+        return result
+    
+    def _filter_z_trim(self, x: np.ndarray) -> ContaminationFilterResult:
+        """
+        Single-pass z-score trimming using MAD.
+        
+        Excludes points where |z_mad| > z_threshold.
+        Uses median and MAD for robustness.
+        """
+        median = np.median(x)
+        mad = np.median(np.abs(x - median))
+        
+        # MAD to sigma conversion (1.4826 for normal distribution)
+        sigma_mad = mad * 1.4826 if mad > 1e-9 else np.std(x)
+        
+        if sigma_mad < 1e-9:
+            return self._bypass_result(x, "degenerate_scale")
+        
+        # Compute z-scores
+        z_scores = (x - median) / sigma_mad
+        
+        # Create exclusion mask
+        excluded_mask = np.abs(z_scores) > self.z_threshold
+        
+        result = self._apply_exclusion_with_guards(
+            x, excluded_mask, method='z_trim',
+            threshold_used=self.z_threshold,
+            diagnostics={
+                'median': float(median), 'mad': float(mad), 'sigma_mad': float(sigma_mad),
+                'max_z': float(np.max(np.abs(z_scores))),
+            }
+        )
+        return result
+    
+    def _filter_iterative_mad(self, x: np.ndarray) -> ContaminationFilterResult:
+        """
+        Iterative MAD-based trimming (most robust).
+        
+        Iteratively removes outliers and recomputes median/MAD until convergence.
+        This prevents outliers from inflating the scale estimate.
+        
+        Algorithm:
+        1. Compute median and MAD on current data
+        2. Exclude points > z_threshold MAD-sigmas from median
+        3. Recompute median/MAD on retained data
+        4. Repeat until median converges or max_iterations reached
+        """
+        current_data = x.copy()
+        current_mask = np.ones(len(x), dtype=bool)  # True = included
+        prev_median = np.inf
+        
+        iterations = 0
+        converged = False
+        
+        for i in range(self.max_iterations):
+            iterations = i + 1
+            
+            # Compute robust statistics on current data
+            median = np.median(current_data)
+            mad = np.median(np.abs(current_data - median))
+            sigma_mad = mad * 1.4826 if mad > 1e-9 else np.std(current_data)
+            
+            if sigma_mad < 1e-9:
+                break  # Degenerate - stop
+            
+            # Compute z-scores on ORIGINAL data using CURRENT statistics
+            z_scores = np.abs(x - median) / sigma_mad
+            
+            # Update mask: exclude points above threshold
+            new_mask = (z_scores <= self.z_threshold) & np.isfinite(z_scores)
+            
+            # Check minimum retention
+            if np.sum(new_mask) < len(x) * self.min_retained_ratio:
+                Console.debug(
+                    f"Iterative MAD: stopping early to preserve min retention ratio",
+                    component="CAL.FILTER", iteration=i, retained=np.sum(new_mask),
+                    min_required=int(len(x) * self.min_retained_ratio)
+                )
+                break
+            
+            current_mask = new_mask
+            current_data = x[current_mask]
+            
+            # Check convergence
+            if abs(median - prev_median) < self.convergence_tol:
+                converged = True
+                break
+            
+            prev_median = median
+        
+        # Final exclusion mask (True = excluded)
+        excluded_mask = ~current_mask
+        
+        # Final statistics
+        final_median = np.median(x[current_mask]) if np.any(current_mask) else np.median(x)
+        final_mad = np.median(np.abs(x[current_mask] - final_median)) if np.any(current_mask) else np.median(np.abs(x - final_median))
+        
+        result = self._apply_exclusion_with_guards(
+            x, excluded_mask, method='iterative_mad',
+            threshold_used=self.z_threshold,
+            iterations=iterations,
+            converged=converged,
+            diagnostics={
+                'final_median': float(final_median),
+                'final_mad': float(final_mad),
+                'final_sigma_mad': float(final_mad * 1.4826) if final_mad > 1e-9 else 0.0,
+                'iterations': iterations,
+                'converged': converged,
+            }
+        )
+        return result
+    
+    def _filter_hybrid(self, x: np.ndarray) -> ContaminationFilterResult:
+        """
+        Hybrid filtering: IQR pre-filter + iterative MAD refinement.
+        
+        Two-stage approach:
+        1. IQR filter removes extreme outliers (fast, conservative)
+        2. Iterative MAD refines on pre-filtered data
+        
+        This combines the speed of IQR with the robustness of iterative MAD.
+        """
+        # Stage 1: IQR pre-filter (looser threshold)
+        iqr_result = CalibrationContaminationFilter(
+            method='iqr',
+            iqr_multiplier=3.0,  # More conservative first pass
+        ).filter(x)
+        
+        pre_filtered = iqr_result.filtered_data
+        iqr_excluded = iqr_result.n_excluded
+        
+        # Stage 2: Iterative MAD on pre-filtered data
+        mad_result = CalibrationContaminationFilter(
+            method='iterative_mad',
+            z_threshold=self.z_threshold,
+            max_iterations=self.max_iterations,
+            convergence_tol=self.convergence_tol,
+            min_retained_ratio=self.min_retained_ratio,
+        ).filter(pre_filtered)
+        
+        # Combine exclusion masks
+        # We need to track which original indices were excluded
+        # Stage 1 excluded some, stage 2 excluded some of the remainder
+        
+        # Build final filtered data and total exclusion count
+        final_data = mad_result.filtered_data
+        total_excluded = iqr_excluded + mad_result.n_excluded
+        
+        # Build combined mask on original data (approximation)
+        # True = excluded
+        excluded_mask = np.zeros(len(x), dtype=bool)
+        excluded_mask[iqr_result.excluded_mask] = True
+        # For the MAD stage, we need to map back - simplify by just counting
+        
+        return ContaminationFilterResult(
+            filtered_data=final_data,
+            excluded_mask=excluded_mask,  # Approximate
+            n_original=len(x),
+            n_filtered=len(final_data),
+            n_excluded=total_excluded,
+            exclusion_rate=total_excluded / len(x) if len(x) > 0 else 0.0,
+            method='hybrid',
+            threshold_used=self.z_threshold,
+            iterations=mad_result.iterations,
+            converged=mad_result.converged,
+            diagnostics={
+                'iqr_excluded': iqr_excluded,
+                'mad_excluded': mad_result.n_excluded,
+                'iqr_diagnostics': iqr_result.diagnostics,
+                'mad_diagnostics': mad_result.diagnostics,
+            }
+        )
+    
+    def _apply_exclusion_with_guards(
+        self,
+        x: np.ndarray,
+        excluded_mask: np.ndarray,
+        method: str,
+        threshold_used: float,
+        iterations: int = 1,
+        converged: bool = True,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> ContaminationFilterResult:
+        """
+        Apply exclusion mask with safety guards.
+        
+        Guards:
+        1. Maximum exclusion rate check
+        2. Minimum retained samples check
+        """
+        n_original = len(x)
+        n_excluded = int(np.sum(excluded_mask))
+        exclusion_rate = n_excluded / n_original if n_original > 0 else 0.0
+        
+        # Guard 1: Maximum exclusion rate
+        if exclusion_rate > self.MAX_EXCLUSION_RATE:
+            Console.warn(
+                f"Contamination filter excluded {exclusion_rate:.1%} > max {self.MAX_EXCLUSION_RATE:.1%}. "
+                f"Training data may be heavily contaminated. Capping exclusion.",
+                component="CAL.FILTER", method=method, exclusion_rate=exclusion_rate,
+                max_allowed=self.MAX_EXCLUSION_RATE
+            )
+            # Cap exclusion: keep the least extreme points up to max exclusion
+            n_to_keep = int(n_original * (1.0 - self.MAX_EXCLUSION_RATE))
+            # Sort by distance from median and keep closest
+            median = np.median(x)
+            distances = np.abs(x - median)
+            keep_indices = np.argsort(distances)[:n_to_keep]
+            excluded_mask = np.ones(n_original, dtype=bool)
+            excluded_mask[keep_indices] = False
+            n_excluded = int(np.sum(excluded_mask))
+            exclusion_rate = n_excluded / n_original
+            if diagnostics:
+                diagnostics['capped_exclusion'] = True
+        
+        # Guard 2: Minimum retained samples
+        n_retained = n_original - n_excluded
+        if n_retained < self.MIN_RETAINED_SAMPLES:
+            Console.warn(
+                f"Contamination filter would retain only {n_retained} samples < min {self.MIN_RETAINED_SAMPLES}. "
+                f"Relaxing filter to retain minimum samples.",
+                component="CAL.FILTER", method=method, n_retained=n_retained,
+                min_required=self.MIN_RETAINED_SAMPLES
+            )
+            # Keep at least MIN_RETAINED_SAMPLES closest to median
+            median = np.median(x)
+            distances = np.abs(x - median)
+            keep_indices = np.argsort(distances)[:self.MIN_RETAINED_SAMPLES]
+            excluded_mask = np.ones(n_original, dtype=bool)
+            excluded_mask[keep_indices] = False
+            n_excluded = int(np.sum(excluded_mask))
+            exclusion_rate = n_excluded / n_original
+            if diagnostics:
+                diagnostics['forced_min_retention'] = True
+        
+        filtered_data = x[~excluded_mask]
+        
+        return ContaminationFilterResult(
+            filtered_data=filtered_data,
+            excluded_mask=excluded_mask,
+            n_original=n_original,
+            n_filtered=len(filtered_data),
+            n_excluded=n_excluded,
+            exclusion_rate=exclusion_rate,
+            method=method,
+            threshold_used=threshold_used,
+            iterations=iterations,
+            converged=converged,
+            diagnostics=diagnostics or {},
+        )
 
 
 def tune_detector_weights(
@@ -438,6 +874,8 @@ class ScoreCalibrator:
     Calibrates a raw score to a robust z-score using median and MAD,
     and computes a threshold at a given quantile `q`.
     Can compute either a single global threshold or per-regime thresholds.
+    
+    v11.3.3: Integrated CalibrationContaminationFilter for anomaly exclusion.
     """
     def __init__(self, q: float = 0.98, self_tune_cfg: Optional[Dict[str, Any]] = None, name: str = "detector"):
         self.q = float(q)
@@ -450,8 +888,17 @@ class ScoreCalibrator:
         self.q_z = 0.0
         self.regime_thresh_: Dict[int, float] = {}
         self.regime_params_: Dict[int, Tuple[float, float]] = {}
+        # v11.3.3: Track contamination filtering diagnostics
+        self.contamination_filter_result_: Optional[ContaminationFilterResult] = None
 
     def fit(self, x: np.ndarray, regime_labels: Optional[np.ndarray] = None) -> "ScoreCalibrator":
+        """
+        Fit calibration parameters from training data.
+        
+        v11.3.3: Now applies contamination filtering BEFORE computing statistics.
+        This addresses Analytics Audit Finding #6: calibration/thresholds from
+        contaminated windows become too permissive.
+        """
         x_finite = x[np.isfinite(x)]
         if x_finite.size == 0:
             Console.warn("No finite values in calibration data - using defaults", component="CAL", calibrator=self.name, input_size=len(x))
@@ -462,14 +909,59 @@ class ScoreCalibrator:
             Console.warn(f"Insufficient samples ({x_finite.size}) for reliable calibration - using defaults", component="CAL", calibrator=self.name, n_samples=x_finite.size, min_required=10)
             return self
 
-        self.med = float(np.median(x_finite))
-        self.mad = float(np.median(np.abs(x_finite - self.med)))
+        # =========================================================================
+        # v11.3.3: CONTAMINATION FILTERING (Analytics Audit Finding #6)
+        # Filter anomalous samples BEFORE computing calibration statistics.
+        # This prevents contaminated training windows from inflating thresholds.
+        # =========================================================================
+        contamination_cfg = self.self_tune_cfg.get("contamination_filter", {})
+        filter_enabled = contamination_cfg.get("enabled", True)  # Default: ON
+        filter_method = contamination_cfg.get("method", "iterative_mad")
+        filter_z_threshold = float(contamination_cfg.get("z_threshold", 4.0))
+        
+        if filter_enabled and x_finite.size >= 50:  # Need enough samples for reliable filtering
+            contam_filter = CalibrationContaminationFilter(
+                method=filter_method,
+                z_threshold=filter_z_threshold,
+                max_iterations=int(contamination_cfg.get("max_iterations", 10)),
+                convergence_tol=float(contamination_cfg.get("convergence_tol", 0.001)),
+                min_retained_ratio=float(contamination_cfg.get("min_retained_ratio", 0.70)),
+            )
+            
+            filter_result = contam_filter.filter(x_finite)
+            self.contamination_filter_result_ = filter_result
+            
+            # Use filtered data for calibration
+            x_clean = filter_result.filtered_data
+            
+            if filter_result.n_excluded > 0:
+                Console.info(
+                    f"Contamination filter ({filter_method}): excluded {filter_result.n_excluded}/{filter_result.n_original} "
+                    f"samples ({filter_result.exclusion_rate:.1%}) | retained={filter_result.n_filtered}",
+                    component="CAL", calibrator=self.name, method=filter_method,
+                    excluded=filter_result.n_excluded, retained=filter_result.n_filtered
+                )
+        else:
+            x_clean = x_finite
+            self.contamination_filter_result_ = None
+            if filter_enabled and x_finite.size < 50:
+                Console.debug(
+                    f"Contamination filter bypassed: insufficient samples ({x_finite.size} < 50)",
+                    component="CAL", calibrator=self.name
+                )
+        # =========================================================================
+        # END CONTAMINATION FILTERING
+        # =========================================================================
+
+        # Compute statistics on CLEANED data
+        self.med = float(np.median(x_clean))
+        self.mad = float(np.median(np.abs(x_clean - self.med)))
         if not np.isfinite(self.mad) or self.mad < 1e-9:
-            self.mad = float(np.nanmedian(np.abs(x_finite - self.med)))
+            self.mad = float(np.nanmedian(np.abs(x_clean - self.med)))
         self.scale = float(self.mad) * 1.4826
         # FUSE-FIX-01: Enforce minimum scale to prevent z-score explosion
         if not np.isfinite(self.scale) or self.scale < 1e-3:
-            fallback_sd = float(np.nanstd(x_finite))
+            fallback_sd = float(np.nanstd(x_clean))
             self.scale = fallback_sd if np.isfinite(fallback_sd) and fallback_sd > 1e-3 else 1.0
         # Additional safety: ensure scale is at least 1e-3
         self.scale = max(self.scale, 1e-3)
@@ -477,23 +969,24 @@ class ScoreCalibrator:
         self.regime_params_.clear()
 
         # Self-tuning path: find threshold that matches target FP rate
+        # NOTE: Uses CLEANED data for threshold calculation
         if self.self_tune_cfg.get("enabled", False):
             target_fp_rate = float(self.self_tune_cfg.get("target_fp_rate", 0.001))
             # The quantile for the target FP rate is (1 - rate)
             auto_q = float(np.clip(1.0 - target_fp_rate, 0.9, 0.995))
             try:
-                q_val = float(np.quantile(x_finite, auto_q))
+                q_val = float(np.quantile(x_clean, auto_q))
             except Exception:
-                q_val = float(np.quantile(x_finite, min(0.99, self.q)))
+                q_val = float(np.quantile(x_clean, min(0.99, self.q)))
             spread = abs(q_val - self.med)
             if spread < 1e-6 or spread > 1e6 or not np.isfinite(spread):
                 fallback_q = min(0.99, max(self.q, 0.95))
-                q_val = float(np.quantile(x_finite, fallback_q))
+                q_val = float(np.quantile(x_clean, fallback_q))
             self.q_thresh = float(q_val)
             Console.info(f"Self-tuning enabled. Target FP rate {target_fp_rate:.3%} -> q={auto_q:.4f}, threshold={self.q_thresh:.4f}", component="CAL")
         else:
-            # Standard quantile-based threshold
-            self.q_thresh = float(np.quantile(x_finite, self.q))
+            # Standard quantile-based threshold (on cleaned data)
+            self.q_thresh = float(np.quantile(x_clean, self.q))
         
         # FUSE-FIX-04: Validate and clamp threshold to reasonable range
         # Thresholds should be in a sensible range for z-scores/raw anomaly metrics
@@ -518,6 +1011,7 @@ class ScoreCalibrator:
             self.q_z = float(np.clip(self.q_z, -20.0, 20.0)) if np.isfinite(self.q_z) else 3.0
 
         # Per-regime thresholding
+        # v11.3.3: Also apply contamination filtering per-regime
         if regime_labels is not None and regime_labels.size == x.size:
             unique_regimes = np.unique(regime_labels)
             Console.info(f"Fitting per-regime thresholds for {len(unique_regimes)} regimes.", component="CAL")
@@ -525,16 +1019,29 @@ class ScoreCalibrator:
                 mask = (regime_labels == r)
                 x_regime = x[mask]
                 x_regime_finite = x_regime[np.isfinite(x_regime)]
+                
                 if x_regime_finite.size > 10:  # Require a minimum number of points
-                    med_r = float(np.median(x_regime_finite))
-                    mad_r = float(np.median(np.abs(x_regime_finite - med_r)))
+                    # Apply contamination filtering per-regime
+                    if filter_enabled and x_regime_finite.size >= 30:
+                        regime_filter = CalibrationContaminationFilter(
+                            method=filter_method,
+                            z_threshold=filter_z_threshold,
+                            min_retained_ratio=0.60,  # More lenient for smaller regime subsets
+                        )
+                        regime_filter_result = regime_filter.filter(x_regime_finite)
+                        x_regime_clean = regime_filter_result.filtered_data
+                    else:
+                        x_regime_clean = x_regime_finite
+                    
+                    med_r = float(np.median(x_regime_clean))
+                    mad_r = float(np.median(np.abs(x_regime_clean - med_r)))
                     if not np.isfinite(mad_r) or mad_r < 1e-9:
-                        mad_r = float(np.nanmedian(np.abs(x_regime_finite - med_r)))
+                        mad_r = float(np.nanmedian(np.abs(x_regime_clean - med_r)))
                     scale_r = float(mad_r) * 1.4826
                     if not np.isfinite(scale_r) or scale_r < 1e-9:
-                        sd_r = float(np.nanstd(x_regime_finite))
+                        sd_r = float(np.nanstd(x_regime_clean))
                         scale_r = sd_r if np.isfinite(sd_r) and sd_r > 1e-9 else self.scale
-                    thresh_r = float(np.quantile(x_regime_finite, self.q))
+                    thresh_r = float(np.quantile(x_regime_clean, self.q))
                     self.regime_params_[int(r)] = (med_r, scale_r)
                     self.regime_thresh_[int(r)] = (thresh_r - med_r) / max(scale_r, 1e-9)
                 else:
