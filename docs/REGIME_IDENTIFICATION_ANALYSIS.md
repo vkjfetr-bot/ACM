@@ -283,60 +283,71 @@ basis_signature = hashlib.md5(
 
 ### Priority 1: Critical (Fix Immediately)
 
-**R1.1: Remove Health-State Variables from Regime Clustering**
+**R1.1: Remove Health-State Variables from Regime Clustering** ✅ IMPLEMENTED
 
-**File**: `core/regimes.py` lines 257-334
+**File**: `core/acm_main.py` lines 1195-1216
 
 **Change**:
 ```python
-# BEFORE (v11.3.0):
-def build_feature_basis(...):
-    basis = concat([pca_features, raw_operating_tags])
-    basis_with_health = _add_health_state_features(basis, detector_scores)  # ❌ WRONG
-    return basis_with_health
-
-# AFTER:
-def build_feature_basis(...):
-    basis = concat([pca_features, raw_operating_tags])
-    # Health tracked separately, not in regime clustering
-    return basis
+# v11.3.x: Health-state features are OPTIONAL (config: regimes.health_state_features.enabled)
+health_state_enabled = cfg_dict.get("regimes.health_state_features.enabled", False)
 ```
+
+**Status**: ✅ Complete
+- Added `regimes.health_state_features.enabled` config flag (default: False)
+- Health-state features now disabled by default
+- Warning message when enabled to alert users of regime drift risk
 
 **Rationale**: Regimes should be **stable operating states**, not health-dependent clusters.
 
 ---
 
-**R1.2: Enforce Minimum Confidence Threshold**
+**R1.2: Enforce Minimum Confidence Threshold** ✅ IMPLEMENTED
 
-**File**: `core/regimes.py` line 3000-3020 (in `label()` function)
+**File**: `core/regimes.py` line 3015-3040
 
 **Change**:
 ```python
-# Add config parameter
-min_confidence = _cfg_get(cfg, "regimes.min_confidence_threshold", 0.3)
+# v11.3.x: Enforce minimum confidence threshold for regime assignments
+confidence_cfg = _cfg_get(cfg, "regimes.confidence", {}) or {}
+min_confidence_threshold = float(confidence_cfg.get("min_threshold", 0.0))
+enforce_threshold = bool(confidence_cfg.get("enforce_threshold", False))
 
-# Enforce threshold
-if score_confidence[i] < min_confidence:
-    score_labels[i] = UNKNOWN_REGIME_LABEL  # -1
+if enforce_threshold and min_confidence_threshold > 0.0:
+    low_confidence_mask = score_confidence < min_confidence_threshold
+    score_labels[low_confidence_mask] = UNKNOWN_REGIME_LABEL  # -1
 ```
+
+**Status**: ✅ Complete
+- Added `regimes.confidence.min_threshold` config (default: 0.0)
+- Added `regimes.confidence.enforce_threshold` config (default: False)
+- Low-confidence assignments marked as UNKNOWN when enabled
 
 **Rationale**: Low-confidence assignments mask model uncertainty.
 
 ---
 
-**R1.3: Fail Fast on Alignment Dimension Mismatch**
+**R1.3: Fail Fast on Alignment Dimension Mismatch** ✅ IMPLEMENTED
 
 **File**: `core/regimes.py` line 2845-2883 (`align_regime_labels`)
 
 **Change**:
 ```python
 if new_centers.shape[1] != prev_centers.shape[1]:
-    raise ValueError(
-        f"Cannot align regimes: feature dimension changed "
-        f"({prev_centers.shape[1]} -> {new_centers.shape[1]}). "
-        "Regime model must be retrained from scratch."
-    )
+    alignment_cfg = _cfg_get(cfg or {}, "regimes.alignment", {}) or {}
+    fail_on_mismatch = bool(alignment_cfg.get("fail_on_mismatch", True))
+    
+    if fail_on_mismatch:
+        raise ValueError(
+            f"Cannot align regimes: feature dimension changed. "
+            "Regime model must be retrained from scratch."
+        )
 ```
+
+**Status**: ✅ Complete
+- Added `regimes.alignment.fail_on_mismatch` config (default: True)
+- Raises ValueError by default on dimension mismatch
+- Can be disabled for legacy behavior (not recommended)
 
 **Rationale**: Silent fallback causes unpredictable regime ID permutations.
 
