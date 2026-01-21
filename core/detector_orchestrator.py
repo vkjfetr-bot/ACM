@@ -623,22 +623,22 @@ def rebuild_detectors_from_cache(
             result["omr_detector"] = omr_detector
         
         # Regime model - AUDIT FIX: Enhanced validation
+        # v11.6.1 FIX: cached_models["regime_model"] is already a serialized RegimeModel instance
+        # Don't try to create a new one - just use the deserialized object directly
         if "regime_model" in cached_models and cached_models["regime_model"]:
-            regime_model = RegimeModel()
-            regime_model.model = cached_models["regime_model"]
+            regime_model = cached_models["regime_model"]  # Already a RegimeModel (joblib deserialized)
             
             if cached_manifest:
                 result["regime_quality_ok"] = cached_manifest.get("models", {}).get("regimes", {}).get("quality", {}).get("quality_ok", True)
             
             # AUDIT FIX: Validate regime model is not None
-            if regime_model.model is None:
+            if regime_model is None:
                 Console.warn("Cached regime model is None; discarding.", component="REGIME", equip=equip)
-                regime_model = None
             
             # AUDIT FIX: Validate regime model feature compatibility
             # Regime models use cluster centers which have n_features dimensions
-            elif current_columns and hasattr(regime_model.model, 'cluster_centers_'):
-                n_features_cached = regime_model.model.cluster_centers_.shape[1]
+            elif current_columns and hasattr(regime_model, 'cluster_centers_'):
+                n_features_cached = regime_model.cluster_centers_.shape[1]
                 # Regime basis might be a subset of all columns - get from manifest
                 regime_n_features = cached_manifest.get("models", {}).get("regimes", {}).get("n_features")
                 

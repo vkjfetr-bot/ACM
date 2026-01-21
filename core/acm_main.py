@@ -706,7 +706,11 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     cl_cfg = cfg.get("continuous_learning", {})
     model_update_interval = int(cl_cfg.get("model_update_interval", 1))  # Default: update every batch
     threshold_update_interval = int(cl_cfg.get("threshold_update_interval", 1))  # Default: update every batch
-    force_retraining = CONTINUOUS_LEARNING  # Force retraining when continuous learning enabled
+    
+    # v11.6.1 FIX: Only force retraining in OFFLINE mode, not ONLINE
+    # ONLINE mode cannot retrain (ALLOWS_MODEL_REFIT=False), so force_retraining must be False
+    # This prevents the case where continuous_learning=True + ONLINE causes use_cache=False
+    force_retraining = CONTINUOUS_LEARNING and ALLOWS_MODEL_REFIT
     
     # Validate interval settings to avoid zero/negative values in production.
     invalid_intervals = []
@@ -1069,7 +1073,21 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         iforest_enabled = det_flags["iforest_enabled"]
         gmm_enabled = det_flags["gmm_enabled"]
         omr_enabled = det_flags["omr_enabled"]
-        use_cache = cfg.get("models", {}).get("use_cache", True) and not refit_requested and not force_retraining
+        
+        # v11.6.1 FIX: In ONLINE mode, ignore refit_requested and always try to load cached models.
+        # Reason: ONLINE mode CANNOT refit (ALLOWS_MODEL_REFIT=False), so if we skip cache loading
+        # due to a refit request, the pipeline crashes with "models not found in cache".
+        # The refit will happen on the next OFFLINE run, so ONLINE runs must use existing models.
+        if refit_requested and not ALLOWS_MODEL_REFIT:
+            Console.info(
+                "Refit requested but ONLINE mode cannot refit - will load cached models anyway",
+                component="MODEL", mode="ONLINE", refit_deferred=True
+            )
+            refit_requested_but_deferred = True  # Track for potential use in metrics
+        else:
+            refit_requested_but_deferred = False
+            
+        use_cache = cfg.get("models", {}).get("use_cache", True) and (not refit_requested or not ALLOWS_MODEL_REFIT) and not force_retraining
         
         with T.section("models.load"):
             if use_cache and detector_cache is None:
@@ -1078,6 +1096,50 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     equip=equip, sql_client=sql_client, equip_id=equip_id,
                     cfg=cfg, train_columns=current_sensors,
                 )
+                if cached_models:
+                    # v11.6.1 FIX: Align current features to cached model's expected features
+                    # This prevents mismatches when different columns are dropped during feature engineering
+                    cached_sensors = cached_manifest.get("train_sensors", [])
+                    if cached_sensors and set(cached_sensors) != set(current_sensors):
+                        # Find intersection - columns that exist in both
+                        common_cols = sorted(set(cached_sensors) & set(current_sensors))
+                        if len(common_cols) >= 0.7 * len(cached_sensors):
+                            # At least 70% overlap - align features to cached list
+                            missing_in_current = set(cached_sensors) - set(current_sensors)
+                            extra_in_current = set(current_sensors) - set(cached_sensors)
+                            
+                            Console.info(
+                                f"Aligning features: cached={len(cached_sensors)}, current={len(current_sensors)}, "
+                                f"common={len(common_cols)}, missing={len(missing_in_current)}, extra={len(extra_in_current)}",
+                                component="MODEL"
+                            )
+                            
+                            # Use cached column order - this is what the models expect
+                            aligned_sensors = cached_sensors
+                            
+                            # Filter train/score to only include aligned columns
+                            # Any missing columns will be filled with NaN (to be imputed)
+                            for col in missing_in_current:
+                                if col not in train.columns:
+                                    train[col] = np.nan
+                            for col in missing_in_current:
+                                if col not in score.columns:
+                                    score[col] = np.nan
+                            
+                            # Select only the cached columns in order
+                            train = train[[c for c in aligned_sensors if c in train.columns]]
+                            score = score[[c for c in aligned_sensors if c in score.columns]]
+                            current_sensors = aligned_sensors
+                            
+                            Console.info(f"Features aligned: train={train.shape}, score={score.shape}", component="MODEL")
+                        else:
+                            Console.warn(
+                                f"Feature overlap too low ({len(common_cols)}/{len(cached_sensors)}) - cannot use cached models",
+                                component="MODEL"
+                            )
+                            cached_models = None  # Force retrain
+                            cached_manifest = None
+                
                 if cached_models:
                     rebuild_result = rebuild_detectors_from_cache(
                         cached_models=cached_models, cached_manifest=cached_manifest,
@@ -1718,7 +1780,21 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 }
             
             # Score TRAIN data with all fitted detectors.
-            pca_cached = (pca_train_spe, pca_train_t2) if pca_train_spe is not None else None
+            # v11.6.1 FIX: pca_cached was computed on SUBSAMPLED train data during fit (e.g., 10K rows)
+            # but here we're scoring the FULL train data (e.g., 13K+ rows). 
+            # NEVER use pca_cached when lengths don't match - always re-score.
+            pca_cached_for_train = None  # Force fresh PCA scoring for calibration
+            if pca_train_spe is not None and len(pca_train_spe) == len(train):
+                # Only use cached PCA scores if lengths match exactly
+                pca_cached_for_train = (pca_train_spe, pca_train_t2)
+            else:
+                # Log why we're not using cache (diagnostic)
+                if pca_train_spe is not None:
+                    Console.info(
+                        f"PCA cache length mismatch: cached={len(pca_train_spe)}, train={len(train)} - re-scoring",
+                        component="CALIBRATE"
+                    )
+            
             train_frame, _ = score_all_detectors(
                 data=train,
                 ar1_detector=ar1_detector,
@@ -1731,7 +1807,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 iforest_enabled=iforest_enabled,
                 gmm_enabled=gmm_enabled,
                 omr_enabled=omr_enabled,
-                pca_cached=pca_cached,
+                pca_cached=pca_cached_for_train,  # v11.6.1: Only use if lengths match
                 return_omr_contributions=False,
             )
             

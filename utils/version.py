@@ -17,9 +17,38 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.6.0"
+__version__ = "11.6.1"
 __version_date__ = "2026-01-21"
 __version_author__ = "ACM Development Team"
+
+# v11.6.1: ONLINE MODE CACHE FIX (Critical Hotfix)
+#
+# ISSUE: ONLINE batches crashed with "Required detector models not found in cache"
+#
+# ROOT CAUSE:
+# - Run #1 (OFFLINE coldstart) creates a refit request during auto-tune
+# - Run #2 (ONLINE batch) sees refit_requested=True
+# - Line 1073: use_cache = ... and not refit_requested ...
+# - Since refit_requested=True, use_cache=False, so cached models NOT loaded
+# - But ONLINE mode can't refit (ALLOWS_MODEL_REFIT=False), so pipeline crashes
+#
+# FIX:
+# - Location: core/acm_main.py lines 1073-1085
+# - Change: In ONLINE mode, ignore refit_requested and always load cached models
+# - Logic: use_cache = ... and (not refit_requested or not ALLOWS_MODEL_REFIT) ...
+# - New log: "Refit requested but ONLINE mode cannot refit - will load cached models anyway"
+#
+# FIX #8 - PCA CACHE LENGTH MISMATCH:
+# - Location: core/acm_main.py lines 1782-1808
+# - Issue: pca_train_spe/pca_train_t2 cached during fit (10K subsampled)
+#          Then used in calibration with full train data (13K+ rows)
+#          Caused: ValueError: Length of values (10000) does not match length of index (13369)
+# - Fix: Only use pca_cached if len(pca_train_spe) == len(train), else re-score
+#
+# IMPACT:
+# - ONLINE batches now work even when refit requests exist
+# - Refit requests will be honored on the next OFFLINE run
+# - Batch processing no longer crashes after coldstart
 
 # v11.6.0: COMPREHENSIVE STABILITY REFACTORING - 6 Critical Fixes
 #
