@@ -1559,6 +1559,7 @@ class OutputManager:
             "pca_t2_z": "pca_t2_z",
             "iforest_z": "iforest_z",
             "gmm_z": "gmm_z",
+            "omr_z": "omr_z",
             "cusum_z": "cusum_z",
             "drift_z": "drift_z",
             "hst_z": "hst_z",
