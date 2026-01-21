@@ -17,9 +17,17 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.3.3"
+__version__ = "11.3.4"
 __version_date__ = "2026-01-19"
 __version_author__ = "ACM Development Team"
+# v11.3.4: RUL VALIDATION GUARD - Prevent Implausible Predictions
+# - NEW: RUL validation logic in core/forecast_engine.py before writing to ACM_RUL
+#   - Rejects RUL < 1h when health > 70% (implausible imminent failure)
+#   - Rejects FailureProbability=100% when RUL > 100h (inconsistent prediction)
+#   - Rejects negative, infinite, or NaN RUL values
+# - Rejected predictions logged with Console.warn() for debugging
+# - Prevents corrupt data from entering ACM_RUL table
+#
 # v11.3.3: CONTAMINATION FILTERING FOR CALIBRATION - Analytics Audit Finding #6
 # - NEW: CalibrationContaminationFilter class in core/fuse.py
 #   - Filters anomalous samples from calibration windows BEFORE computing statistics

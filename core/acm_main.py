@@ -718,10 +718,10 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     # Get run count from SQL for interval calculations (completed runs only).
     run_count = 0
     try:
-        cur = sql_client.get_cursor()
-        cur.execute("SELECT COUNT(*) FROM ACM_Runs WHERE EquipID = ?", (equip_id,))
-        row = cur.fetchone()
-        run_count = row[0] if row else 0
+        with sql_client.get_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM ACM_Runs WHERE EquipID = ?", (equip_id,))
+            row = cur.fetchone()
+            run_count = row[0] if row else 0
     except Exception:
         run_count = 0  # First run or error - will trigger threshold calc
     
@@ -1261,6 +1261,17 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         score_regime_labels = None
         regime_model_was_trained = False
         
+        # v11.4.0: Load model maturity state BEFORE regimes to control discovery
+        current_model_maturity: Optional[str] = None
+        if sql_client and equip_id:
+            try:
+                early_model_state = load_model_state_from_sql(sql_client, equip_id)
+                if early_model_state is not None:
+                    current_model_maturity = early_model_state.maturity.value
+                    Console.info(f"Model maturity: {current_model_maturity}", component="LIFECYCLE")
+            except Exception as e:
+                Console.warn(f"Could not load model state for maturity check: {e}", component="LIFECYCLE")
+        
         with T.section("regimes.label"):
             # Reconstruct model from loaded state when available.
             regime_state_action = "none"
@@ -1286,7 +1297,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                 "regime_model": regime_model,  # Pass through; no sentinel checks.
                 "regime_basis_hash": regime_basis_hash,
                 "X_train": train,
-                "allow_discovery": ALLOWS_REGIME_DISCOVERY,  # ONLINE mode disables discovery.
+                "allow_discovery": ALLOWS_REGIME_DISCOVERY,  # DEPRECATED: kept for backward compat
+                "model_maturity": current_model_maturity,  # v11.4.0: MaturityState controls discovery
             }
             regime_out = regimes.label(score, regime_ctx, {"frame": frame}, cfg)
             frame = regime_out.get("frame", frame)
@@ -1361,6 +1373,13 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             # For HDBSCAN, filter out noise labels (-1)
                             unique_labels = np.unique(labels)
                             valid_labels = unique_labels[unique_labels >= 0]
+                            # Get model-level silhouette score (same for all regimes)
+                            model_silhouette = regime_model.meta.get("fit_score")
+                            if model_silhouette is not None and not np.isnan(model_silhouette):
+                                model_silhouette = float(model_silhouette)
+                            else:
+                                model_silhouette = None
+                            
                             for i, centroid in enumerate(centroids):
                                 # Map centroid index to actual regime label (important for HDBSCAN)
                                 regime_id = int(valid_labels[i]) if i < len(valid_labels) else i
@@ -1368,8 +1387,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                     'RegimeID': regime_id,
                                     'RegimeName': f'Regime_{regime_id}',
                                     'CentroidJSON': _json.dumps(centroid.tolist()),
-                                    'FeatureColumns': _json.dumps(regime_model.feature_cols if hasattr(regime_model, 'feature_cols') else []),
+                                    'FeatureColumns': _json.dumps(regime_model.feature_columns if hasattr(regime_model, 'feature_columns') else []),
                                     'DataPointCount': int(np.sum(np.array(labels) == regime_id)) if len(labels) > 0 else 0,
+                                    'SilhouetteScore': model_silhouette,  # FIX: Include silhouette score
                                     'MaturityState': new_state.maturity_state if hasattr(new_state, 'maturity_state') else 'LEARNING',
                                 })
                             output_manager.write_regime_definitions(regime_defs, version=regime_state_version)
@@ -1574,6 +1594,23 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                         if regime_model is not None and hasattr(regime_model, 'meta'):
                             silhouette = regime_model.meta.get('fit_score')
                         
+                        # Compute actual stability ratio from regime transitions.
+                        # stability = 1 / (1 + normalized_transition_rate)
+                        # Low transitions = high stability, high transitions = low stability.
+                        actual_stability = 1.0 if regime_quality_ok else 0.75  # Default to good
+                        if regime_model is not None and hasattr(regime_model, 'stats') and regime_model.stats:
+                            # Compute weighted average stability across regimes
+                            total_samples = 0
+                            weighted_stability = 0.0
+                            for regime_id, stat in regime_model.stats.items():
+                                count = stat.get('count', 0)
+                                stab = stat.get('stability_score', 1.0)
+                                if count > 0 and np.isfinite(stab):
+                                    weighted_stability += stab * count
+                                    total_samples += count
+                            if total_samples > 0:
+                                actual_stability = weighted_stability / total_samples
+                        
                         # Load existing state or create new.
                         model_state = load_model_state_from_sql(sql_client, equip_id)
                         
@@ -1597,7 +1634,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                 run_id=run_id,
                                 run_success=True,
                                 silhouette_score=silhouette,
-                                stability_ratio=1.0 if regime_quality_ok else 0.5,  # Simplified for now
+                                stability_ratio=actual_stability,  # Use computed stability from regime stats
                                 additional_rows=len(train),
                                 additional_days=training_days,
                             )
@@ -1605,7 +1642,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                             # Check promotion eligibility if still LEARNING.
                             promotion_happened = False
                             if model_state.maturity == MaturityState.LEARNING:
-                                eligible, unmet = check_promotion_eligibility(model_state)
+                                # Get promotion criteria from config (allows per-equipment tuning)
+                                promotion_criteria = PromotionCriteria.from_config(cfg or {})
+                                eligible, unmet = check_promotion_eligibility(model_state, promotion_criteria)
                                 if eligible:
                                     old_maturity = model_state.maturity.value
                                     model_state = promote_model(model_state)
@@ -1628,6 +1667,9 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                                         pass  # Promotion log is best-effort.
                                     
                                     Console.ok(f"Model promoted: LEARNING->CONVERGED (runs={model_state.consecutive_runs}, days={model_state.total_days:.1f})", component="LIFECYCLE")
+                                else:
+                                    # Log why promotion didn't happen
+                                    Console.info(f"Promotion not eligible: {', '.join(unmet)}", component="LIFECYCLE")
                         
                         # Write updated state.
                         output_manager.write_active_models(get_active_model_dict(

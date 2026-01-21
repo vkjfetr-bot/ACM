@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "ACM Pipeline Observability - Traces, Logs, Metrics, Profiling",
+  "description": "ACM Pipeline Observability - Traces (Tempo), Logs (Loki), Metrics (Prometheus), Profiling (Pyroscope). Data appears after ACM batch runs with observability stack.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -81,8 +81,8 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "tempo", "uid": "tempo-ds" },
-      "description": "Memory usage per pipeline phase extracted from trace spans",
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "description": "Memory usage per pipeline phase from Prometheus metrics",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -119,13 +119,13 @@
       },
       "targets": [
         {
-          "datasource": { "type": "tempo", "uid": "tempo-ds" },
-          "queryType": "traceqlmetrics",
-          "query": "{span.acm.mem_mb > 0} | rate() by (resource.service.name)",
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "max by (equipment, section) (acm_memory_rss_mb)",
+          "legendFormat": "{{section}}",
           "refId": "A"
         }
       ],
-      "title": "Memory Usage (from Traces)",
+      "title": "Memory by Pipeline Phase",
       "type": "timeseries"
     },
     {
@@ -170,12 +170,12 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
-          "expr": "acm_cpu_percent",
+          "expr": "avg by (equipment) (acm_cpu_percent)",
           "legendFormat": "{{equipment}}",
           "refId": "A"
         }
       ],
-      "title": "CPU Utilization",
+      "title": "CPU Utilization (avg)",
       "type": "timeseries"
     },
     {
@@ -218,12 +218,12 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
-          "expr": "acm_memory_rss_mb",
+          "expr": "max by (equipment) (acm_memory_rss_mb)",
           "legendFormat": "{{equipment}}",
           "refId": "A"
         }
       ],
-      "title": "Memory RSS",
+      "title": "Memory RSS (max)",
       "type": "timeseries"
     },
     {
@@ -248,7 +248,7 @@
         {
           "datasource": { "type": "tempo", "uid": "tempo-ds" },
           "queryType": "traceql",
-          "query": "{resource.service.name=\"acm-pipeline\"} | select(span.acm.mem_mb, span.acm.duration_s, span.acm.equipment)",
+          "query": "{resource.service.name=\"acm-pipeline\"} | select(span.\"acm.mem_mb\", span.\"acm.duration_s\", span.\"acm.equipment\")",
           "limit": 20,
           "refId": "A"
         }
@@ -334,7 +334,7 @@
     },
     {
       "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope-ds" },
-      "description": "CPU flame graph from Pyroscope",
+      "description": "CPU flame graph from Pyroscope. Requires yappi installed and ACM batch run with observability stack running. Profile appears after batch completion.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -345,18 +345,18 @@
       "targets": [
         {
           "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope-ds" },
-          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "profileTypeId": "acm.cpu:samples:samples::",
           "labelSelector": "{service_name=\"acm-pipeline\"}",
           "queryType": "profile",
           "refId": "A"
         }
       ],
-      "title": "CPU Profile",
+      "title": "CPU Profile (ACM Pipeline)",
       "type": "flamegraph"
     },
     {
       "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope-ds" },
-      "description": "Memory allocation flame graph",
+      "description": "Memory allocation flame graph. Requires tracemalloc and ACM batch run with observability stack running. Profile appears after batch completion.",
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -367,13 +367,13 @@
       "targets": [
         {
           "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope-ds" },
-          "profileTypeId": "memory:alloc_space:bytes:space:bytes",
+          "profileTypeId": "acm.alloc_space:bytes:bytes::",
           "labelSelector": "{service_name=\"acm-pipeline\"}",
           "queryType": "profile",
           "refId": "A"
         }
       ],
-      "title": "Memory Allocation Profile",
+      "title": "Memory Allocation Profile (ACM Pipeline)",
       "type": "flamegraph"
     },
     {
@@ -454,12 +454,12 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
-          "expr": "rate(acm_stage_duration_seconds_sum[$__rate_interval]) / rate(acm_stage_duration_seconds_count[$__rate_interval])",
+          "expr": "topk(10, acm_stage_duration_seconds_sum)",
           "legendFormat": "{{stage}}",
           "refId": "A"
         }
       ],
-      "title": "Stage Duration (OTEL Metrics)",
+      "title": "Stage Duration (Top 10)",
       "type": "timeseries"
     },
     {
@@ -513,7 +513,7 @@
         {
           "datasource": { "type": "mssql", "uid": "mssql-ds" },
           "format": "table",
-          "rawSql": "SELECT 'ACM_Scores_Wide' AS TableName, COUNT(*) AS RowCount FROM ACM_Scores_Wide WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_HealthTimeline', COUNT(*) FROM ACM_HealthTimeline WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_RegimeTimeline', COUNT(*) FROM ACM_RegimeTimeline WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_Episodes', COUNT(*) FROM ACM_Episodes WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_Runs', COUNT(*) FROM ACM_Runs WHERE StartedAt BETWEEN $__timeFrom() AND $__timeTo()",
+          "rawSql": "SELECT 'ACM_Scores_Wide' AS TableName, COUNT(*) AS TotalRows FROM ACM_Scores_Wide WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_HealthTimeline', COUNT(*) FROM ACM_HealthTimeline WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_RegimeTimeline', COUNT(*) FROM ACM_RegimeTimeline WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_Episodes', COUNT(*) FROM ACM_Episodes WHERE CreatedAt BETWEEN $__timeFrom() AND $__timeTo()\nUNION ALL\nSELECT 'ACM_Runs', COUNT(*) FROM ACM_Runs WHERE StartedAt BETWEEN $__timeFrom() AND $__timeTo()",
           "refId": "A"
         }
       ],

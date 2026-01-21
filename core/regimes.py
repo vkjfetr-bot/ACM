@@ -4,7 +4,7 @@
 from __future__ import annotations
 from collections import deque, Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, TYPE_CHECKING
 import json
 try:
     import orjson  # type: ignore
@@ -200,7 +200,15 @@ def _cfg_get(cfg: Dict[str, Any], path: str, default: Any) -> Any:
         expected_type = type(default)
         if expected_type in (int, float, bool, str) and not isinstance(val, expected_type):
             try:
-                val = expected_type(val)
+                # Cast val to the expected type (only for scalar types)
+                if expected_type is int:
+                    val = int(val)  # type: ignore[arg-type]
+                elif expected_type is float:
+                    val = float(val)  # type: ignore[arg-type]
+                elif expected_type is bool:
+                    val = bool(val)
+                elif expected_type is str:
+                    val = str(val)
             except Exception:
                 return default
     return val
@@ -300,8 +308,8 @@ def _add_health_state_features(
         # Captures sustained degradation (not transient spikes)
         trend_series = pd.Series(ensemble_z_clipped)
         trend = trend_series.rolling(window=20, min_periods=5, center=False).mean()
-        trend_filled = trend.fillna(method='bfill').fillna(method='ffill').fillna(0)
-        trend_clipped = np.clip(trend_filled.values, -3.0, 3.0)
+        trend_filled = trend.bfill().ffill().fillna(0)
+        trend_clipped = np.clip(np.asarray(trend_filled.values, dtype=np.float64), -3.0, 3.0)
         features_with_health['health_trend'] = trend_clipped
         
         # 3. Health State Quartile (binned health level: 0=healthy, 3=critical)
@@ -466,7 +474,7 @@ class RegimeModel:
     industrial regime detection due to varying density handling and probabilistic
     assignment capabilities.
     """
-    scaler: StandardScaler
+    scaler: Union[StandardScaler, "_IdentityScaler"]  # Can be either StandardScaler or _IdentityScaler
     clustering_model: Any  # v11.1.0: HDBSCAN or GaussianMixture
     feature_columns: List[str]
     raw_tags: List[str]
@@ -484,6 +492,11 @@ class RegimeModel:
     label_map_: Optional[Dict[int, int]] = None
     # v11.1.8: Fallback GMM model for HDBSCAN noise points (ensemble clustering)
     fallback_model_: Optional[GaussianMixture] = None
+    # v11.4.0: Normal regime identification (highest dwell + lowest anomaly)
+    normal_regime_label_: Optional[int] = None  # Identified "Normal" regime
+    regime_semantic_labels_: Dict[int, str] = field(default_factory=dict)  # label -> name
+    # v11.4.0: Optional PCA model for dimensionality reduction
+    pca: Optional[PCA] = None
     
     @property
     def cluster_centers_(self) -> np.ndarray:
@@ -518,7 +531,7 @@ class RegimeModel:
     @property
     def is_hdbscan(self) -> bool:
         """Check if model uses HDBSCAN."""
-        if not HDBSCAN_AVAILABLE:
+        if not HDBSCAN_AVAILABLE or hdbscan is None:
             return False
         return isinstance(self.clustering_model, hdbscan.HDBSCAN)
     
@@ -813,7 +826,7 @@ def build_feature_basis(
                     if not np.isfinite(pca_variance_ratio) or pca_variance_ratio < 0 or pca_variance_ratio > 1.0:
                         Console.warn(f"PCA variance ratio out of bounds: {pca_variance_ratio}. Resetting to NaN.", component="REGIME", variance_ratio=pca_variance_ratio, n_components=n_pca_used)
                         pca_variance_ratio = float("nan")
-                        pca_variance_vector = None
+                        pca_variance_vector = []  # Use empty list instead of None
                     elif any(not np.isfinite(v) for v in pca_variance_vector):
                         Console.warn("PCA variance vector contains non-finite values. Check numerical stability.", component="REGIME", n_components=n_pca_used)
                         
@@ -854,8 +867,12 @@ def build_feature_basis(
     score_basis.loc[:, all_cols] = basis_scaler.transform(score_basis[all_cols].values)
 
     # Compute basis signature for cache invalidation (FIX #8)
-    mean_vec_list = [float(x) for x in basis_scaler.mean_] if hasattr(basis_scaler, 'mean_') else None
-    var_vec_list = [float(x) for x in basis_scaler.var_] if hasattr(basis_scaler, 'var_') else None
+    mean_vec_list: Optional[List[float]] = None
+    var_vec_list: Optional[List[float]] = None
+    if hasattr(basis_scaler, 'mean_') and basis_scaler.mean_ is not None:
+        mean_vec_list = [float(x) for x in basis_scaler.mean_]
+    if hasattr(basis_scaler, 'var_') and basis_scaler.var_ is not None:
+        var_vec_list = [float(x) for x in basis_scaler.var_]
     basis_signature = _compute_basis_signature(all_cols, mean_vec_list, var_vec_list, n_pca_used)
 
     meta = {
@@ -900,7 +917,7 @@ def _fit_gmm_scaled(
     cfg: Dict[str, Any],
     *,
     pre_scaled: bool = False,
-) -> Tuple[StandardScaler, GaussianMixture, int, float, str, List[Tuple[int, float]], bool]:
+) -> Tuple[Union[StandardScaler, "_IdentityScaler"], Optional[GaussianMixture], int, float, str, List[Tuple[int, float]], bool]:
     """Fit GaussianMixture with auto-k selection using BIC scoring.
     
     v11.1.0: GMM is the fallback after HDBSCAN. Used when:
@@ -962,9 +979,11 @@ def _fit_gmm_scaled(
         if X_eval.shape[0] <= k * 2:  # Need at least 2 samples per component
             continue
         try:
+            # Cast covariance_type to Literal for type checker
+            cov_type: Literal['full', 'tied', 'diag', 'spherical'] = covariance_type if covariance_type in ('full', 'tied', 'diag', 'spherical') else 'diag'  # type: ignore[assignment]
             gmm = GaussianMixture(
                 n_components=k,
-                covariance_type=covariance_type,
+                covariance_type=cov_type,
                 max_iter=max_iter,
                 n_init=n_init,
                 random_state=random_state,
@@ -1007,9 +1026,10 @@ def _fit_gmm_scaled(
             )
 
     # Refit on full data with best k
+    cov_type_final: Literal['full', 'tied', 'diag', 'spherical'] = covariance_type if covariance_type in ('full', 'tied', 'diag', 'spherical') else 'diag'  # type: ignore[assignment]
     best_model = GaussianMixture(
         n_components=best_k,
-        covariance_type=covariance_type,
+        covariance_type=cov_type_final,
         max_iter=max_iter * 2,  # More iterations for final fit
         n_init=n_init * 2,  # More restarts for final fit
         random_state=random_state,
@@ -1059,7 +1079,7 @@ def _fit_hdbscan_scaled(
     cfg: Dict[str, Any],
     *,
     pre_scaled: bool = False,
-) -> Tuple[StandardScaler, Any, int, float, str, List[Tuple[int, float]], bool, np.ndarray]:
+) -> Tuple[Union[StandardScaler, "_IdentityScaler"], Any, int, float, str, List[Tuple[Union[str, int], float]], bool, np.ndarray]:
     """Fit HDBSCAN clustering for regime detection.
     
     v11.1.0: HDBSCAN is preferred for industrial regime detection because:
@@ -1082,6 +1102,9 @@ def _fit_hdbscan_scaled(
     """
     if not HDBSCAN_AVAILABLE:
         raise ImportError("hdbscan package not installed")
+    
+    # Type assertion: hdbscan module is guaranteed available after the above check
+    assert hdbscan is not None, "hdbscan should be available here"
     
     X = _finite_impute_inplace(X)
     if pre_scaled:
@@ -1228,7 +1251,7 @@ def _fit_hdbscan_scaled(
         # Quality metrics for HDBSCAN
         quality_score = 0.0
         quality_metric = "hdbscan_validity"
-        quality_sweep: List[Tuple[int, float]] = []
+        quality_sweep: List[Tuple[Union[str, int], float]] = []
         
         # DBCV score (Density-Based Clustering Validation) - preferred for HDBSCAN
         try:
@@ -1596,6 +1619,10 @@ def fit_regime_model(
         meta["hdbscan_noise_ratio"] = basis_meta["hdbscan_noise_ratio"]
     if "ensemble_fallback" in basis_meta:
         meta["ensemble_fallback"] = basis_meta["ensemble_fallback"]
+    
+    # Ensure scaler is not None before creating RegimeModel
+    if scaler is None:
+        raise RuntimeError("Scaler was not initialized - all clustering methods failed")
         
     regime_model = RegimeModel(
         scaler=scaler,
@@ -1675,8 +1702,9 @@ def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
     if model.is_hdbscan:
         # HDBSCAN: Use approximate_predict for new points
         try:
-            labels, strengths = hdbscan.approximate_predict(model.clustering_model, X_scaled)
-            labels = labels.astype(int, copy=True)  # Make mutable copy
+            predict_result = hdbscan.approximate_predict(model.clustering_model, X_scaled)  # type: ignore[union-attr]
+            labels = np.asarray(predict_result[0], dtype=int, copy=True)  # Make mutable copy
+            strengths = np.asarray(predict_result[1], dtype=float)
             
             # v11.3.1: Always assign low-strength points to nearest centroid
             # They ARE in some operating state, we just have lower confidence
@@ -1771,8 +1799,9 @@ def predict_regime_with_confidence(
     if model.is_hdbscan:
         # HDBSCAN: Use approximate_predict for probabilistic confidence
         try:
-            labels, strengths = hdbscan.approximate_predict(model.clustering_model, X_scaled)
-            labels = labels.astype(int, copy=True)
+            predict_result = hdbscan.approximate_predict(model.clustering_model, X_scaled)  # type: ignore[union-attr]
+            labels = np.asarray(predict_result[0], dtype=int, copy=True)
+            strengths = np.asarray(predict_result[1], dtype=float)
             
             # v11.1.6 FIX #4: Apply label mapping if available
             labels = model.apply_label_map(labels)
@@ -1978,7 +2007,168 @@ def update_health_labels(
     if np.isfinite(total_duration_sec):
         model.meta["total_duration_seconds"] = float(total_duration_sec)
     model.meta["total_samples"] = int(len(labels_arr))
+    
+    # v11.4.0: Identify the "Normal" operating regime using config parameters
+    normal_cfg = _cfg_get(cfg, "regimes.normal_identification", {})
+    normal_enabled = bool(normal_cfg.get("enabled", True))
+    min_dwell = float(normal_cfg.get("min_dwell_fraction", 0.15))
+    max_fused = float(normal_cfg.get("max_median_fused", 2.0))
+    
+    if normal_enabled:
+        normal_label = identify_normal_regime(stats, min_dwell_fraction=min_dwell, max_median_fused=max_fused)
+    else:
+        normal_label = None
+    model.normal_regime_label_ = normal_label
+    
+    # v11.4.0: Generate semantic labels for all regimes
+    model.regime_semantic_labels_ = _generate_regime_semantic_labels(stats, normal_label)
+    model.meta["normal_regime_label"] = normal_label
+    model.meta["regime_semantic_labels"] = dict(model.regime_semantic_labels_)
+    
+    if normal_label is not None:
+        Console.info(
+            f"Identified Normal regime: {normal_label} "
+            f"(dwell={stats[normal_label].get('dwell_fraction', 0):.1%}, "
+            f"median_fused={stats[normal_label].get('median_fused', 0):.2f})",
+            component="REGIME"
+        )
+    
     return stats
+
+
+def identify_normal_regime(
+    regime_stats: Dict[int, Dict[str, Any]],
+    min_dwell_fraction: float = 0.15,
+    max_median_fused: float = 2.0,
+) -> Optional[int]:
+    """
+    Identify the "Normal" operating regime using dwell time and anomaly score.
+    
+    v11.4.0: Research-backed Normal regime identification.
+    
+    The Normal regime is the operating state where:
+    1. Equipment spends the MOST time (highest dwell_fraction)
+    2. Equipment shows the HEALTHIEST behavior (lowest median_fused)
+    
+    Combined score: dwell_fraction * (1 / (1 + median_fused))
+    
+    This approach is consistent with semi-Markov reliability modeling where
+    the baseline/steady-state has maximum stationary probability and minimum
+    hazard rate (Limnios & Oprisan, 2001).
+    
+    Args:
+        regime_stats: Dict from update_health_labels() with regime statistics
+        min_dwell_fraction: Minimum dwell fraction to consider (default: 0.15)
+        max_median_fused: Maximum median_fused to consider as potentially normal (default: 2.0)
+        
+    Returns:
+        Integer label of the Normal regime, or None if no suitable regime found
+    """
+    if not regime_stats:
+        return None
+    
+    best_regime: Optional[int] = None
+    best_score: float = -1.0
+    
+    for label, stats in regime_stats.items():
+        # Skip UNKNOWN regime (deprecated but may exist in legacy data)
+        if label == UNKNOWN_REGIME_LABEL:
+            continue
+        
+        dwell_fraction = stats.get("dwell_fraction", 0.0)
+        median_fused = stats.get("median_fused", float("inf"))
+        
+        # Validate values
+        if not np.isfinite(dwell_fraction) or not np.isfinite(median_fused):
+            continue
+        
+        # Filter out rare regimes and high-anomaly regimes
+        if dwell_fraction < min_dwell_fraction:
+            continue
+        if median_fused > max_median_fused:
+            continue
+        
+        # Combined score: higher dwell + lower anomaly = more "normal"
+        # The inverse transform 1/(1+z) maps [0, inf) -> (0, 1]
+        # This gives highest weight to regimes with median_fused near 0
+        health_factor = 1.0 / (1.0 + max(0.0, median_fused))
+        combined_score = dwell_fraction * health_factor
+        
+        if combined_score > best_score:
+            best_score = combined_score
+            best_regime = int(label)
+    
+    return best_regime
+
+
+def _generate_regime_semantic_labels(
+    regime_stats: Dict[int, Dict[str, Any]],
+    normal_regime_label: Optional[int],
+) -> Dict[int, str]:
+    """
+    Generate human-readable semantic labels for regimes.
+    
+    v11.4.0: Provides meaningful names based on regime characteristics.
+    
+    Naming conventions:
+    - Normal: The identified normal operating regime
+    - High Load / Low Load: Based on relative dwell patterns
+    - Transient: Low dwell fraction, high transition count
+    - Stressed: High median_fused (anomaly score)
+    
+    Args:
+        regime_stats: Regime statistics from update_health_labels()
+        normal_regime_label: The identified normal regime
+        
+    Returns:
+        Dict mapping regime label (int) to semantic name (str)
+    """
+    labels: Dict[int, str] = {}
+    
+    if not regime_stats:
+        return labels
+    
+    # Compute reference values for relative naming
+    all_dwell = [s.get("dwell_fraction", 0) for s in regime_stats.values() if np.isfinite(s.get("dwell_fraction", 0))]
+    all_fused = [s.get("median_fused", 0) for s in regime_stats.values() if np.isfinite(s.get("median_fused", 0))]
+    
+    median_dwell = float(np.median(all_dwell)) if all_dwell else 0.0
+    median_fused = float(np.median(all_fused)) if all_fused else 0.0
+    
+    for label, stats in regime_stats.items():
+        if label == UNKNOWN_REGIME_LABEL:
+            labels[label] = "Unknown"
+            continue
+        
+        dwell_frac = stats.get("dwell_fraction", 0.0)
+        fused = stats.get("median_fused", 0.0)
+        transition_count = stats.get("transition_count", 0)
+        segment_count = stats.get("segment_count", 0)
+        state = stats.get("state", "unknown")
+        
+        # Primary classification
+        if label == normal_regime_label:
+            labels[label] = "Normal"
+        elif state == "critical":
+            labels[label] = "Stressed"
+        elif state == "suspect":
+            # Check if transient (high transitions, low dwell)
+            if segment_count > 0 and transition_count / max(segment_count, 1) > 0.5:
+                labels[label] = "Transient"
+            else:
+                labels[label] = "Elevated"
+        elif np.isfinite(dwell_frac) and dwell_frac < median_dwell * 0.3:
+            # Low dwell = startup/shutdown type regime
+            labels[label] = "Transient"
+        elif np.isfinite(fused) and fused > median_fused * 1.5:
+            labels[label] = "Elevated"
+        else:
+            # Generic operating regime
+            labels[label] = f"Regime_{label}"
+    
+    return labels
+
+
 def _persist_regime_error(e: Exception, models_dir: Path):
     """Helper to write error details to a file."""
     err_file = models_dir / "regime_persist.errors.txt"
@@ -2783,7 +2973,9 @@ def regime_state_to_model(
     # Reconstruct scaler
     scaler = StandardScaler()
     scaler.mean_, scaler.scale_ = state.get_scaler_params()
-    scaler.n_features_in_ = len(scaler.mean_)
+    # Set n_features_in_ with proper None guard
+    n_features_in = len(scaler.mean_) if scaler.mean_ is not None else 0
+    scaler.n_features_in_ = n_features_in
     scaler.n_samples_seen_ = 1  # Required by sklearn but not critical here
     
     # v11.1.0: Reconstruct GMM instead of KMeans
@@ -2972,7 +3164,27 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
     basis_meta: Dict[str, Any] = ctx.get("basis_meta") or {}
     regime_model: Optional[RegimeModel] = ctx.get("regime_model")
     basis_hash: Optional[int] = ctx.get("regime_basis_hash")  # v11.1.1: Now SCHEMA hash, not data hash
-    allow_discovery: bool = ctx.get("allow_discovery", True)  # V11: ONLINE mode sets False
+    
+    # v11.4.0: DEPRECATED - allow_discovery flag replaced by MaturityState-based logic
+    # Discovery is now controlled by model lifecycle:
+    # - COLDSTART/LEARNING: discovery allowed (model is still learning)
+    # - CONVERGED/DEPRECATED: discovery NOT allowed (use existing model)
+    # The flag is kept for backward compatibility but should not be used in new code.
+    allow_discovery_flag: bool = ctx.get("allow_discovery", True)  # Legacy flag
+    model_maturity: Optional[str] = ctx.get("model_maturity")  # v11.4.0: MaturityState string
+    
+    # v11.4.0: Determine discovery eligibility from MaturityState (preferred) or flag (fallback)
+    if model_maturity is not None:
+        # MaturityState controls discovery - CONVERGED models don't rediscover
+        discovery_allowed = model_maturity in ("COLDSTART", "LEARNING", None)
+        if not discovery_allowed and allow_discovery_flag:
+            Console.info(
+                f"Model maturity is {model_maturity} - regime discovery disabled (using existing model)",
+                component="REGIME"
+            )
+    else:
+        # Fallback to legacy flag if no maturity state provided
+        discovery_allowed = allow_discovery_flag
 
     out = dict(score_out or {})
     frame = out.get("frame")
@@ -2986,16 +3198,22 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
             or regime_model.feature_columns != list(basis_train.columns)
         )
         
-        # V11 ONLINE mode gate: fail fast if model missing and discovery not allowed
-        if needs_fit and not allow_discovery:
+        # v11.4.0: Fail fast if model missing and discovery not allowed by maturity
+        if needs_fit and not discovery_allowed:
             raise RuntimeError(
-                "[ONLINE MODE] Regime model not found or invalidated. "
-                "ONLINE mode requires pre-trained regime model. Run in OFFLINE mode first to discover regimes."
+                f"[CONVERGED MODEL] Regime model not found or feature mismatch. "
+                f"Model maturity={model_maturity or 'unknown'} does not allow rediscovery. "
+                f"Either provide a valid cached model or reset to LEARNING state."
             )
         
         if needs_fit:
             regime_model = fit_regime_model(basis_train, basis_meta, cfg, basis_hash)
-        elif regime_model.train_hash is None and basis_hash is not None:
+        
+        # Type assertion: regime_model is guaranteed non-None at this point
+        # Either it was loaded from cache, or fit_regime_model was called (which never returns None)
+        assert regime_model is not None, "regime_model should be set by now"
+        
+        if regime_model.train_hash is None and basis_hash is not None:
             regime_model.train_hash = basis_hash
 
         # V11: Use confidence-aware prediction for score data
@@ -3173,7 +3391,8 @@ def _legacy_label(score_df, ctx: Dict[str, Any], out: Dict[str, Any], cfg: Dict[
                                 min_dwell_samples=min_dwell_samples, min_dwell_seconds=min_dwell_seconds)
         out["regime_labels_train"] = tr
     out["regime_quality_ok"] = True
-    out["regime_centers"] = _as_f32(model.cluster_centers_)
+    # GaussianMixture uses means_ not cluster_centers_
+    out["regime_centers"] = _as_f32(model.means_)
     frame = out.get("frame")
     if frame is not None:
         frame["regime_label"] = labels
@@ -3229,7 +3448,7 @@ def run(ctx: Any) -> Dict[str, Any]:
         if not summary_df.empty:
             # Write to ACM_RegimeStats SQL table (SQL-only mode)
             if OutputManager is not None:
-                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id)
                 # Convert dwell_fraction to OccupancyPct (percentage) and prepare correct columns
                 if 'dwell_fraction' in summary_df.columns:
                     summary_df['OccupancyPct'] = summary_df['dwell_fraction'] * 100.0
@@ -3257,7 +3476,7 @@ def run(ctx: Any) -> Dict[str, Any]:
             )
             # Write to ACM_RegimeOccupancy SQL table (SQL-only mode)
             if OutputManager is not None:
-                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id)
                 sql_cols = {"feature": "Feature", "importance": "Importance"}
                 om.write_dataframe(feature_importance_df, "regime_feature_importance", sql_table="ACM_RegimeOccupancy", sql_columns=sql_cols)
 
@@ -3281,7 +3500,7 @@ def run(ctx: Any) -> Dict[str, Any]:
             transitions_df = pd.DataFrame(transition_rows)
             # Write to ACM_RegimeTransitions SQL table (SQL-only mode)
             if OutputManager is not None:
-                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id, base_output_dir=getattr(ctx, "run_dir", None))
+                om = OutputManager(sql_client=sql_client, run_id=run_id, equip_id=equip_id)
                 sql_cols = {"from_regime": "FromRegime", "to_regime": "ToRegime", "count": "Count"}
                 om.write_dataframe(transitions_df, "regime_transitions", sql_table="ACM_RegimeTransitions", sql_columns=sql_cols)
 
@@ -3382,10 +3601,12 @@ def run(ctx: Any) -> Dict[str, Any]:
 
     # simple regime stability via episode durations
     eps = eps.sort_values(["start_ts","end_ts"])
-    durations = (
-        (eps["end_ts"] - eps["start_ts"]).dt.total_seconds().clip(lower=0)
-        if not eps.empty else pd.Series([], dtype="float64")
-    )
+    if not eps.empty:
+        # Convert datetime columns to ensure proper Timedelta arithmetic
+        duration_td = pd.to_datetime(eps["end_ts"]) - pd.to_datetime(eps["start_ts"])
+        durations = duration_td.dt.total_seconds().clip(lower=0)
+    else:
+        durations = pd.Series([], dtype="float64")
     metrics: Dict[str, float] = {"episode_count": float(len(eps))}
     if summary_df is not None and not summary_df.empty:
         metrics["regime_count"] = float(summary_df["regime"].nunique())

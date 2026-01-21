@@ -713,6 +713,81 @@ pytest tests/test_observability.py
 
 ---
 
+## Regime Detection (v11.4.0)
+
+### Regime Discovery Logic (MaturityState-based)
+Regime discovery is controlled by **ModelMaturityState**, not a flag:
+- **COLDSTART/LEARNING**: Full clustering allowed (HDBSCAN + GMM fallback)
+- **CONVERGED**: Uses cached regime model; no cluster rediscovery (stability)
+- **DEPRECATED**: Forces full retrain
+
+```python
+# OLD (flag-based) - DEPRECATED
+allow_discovery = pipeline_mode != "online"  # ❌ Too rigid
+
+# NEW (maturity-based)
+if maturity in (CONVERGED,):
+    use_cached_model = True  # ✅ Stable models don't change clusters
+else:
+    run_full_clustering = True  # ✅ Learning phase allows discovery
+```
+
+### Normal Regime Identification
+Normal regime is identified using **dwell fraction + median fused score**:
+
+```python
+def identify_normal_regime(regime_stats: pd.DataFrame) -> Optional[int]:
+    """
+    Score = dwell_fraction * (1 / (1 + median_fused))
+    
+    - Higher dwell_fraction = more time spent = likely normal
+    - Lower median_fused = fewer anomalies = healthy operation
+    - Scoring formula: dwell_fraction * inverse_fused
+    
+    Returns regime label with highest score as "Normal"
+    """
+```
+
+**Config Parameters**:
+- `regimes.normal_identification.enabled` (default: True)
+- `regimes.normal_identification.min_dwell_fraction` (default: 0.15)
+- `regimes.normal_identification.max_median_fused` (default: 2.0)
+
+### Semantic Regime Labels
+Regimes are assigned human-readable labels based on characteristics:
+- **Normal**: Highest dwell + low fused (identified by algorithm)
+- **Stressed**: High fused_z (> 2.0) indicating strain
+- **Transient**: Low dwell fraction (< 0.10) indicating transition
+- **OpMode_N**: Other stable operating modes
+
+---
+
+## Weight Tuning Methods (v11.4.0)
+
+### Episode Separability (Primary)
+Requires external episode labels; tunes weights to maximize AUROC:
+```python
+fusion.auto_tune.method = "episode_separability"
+fusion.auto_tune.require_external_labels = True  # Needs ACM_Anomaly_Events
+```
+
+### Statistical Diversity (Fallback - NEW)
+When no external labels exist, uses signal statistics:
+```python
+fusion.auto_tune.fallback_method = "statistical_diversity"
+fusion.auto_tune.require_external_labels = False  # v11.4.0 default
+```
+
+**Scoring Formula**:
+```
+weight_score = 0.4 * variance_score + 0.4 * diversity_score + 0.2 * tail_score
+```
+- **variance_score**: Higher variance = more informative signal
+- **diversity_score**: Low correlation with other detectors = unique information
+- **tail_score**: P95/P50 ratio = sensitivity to extremes
+
+---
+
 ## Analytical Correctness Rules (v11.1.4+)
 
 **CRITICAL: These statistical principles must be followed in ALL ML/analytics code.**

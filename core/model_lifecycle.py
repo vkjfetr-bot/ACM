@@ -134,6 +134,11 @@ class ModelState:
     last_run_at: Optional[datetime] = None
     total_runs: int = 0
     
+    @property
+    def total_days(self) -> float:
+        """Alias for training_days for backward compatibility."""
+        return self.training_days
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for SQL persistence."""
         return {
@@ -392,8 +397,8 @@ def get_active_model_dict(
     Returns:
         Dict for ACM_ActiveModels table
         
-    Note: Only includes columns that exist in the ACM_ActiveModels table schema.
-          Additional metrics are logged but not persisted to avoid schema changes.
+    Note: v11.3.1 - Now persists all promotion metrics to enable proper lifecycle
+          tracking across runs. Previous versions only logged these values.
     """
     # Log the full state for observability
     Console.info(
@@ -409,13 +414,23 @@ def get_active_model_dict(
     # Use regime version as default for threshold/forecast if not specified
     effective_regime_version = regime_version or state.version
     
-    # Return only columns that exist in ACM_ActiveModels table
+    # v11.3.1: Persist ALL promotion metrics to enable proper lifecycle tracking
     return {
         'ActiveRegimeVersion': effective_regime_version,
         'RegimeMaturityState': str(state.maturity),
         'RegimePromotedAt': state.promoted_at,
         'ActiveThresholdVersion': threshold_version or effective_regime_version,
         'ActiveForecastVersion': forecast_version or effective_regime_version,
+        # Promotion metrics - NOW PERSISTED
+        'SilhouetteScore': state.silhouette_score,
+        'StabilityRatio': state.stability_ratio,
+        'TrainingRows': state.training_rows,
+        'TrainingDays': state.training_days,
+        'ConsecutiveRuns': state.consecutive_runs,
+        'TotalRuns': state.total_runs,
+        'ForecastMAPE': state.forecast_mape,
+        'ForecastRMSE': state.forecast_rmse,
+        'CreatedAt': state.created_at,
     }
 
 
@@ -433,9 +448,9 @@ def load_model_state_from_sql(
     Returns:
         ModelState if found, None otherwise
         
-    Note: This function only queries columns that exist in the current schema.
-          Training metrics are not persisted to ACM_ActiveModels yet - they are
-          reconstructed from run history or defaults.
+    Note: v11.3.1 - Now fully persists and loads all promotion metrics.
+          Previous versions did not persist training metrics, causing models
+          to remain stuck in LEARNING forever.
     """
     try:
         with sql_client.cursor() as cur:
@@ -445,7 +460,16 @@ def load_model_state_from_sql(
                     RegimeMaturityState,
                     RegimePromotedAt,
                     LastUpdatedAt,
-                    LastUpdatedBy
+                    LastUpdatedBy,
+                    SilhouetteScore,
+                    StabilityRatio,
+                    TrainingRows,
+                    TrainingDays,
+                    ConsecutiveRuns,
+                    TotalRuns,
+                    ForecastMAPE,
+                    ForecastRMSE,
+                    CreatedAt
                 FROM dbo.[ACM_ActiveModels]
                 WHERE EquipID = ?
             """, (equip_id,))
@@ -462,18 +486,21 @@ def load_model_state_from_sql(
             except ValueError:
                 maturity = MaturityState.LEARNING
             
+            # v11.3.1: Load all persisted metrics
             return ModelState(
                 equip_id=equip_id,
                 version=version,
                 maturity=maturity,
-                created_at=row[3] or datetime.now(),  # LastUpdatedAt as proxy
+                created_at=row[13] or row[3] or datetime.now(),  # CreatedAt, fallback LastUpdatedAt
                 promoted_at=row[2],
-                # These are not persisted yet - use defaults
-                silhouette_score=None,
-                stability_ratio=None,
-                training_rows=0,
-                training_days=0.0,
-                consecutive_runs=0,
+                silhouette_score=row[5],  # SilhouetteScore
+                stability_ratio=row[6],   # StabilityRatio
+                training_rows=row[7] or 0,  # TrainingRows
+                training_days=row[8] or 0.0,  # TrainingDays
+                consecutive_runs=row[9] or 0,  # ConsecutiveRuns
+                total_runs=row[10] or 0,  # TotalRuns
+                forecast_mape=row[11],  # ForecastMAPE
+                forecast_rmse=row[12],  # ForecastRMSE
                 last_run_id=row[4],
                 last_run_at=row[3],
             )

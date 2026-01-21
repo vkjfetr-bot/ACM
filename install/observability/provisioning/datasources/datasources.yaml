@@ -83,8 +83,9 @@ datasources:
       # Links from Tempo traces to Pyroscope profiles using service_name label
       tracesToProfiles:
         datasourceUid: pyroscope-ds
-        # CPU profile type (primary)
-        profileTypeId: process_cpu:cpu:nanoseconds:cpu:nanoseconds
+        # CPU profile type - ACM uses HTTP ingestion API with custom app name
+        # Format: app_name.profile_type:sample_type:sample_unit::
+        profileTypeId: "acm.cpu:samples:samples::"
         customQuery: true
         # Match using service_name label (standard Grafana label set by ACM)
         # Also include equipment for filtering

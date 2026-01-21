@@ -162,7 +162,8 @@ def populate_config(csv_path: Path):
                 Console.warn(f"Failed to insert {full_param_path} (EquipID={equip_id}): {e}", component="CFG-MIGRATE")
                 error_count += 1
         
-        client.conn.commit()
+        if client.conn is not None:
+            client.conn.commit()
         Console.info(f"Committed {insert_count} config parameters", component="CFG-MIGRATE")
     finally:
         cursor.close()

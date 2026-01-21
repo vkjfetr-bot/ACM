@@ -574,9 +574,11 @@ class ForecastEngine:
 
             regime_df = pd.DataFrame(rows, columns=['Timestamp', 'RegimeLabel'])
             regime_df['Timestamp'] = pd.to_datetime(regime_df['Timestamp'])
-            regime_df = regime_df.sort_values('Timestamp')
+            regime_df = regime_df.sort_values('Timestamp').drop_duplicates(subset=['Timestamp'], keep='last')
 
             health_times = pd.DataFrame({'Timestamp': pd.to_datetime(health_df['Timestamp'])})
+            # Remove duplicate timestamps to prevent merge_asof shape mismatch
+            health_times = health_times.drop_duplicates(subset=['Timestamp'], keep='last')
             max_regime_gap = float(forecast_config.get('forecast.regime_conditioned.max_regime_gap_hours', 0.0))
             tolerance_hours = max(2.0 * float(dt_hours), 0.0)
             if max_regime_gap > 0:
@@ -1118,13 +1120,42 @@ class ForecastEngine:
                 'CreatedAt': [datetime.now()]
             })
             
-            self.output_manager.write_dataframe(
-                df_rul,
-                artifact_name='acm_rul_summary',
-                sql_table='ACM_RUL',
-                add_created_at=False
-            )
-            tables_written.append('ACM_RUL')
+            # V11.3.3: RUL Validation Guard - Reject implausible predictions
+            # This prevents corrupt data from entering the database
+            rul_value = df_rul['RUL_Hours'].iloc[0]
+            health_value = df_rul['CurrentHealth'].iloc[0]
+            fail_prob = df_rul['FailureProbability'].iloc[0]
+            
+            rul_is_valid = True
+            validation_reason = ""
+            
+            # Rule 1: If health > 70%, RUL must be > 1 hour
+            if health_value is not None and health_value > 70 and rul_value is not None and rul_value < 1.0:
+                rul_is_valid = False
+                validation_reason = f"RUL={rul_value:.2f}h too low for health={health_value:.1f}%"
+            
+            # Rule 2: If RUL > 100h, failure probability should not be 100%
+            if rul_value is not None and rul_value > 100 and fail_prob is not None and fail_prob >= 1.0:
+                rul_is_valid = False
+                validation_reason = f"FailureProbability=100% invalid with RUL={rul_value:.1f}h"
+            
+            # Rule 3: RUL must be positive and finite
+            if rul_value is not None and (rul_value < 0 or np.isinf(rul_value) or np.isnan(rul_value)):
+                rul_is_valid = False
+                validation_reason = f"RUL={rul_value} is invalid (negative, inf, or NaN)"
+            
+            if rul_is_valid:
+                self.output_manager.write_dataframe(
+                    df_rul,
+                    artifact_name='acm_rul_summary',
+                    sql_table='ACM_RUL',
+                    add_created_at=False
+                )
+                tables_written.append('ACM_RUL')
+            else:
+                Console.warn(f"RUL prediction REJECTED: {validation_reason}",
+                             component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
+                             rul_hours=rul_value, health=health_value, fail_prob=fail_prob)
             
             Console.info(f"Wrote {len(tables_written)} forecast tables to SQL",
                          component="FORECAST", equip_id=self.equip_id, run_id=self.run_id,
