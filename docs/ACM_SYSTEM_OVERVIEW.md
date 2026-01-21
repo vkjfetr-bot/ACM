@@ -1,962 +1,1494 @@
 # ACM V11 - System Handbook
 
-This handbook is a complete, implementation-level walkthrough of ACM V11 for new maintainers. It covers the end-to-end data flow, the role of every module, configuration surfaces, and the reasoning behind each major decision so that a new engineer can operate, extend, and hand off the system confidently.
+**Complete Implementation-Level Technical Reference**
 
-**Current Version:** v11.3.0 - Health-State Aware Regime Detection (January 13, 2026)
+This handbook provides a comprehensive walkthrough of ACM V11 for engineers and maintainers. It covers end-to-end data flow, module architecture, configuration surfaces, algorithmic reasoning, and operational procedures.
 
-**Latest Enhancement (v11.3.0):** Multi-dimensional regime clustering now includes **health-state variables** alongside operating conditions. The same detector anomaly score carries different severity weight depending on equipment health state (healthy ×1.0, degrading ×1.2, mode switching ×0.9). This eliminates false positives from healthy equipment in unusual operating modes while boosting urgency when equipment is actually failing.
+**Current Version:** v11.4.0 (January 21, 2026)
 
 ---
 
-## 🚀 Quick Installation
+## Table of Contents
 
-### Interactive Installer Wizard (Recommended)
+1. [Mental Model - Top Level Flow](#1-mental-model---top-level-flow)
+2. [Architecture Diagram](#2-architecture-diagram)
+3. [Pipeline Phase Sequence](#3-pipeline-phase-sequence)
+4. [Module Dependency Graph](#4-module-dependency-graph)
+5. [Detector Algorithms](#5-detector-algorithms)
+6. [Regime Detection](#6-regime-detection)
+7. [Fusion and Episode Detection](#7-fusion-and-episode-detection)
+8. [Health Scoring](#8-health-scoring)
+9. [RUL Forecasting](#9-rul-forecasting)
+10. [Model Lifecycle](#10-model-lifecycle)
+11. [Configuration System](#11-configuration-system)
+12. [SQL Schema](#12-sql-schema)
+13. [Observability Stack](#13-observability-stack)
+14. [Entry Points and Runtime Modes](#14-entry-points-and-runtime-modes)
+15. [Codebase Map](#15-codebase-map)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Extending ACM](#17-extending-acm)
 
-ACM v11.3.0 includes a comprehensive **installer wizard** that handles all setup automatically:
+---
+
+## 1. Mental Model - Top Level Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 ACM PIPELINE OVERVIEW                                    │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+
+     DATA SOURCE                    PROCESSING                         OUTPUTS
+     ───────────                    ──────────                         ───────
+
+  ┌──────────────┐            ┌─────────────────────┐            ┌──────────────────┐
+  │ SQL Server   │            │  Feature Engineering │            │ ACM_Scores_Wide  │
+  │ Historian    │───────────▶│  (fast_features.py)  │            │ ACM_HealthTimeline│
+  │              │            └──────────┬──────────┘            │ ACM_Anomaly_Events│
+  │ Equipment    │                       │                        │ ACM_RUL           │
+  │ Sensor Data  │                       ▼                        │ ACM_RegimeTimeline│
+  └──────────────┘            ┌─────────────────────┐            │ ACM_*Forecast     │
+                              │  6-Head Detector     │            └──────────────────┘
+                              │  Ensemble            │                     │
+                              │  ┌───┬───┬───┐       │                     ▼
+                              │  │AR1│PCA│IF │       │            ┌──────────────────┐
+                              │  ├───┼───┼───┤       │            │ Grafana          │
+                              │  │GMM│OMR│T2 │       │            │ Dashboards       │
+                              │  └───┴───┴───┘       │            │                  │
+                              └──────────┬──────────┘            │ Operations       │
+                                         │                        │ Console          │
+                                         ▼                        └──────────────────┘
+                              ┌─────────────────────┐
+                              │  Regime Clustering   │
+                              │  (Raw Sensors Only)  │
+                              └──────────┬──────────┘
+                                         │
+                                         ▼
+                              ┌─────────────────────┐
+                              │  Weighted Fusion     │
+                              │  + Episode Detection │
+                              └──────────┬──────────┘
+                                         │
+                                         ▼
+                              ┌─────────────────────┐
+                              │  Forecasting & RUL   │
+                              │  Monte Carlo Sim     │
+                              └─────────────────────┘
+```
+
+**Key Principles:**
+
+1. **SQL-First Architecture**: All production data flows through SQL Server. File mode exists only for diagnostics.
+
+2. **Six Independent Detectors**: Each detector answers a different "what's wrong?" question:
+   - AR1: Sensor drift/spikes
+   - PCA-SPE: Sensor decoupling
+   - PCA-T2: Operating point anomaly
+   - IForest: Rare states
+   - GMM: Cluster membership
+   - OMR: Cross-sensor residuals
+
+3. **Regime Clustering Uses Raw Sensors Only** (v11.4.0 Architecture):
+   - Regimes = HOW equipment operates (load, speed, flow, pressure)
+   - Detectors = IF equipment is healthy
+   - These are ORTHOGONAL concerns that must never be mixed
+
+4. **Weighted Fusion**: Detector z-scores are weighted and combined into a single fused anomaly score.
+
+5. **Episode Detection**: CUSUM change-point detection identifies sustained anomaly periods.
+
+6. **RUL Forecasting**: Monte Carlo simulation projects health trajectory to estimate remaining useful life.
+
+---
+
+## 2. Architecture Diagram
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DETAILED SYSTEM ARCHITECTURE                                   │
+└────────────────────────────────────────────────────────────────────────────────────────────┘
+
+                                    ┌─────────────────────┐
+                                    │   sql_batch_runner  │
+                                    │   (Entry Point)     │
+                                    └──────────┬──────────┘
+                                               │ subprocess
+                                               ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    core/acm_main.py                                       │
+│                                    (Pipeline Orchestrator)                                │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                           │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐ │
+│  │ ConfigDict  │   │ SQLClient   │   │ OutputMgr   │   │ Observability│   │ PipelineType│ │
+│  │ (config)    │   │ (sql)       │   │ (writes)    │   │ (logging)   │   │ (contracts) │ │
+│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘ │
+│         │                 │                 │                 │                 │        │
+│         └─────────────────┴─────────────────┴─────────────────┴─────────────────┘        │
+│                                          │                                                │
+│  ┌───────────────────────────────────────┴───────────────────────────────────────────┐   │
+│  │                              PIPELINE PHASES                                       │   │
+│  │                                                                                    │   │
+│  │  [1] Data Load ──▶ [2] Validation ──▶ [3] Features ──▶ [4] Detectors ──────────▶  │   │
+│  │                                                                                    │   │
+│  │  ──▶ [5] Regimes ──▶ [6] Calibration ──▶ [7] Fusion ──▶ [8] Episodes ──────────▶  │   │
+│  │                                                                                    │   │
+│  │  ──▶ [9] Analytics ──▶ [10] Forecasting ──▶ [11] RUL ──▶ [12] Finalize           │   │
+│  │                                                                                    │   │
+│  └────────────────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                           │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+         │                    │                    │                    │
+         ▼                    ▼                    ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│ fast_features.py│  │ ar1_detector.py │  │  regimes.py     │  │ forecast_engine │
+│ Feature Builder │  │ PCA, IF, GMM    │  │  Clustering     │  │ RUL Estimator   │
+│                 │  │ omr.py          │  │                 │  │                 │
+│ - Rolling stats │  │                 │  │ - K-Means       │  │ - Holt-Winters  │
+│ - Lag features  │  │ - AR1 residuals │  │ - Auto-k        │  │ - Monte Carlo   │
+│ - Z-scores      │  │ - SPE, T2       │  │ - Smoothing     │  │ - P10/P50/P90   │
+│ - Spectral      │  │ - IsolationForest│ │ - Transients    │  │ - Culprits      │
+│                 │  │ - GMM likelihood │  │                 │  │                 │
+└─────────────────┘  │ - OMR residual  │  └─────────────────┘  └─────────────────┘
+                     └─────────────────┘
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │    fuse.py      │
+                     │                 │
+                     │ - Weighted sum  │
+                     │ - Weight tuning │
+                     │ - CUSUM CPD     │
+                     │ - Episode detect│
+                     └─────────────────┘
+```
+
+---
+
+## 3. Pipeline Phase Sequence
+
+Each pipeline run executes these phases in order. Phase names appear in console output and SQL logs.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              PIPELINE PHASE EXECUTION                                   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+PHASE 1: INITIALIZATION [startup]
+├── Parse CLI arguments (--equip, --start-time, --end-time, --mode)
+├── Load configuration from SQL ACM_Config (cascading: global then equipment-specific)
+├── Determine PipelineMode (ONLINE = scoring only, OFFLINE = full training)
+├── Initialize OutputManager with SQL client
+├── Create RunID for this execution
+└── Start OpenTelemetry trace span
+
+PHASE 2: DATA CONTRACT VALIDATION [data.contract]
+├── DataContract.validate(raw_data) from pipeline_types.py
+├── Check sensor column coverage (minimum 70% required)
+├── Validate timestamp column exists and is parseable
+├── Check data cadence matches config (sampling_secs)
+├── Write validation results to ACM_DataContractValidation
+└── FAIL FAST if validation fails (no point continuing with bad data)
+
+PHASE 3: DATA LOADING [load_data]
+├── Call stored procedure usp_ACM_GetHistorianData_TEMP
+├── Parameters: @StartTime, @EndTime, @EquipmentName
+├── Apply coldstart split: 60% train / 40% score
+├── Deduplicate timestamps (keep last occurrence)
+├── Ensure monotonically increasing index
+├── Guard: NOOP if score data empty after deduplication
+└── Output: train_df, score_df DataFrames
+
+PHASE 4: BASELINE SEEDING [baseline.seed]
+├── Load baseline from ACM_BaselineBuffer (persisted healthy data)
+├── Check for temporal overlap with score data
+├── Apply baseline for z-score normalization
+├── If no baseline: use training data head
+└── Output: baseline_df for calibration
+
+PHASE 5: SEASONALITY DETECTION [seasonality.detect]
+├── SeasonalityHandler.detect_patterns() from seasonality.py
+├── FFT analysis to detect DAILY (24h) and WEEKLY (168h) cycles
+├── Compute seasonal adjustment factors per sensor
+├── Apply adjustment if config enables (seasonality.adjust_enabled)
+└── Write results to ACM_SeasonalPatterns
+
+PHASE 6: DATA QUALITY GUARDRAILS [data.guardrails]
+├── Check train/score temporal overlap (warn if present)
+├── Validate sensor variance (drop low-variance columns)
+├── Check sensor coverage (% of expected sensors present)
+├── Compute overall data quality score
+├── Write to ACM_DataQuality table
+└── Output: quality_score, valid_columns list
+
+PHASE 7: FEATURE ENGINEERING [features.build + features.impute]
+├── fast_features.compute_all_features() from fast_features.py
+├── Build rolling statistics (mean, std, min, max) for each window size
+├── Build lag features (t-1, t-2, ... up to lag_depth)
+├── Compute per-sensor z-scores relative to training distribution
+├── Optional: Polars acceleration if row count > polars_threshold
+├── Impute missing values using TRAIN medians (prevents leakage)
+├── Compute feature hash for model cache validation
+└── Output: train_features, score_features DataFrames
+
+PHASE 8: MODEL TRAINING [train.detector_fit] (OFFLINE mode only)
+├── Check ModelRegistry for cached models matching feature hash
+├── If cache miss or OFFLINE mode:
+│   ├── Fit AR1 detector: per-sensor autoregressive residuals
+│   ├── Fit PCA detector: principal components, compute loadings
+│   ├── Fit IForest detector: isolation forest ensemble
+│   ├── Fit GMM detector: Gaussian mixture with BIC k-selection
+│   └── Fit OMR detector: cross-sensor regression residuals
+├── If ONLINE mode: load all detectors from cache
+├── Validate loaded models against current feature columns
+│   └── If mismatch: force retrain (v11.3.2 compatibility fix)
+└── Output: trained detector objects
+
+PHASE 9: DETECTOR SCORING [score.detector_score]
+├── Score all 6 detectors on score_features
+├── Compute raw scores:
+│   ├── AR1: residual magnitude per sensor, aggregate
+│   ├── PCA-SPE: squared prediction error (reconstruction loss)
+│   ├── PCA-T2: Hotelling T-squared (distance in PC space)
+│   ├── IForest: isolation path length (inverted)
+│   ├── GMM: negative log-likelihood
+│   └── OMR: cross-sensor prediction residual
+├── Normalize to z-scores using training distribution (mean, std)
+├── Apply clipping (z_cap, typically 8-10)
+└── Output: scores_wide DataFrame with columns ar1_z, pca_spe_z, pca_t2_z, iforest_z, gmm_z, omr_z
+
+PHASE 10: REGIME LABELING [regimes.label]
+├── Build regime basis from RAW SENSOR VALUES ONLY (v11.4.0)
+│   ├── Include: load, speed, flow, pressure, inlet_temp, etc.
+│   └── Exclude: ALL detector z-scores, health metrics, engineered features
+├── Standardize basis (StandardScaler)
+├── Auto-k selection using silhouette score (k_min to k_max range)
+├── Run K-Means clustering (or HDBSCAN if configured)
+├── Smooth labels using median filter (smoothing.window)
+├── Compute regime confidence per point
+├── Identify NORMAL regime (highest dwell + lowest fused_z)
+├── Label semantic regimes: Normal, Stressed, Transient, OpMode_N
+├── Write ACM_RegimeDefinitions (cluster centers, statistics)
+├── Write ACM_RegimeTimeline (per-timestamp labels)
+└── Output: regime_labels array, regime_confidence array
+
+PHASE 11: CALIBRATION [calibrate]
+├── Score TRAINING data through all detectors (for calibration baseline)
+├── Compute per-detector percentiles (P50, P95, P99)
+├── Set adaptive clip_z from P99 to prevent saturation
+├── Compute per-regime thresholds (if enabled)
+├── Apply contamination filtering (v11.3.3): remove outliers from calibration
+├── Self-tune thresholds to achieve target false positive rate
+├── Write ACM_Thresholds (per-detector, per-regime)
+└── Write ACM_CalibrationSummary
+
+PHASE 12: DETECTOR FUSION [fusion.auto_tune + fusion]
+├── Auto-tune detector weights:
+│   ├── Primary method: Episode separability (maximize AUROC vs labeled episodes)
+│   ├── Fallback method: Statistical diversity (variance + decorrelation)
+│   └── Correlation discount: reduce weight for correlated detector pairs
+├── Compute fused_z = sum(weight_i * z_i) / sum(weight_i)
+├── Apply severity multipliers (context-aware):
+│   ├── stable: x1.0
+│   ├── regime_transition: x0.9 (mode switches less alarming)
+│   └── health_degradation: x1.2 (boost priority when degrading)
+├── Write ACM_DetectorCorrelation (28 pairwise correlations)
+└── Output: fused_z series
+
+PHASE 13: EPISODE DETECTION [episodes.detect]
+├── CUSUM change-point detection on fused_z
+├── Parameters: k_sigma (start threshold), h_sigma (severity threshold)
+├── Identify episode boundaries (start_time, end_time)
+├── Merge nearby episodes (gap_merge parameter)
+├── Filter short episodes (min_len parameter)
+├── Compute per-episode statistics:
+│   ├── max_fused_z, mean_fused_z, duration_seconds
+│   ├── Culprit sensors (top contributors)
+│   └── Severity classification (INFO, WARNING, CRITICAL)
+├── Write ACM_Anomaly_Events
+├── Write ACM_EpisodeDiagnostics
+└── Output: episodes DataFrame
+
+PHASE 14: DRIFT MONITORING [drift]
+├── CUSUMDetector on fused_z trend
+├── Compute drift score (cumulative deviation from baseline)
+├── Classify: STABLE (score < 1), DRIFTING (1-3), FAULT (> 3)
+├── Write ACM_Drift_TS (time series of drift score)
+├── Write ACM_DriftController (current state)
+└── Output: drift_status, drift_score
+
+PHASE 15: MODEL PERSISTENCE [models.persistence.save]
+├── Save all trained models to SQL ModelRegistry
+├── Include: detector objects, scaler params, feature columns
+├── Compute model version hash from config signature
+├── Write metadata to ACM_ModelHistory
+└── Update ACM_ActiveModels pointer
+
+PHASE 16: MODEL LIFECYCLE [models.lifecycle]
+├── Load model state from ACM_ModelHistory
+├── Compute model maturity metrics:
+│   ├── run_count, total_samples_seen, silhouette_score
+│   └── stability_ratio, forecast_mape
+├── Check promotion criteria (v11.2.2 tightened):
+│   ├── min_runs: 5
+│   ├── min_silhouette: 0.40
+│   ├── min_stability: 0.75
+│   └── min_days: 7
+├── Transition state if criteria met:
+│   └── COLDSTART -> LEARNING -> CONVERGED -> DEPRECATED
+├── Update ACM_ActiveModels with new state
+└── Output: MaturityState
+
+PHASE 17: OUTPUT GENERATION [persist.*]
+├── write_scores_wide() -> ACM_Scores_Wide
+├── write_anomaly_events() -> ACM_Anomaly_Events
+├── write_detector_correlation() -> ACM_DetectorCorrelation
+├── write_sensor_correlation() -> ACM_SensorCorrelations
+├── write_sensor_normalized_ts() -> ACM_SensorNormalized_TS
+├── write_seasonal_patterns() -> ACM_SeasonalPatterns
+└── All writes batched for performance
+
+PHASE 18: ANALYTICS GENERATION [outputs.comprehensive_analytics]
+├── _generate_health_timeline() -> ACM_HealthTimeline
+│   ├── Compute health_index = 100 * exp(-fused_z / scale)
+│   ├── Apply smoothing (EWMA with smoothing_alpha)
+│   └── Classify health zones (HEALTHY, DEGRADING, CRITICAL)
+├── _generate_regime_timeline() -> ACM_RegimeTimeline
+├── _generate_sensor_defects() -> ACM_SensorDefects
+│   ├── Identify sensors with sustained high z-scores
+│   └── Classify by severity
+├── _generate_sensor_hotspots() -> ACM_SensorHotspots
+└── Compute confidence values for all outputs (v11.0.0)
+
+PHASE 19: FORECASTING [outputs.forecasting]
+├── ForecastEngine.run_forecast() from forecast_engine.py
+├── Load health history from ACM_HealthTimeline (30-90 days)
+├── Detect maintenance resets (health jumps > 15%)
+│   └── Use only post-reset data for trend fitting
+├── Fit degradation model:
+│   ├── Holt-Winters exponential smoothing
+│   ├── Parameters: alpha, beta (trend)
+│   └── Handle quality gates (reject SPARSE/FLAT/NOISY)
+├── Generate health forecast (horizon: 7-30 days)
+├── Generate sensor forecasts for top-10 changing sensors
+├── Write ACM_HealthForecast
+├── Write ACM_SensorForecast
+└── Write ACM_FailureForecast
+
+PHASE 20: RUL ESTIMATION [outputs.rul]
+├── Load health forecast from previous phase
+├── Monte Carlo simulation:
+│   ├── Generate N=1000 random trajectories
+│   ├── Add noise based on historical variance
+│   ├── Project forward until health < failure_threshold (20%)
+│   └── Record time-to-failure for each trajectory
+├── Compute confidence intervals:
+│   ├── P10 = 10th percentile (optimistic)
+│   ├── P50 = 50th percentile (median)
+│   └── P90 = 90th percentile (pessimistic)
+├── Identify culprit sensors (top-3 contributors to degradation)
+├── Validation guards (v11.3.4):
+│   ├── Reject RUL < 1h if health > 70%
+│   ├── Reject FailureProbability=100% if RUL > 100h
+│   └── Reject negative/infinite/NaN values
+├── Compute RUL confidence based on model maturity
+├── Write ACM_RUL
+└── Output: rul_hours, p10, p50, p90, top_sensors
+
+PHASE 21: RUN FINALIZATION [sql.run_stats]
+├── Write PCA loadings -> ACM_PCA_Loadings
+├── Write run statistics -> ACM_Run_Stats
+├── Write run metadata -> ACM_Runs
+│   ├── StartedAt, CompletedAt, Status
+│   ├── RowsProcessed, EpisodesDetected
+│   ├── HealthIndexMin, HealthIndexMax, HealthIndexAvg
+│   └── DriftStatus, ModelVersion
+├── Update ACM_ColdstartState with progress
+├── Commit all pending SQL transactions
+├── Emit final OTEL span
+└── Console summary output
+```
+
+---
+
+## 4. Module Dependency Graph
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              MODULE DEPENDENCY GRAPH                                    │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+scripts/sql_batch_runner.py
+    └── subprocess calls: core/acm_main.py
+
+core/acm_main.py (ORCHESTRATOR - 6000+ lines)
+    │
+    ├── Configuration & I/O
+    │   ├── utils/config_dict.py ─────────── ConfigDict (cascading config loader)
+    │   ├── core/sql_client.py ───────────── SQLClient (pyodbc wrapper)
+    │   ├── core/output_manager.py ───────── OutputManager (all SQL/CSV writes)
+    │   └── core/observability.py ────────── Console, Span, Metrics, T (logging)
+    │
+    ├── Data Processing
+    │   ├── core/pipeline_types.py ───────── DataContract, PipelineMode enums
+    │   ├── core/fast_features.py ────────── compute_all_features (pandas/Polars)
+    │   ├── core/seasonality.py ──────────── SeasonalityHandler (FFT patterns)
+    │   └── core/smart_coldstart.py ──────── SmartColdstart (historian retry)
+    │
+    ├── Detectors
+    │   ├── core/ar1_detector.py ─────────── AR1Detector (autoregressive)
+    │   ├── core/correlation.py ──────────── PCASubspaceDetector (SPE, T2)
+    │   ├── core/outliers.py ─────────────── IsolationForestDetector, GMMDetector
+    │   └── core/omr.py ──────────────────── OMRDetector (cross-sensor)
+    │
+    ├── Regimes & Fusion
+    │   ├── core/regimes.py ──────────────── label(), detect_transient_states()
+    │   ├── core/fuse.py ─────────────────── Fuser, ScoreCalibrator, tune_weights()
+    │   ├── core/adaptive_thresholds.py ─── AdaptiveThresholdCalculator
+    │   └── core/drift.py ────────────────── CUSUMDetector, compute_drift_metrics()
+    │
+    ├── Lifecycle & Persistence
+    │   ├── core/model_persistence.py ────── save_models(), load_models()
+    │   ├── core/model_lifecycle.py ──────── ModelState, promote_model()
+    │   └── core/confidence.py ───────────── compute_*_confidence() functions
+    │
+    └── Forecasting
+        ├── core/forecast_engine.py ──────── ForecastEngine (main forecaster)
+        ├── core/degradation_model.py ────── fit_degradation(), health_jump_detect()
+        ├── core/rul_estimator.py ────────── estimate_rul(), monte_carlo_sim()
+        └── core/health_tracker.py ───────── HealthTracker (history management)
+
+core/output_manager.py (I/O HUB)
+    ├── core/sql_client.py ────────── SQLClient
+    ├── core/observability.py ─────── Console
+    └── core/confidence.py ────────── compute_*_confidence()
+
+core/forecast_engine.py (FORECASTER)
+    ├── core/sql_client.py
+    ├── core/degradation_model.py
+    ├── core/rul_estimator.py
+    ├── core/confidence.py
+    ├── core/model_lifecycle.py
+    └── core/health_tracker.py
+```
+
+---
+
+## 5. Detector Algorithms
+
+### 5.1 AR1 Detector (Autoregressive Residuals)
+
+**Purpose:** Detect sensor drift, spikes, and temporal pattern anomalies.
+
+**Algorithm:**
+```
+For each sensor s:
+    1. Fit AR(1) model: x(t) = phi * x(t-1) + epsilon(t)
+    2. Compute residual: epsilon(t) = x(t) - phi * x(t-1)
+    3. Normalize: z(t) = (epsilon(t) - mu_train) / sigma_train
+
+Aggregate:
+    ar1_z = sqrt(sum(z_i^2) / n_sensors)  # RMS across sensors
+```
+
+**Configuration:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ar1.window` | 256 | Lookback window for AR coefficient |
+| `ar1.alpha` | 0.05 | Significance level |
+| `ar1.z_cap` | 8.0 | Maximum z-score cap |
+
+**Fault Types Detected:** Sensor degradation, control loop oscillation, actuator wear, calibration drift.
+
+---
+
+### 5.2 PCA Detector (Principal Component Analysis)
+
+**Purpose:** Detect multivariate anomalies - both sensor decoupling and operating point shifts.
+
+**Training:**
+```
+1. Standardize features: X_scaled = (X - mu) / sigma
+2. Fit PCA: X = T * P^T + E  (T = scores, P = loadings, E = residual)
+3. Retain k components explaining 95% variance
+4. Compute training statistics for SPE and T2
+```
+
+**Scoring - Two Metrics:**
+
+**SPE (Squared Prediction Error):**
+```
+SPE(x) = ||x - x_hat||^2 = sum((x_i - x_hat_i)^2)
+
+where x_hat = P * P^T * x  (projection onto PC subspace)
+
+pca_spe_z = (SPE - SPE_mean_train) / SPE_std_train
+```
+*Detects: Sensor decoupling, reconstruction error, correlation breakdown*
+
+**T2 (Hotelling's T-squared):**
+```
+T2(x) = sum(t_i^2 / lambda_i)  for i = 1..k
+
+where t_i = score on i-th principal component
+      lambda_i = variance explained by i-th component
+
+pca_t2_z = (T2 - T2_mean_train) / T2_std_train
+```
+*Detects: Operating point anomalies, process upsets, off-design operation*
+
+**Configuration:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `pca.n_components` | 5 | Number of principal components |
+| `pca.svd_solver` | randomized | SVD algorithm |
+| `pca.variance_threshold` | 0.95 | Minimum variance explained |
+
+---
+
+### 5.3 IForest Detector (Isolation Forest)
+
+**Purpose:** Detect rare states and novel failure modes.
+
+**Algorithm:**
+```
+Training:
+1. Build ensemble of N=100 isolation trees
+2. Each tree randomly partitions feature space
+3. Anomalies are isolated with fewer splits (shorter path)
+
+Scoring:
+1. Compute average path length h(x) across all trees
+2. Anomaly score: s(x) = 2^(-E[h(x)] / c(n))
+3. Normalize: iforest_z = (s - s_mean_train) / s_std_train
+
+where c(n) = 2 * (ln(n-1) + 0.5772) - 2*(n-1)/n
+      (average path length in unsuccessful search)
+```
+
+**Configuration:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `iforest.n_estimators` | 100 | Number of trees |
+| `iforest.contamination` | 0.01 | Expected anomaly fraction |
+| `iforest.max_samples` | 2048 | Samples per tree |
+
+**Fault Types Detected:** Novel failure modes, rare transients, unknown conditions.
+
+---
+
+### 5.4 GMM Detector (Gaussian Mixture Model)
+
+**Purpose:** Detect cluster membership anomalies and mode confusion.
+
+**Algorithm:**
+```
+Training:
+1. Search k from k_min to k_max
+2. Fit GMM for each k, compute BIC
+3. Select k with lowest BIC
+4. Final model: p(x) = sum_k pi_k * N(x | mu_k, Sigma_k)
+
+Scoring:
+1. Compute log-likelihood: log p(x)
+2. Low likelihood = anomaly
+3. Normalize: gmm_z = -(log_p - log_p_mean_train) / log_p_std_train
+   (negative because low likelihood = high z)
+```
+
+**Configuration:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `gmm.k_min` | 2 | Minimum components |
+| `gmm.k_max` | 3 | Maximum components |
+| `gmm.covariance_type` | diag | Covariance structure |
+| `gmm.bic_enabled` | True | Use BIC for k selection |
+
+**Fault Types Detected:** Mode confusion, startup/shutdown anomalies, regime transitions.
+
+---
+
+### 5.5 OMR Detector (Overall Model Residual)
+
+**Purpose:** Detect cross-sensor relationship breakdowns.
+
+**Algorithm:**
+```
+Training:
+1. For each sensor s_i:
+   a. Train model: s_i_hat = f(s_1, s_2, ..., s_n \ s_i)
+   b. Model type: Linear regression, PLS, or auto-selected
+2. Store trained models and residual statistics
+
+Scoring:
+1. For each sensor, compute residual: r_i = s_i - s_i_hat
+2. Aggregate: OMR = sqrt(sum(r_i^2) / n)
+3. Normalize: omr_z = (OMR - OMR_mean_train) / OMR_std_train
+```
+
+**Configuration:**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `omr.model_type` | auto | Model type: auto/pca/linear |
+| `omr.n_components` | 5 | PCA components for reconstruction |
+| `omr.min_samples` | 100 | Minimum training samples |
+| `omr.z_clip` | 10.0 | Z-score clipping |
+
+**Fault Types Detected:** Bearing degradation, mechanical wear, fouling, calibration drift, coupling failures.
+
+---
+
+### 5.6 Detector Comparison Summary
+
+| Detector | Z-Column | What It Detects | Strengths | Weaknesses |
+|----------|----------|-----------------|-----------|------------|
+| AR1 | `ar1_z` | Temporal drift, spikes | Fast, interpretable | Single-sensor focus |
+| PCA-SPE | `pca_spe_z` | Sensor decoupling | Multivariate | Needs many sensors |
+| PCA-T2 | `pca_t2_z` | Operating point shift | Sensitive to mode changes | False positives on regime change |
+| IForest | `iforest_z` | Rare states | Novel detection | Less interpretable |
+| GMM | `gmm_z` | Cluster anomalies | Probabilistic | Assumes Gaussian clusters |
+| OMR | `omr_z` | Relationship breakdown | Cross-sensor | Computationally expensive |
+
+---
+
+## 6. Regime Detection
+
+### 6.1 Architectural Principle (v11.4.0)
+
+**CRITICAL:** Regime clustering uses RAW SENSOR VALUES ONLY.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              REGIME CLUSTERING ARCHITECTURE                             │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+    CORRECT (v11.4.0)                           WRONG (pre-v11.4.0)
+    ─────────────────                           ───────────────────
+
+    Raw Sensors                                 Raw Sensors + Health Features
+    ────────────                                ─────────────────────────────
+    • Load (%)         ─┐                       • Load (%)              ─┐
+    • Speed (RPM)       │                       • Speed (RPM)            │
+    • Flow (m3/h)       ├──▶ K-Means            • Flow (m3/h)            │
+    • Pressure (bar)    │    Clustering         • health_ensemble_z      ├──▶ K-Means
+    • Inlet Temp (C)   ─┘                       • health_trend           │    CIRCULAR!
+                                                • health_quartile       ─┘
+
+    WHY THIS MATTERS:
+    ─────────────────
+    Using health features in clustering creates CIRCULAR MASKING:
+
+    1. Equipment degrades -> detector z-scores rise
+    2. Health features push point to "new regime"
+    3. New regime gets fresh baseline -> degradation hidden
+    4. Equipment appears "healthy in its current regime"
+
+    RESULT: Masked degradation, missed failures, delayed alerts
+
+    CORRECT SEPARATION:
+    ───────────────────
+    • Regimes = HOW equipment operates (controllable inputs)
+    • Detectors = IF equipment is healthy (condition outputs)
+    • These are ORTHOGONAL and must NEVER be mixed
+```
+
+### 6.2 Regime Discovery Algorithm
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              REGIME DISCOVERY FLOW                                      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+Step 1: Build Regime Basis
+├── Select operating variables (OPERATING_TAG_KEYWORDS):
+│   ├── speed, rpm, load, flow, pressure, power
+│   ├── stroke, valve, frequency, setpoint
+│   └── Exclude: bearing, winding, vibration, current (condition indicators)
+├── Scale using StandardScaler
+└── Output: basis_matrix (N_samples x M_operating_vars)
+
+Step 2: Auto-K Selection
+├── For k in range(k_min, k_max):
+│   ├── Fit K-Means with k clusters
+│   ├── Compute silhouette score: (b - a) / max(a, b)
+│   │   where a = mean intra-cluster distance
+│   │         b = mean nearest-cluster distance
+│   └── Store score
+├── Select k with highest silhouette score
+└── Guard: minimum silhouette_min (0.40 in v11.2.2)
+
+Step 3: Clustering
+├── Fit K-Means with selected k
+├── Assign labels (0, 1, 2, ... k-1)
+├── Compute per-point confidence:
+│   confidence = 1 - (dist_to_centroid / max_dist)
+└── Output: raw_labels, confidence
+
+Step 4: Label Smoothing
+├── Apply median filter (smoothing.window)
+├── Enforce minimum dwell time (min_dwell_samples, min_dwell_seconds)
+├── Handle transient states (rapid regime changes)
+└── Output: smoothed_labels
+
+Step 5: Normal Regime Identification
+├── For each regime:
+│   ├── Compute dwell_fraction = time_in_regime / total_time
+│   ├── Compute median_fused = median(fused_z in regime)
+│   └── Score = dwell_fraction * (1 / (1 + median_fused))
+├── Regime with highest score = NORMAL
+└── Guards: min_dwell_fraction (0.15), max_median_fused (2.0)
+
+Step 6: Semantic Labeling
+├── NORMAL: Highest dwell + low fused (identified above)
+├── STRESSED: High median_fused (> 2.0)
+├── TRANSIENT: Low dwell_fraction (< 0.10)
+└── OpMode_N: Other stable operating modes
+```
+
+### 6.3 Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `regimes.auto_k.k_min` | 2 | Minimum clusters |
+| `regimes.auto_k.k_max` | 6 | Maximum clusters |
+| `regimes.quality.silhouette_min` | 0.40 | Minimum clustering quality (v11.2.2 tightened) |
+| `regimes.smoothing.passes` | 3 | Smoothing iterations |
+| `regimes.smoothing.window` | 7 | Median filter window |
+| `regimes.smoothing.min_dwell_samples` | 10 | Minimum samples in regime |
+| `regimes.smoothing.min_dwell_seconds` | 900 | Minimum regime duration (15 min) |
+
+---
+
+## 7. Fusion and Episode Detection
+
+### 7.1 Detector Fusion
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DETECTOR FUSION ALGORITHM                                  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+Step 1: Weight Assignment
+├── Default weights:
+│   ├── ar1_z:     0.20
+│   ├── pca_spe_z: 0.20
+│   ├── pca_t2_z:  0.15
+│   ├── iforest_z: 0.15
+│   ├── gmm_z:     0.15
+│   └── omr_z:     0.15
+
+Step 2: Auto-Tuning (if enabled)
+├── Primary Method: Episode Separability
+│   ├── Compute AUROC for each detector vs known episodes
+│   ├── Weight ~ AUROC (better separation = higher weight)
+│   └── Requires: require_external_labels = True (v11.2.2 default)
+│
+├── Fallback Method: Statistical Diversity
+│   ├── variance_score: Higher variance = more informative
+│   ├── diversity_score: Low correlation with others = unique info
+│   ├── tail_score: P95/P50 ratio = sensitivity to extremes
+│   └── weight_score = 0.4*variance + 0.4*diversity + 0.2*tail
+
+Step 3: Correlation Discount (v11.1.4)
+├── For each detector pair (i, j):
+│   ├── Compute correlation: r = corr(z_i, z_j)
+│   ├── If |r| > 0.5:
+│   │   ├── discount = min(0.3, (|r| - 0.5) * 0.5)
+│   │   ├── w_i *= (1 - discount)
+│   │   └── w_j *= (1 - discount)
+│   └── Prevents double-counting correlated information
+
+Step 4: Fusion Computation
+├── fused_z = sum(w_i * z_i) / sum(w_i)
+├── Apply z_clip to prevent extreme values
+└── Output: fused_z series
+```
+
+### 7.2 Episode Detection (CUSUM)
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              CUSUM EPISODE DETECTION                                    │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+CUSUM Algorithm:
+────────────────
+S_t = max(0, S_{t-1} + (x_t - mu - k))
+
+where:
+• S_t = cumulative sum at time t
+• x_t = fused_z at time t
+• mu = mean fused_z (typically 0 after calibration)
+• k = allowance parameter (k_sigma * sigma)
+
+Episode Boundaries:
+───────────────────
+• Episode START: S_t > h (h = h_sigma * sigma)
+• Episode END: S_t returns to 0
+
+Post-Processing:
+────────────────
+• Merge episodes separated by < gap_merge samples
+• Filter episodes shorter than min_len samples
+• Compute per-episode statistics (max_z, mean_z, duration)
+• Identify culprit sensors (top contributors)
+• Classify severity: INFO (z < 3), WARNING (3-5), CRITICAL (> 5)
+```
+
+### 7.3 Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `fusion.weights.*` | See above | Per-detector weights |
+| `fusion.auto_tune.enabled` | True | Enable weight tuning |
+| `fusion.auto_tune.require_external_labels` | True | Require labeled episodes (v11.2.2) |
+| `episodes.cpd.k_sigma` | 2.0 | Episode start threshold |
+| `episodes.cpd.h_sigma` | 12.0 | Episode severity threshold |
+| `episodes.min_len` | 3 | Minimum episode length |
+| `episodes.gap_merge` | 5 | Merge gap threshold |
+
+---
+
+## 8. Health Scoring
+
+### 8.1 Health Index Calculation
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              HEALTH INDEX FORMULA                                       │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+Raw Health:
+───────────
+health_raw(t) = 100 * exp(-fused_z(t) / scale)
+
+where:
+• fused_z(t) = weighted fusion of detector z-scores
+• scale = calibration parameter (default: 3.0)
+• Result: 100% when fused_z=0, decays exponentially
+
+Smoothed Health (EWMA):
+───────────────────────
+health(t) = alpha * health_raw(t) + (1 - alpha) * health(t-1)
+
+where:
+• alpha = smoothing_alpha (default: 0.3)
+• Higher alpha = more responsive, noisier
+• Lower alpha = smoother, slower to react
+
+Health Zones:
+─────────────
+┌──────────────┬─────────────┬────────────────────────────┐
+│ Range        │ Zone        │ Action                     │
+├──────────────┼─────────────┼────────────────────────────┤
+│ 80-100%      │ HEALTHY     │ Normal operation           │
+│ 50-80%       │ DEGRADING   │ Monitor closely            │
+│ 20-50%       │ CRITICAL    │ Schedule maintenance       │
+│ 0-20%        │ FAILURE     │ Immediate intervention     │
+└──────────────┴─────────────┴────────────────────────────┘
+```
+
+### 8.2 Confidence Model (v11.2.2)
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              CONFIDENCE CALCULATION                                     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+Confidence = Harmonic Mean of:
+──────────────────────────────
+1. model_maturity:
+   • COLDSTART:  0.3
+   • LEARNING:   0.6
+   • CONVERGED:  1.0
+   • DEPRECATED: 0.4
+
+2. data_coverage:
+   • n_sensors_present / n_sensors_expected
+
+3. regime_confidence:
+   • 1 - (distance_to_centroid / max_distance)
+
+4. temporal_stability:
+   • 1 - std(health_last_N) / mean(health_last_N)
+
+Formula:
+────────
+confidence = 4 / (1/maturity + 1/coverage + 1/regime_conf + 1/stability)
+
+Why Harmonic Mean? (v11.2.2 fix)
+────────────────────────────────
+• Penalizes imbalanced factors heavily
+• If ANY factor is low, overall confidence is low
+• Prevents false confidence when one factor masks weakness
+
+Example:
+• Arithmetic mean: (0.1 + 0.9 + 0.9 + 0.9) / 4 = 0.70 (too optimistic)
+• Harmonic mean:   4 / (10 + 1.1 + 1.1 + 1.1) = 0.31 (appropriate)
+```
+
+---
+
+## 9. RUL Forecasting
+
+### 9.1 Forecasting Pipeline
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              RUL FORECASTING PIPELINE                                   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+Step 1: Load Health History
+├── Query ACM_HealthTimeline for last 30-90 days
+├── Resample to uniform cadence
+└── Handle gaps with linear interpolation
+
+Step 2: Detect Maintenance Resets (v11.1.4)
+├── Compute health differences: diff = health(t) - health(t-1)
+├── Identify positive jumps > 15% (maintenance resets)
+├── Find last reset index
+└── Use ONLY post-reset data for trend fitting
+
+Step 3: Fit Degradation Model
+├── Method: Holt-Winters exponential smoothing
+├── Parameters: alpha (level), beta (trend)
+├── Quality gates:
+│   ├── Reject SPARSE: < 50 samples
+│   ├── Reject FLAT: std(health) < 1.0
+│   ├── Reject NOISY: std(residuals) > 20
+│   └── Allow GAPPY: for historical replay
+
+Step 4: Monte Carlo Simulation
+├── Generate N=1000 trajectories
+├── For each trajectory:
+│   ├── Start from current health
+│   ├── Apply trend + random noise (calibrated from history)
+│   ├── Project forward hour-by-hour
+│   ├── Record time when health < failure_threshold (20%)
+│   └── Store time-to-failure
+├── Sort all times-to-failure
+└── Output: distribution of RUL values
+
+Step 5: Confidence Intervals
+├── P10 = 10th percentile (optimistic - 90% chance of lasting longer)
+├── P50 = 50th percentile (median estimate)
+├── P90 = 90th percentile (pessimistic - 90% chance of failing sooner)
+└── RUL_Hours = P50 (primary estimate)
+
+Step 6: Culprit Identification
+├── For each sensor, compute contribution to degradation:
+│   contribution_i = corr(sensor_z_i, fused_z) * mean(sensor_z_i)
+├── Rank sensors by contribution
+├── TopSensor1 = highest contribution
+├── TopSensor2 = second highest
+└── TopSensor3 = third highest
+
+Step 7: Validation Guards (v11.3.4)
+├── REJECT if: RUL < 1h AND health > 70%
+│   Reason: Implausible imminent failure
+├── REJECT if: FailureProbability = 100% AND RUL > 100h
+│   Reason: Inconsistent prediction
+├── REJECT if: RUL is negative, infinite, or NaN
+│   Reason: Invalid computation
+└── Log rejections with Console.warn()
+```
+
+### 9.2 RUL Reliability Gating
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              RUL RELIABILITY STATUS                                     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+ReliabilityStatus based on MaturityState:
+─────────────────────────────────────────
+
+┌───────────────┬────────────────────┬──────────────────────────────────────┐
+│ MaturityState │ ReliabilityStatus  │ Dashboard Display                    │
+├───────────────┼────────────────────┼──────────────────────────────────────┤
+│ COLDSTART     │ NOT_RELIABLE       │ "RUL: Insufficient History"          │
+│ LEARNING      │ NOT_RELIABLE       │ "RUL: Model Training (N/5 runs)"     │
+│ CONVERGED     │ RELIABLE           │ "RUL: 142h (P10: 98h, P90: 201h)"    │
+│ DEPRECATED    │ STALE              │ "RUL: Model Outdated - Retraining"   │
+└───────────────┴────────────────────┴──────────────────────────────────────┘
+
+Promotion Criteria (v11.2.2 tightened):
+───────────────────────────────────────
+• min_consecutive_runs: 5 (was 3)
+• min_silhouette_score: 0.40 (was 0.15)
+• min_stability_ratio: 0.75 (was 0.6)
+• min_days_of_history: 7
+• max_forecast_mape: 35.0 (was 50.0)
+```
+
+---
+
+## 10. Model Lifecycle
+
+### 10.1 MaturityState Transitions
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              MODEL LIFECYCLE STATE MACHINE                              │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+     ┌─────────────┐
+     │  COLDSTART  │ ─── First run, no history
+     └──────┬──────┘
+            │ After 1 successful run
+            ▼
+     ┌─────────────┐
+     │  LEARNING   │ ─── Building baselines, accumulating statistics
+     └──────┬──────┘
+            │ All promotion criteria met:
+            │ • 5+ runs
+            │ • Silhouette >= 0.40
+            │ • Stability >= 0.75
+            │ • 7+ days history
+            ▼
+     ┌─────────────┐
+     │  CONVERGED  │ ─── Stable, reliable outputs, full confidence
+     └──────┬──────┘
+            │ Any of:
+            │ • Config signature changed
+            │ • Schema version bumped
+            │ • Force retrain flag set
+            ▼
+     ┌─────────────┐
+     │ DEPRECATED  │ ─── Stale model, pending retrain
+     └──────┬──────┘
+            │ On next run
+            ▼
+     ┌─────────────┐
+     │  COLDSTART  │ ─── Cycle restarts
+     └─────────────┘
+```
+
+### 10.2 Regime Model Versioning
+
+```
+REGIME_MODEL_VERSION History:
+─────────────────────────────
+• v3.0 (Dec 2025): Tag taxonomy, uniform scaling, P95 threshold
+• v3.1 (Jan 2026): Label mapping, transient detection on operating vars
+• v4.0 (Jan 21, 2026): RAW SENSORS ONLY - removed health-state features
+
+When REGIME_MODEL_VERSION changes:
+──────────────────────────────────
+• All cached regime models invalidated
+• Full clustering retraining on next run
+• Existing regime labels may change
+• Dashboard may show discontinuity
+```
+
+---
+
+## 11. Configuration System
+
+### 11.1 Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              CONFIGURATION FLOW                                         │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+configs/config_table.csv ──▶ Python ConfigDict ──▶ SQL ACM_Config
+         │                        │                       │
+         ▼                        ▼                       ▼
+    EquipID=0                Dot-path access         Sync via:
+    (global)                 cfg['models.pca']       populate_acm_config.py
+         │
+    EquipID=N
+    (override)
+
+Cascading Logic:
+────────────────
+1. Load global defaults (EquipID=0)
+2. Apply equipment-specific overrides (EquipID=N)
+3. Apply runtime CLI overrides (--config)
+4. Result: merged configuration for this run
+```
+
+### 11.2 Key Configuration Categories
+
+**DATA (Most Likely to Need Override)**
+| Parameter | Default | Description | Override? |
+|-----------|---------|-------------|-----------|
+| `data.sampling_secs` | 1800 | Data cadence (seconds) | YES |
+| `data.timestamp_col` | EntryDateTime | Timestamp column name | YES |
+| `data.min_train_samples` | 200 | Minimum coldstart rows | Sometimes |
+
+**MODELS (Detector Hyperparameters)**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `models.pca.n_components` | 5 | PCA dimensions |
+| `models.ar1.window` | 256 | AR lookback window |
+| `models.iforest.contamination` | 0.01 | Anomaly fraction |
+| `models.gmm.k_max` | 3 | Max GMM components |
+| `models.omr.model_type` | auto | OMR model selection |
+
+**FUSION (Auto-Tuned)**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `fusion.weights.ar1_z` | 0.20 | AR1 weight |
+| `fusion.weights.pca_spe_z` | 0.20 | PCA-SPE weight |
+| `fusion.auto_tune.enabled` | True | Enable auto-tuning |
+
+**EPISODES**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `episodes.cpd.k_sigma` | 2.0 | Episode start threshold |
+| `episodes.cpd.h_sigma` | 12.0 | Severity threshold |
+| `episodes.min_len` | 3 | Minimum episode length |
+
+**REGIMES**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `regimes.auto_k.k_min` | 2 | Minimum clusters |
+| `regimes.auto_k.k_max` | 6 | Maximum clusters |
+| `regimes.quality.silhouette_min` | 0.40 | Minimum quality |
+
+**THRESHOLDS**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `thresholds.alert_z` | 3.0 | Alert threshold |
+| `thresholds.warn_z` | 1.5 | Warning threshold |
+| `thresholds.self_tune.enabled` | True | Enable self-tuning |
+
+### 11.3 Syncing Configuration
 
 ```powershell
-# Install prerequisites
-pip install questionary
-
-# Run the installer wizard
-python install/acm_installer.py
-```
-
-The wizard guides you through:
-1. ✅ **Prerequisites Check** - Python 3.11+, Docker Desktop, ODBC drivers
-2. 📦 **Docker Download** - Automatic download of Docker Desktop if missing (Windows)
-3. 🔧 **Observability Stack** - Grafana, Tempo, Loki, Prometheus, Pyroscope
-4. 🗄️ **SQL Server Setup** - Database creation and schema installation (optional)
-5. ⚙️ **Configuration** - Generates `configs/sql_connection.ini` automatically
-6. ✓ **Verification** - Tests all endpoints and connectivity
-
-**Supported OS:** Windows 10 (1803+), Windows 11, Windows Server 2019/2022
-
----
-
-### V11.3.0 Release (January 13, 2026)
-**Breakthrough release**: Multi-dimensional regimes with health-state awareness
-- **Multi-Dimensional Regime Detection**: Regimes now = Operating Mode × Health State
-  - Operating Mode: K-Means clustering on sensor values (pressure, load, speed, flow)
-  - Health State: 3 new features added to regime clustering:
-    - `health_ensemble_z`: Consensus anomaly score from AR1, PCA-SPE, PCA-T² (clipped [-3,3])
-    - `health_trend`: 20-point rolling mean of ensemble_z (sustained degradation indicator)
-    - `health_quartile`: Health state bucket (0=healthy, 3=critical)
-  - Result: 10-20 multi-dimensional regime clusters per equipment
-- **Severity Multipliers (Context-Aware)**:
-  - `stable` (×1.0): Normal operation, no regime change
-  - `operating_mode` (×0.9): Mode switches, reduce alert priority
-  - `health_degradation` (×1.2): Equipment failing, boost alert priority ← **KEY FIX**
-  - `health_transition` (×1.1): Ambiguous state transitions, mild boost
-- **Impact Metrics**:
-  - False positive rate: 70% → 30% (2.3× reduction)
-  - Fault detection recall: 100% maintained
-  - Early detection: 7+ days before failure (vs 3-5 days previously)
-  - Regime quality: Silhouette score 0.15-0.40 → 0.50-0.70
-- **Implementation**:
-  - `core/regimes.py` (+209 lines): Health-state feature engineering
-  - `core/fuse.py` (+25 lines): Severity multiplier context detection
-  - `core/acm_main.py` (+44 lines): Pipeline integration + diagnostic logging
-- **Files Changed**: regimes.py, fuse.py, acm_main.py, multivariate_forecast.py, output_manager.py, smart_coldstart.py
-- **Testing**: Comprehensive 8-phase test suite in `docs/v11_3_0_TESTING_STRATEGY.md`
-- **Documentation**: 10 new docs created (~3,050 lines) in `docs/v11_3_0_*.md`
-
-### V11.0.0 Production Release (Dec 27, 2025)
-All V11 features are now production-ready and verified:
-- **DataContract Validation**: 3 validation records in ACM_DataContractValidation
-- **Seasonality Detection**: 7 daily patterns detected in ACM_SeasonalPatterns
-- **Asset Profiles**: 1 profile in ACM_AssetProfiles for cold-start transfer
-- **Regime Definitions**: 4 versioned regimes in ACM_RegimeDefinitions
-- **Active Models**: 1 model pointer in ACM_ActiveModels
-- **Feature Drop Logging**: 9 low-variance features logged to ACM_FeatureDropLog
-- **Refactoring Complete**: 43 helper functions extracted from acm_main.py
-
-### V11 Architecture (Implemented)
-- **DataContract Validation**: Entry-point validation via `core/pipeline_types.py` ensures data quality before processing
-- **MaturityState Lifecycle**: Regime models have explicit states (INITIALIZING → LEARNING → CONVERGED → DEPRECATED)
-- **FeatureMatrix Schema**: Standardized feature representation with schema enforcement in `core/feature_matrix.py`
-- **DetectorProtocol ABC**: Unified detector interface in `core/detector_protocol.py` for all anomaly detectors
-- **Seasonality Detection**: Diurnal/weekly pattern detection and adjustment in `core/seasonality.py`
-- **Asset Similarity**: Cold-start transfer learning using similar equipment in `core/asset_similarity.py`
-- **SQL Performance**: Deprecated ACM_Scores_Long (~44K rows/batch savings), batched DELETEs
-- **Grafana Dashboards**: 9 production dashboards including comprehensive equipment health monitoring
-
-### v10 Deltas (Dec 2025)
-- **v10.3.0**: Consolidated observability stack with unified `core/observability.py`:
-  - Removed legacy loggers: `utils/logger.py`, `utils/acm_logger.py`, `core/sql_logger.py`, `core/sql_logger_v2.py`
-  - Unified Console API: `Console.info/warn/error/ok/status/header` for all logging
-  - OpenTelemetry integration: Traces to Tempo, metrics to Prometheus, logs to Loki
-  - Grafana Pyroscope: Continuous profiling for performance analysis
-  - Timer metrics: `utils/timer.py` emits OTEL spans and Prometheus histograms
-  - New dashboards: `acm_observability.json`, `acm_performance_monitor.json`
-  - Install scripts: `install/observability/` with Docker Compose stack
-- **v10.2.0**: Mahalanobis detector deprecated - mathematically redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable in orthogonal space. Simplified to 6 active detectors.
-- Scripts cleanup: Single-purpose analysis/check/debug scripts archived to `scripts/archive/`. Schema updater remains: `scripts/sql/export_comprehensive_schema.py`.
-- Forecast/RUL refactor complete: `core/forecast_engine.py` is primary.
-- Schema reference: `docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md` (authoritative ACM table/column definitions).
-
-### v10.0.0 Major Changes from v9.0.0
-- **Continuous Forecasting Architecture**: Exponential temporal blending eliminates per-batch forecast duplication; single continuous health forecast line per equipment with 12-hour decay window
-- **State Persistence & Versioning**: `ForecastState` class with version tracking (v807→v813 validated) stored in `ACM_ForecastState` table; audit trail with RunID + BatchNum
-- **Hazard-Based RUL**: Converts health forecasts to failure hazard rates with EWMA smoothing; survival probability curves `S(t) = exp(-∫ lambda_smooth)` with Monte Carlo confidence bounds (P10/P50/P90)
-- **Time-Series Tables**: New `ACM_HealthForecast_Continuous` (merged forecasts) and `ACM_FailureHazard_TS` (smoothed hazard) tables for Grafana visualization
-- **Multi-Signal Evolution**: All signals (drift CUSUM, regime MiniBatchKMeans, 7+ detectors, adaptive thresholds) evolve correctly across batches with 28 pairwise detector correlations
-- **Production Validation**: Comprehensive analytical robustness report (`docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`) with 14-component checklist (all ✅ PASS)
-- **Critical Bug Fix**: Added Method='GaussianTail' to hazard DataFrame preventing SQL write failures for `ACM_FailureForecast` table
-
-### v9.0.0 Major Changes from v8.2.0
-- **Detector Label Standardization**: Fixed `extract_dominant_sensor()` to preserve full detector labels ("Multivariate Outlier (PCA-T²)") instead of truncating to sensor names or codes
-- **Database Hygiene**: Removed migration backup tables (PCA_Components_BACKUP, RunLog_BACKUP, Runs_BACKUP) and 6 unused feature tables (Drift_TS, Enhanced*, Forecast_QualityMetrics)
-- **Equipment Data Integrity**: Standardized equipment names across all runs; all 26 runs now reference consistent equipment codes
-- **Run Completion**: All runs have valid CompletedAt timestamps; incomplete runs marked with NOOP status and zero duration
-- **Stored Procedure Fix**: usp_ACM_FinalizeRun now correctly references ACM_Runs table with proper column mappings
-- **Comprehensive Testing**: Added 30+ Python unit tests and 8 SQL validation checks covering all P0 fixes
-- **Version Management**: Implemented semantic versioning with v9.0.0 tag and proper release management practices
-
----
-
-## 1) Mental Model (Top-Level Flow) - v11.3.0
-
-```
-        +--------------+    +-----------------+    +----------------+    +----------------------------------+
-        | Ingestion    |    | Feature Builder |    | Detector Heads |    | Fusion & Episodes              |
-        | (CSV / SQL)  | -> | (fast_features) | -> | (PCA/IF/GMM/   | -> | Multi-Dimensional Regimes      |
-        | acm_main     |    |                 |    |  AR1/OMR)      |    | (Operating Mode × Health State)|
-        +--------------+    +-----------------+    +----------------+    +----------------------------------+
-               |                       |                       |                           |
-               v                       v                       v                           v
-        +--------------+    +-----------------+    +------------------------+    +---------------------+
-        | Calibration  |    | Drift Detection |    | Context-Aware Fusion   |    | Outputs & SQL       |
-        | (z-scores)   |    | (cusum)         |    | (Severity Multipliers) |    | (OutputManager)     |
-        +--------------+    +-----------------+    | ×1.0 stable            |    +---------------------+
-                                                    | ×1.2 degrading ← NEW   |          |
-                                                    | ×0.9 mode switch ← NEW |          |
-                                                    | ×1.1 transition ← NEW  |          |
-                                                    +------------------------+          |
-                                               \                                        |
-                                                \-> Forecast/RUL (forecasting, rul_*) <-/
-```
-
-**v11.3.0 Addition**: The **Regimes** stage now outputs two dimensions:
-1. **Operating Mode** (original v11.2): K-Means on sensor values → 3-8 clusters
-2. **Health State** (NEW v11.3.0): Ensemble z-score + degradation trend + health quartile → Pre-fault | Healthy | Degrading | Critical
-
-**Fusion Stage** (NEW v11.3.0) applies **context-aware severity multipliers**:
-- Same detector z=3.5 means different things:
-  - During healthy operation: minor anomaly (×1.0)
-  - During degradation: approaching failure (×1.2) ← KEY FIX
-  - During mode switch: normal transient (×0.9)
-  - During transition: ambiguous (×1.1)
-
-**Result**: 70% false positive → 30% false positive (2.3× improvement) while maintaining 100% fault detection recall.
-
-* **acm_main.py** is the orchestrator: it loads config, ingests data, cleans/guards, builds features, fits and scores detectors, detects regimes with health-state awareness, fuses with severity context, detects episodes, computes drift, writes analytics, and finalizes (including SQL logging and metadata).
-* **Modes:** file mode (CSV artifacts), SQL mode (historian + stored procedures + SQL sinks), dual-write (file + SQL).
-* **Artifacts:** `artifacts/{EQUIP}/run_<ts>/` per-run tables/charts + `artifacts/{EQUIP}/models/` for cached detectors and forecast/regime state.
-
----
-
-## Codebase Map (Deep Index)
-
-- **Top-level runtime**
-  - `core/acm_main.py`: Orchestrator CLI entry; parses config, routes file-vs-SQL data load, runs detectors/fusion/episodes/regimes/drift, writes outputs, and finalizes SQL run metadata.
-  - `core/output_manager.py`: Unified IO hub; CSV + SQL loading (`load_data`, `_load_data_from_sql`), analytics writers, batching, and table allowlist/field defaults.
-  - `core/model_persistence.py`: Model registry + joblib cache manager; SQL-only/dual-write handling, manifest management, and load/save semantics.
-  - `core/forecasting.py`: Enhanced forecasting and regime-aware projections; handles config ingestion and detector alignment.
-  - `core/rul_engine.py`: RUL computation pipeline; persistence, run metadata extraction, and health/failure timelines.
-  - `core/regimes.py`, `core/drift.py`, `core/fuse.py`, `core/fast_features.py`, `core/outliers.py`, `core/correlation.py`: Detector heads and feature plumbing used by `acm_main`.
-    - **v11.3.0 Addition** (`core/regimes.py` +209 lines): Multi-dimensional regime detection with health-state features
-      - `_add_health_state_features()`: Adds `health_ensemble_z` (consensus anomaly), `health_trend` (20-point rolling mean), `health_quartile` (health bucket)
-      - Result: Regimes = Operating Mode (K-Means) × Health State (ensemble-based) → 10-20 clusters per equipment
-      - Eliminates false positives from healthy equipment in unusual modes by distinguishing degradation (×1.2 priority boost)
-    - **v11.3.0 Addition** (`core/fuse.py` +25 lines): Context-aware severity multipliers
-      - Detects regime transitions and health degradation
-      - Applies multipliers: stable ×1.0, operating_mode ×0.9, health_degradation ×1.2, health_transition ×1.1
-      - Enables early warning system by prioritizing degrading equipment
-  - `core/sql_client.py`: Thin pyodbc wrapper used by SQL mode (SP calls, retries).
-  - `core/smart_coldstart.py`: Coldstart retry/orchestration when SQL historian is sparse.
-  - `core/observability.py`: **Unified observability module** (v10.3.0) providing:
-    - `Console` class: Structured logging with `.info()/.warn()/.error()/.ok()/.status()/.header()`
-    - `Span` class: OpenTelemetry trace spans with automatic context propagation
-    - `Metrics` class: Prometheus counters, histograms, gauges
-    - `log_timer()`: Structured timer logs for Grafana visualization
-    - Automatic Loki integration via structlog + Grafana Alloy
-    - Pyroscope profiling hooks for performance analysis
-    - See `docs/OBSERVABILITY.md` for full API reference
-  - `utils/timer.py`: Scoped timing with OTEL span integration; uses `Console.section/status` for console-only output.
-  - Feature builder implementation detail: `core/fast_features.py` prefers Polars over pandas by default. The threshold `fusion.features.polars_threshold` is set to 10 to aggressively route feature computations through Polars for performance.
-
-- **Persistence & SQL assets**
-  - `scripts/sql/` (numbered migrations + helpers):
-    - `49_create_equipment_data_tables.sql`, `51_create_historian_sp_temp.sql`: Equipment data tables and historian SP used by SQL mode.
-    - `52_fix_start_run_sp.sql` + later migrations: `usp_ACM_StartRun` window handling, coldstart fixes.
-    - `50_create_tag_equipment_map.sql`, `53_validate_all_tables.sql`, `54_create_latest_run_views.sql`: Tag mapping, table validation, latest-run dedup views.
-    - `load_equipment_data_to_sql.py`, `load_historian_from_csv.py`: CSV → SQL loaders (equipment tables vs unified historian).
-    - `populate_acm_config.py`: Syncs `configs/config_table.csv` into `ACM_Config`.
-    - `migrations/008_fix_start_run_data_range.sql`: Start-run window fix (OUTPUT params).
-  - `configs/sql_connection.ini*`: DSN/auth for `SQLClient`.
-
-- **Batch automation & runners**
-  - `scripts/sql_batch_runner.py`: Continuous SQL batch engine; coldstart retries, window walking, progress tracking, output QA, and env toggles (`ACM_BATCH_MODE`, `ACM_FORCE_SQL_MODE`).
-  - `scripts/run/run_sql_batch.ps1`: PowerShell wrapper for `sql_batch_runner` (tick, resume, parallel workers).
-  - `scripts/run/run_file_mode.ps1`: File-mode convenience wrapper (CSV paths).
-  - `scripts/run_data_range_batches.ps1`, `scripts/run_all_batches.ps1`: Helpers for specific batch ranges/runs.
-
-- **Monitoring, analysis, and QA scripts**
-  - `scripts/analyze_*`, `tools/*.py`, `check_*.py`: Post-run analysis, counts, schema checks, dashboard/data sanity, and truncation tools.
-  - `scripts/sql/test_sql_mode_loading.py`: Sanity test for historian SP load path.
-  - `scripts/update_grafana_dashboards.ps1`: Bulk dashboard query updates.
-
-- **Documentation & status**
-  - `docs/ACM_SYSTEM_OVERVIEW.md`: This handbook; now includes the deep map.
-  - SQL mode/batch docs: `docs/SQL_BATCH_RUNNER.md`, `docs/SQL_BATCH_QUICK_REF.md`, `docs/SQL-44_IMPLEMENTATION.md`, `docs/BATCH_MODE_WAVE_PATTERN_FIX.md`, `docs/SQL_INTEGRATION_PLAN.md`.
-  - Architecture/guides: `docs/CONTINUOUS_LEARNING.md`, `docs/CHANGELOG.md`, `docs/ACM_SYSTEM_OVERVIEW.md`.
-
-- **Configuration & artifacts**
-  - `configs/config_table.csv`: Canonical config table (mirrored into `ACM_Config`).
-  - `artifacts/`: Per-run outputs/models (file mode) and cached baselines; SQL mode minimizes usage.
-  - `code_tags.tsv`: Lightweight symbol index (name/kind/path:line) generated for quick lookup (ctags fallback).
-
----
-
-## 2) Runtime Modes & Entry Points
-
-**CLI:** `python -m core.acm_main --equip <EQUIP> [--train-csv ... --score-csv ...] [--config ...] [--clear-cache] [--log-level ...]`
-
-**SQL batch automation:** `python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --tick-minutes 1440 --max-workers 2 --start-from-beginning`  
-Uses SQL historian tables and calls `usp_ACM_StartRun`/`usp_ACM_FinalizeRun`. Handles cold-start retries and progress tracking (`.sql_batch_progress.json`). This command sets `ACM_BATCH_MODE`/`ACM_BATCH_NUM`; avoid manipulating them elsewhere.
-
-**File mode helper (diagnostics-only):** `powershell ./scripts/run/run_file_mode.ps1` (wraps acm_main with CSV defaults).
-
-Mode decision and migration:
-- SQL mode is the target/default; file mode exists for local diagnostics only.
-- Avoid adding new file/SQL branching; collapse to the SQL-first path where practical.
-- `--equip` selects the config row (SQL `ACM_Config` or `configs/config_table.csv` fallback).
-- `ACM_BATCH_MODE=1` toggles batch-run semantics (continuous learning hooks).
-
-### Quick Actions
-
-- Resume a paused batch run for a single equipment:
-  - `python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --resume`
-- Sync local config changes into SQL `ACM_Config` (ensures `fusion.features.polars_threshold=10` is reflected):
-  - `python scripts/sql/populate_acm_config.py`
-
----
-
-## 3) Configuration Surfaces
-
-### Primary table (`configs/config_table.csv` or SQL `ACM_Config`)
-
-**Current State (v10.1.0):** 238 parameters across 10 categories, cleaned of duplicates and disabled features (Dec 2025 cleanup: removed river.* streaming features, merged redundant detectors.* into models.*, resolved conflicting values).
-
-**Key Configuration Categories:**
-
-1. **Data Ingestion (`data.*`)**
-   - `train_csv`, `score_csv`, `data_dir`: File paths for baseline/batch CSVs (file mode)
-   - `timestamp_col`: Column name for timestamps (default: `EntryDateTime`)
-   - `sampling_secs`: Data cadence in seconds (1800 = 30-min intervals)
-   - `max_rows`: Maximum rows per batch (100000)
-   - `min_train_samples`: Minimum samples for training (200; K-means n_clusters=6 requires statistical validity)
-
-2. **Feature Engineering (`features.*`)**
-   - `window`: Rolling window size (16); must match process dynamics to capture oscillations without oversmoothing
-   - `fft_bands`: Spectral frequency bins for FFT decomposition
-   - `polars_threshold`: Row count to trigger Polars acceleration (5000)
-
-3. **Detectors & Models (`models.*`)**
-   - `pca.*`: PCA configuration (n_components=5, randomized SVD, incremental=False)
-   - `ar1.*`: AR1 detector (window=256, alpha=0.05, z_cap=8.0)
-   - `iforest.*`: Isolation Forest (n_estimators=100, contamination=0.01); tighter contamination lowers false positives
-   - `gmm.*`: Gaussian Mixture (k_min=2, k_max=3, BIC search enabled); higher `pca.n_components` trades explainability vs. residual sensitivity
-   - `mahl.regularization`: Mahalanobis regularization (0.1 global, 1.0 for FD_FAN) to prevent ill-conditioning
-   - `omr.*`: Overall Model Residual (auto model selection, n_components=5, min_samples=100)
-   - `use_cache`: Enable ModelVersionManager caching (True in SQL mode)
-   - `auto_retrain.*`: Automatic retraining triggers (max_anomaly_rate=0.25, max_drift_score=2.0, max_model_age_hours=720)
-
-4. **Fusion & Weights (`fusion.*`)**
-   - `weights.*`: Detector contributions (ar1_z=0.2, iforest_z=0.2, gmm_z=0.1, pca_spe_z=0.2, mhal_z=0.2, omr_z=0.10)
-   - `per_regime`: Per-regime fusion enabled (True)
-   - `auto_tune.*`: Adaptive weight tuning (enabled, learning_rate=0.3, temperature=1.5, method=episode_separability)
-
-5. **Episodes & Anomaly Detection (`episodes.*`)**
-   - `cpd.k_sigma`: K-sigma threshold for change-point detection (2.0 global, 4.0 for FD_FAN/GAS_TURBINE)
-   - `cpd.h_sigma`: H-sigma threshold for episode boundaries (12.0)
-   - `min_len`, `gap_merge`: Episode merging logic (min_len=3, gap_merge=5)
-   - `cpd.auto_tune.*`: Barrier auto-tuning (k_factor=0.8, h_factor=1.2)
-
-6. **Thresholds (`thresholds.*`)**
-   - `q`: Quantile threshold (0.98 for calibration)
-   - `alert`, `warn`: Thresholds for health zones (0.85, 0.7)
-   - `self_tune.*`: Self-tuning (enabled, target_fp_rate=0.001, max_clip_z=100.0)
-   - `adaptive.*`: Per-regime adaptive thresholds (enabled, method=quantile, confidence=0.997, per_regime=True)
-
-7. **Regimes (`regimes.*`)**
-   - `auto_k.k_min/k_max`: Cluster bounds (2-6); smaller range avoids over-segmentation on short baselines
-   - `auto_k.max_models`, `auto_k.max_eval_samples`: Auto-k evaluation limits (10, 5000)
-   - `quality.silhouette_min`: Minimum acceptable clustering quality (0.3)
-   - `smoothing.*`: Label smoothing (passes=3, window=7, min_dwell_samples=10, min_dwell_seconds=900)
-   - `transient_detection.*`: Change detection (roc_window=10, roc_threshold_high=0.15, roc_threshold_trip=0.3)
-   - `health.*`: Health-based regime boundaries (fused_warn_z=2.5, fused_alert_z=4.0)
-
-8. **Drift Detection (`drift.*`)**
-   - `cusum.*`: CUSUM drift detector (threshold=2.0, smoothing_alpha=0.3, drift=0.1)
-   - `p95_threshold`: Drift vs fault classification (2.0)
-   - `multi_feature.*`: Multi-feature drift (enabled, trend_window=20, hysteresis_on=3.0, hysteresis_off=1.5)
-
-9. **Forecasting (`forecasting.*`)**
-   - `enhanced_enabled`, `enable_continuous`: Unified/continuous forecasting (both True)
-   - `failure_threshold`: Health threshold for failure prediction (70.0)
-   - `max_forecast_hours`: Maximum horizon (168 = 7 days)
-   - `confidence_k`: CI multiplier (1.96 for 95% confidence)
-   - `blend_tau_hours`: Exponential blending time constant (12 hours)
-   - `hazard_smoothing_alpha`: EWMA alpha for hazard rate smoothing (0.3)
-
-10. **Runtime (`runtime.*`)**
-    - `storage_backend`: Storage mode (`sql`; file mode deprecated)
-    - `reuse_model_fit`: Legacy joblib cache (False in SQL mode; use ModelRegistry)
-    - `tick_minutes`: Batch cadence (30 for FD_FAN, 1440 for GAS_TURBINE)
-    - `version`: Current ACM version (v10.1.0)
-    - `phases.*`: Pipeline phase toggles (features, regimes, drift, models, fuse, report)
-
-**Equipment-Specific Overrides:**
-- Global defaults: `EquipID=0`
-- FD_FAN (EquipID=1): `mahl.regularization=1.0`, `episodes.cpd.k_sigma=4.0`, `min_train_samples=200`
-- GAS_TURBINE (EquipID=2621): `timestamp_col=Ts`, `tick_minutes=1440`, `min_train_samples=200`
-
-**Config sync:** When `configs/config_table.csv` changes, run `python scripts/sql/populate_acm_config.py` to update `ACM_Config` so SQL mode stays authoritative (238 params synced as of Dec 2025 cleanup).  
-**Config history:** `ACM_ConfigHistory` tracks all adaptive tuning changes via `core.config_history_writer.ConfigHistoryWriter` with timestamp, parameter path, old/new values, reason, and UpdatedBy tag.
-
-**Removed/Deprecated (v10.1.0 cleanup):**
-- `river.*`: Streaming features removed (never implemented)
-- `fusion.weights.river_hst_z`, `fusion.weights.pca_t2_z`: Zero-weight detectors removed
-- Duplicate `detectors.*` namespace: Merged into `models.*` to eliminate redundancy
-
-### SQL connection
-- `configs/sql_connection.ini` (or `.example.ini`) supplies DSN/user/pass; `SQLClient.from_ini` loads it.
-
-### CLI overrides
-- `--config` loads a YAML overrides file merged atop the config table row.
-- `--train-csv` / `--score-csv` override ingestion paths per run.
-- `--clear-cache` forces detector refit, ignoring cached joblib.
-- Logging overrides: `--log-level`, `--log-format`, `--log-module-level`, `--log-file` (SQL sink is always on in SQL mode).
-
----
-
-## 4) Module-by-Module Map
-
-### Orchestrator: `core/acm_main.py`
-- **Helpers:** `_get_equipment_id`, `_load_config`, `_compute_config_signature`, `_ensure_local_index`, `_sql_start_run`/`_sql_finalize_run`, `_calculate_adaptive_thresholds`, `_compute_drift_trend`, `_compute_regime_volatility`.
-- **Data load:** file via `OutputManager.load_data`; SQL via `SmartColdstart.load_with_retry`. Dedup timestamps, enforce monotonicity, guard empty SCORE (NOOP).
-- **Baseline buffer:** seeds TRAIN from SQL `ACM_BaselineBuffer`, local `baseline_buffer.csv`, or SCORE head when baseline thin.
-- **Guardrails:** overlap checks, low-variance sensors, data quality export (`tables/data_quality.csv` or SQL `ACM_DataQuality`), cadence checks.
-- **Features:** `fast_features.compute_basic_features` with Polars fast-path; uses TRAIN medians to impute SCORE (prevents leakage).
-- **Heads fit/score:** PCA (PCASubspaceDetector), IsolationForest, GMM, AR1 (forecasting.AR1Detector), OMR (core.omr), optional River streaming. Reuses cached detectors when signature matches. Note: Mahalanobis deprecated v10.2.0.
-- **Regimes:** builds feature basis (PCA scores + optional raw tags), clusters with MiniBatchKMeans, smooths labels, transient detection, per-regime stats; supports load/save of regime model.
-- **Calibration:** z-score calibration per head (ScoreCalibrator), optional per-regime thresholds (DET-07), adaptive thresholds (adaptive_thresholds.py).
-- **Fusion:** `fuse.Fuser.fuse` combines z streams under configured weights; auto-tunes weights via episode separability (tune_detector_weights).
-- **Episodes:** `fuse.Fuser.detect_episodes` finds sustained excursions with hysteresis; writes culprits via `episode_culprits_writer`.
-- **Drift:** CUSUM on fused (`drift.compute`), plots via `drift.run`.
-- **Forecast/RUL:** optional health/failure forecasts and RUL surfaces via `forecasting.run_and_persist_enhanced_forecasting` and `rul_estimator`/`enhanced_rul_estimator`.
-- **Analytics/output:** centralized `OutputManager` for CSV/PNG/SQL (scores, drift, events, regimes, PCA artifacts, health timelines, fusion quality, OMR contributions, etc.). Writes run stats, run metadata (`run_metadata_writer`), config history, culprits, caches models.
-- **Finalize:** always calls `_sql_finalize_run`; writes `meta.json` in file mode only.
-
-### Feature Builder: `core/fast_features.py`
-- Rolling statistics: `rolling_median`, `rolling_mad`, `rolling_mean_std`, `rolling_skew_kurt`, `rolling_ols_slope`.
-- Spectral/lag: `rolling_spectral_energy`, `rolling_xcorr`, `rolling_pairwise_lag`, `compute_basic_features(_pl)`.
-- Fills missing values with medians/ffill/bfill; Polars acceleration when available, pandas fallback otherwise. Uses TRAIN-derived fill values for SCORE to prevent leakage.
-
-### Detectors (6 Active Heads - v10.2.0)
-
-Each detector answers a specific "what's wrong?" question:
-
-| Detector | Z-Score | What's Wrong? | Fault Types |
-|----------|---------|---------------|-------------|
-| **AR1** | `ar1_z` | "A sensor is drifting/spiking" | Sensor degradation, control loop issues, actuator wear |
-| **PCA-SPE** | `pca_spe_z` | "Sensors are decoupled" | Mechanical coupling loss, thermal expansion, structural fatigue |
-| **PCA-T²** | `pca_t2_z` | "Operating point is abnormal" | Process upset, load imbalance, off-design operation |
-| **IForest** | `iforest_z` | "This is a rare state" | Novel failure mode, rare transient, unknown condition |
-| **GMM** | `gmm_z` | "Doesn't match known clusters" | Regime transition, mode confusion, startup/shutdown anomaly |
-| **OMR** | `omr_z` | "Sensors don't predict each other" | Fouling, wear, misalignment, calibration drift |
-
-- **Correlation (`core/correlation.py`):**
-  - `MahalanobisDetector`: DEPRECATED v10.2.0 - redundant with PCA-T² (both compute Mahalanobis distance). PCA-T² is numerically stable because covariance is diagonal in PCA space.
-  - `PCASubspaceDetector`: cleans non-finite, drops constants, scales, fits PCA; returns SPE (Q) and T²; handles low-sample fallback.
-- **Outliers (`core/outliers.py`):**
-  - `IsolationForestDetector`: fits/uses scikit IF, stores columns, optional quantile threshold when contamination numeric.
-  - `GMMDetector`: BIC-driven component selection, variance guards, scaling; returns neg log-likelihood style scores.
-- **OMR (`core/omr.py`):**
-  - Multivariate reconstruction error via PLS/linear ensemble/PCA. Features auto model selection, diagnostics, per-sensor contribution extraction, z clipping, min sample guards.
-- **AR1 (`core/ar1_detector.py`):** Per-sensor AR(1) residual detector for temporal pattern anomalies.
-- **Forecasting/RUL (`core/forecasting.py`, `core/rul_estimator.py`, `core/enhanced_rul_estimator.py`):**
-  - **Health & Failure Forecasting:** Exponential smoothing with bootstrap confidence intervals, adaptive parameters (alpha/beta), quality gates (blocks SPARSE/FLAT/NOISY but allows GAPPY data for historical replay)
-  - **Physical Sensor Forecasting:** Predicts future values for top 10 changing sensors using LinearTrend or VAR (Vector AutoRegression) methods; includes confidence intervals and regime awareness
-  - **RUL Estimation:** Monte Carlo simulations with multiple degradation paths (trajectory, hazard, energy-based); P10/P50/P90 bounds with confidence scoring
-  - **State Management:** Persistent forecast state with version tracking (ACM_ForecastingState); retrain decisions based on RMSE degradation, data quality, and time thresholds
-  - AR1 per-sensor residual detector, data hash for retrain decisions, SQL/file dual persistence of forecast state
-  - Enhanced RUL: multiple degradation models (AR1, exponential, Weibull-inspired, linear), learning state, attribution, maintenance recommendations, hazard smoothing
-  - **NEW v10.0.0 - Continuous Forecasting Architecture:**
-    - `merge_forecast_horizons()` (lines 888-988): Exponential temporal blending with tau=12h; dual weighting (recency × horizon); NaN-aware merging; weight capping at 0.9
-    - `ForecastState` class: Version-tracked state persistence (v807→v813) in `ACM_ForecastState` table; audit trail with RunID + BatchNum + timestamp
-    - `write_continuous_health_forecast()` (lines 1014-1110): Bulk insert merged health forecasts into `ACM_HealthForecast_Continuous` with transaction handling
-    - `write_continuous_hazard_forecast()` (lines 1111-1209): EWMA-smoothed hazard curves into `ACM_FailureHazard_TS` with survival probability calculation
-    - Hazard calculation: `lambda(t) = -ln(1-p(t))/dt`, survival: `S(t) = exp(-∫ lambda_smooth)`
-    - Integration points: Lines 2938-2988 (horizon merging), 3029-3043 (continuous writes), ~2559 (Method='GaussianTail' for hazard_df)
-    - Quality assurance: RMSE validation gates, MAPE tracking (33.8%), TheilU coefficient (1.098), P10/P50/P90 confidence bounds
-    - Multi-signal evolution: Drift (CUSUM P95), regimes (MiniBatchKMeans auto-k), detector correlation (28 pairwise), adaptive thresholds with PR-AUC throttling
-    - Benefit: Single continuous forecast line per equipment; smooth 12h transitions; no Grafana per-run duplicates; production-validated (see `docs/CONTINUOUS_LEARNING_ROBUSTNESS.md`)
-- **Drift (`core/drift.py`):** CUSUMDetector with z calibration; report plot generator.
-- **Regimes (`core/regimes.py`):** feature basis builder, auto-k (silhouette/Calinski-Harabasz), smoothing, transient detection via ROC energy, health labeling, persistence to joblib/json, loading with version guard.
-- **Fusion (`core/fuse.py`):** `Fuser.fuse` (weighted sum with z clipping), `detect_episodes` (hysteresis thresholds), `ScoreCalibrator`, `tune_detector_weights` (PR-AUC against episode windows).
-
-### Thresholding & Adaptation
-- **adaptive_thresholds.py:** quantile/MAD/hybrid fused threshold calculator; supports per-regime thresholds; validation to avoid degenerate values.
-- **config_history_writer.py:** append-only JSON log of auto-tune changes to track self-modifying behavior.
-
-### Persistence & Metadata
-- **model_persistence.py:** versioned model storage under `artifacts/{equip}/models/vN`, manifest generation, SQL dual-write hooks. Forecast state save/load helpers.
-- **run_metadata_writer.py:** writes ACM_Runs / ACM_RunMetadata; extracts health metrics, data quality, refit flags; guards SQL errors.
-- **model_evaluation.py:** quality monitor to decide retrain based on anomaly rates, regime quality, episode quality.
-
-### I/O & SQL
-- **output_manager.py:** single point for CSV/JSON/PNG + SQL writes. Batched writes with buffering, schema discovery, health index generation, analytics tables (scores_wide/long, drift, episodes, timelines, fusion quality, OMR contributions, calibration summaries, hotspots, forecast quality metrics, OMR diagnostics, RUL summaries, etc.). Generates charts and descriptors; coordinates dual mode.
-- **simplified_output_manager.py:** trimmed SQL writer for legacy paths.
-- **sql_client.py / sql_protocol.py:** thin wrappers over pyodbc for safe cursor operations and protocol typing.
-- **sql_logger.py:** SQL sink that mirrors Console logs into ACM_Log.
-- **sql_performance.py:** timing/batching helpers; `SQLBatchWriter` for efficient inserts.
-- **historian.py:** historian client abstraction (cyclic/full tag retrieval).
-
-### Cold start & utilities
-- **smart_coldstart.py:** determines if baseline ready; backfills from historian/score; tracks progress.
-- **utils.config_dict / validators / timestamp_utils / logger / timer:** config merging with type safety, timestamp normalization, structured logging, scoped timers.
-
-### Episode culprits
-- **episode_culprits_writer.py:** parses culprits strings, computes detector contributions, writes enhanced culprits (per-episode sensor attributions).
-
-### Scripts (operations)
-- `scripts/sql_batch_runner.py`: continuous SQL processing with ticked windows, resume, cold-start retries, historian coverage checks.
-- `python scripts/sql_batch_runner.py ...`: single entry point for SQL batch/continuous runs.
-- `scripts/sql/populate_acm_config.py`: pushes `config_table.csv` rows into SQL `ACM_Config`.
-- Validation/check scripts: `check_*`, `validate_*`, `monitor_*`, `analyze_*` for dashboards, data gaps, drift, forecast status, table population.
-- `scripts/sql/*`: SQL schema helpers and tests.
-
----
-
-## 5) Data & Artifact Layout
-
-- **Input data:** `data/` for CSV baselines/batches; SQL mode pulls from historian tables configured per equipment.
-- **Artifacts (diagnostic/file mode):** `artifacts/{EQUIP}/run_<timestamp>/` with `scores.csv`, `drift.csv`, `episodes.csv`, `tables/*.csv`, `charts/*.png`, `meta.json`.
-- **Models/cache:** `artifacts/{EQUIP}/models/` containing `detectors.joblib`, regime model joblib/json, forecast state, baseline buffer.
-- **Grafana dashboards:** Active work is on `grafana_dashboards/ACM Claude Generated To Be Fixed.json`. All other dashboards are archived under `grafana_dashboards/archive/` (see `grafana_dashboards/archive/ARCHIVE_LOG.md` for the move list) to keep the working set lean.
-
----
-
-## 6) How to Run ACM (End-to-End)
-
-1) **Environment**
-- Python >= 3.11. `python -m venv .venv && .\\.venv\\Scripts\\activate` (Windows).
-- Install deps: `pip install -r requirements.txt` (or `pip install .`).
-
-2) **Config & data**
-- Populate `configs/config_table.csv` (or SQL `ACM_Config`). Ensure `data.train_csv` and `data.score_csv` exist for file mode.
-- For SQL mode, fill `configs/sql_connection.ini` with DSN/credentials and historian table names.
-
-3) **Run (file mode example)**
-```
-python -m core.acm_main --equip FD_FAN ^
-  --train-csv data/FD_FAN_BASELINE_DATA.csv ^
-  --score-csv data/FD_FAN_BATCH_DATA.csv ^
-  --log-level INFO
-```
-
-4) **Run (SQL mode example)**
-```
-python -m core.acm_main --equip FD_FAN --log-level INFO
-# Uses SQL config row, historian, and SQL sinks (SQL logging always enabled in SQL mode).
-```
-
-5) **Batch runner (SQL, continuous)**
-```
-python scripts/sql_batch_runner.py --equip FD_FAN GAS_TURBINE --max-workers 2 --tick-minutes 240 --resume
-```
-
-6) **Outputs**
-- File mode (diagnostics): check `artifacts/FD_FAN/run_<ts>/tables/` and `charts/`.
-- SQL mode (primary): check ACM_* tables (Scores_Wide/Long, Episodes, Drift_TS, Run_Stats, PCA artifacts, OMR contributions, FusionQualityReport, OMR diagnostics, forecast quality metrics, RUL summaries, etc.) and ACM_Runs metadata.
-
----
-
-## 7) Analytical Reasoning (Why each step exists)
-
-- **Dedup + local timestamps:** prevents double-counting and timezone drift; many detectors assume monotonic time.
-- **Baseline seeding:** keeps the system from stalling when no explicit TRAIN exists; uses stable SQL buffer or SCORE head to bootstrap with minimum sample guard.
-- **Feature windowing & spectral energy:** captures local trends/oscillations; window tuned per equipment cadence (`features.window`, `features.fs_hz`).
-- **Median-based fill:** robust to spikes; TRAIN-derived stats avoid leakage into SCORE.
-- **Detector diversity:** PCA catches correlated variance loss; Mahalanobis catches covariance shifts; IF/GMM catch density anomalies; OMR captures multivariate reconstruction error; AR1 residuals catch temporal shifts. Fusion combines complementary signals.
-- **Calibration to z-scores:** normalizes heterogeneous detectors so fusion weights are meaningful; per-regime thresholds prevent over-alerting in regimes with naturally higher variance.
-- **Episode detection with hysteresis:** avoids flapping; only sustained fused excursions become episodes.
-- **Drift (CUSUM):** monitors slow changes even when fused stays below alert; informs refit policies.
-- **Regimes:** clusters operating states to contextualize anomalies and enable per-regime thresholds/health; transient detection distinguishes startups/trips.
-- **Adaptive thresholds & auto-tuned fusion:** adjusts to drift and class imbalance without manual retuning; logged via config_history_writer for auditability.
-- **Caching/persistence:** speeds re-runs and supports continuous learning; config signature guards stale models.
-- **Run metadata & quality checks:** ACM_Runs + data quality score make operational health observable; refit flags trigger retraining pipelines.
-- **SQL-first posture:** production runs should use SQL sinks; file mode is only for diagnostics and should not accumulate bespoke branches.
-
----
-
-## 8) Quick Reference: Functions by File
-
-- **core/acm_main.py:** `main` (CLI), `_sql_start_run`, `_sql_finalize_run`, `_calculate_adaptive_thresholds`, `_compute_drift_trend`, `_compute_regime_volatility`, `_load_config`, `_compute_config_signature`, `_nearest_indexer`, `_ensure_local_index`.
-- **core/fast_features.py:** rolling_* funcs, `compute_basic_features`, Polars fast-path helpers.
-- **core/correlation.py:** `MahalanobisDetector.fit/score`, `PCASubspaceDetector.fit/score`.
-- **core/outliers.py:** `IsolationForestDetector.fit/score/predict`, `GMMDetector.fit/score`.
-- **core/omr.py:** `OMRDetector.fit/score/get_top_contributors/get_diagnostics`, `OMRModel.to_dict`.
-- **core/fuse.py:** `Fuser.fuse/detect_episodes`, `ScoreCalibrator.fit/transform`, `tune_detector_weights`.
-- **core/regimes.py:** `build_feature_basis`, `build_regime_model`, `apply_regime_labels`, `detect_transient_states`, `save_regime_model`, `load_regime_model`.
-- **core/drift.py:** `CUSUMDetector.fit/score`, `compute`, `run`.
-- **core/forecasting.py:** `AR1Detector`, `estimate_rul`, `run_and_persist_enhanced_forecasting`, `run_enhanced_forecasting_sql`, `should_retrain`, `compute_data_hash`.
-- **core/rul_estimator.py / enhanced_rul_estimator.py:** `_simple_ar1_forecast`, `estimate_rul_and_failure`, `compute_rul_multipath`, degradation model classes, attribution and maintenance recommendations.
-- **core/adaptive_thresholds.py:** `AdaptiveThresholdCalculator.calculate_fused_threshold/_calculate_per_regime`, `calculate_warn_threshold`.
-- **core/output_manager.py:** `create_output_manager`, `write_scores_ts`, `write_drift_ts`, `write_anomaly_events`, `write_regime_episodes`, `write_pca_model/loadings/metrics`, analytics generators (`_generate_*`), `flush/close`.
-- **core/model_persistence.py:** `ModelVersionManager.get_*`, `save_models/load_models`, `save_forecast_state/load_forecast_state`, manifest helpers.
-- **core/run_metadata_writer.py:** `write_run_metadata`, `extract_run_metadata_from_scores`, `extract_data_quality_score`, `write_retrain_metadata`.
-- **core/config_history_writer.py:** `write_config_change(s)`, `log_auto_tune_changes`.
-- **core/episode_culprits_writer.py:** `compute_detector_contributions`, `write_episode_culprits_enhanced`.
-- **core/smart_coldstart.py:** `SmartColdstart.load_with_retry`, cadence detection, progress tracking.
-- **core/sql_*:** `SQLClient`, `SqlLogSink`, `SQLPerformanceMonitor`, `SQLBatchWriter`, `sql_protocol` mocks.
-- **core/historian.py:** historian fetch helpers.
-- **scripts/sql_batch_runner.py:** `SQLBatchRunner` orchestrates continuous historian processing.
-
----
-
-## 9) Onboarding Checklist
-
-- Install deps and run a file-mode smoke test with sample CSVs (diagnostic).
-- Configure SQL credentials and run a single SQL-mode job with `--equip` pointed at a known equipment row; verify ACM_Runs, Scores_Wide, Episodes populate.
-- When `config_table.csv` is edited, run `python scripts/sql/populate_acm_config.py` to sync `ACM_Config`; confirm via a quick select.
-- Inspect `artifacts/{EQUIP}/run_<ts>/meta.json` (file mode) or ACM_Runs (SQL) to confirm health indices and thresholds.
-- Review `config_history.log` to ensure auto-tuning events are recorded.
-- Validate dashboards using `grafana_dashboards/` JSONs (Ops Command Center, Asset Health Deep Dive, Failure & Maintenance Planner, Sensor & Regime Forensics, Ops & Model Observability) and `docs/` quick refs (e.g., `BATCH_MODE_SQL_QUICK_REF.md`, `SQL_MODE_CONFIGURATION.md`).
-
----
-
-## 10) Troubleshooting Signals
-
-- Empty `scores.csv` or zero rows written: check data guardrails, duplicate timestamp removal, historian coverage (`check_historian_data.py`, `_log_historian_overview` in sql_batch_runner).
-- Flat fused z near zero: baseline too short or detectors cached with mismatched signature; rerun with `--clear-cache`.
-- Frequent false alerts: adjust `thresholds.clip_z`, enable per-regime thresholds (DET-07), or lower fusion weights for noisy heads via config or auto-tuning.
-- Missing SQL writes: confirm `enable_sql_sink` not disabled, SQL connectivity via `OutputManager` diagnostic, table existence (`check_tables_existence.py`).
-- Slow runs: enable Polars, reduce feature window, trim tag list (`features.top_k_tags`), or limit max models in regimes auto-k.
-
----
-
-## 11) Extend/Modify Safely
-
-- Add detectors by producing z-scores and registering them in fusion weight config; ensure calibration and episode detection include them.
-- Update configs via `configs/config_table.csv` or SQL `ACM_Config`; keep `config_signature` changes in mind for cache invalidation.
-- When changing schema/outputs, extend `OutputManager.ALLOWED_TABLES` and add write helpers + analytics generators to keep file/SQL parity.
-- For new regimes logic, bump `REGIME_MODEL_VERSION` to invalidate stale caches.
-- Add logging via `Console` with module-level overrides (`--log-module-level core.fast_features=DEBUG`).
-
----
-
-## 12) Minimal Config Examples
-
-**File mode row (config_table.csv)**
-```
-EquipID,Category,ParamPath,ParamValue,ValueType
-0,data,train_csv,data/FD_FAN_BASELINE_DATA.csv,string
-0,data,score_csv,data/FD_FAN_BATCH_DATA.csv,string
-0,data,timestamp_col,Timestamp,string
-0,data,sampling_secs,60,int
-0,features,window,16,int
-0,models,pca.n_components,5,int
-0,models,iforest.contamination,0.001,float
-0,fusion,weights,"{""pca_spe_z"":0.25,""pca_t2_z"":0.25,""iforest_z"":0.2,""gmm_z"":0.15,""omr_z"":0.15}",json
-```
-
-**Equipment-specific overrides (config_table.csv)**
-```
-EquipID,Category,ParamPath,ParamValue,ValueType
-1,data,timestamp_col,EntryDateTime,string
-1,data,sampling_secs,60,int
-1,models,pca.incremental,true,bool
-1,runtime,reuse_model_fit,false,bool
-```
-
-**SQL connection (configs/sql_connection.ini)**
-```
-[sqlserver]
-driver=ODBC Driver 17 for SQL Server
-server=YOUR_SQL_SERVER_HOST
-database=ACM
-uid=acm_user
-pwd=***REDACTED***
-trust_certificate=yes
-timeout=30
+# After editing config_table.csv
+python scripts/sql/populate_acm_config.py
+
+# Verify sync
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT COUNT(*) FROM ACM_Config"
 ```
 
 ---
 
-## 13) Data & Timestamp Expectations
+## 12. SQL Schema
 
-- **Index:** DatetimeIndex, timezone-naive, monotonic increasing; duplicates are dropped in `acm_main`.
-- **Timestamp column name:** `timestamp_col` config (defaults to `Timestamp`/`EntryDateTime`); historian uses `EntryDateTime`.
-- **Cadence tolerance:** configured via `data.sampling_secs`; cadence check warns when drifted; `SmartColdstart` enforces window discovery.
-- **Columns:** numeric sensor columns; non-numeric are dropped before detectors; low-variance columns are warned and optionally excluded.
-- **Missing data:** TRAIN medians used to fill SCORE; remaining NaN columns trigger validation errors upstream.
-- **Windowing:** feature window (`features.window`) should reflect process dynamics (too small = noisy, too large = lag).
+### 12.1 Core Tables
 
----
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `Equipment` | Equipment registry | EquipID, EquipCode, EquipName |
+| `{Equipment}_Data` | Historian data | EntryDateTime, sensor columns |
+| `ACM_Config` | Configuration | EquipID, ParamPath, ParamValue |
+| `ACM_Runs` | Run metadata | RunID, EquipID, StartedAt, Status |
+| `ACM_ColdstartState` | Coldstart progress | EquipID, DataPointsAccumulated |
 
-## 14) Detector & Fusion Defaults (quick reference)
+### 12.2 Output Tables
 
-- **Weights (example):** pca_spe_z 0.25, pca_t2_z 0.25, iforest_z 0.20, gmm_z 0.15, omr_z 0.15 (tuned per asset).
-- **Thresholds:** fused_z alert ~3.0 unless adaptive/per-regime enabled; detector z clipping via `thresholds.clip_z` (e.g., 8–10) to avoid extreme leverage.
-- **PCA:** n_components=5, randomized SVD, incremental optional; drops constant cols.
-- **Mahalanobis:** regularization 1e-3 with auto-escalation on high condition number.
-- **Isolation Forest:** contamination auto or numeric; max_samples auto; random_state=17.
-- **GMM:** BIC search enabled, reg_covar=1e-3, covariance_type=diag, cap k by samples.
-- **OMR:** model_type=auto, n_components=5, alpha=1.0, min_samples=100, z clip=10.
-- **AR1:** min_samples=3; falls back to mean residual when under-sampled.
-- **Fusion tuning:** episode-separability method, temperature=2.0, min_weight=0.05, learning_rate=0.3.
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `ACM_Scores_Wide` | Detector z-scores | Timestamp, ar1_z, pca_spe_z, fused_z |
+| `ACM_HealthTimeline` | Health history | Timestamp, HealthIndex, Confidence |
+| `ACM_RegimeTimeline` | Regime assignments | Timestamp, RegimeLabel, Confidence |
+| `ACM_Anomaly_Events` | Detected episodes | StartTime, EndTime, Severity, MaxZ |
+| `ACM_RUL` | RUL predictions | RUL_Hours, P10, P50, P90, TopSensor1 |
+| `ACM_HealthForecast` | Health projections | ForecastTime, ForecastHealth |
+| `ACM_SensorForecast` | Sensor projections | SensorName, ForecastValue |
 
----
+### 12.3 Dashboard Views
 
-## 15) Validation & Testing Recipes
+| View | Purpose |
+|------|---------|
+| `vw_ACM_CurrentHealth` | Latest health per equipment |
+| `vw_ACM_HealthHistory` | Health time series |
+| `vw_ACM_ActiveDefects` | Active sensor defects |
+| `vw_ACM_RULSummary` | RUL overview |
+| `vw_ACM_EquipmentOverview` | Fleet summary |
 
-- **Smoke (file mode):**
-  - `python -m core.acm_main --equip FD_FAN --train-csv data/FD_FAN_BASELINE_DATA.csv --score-csv data/FD_FAN_BATCH_DATA.csv --log-level INFO`
-  - Verify `artifacts/FD_FAN/run_<ts>/scores.csv`, `episodes.csv`, `meta.json` exist; inspect fused z distribution and episode count.
-- **SQL dry-run sanity:**
-  - Ensure historian coverage via `_log_historian_overview` (runs inside `sql_batch_runner`); or run `scripts/check_historian_data.py`.
-  - `python -m core.acm_main --equip FD_FAN --log-level INFO` (SQL mode default). Check ACM_Runs row inserted and Scores_Wide populated.
-- **Cache/threshold checks:**
-  - Run once, rerun with `--clear-cache` and compare PCA/IFOREST model hashes in `detectors.joblib` to ensure cache invalidation.
-- **Regression spot-checks:**
-  - Compare P95 fused z and episode counts across two runs; large deltas suggest config drift or data shift.
+### 12.4 Schema Reference
 
----
+Full schema documentation: [docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md](sql/COMPREHENSIVE_SCHEMA_REFERENCE.md)
 
-## 16) Operational Signals & Runbook
-
-- **Primary health:** ACM_Runs.health_status, avg/min health index, max_fused_z.
-- **Data quality:** ACM_DataQuality score; low values imply ingestion or sensor issues.
-- **Drift:** Drift_TS p95 and slope from `_compute_drift_trend`; spikes may warrant refit.
-- **Regimes:** silhouette score, regime_count stability; high volatility can mean process change or bad clustering.
-- **OMR diagnostics:** ACM_OMR_Diagnostics residual std and calibration status; saturation indicates recalibration needed.
-- **Forecast quality:** ACM_Forecast_QualityMetrics RMSE/MAE/MAPE trends; retrain when sustained degradation.
-- **RUL multipath:** ACM_RUL_Summary consensus vs paths; large divergence signals uncertainty.
-- **Actions:**
-  - Frequent false alerts: lower fusion weights for noisy heads, enable per-regime thresholds, or raise fused warn/alert thresholds.
-  - Flat fused z: baseline too small or stale cache; rerun with `--clear-cache` or expand baseline window.
-  - SQL write gaps: check SQL sink enabled, table existence (`check_tables_existence.py`), and connectivity.
-  - Drift spikes: trigger retrain by clearing cache or setting refit flag in `artifacts/{equip}/models/refit_requested.flag`.
-
----
-
-## 17) Versioning & Change Control
-
-- **Config signature:** `_compute_config_signature` hashes model/feature/fusion/regime/threshold sections; cache reuse only when hash matches.
-- **Regime model version:** `REGIME_MODEL_VERSION` (regimes.py) gates loading; bump when changing clustering logic or feature basis.
-- **Forecast state version:** stored in manifest under `artifacts/{equip}/models`; retrain when data hash changes.
-- **Output schema changes:** update `OutputManager.ALLOWED_TABLES`, add write helpers, and align SQL schemas before deployment.
-- **Documentation alignment:** update README and this handbook when changing defaults or run modes to keep ops expectations accurate.
-
----
-
-## 18) Security & Secrets
-
-- **Credentials:** keep `configs/sql_connection.ini` out of VCS; use `.example.ini` as template. Do not commit real passwords/DSNs.
-- **Access:** restrict artifacts and configs directories to least privilege; SQL user should have only required read/write on ACM_* tables and historian views.
-- **Logging:** avoid logging credentials or PII; Console outputs may be mirrored to SQL via `SqlLogSink`.
-- **Environment overrides:** prefer environment variables or secure secret stores for credentials in CI/CD; validate that `SqlLogSink` is enabled only where allowed.
-
----
-
-## 19) Adding New Equipment
-
-To import a new equipment's sensor data into ACM, see [EQUIPMENT_IMPORT_PROCEDURE.md](EQUIPMENT_IMPORT_PROCEDURE.md).
-
-Quick summary:
-1. Prepare CSV with datetime + sensor columns
-2. Run `python scripts/sql/import_csv_to_acm.py --csv file.csv --equip-code CODE --equip-name "Name"`
-3. Run batch processing: `python scripts/sql_batch_runner.py --equip CODE --max-batches 10`
-4. View in dashboard (select equipment, adjust time range)
-
----
-
-## 20) Configuration Reference
-
-ACM uses a cascading configuration system where **global defaults** (EquipID=0) can be overridden by **equipment-specific values**. Configuration is stored in `configs/config_table.csv` and synced to SQL `ACM_Config` table via `scripts/sql/populate_acm_config.py`.
-
-### Configuration Architecture
-
-```
-configs/config_table.csv  -->  Python ConfigDict  -->  SQL ACM_Config (optional sync)
-         |                           |
-         v                           v
-   EquipID=0 (global)        Dot-path access: cfg['models.pca.n_components']
-   EquipID=N (override)      Equipment-specific lookup with fallback
+Export fresh schema:
+```powershell
+python scripts/sql/export_comprehensive_schema.py --output docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md
 ```
 
-### Parameter Categories
+---
 
-| Category | Purpose | Typical Tuning Frequency |
-|----------|---------|--------------------------|
-| `data` | Data loading, cadence, timestamps | Per-Equipment |
-| `features` | Window sizes, spectral analysis | Rarely |
-| `models` | Detector hyperparameters | Per-Equipment (some) |
-| `fusion` | Detector weight blending | Auto-tuned |
-| `episodes` | Anomaly event detection | Per-Equipment |
-| `thresholds` | Alert/warning levels | Per-Equipment |
-| `regimes` | Operating mode clustering | Per-Equipment |
-| `drift` | Slow change detection | Rarely |
-| `forecasting` | Health/RUL prediction | Rarely |
-| `runtime` | Execution control | Per-Equipment |
-| `health` | Health index calculation | Rarely |
+## 13. Observability Stack
+
+### 13.1 Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              OBSERVABILITY STACK                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  ACM        │     │  Alloy      │     │  Storage    │     │  Grafana    │
+│  Pipeline   │────▶│  (OTLP)     │────▶│  Backends   │────▶│  Dashboards │
+│             │     │             │     │             │     │             │
+│  Console.*  │     │  Port 4317  │     │  Tempo      │     │  Port 3000  │
+│  Span.*     │     │  Port 4318  │     │  Loki       │     │             │
+│  Metrics.*  │     │             │     │  Prometheus │     │  admin/admin│
+│             │     │             │     │  Pyroscope  │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+```
+
+### 13.2 Components
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| Grafana | 3000 | Dashboard UI (admin/admin) |
+| Alloy | 4317, 4318 | OTLP collector |
+| Tempo | 3200 | Distributed traces |
+| Loki | 3100 | Log aggregation |
+| Prometheus | 9090 | Metrics |
+| Pyroscope | 4040 | Continuous profiling |
+
+### 13.3 Console API (core/observability.py)
+
+```python
+from core.observability import Console, Span, Metrics
+
+# Logging (goes to Loki)
+Console.info("Processing equipment", equipment="FD_FAN", batch=5)
+Console.warn("High anomaly rate", rate=0.15)
+Console.error("SQL connection failed", error=str(e))
+
+# Console-only output (NOT to Loki)
+Console.status("Loading data...")
+Console.header("Phase 1: Initialization")
+Console.section("Feature Engineering")
+
+# Tracing (goes to Tempo)
+with Span("detector.score", detector="PCA"):
+    scores = pca.score(features)
+
+# Metrics (goes to Prometheus)
+Metrics.counter("acm.episodes.detected", 5, equipment="FD_FAN")
+Metrics.histogram("acm.run.duration_seconds", 45.3)
+```
+
+### 13.4 Starting the Stack
+
+```powershell
+cd install/observability
+docker compose up -d
+
+# Verify
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+# Expected: 6 containers running
+# acm-grafana, acm-alloy, acm-tempo, acm-loki, acm-prometheus, acm-pyroscope
+```
 
 ---
 
-### DATA CATEGORY - Most Likely to Need Per-Equipment Tuning
+## 14. Entry Points and Runtime Modes
 
-| Parameter | Default | Type | Description | Equipment-Specific? |
-|-----------|---------|------|-------------|---------------------|
-| **`sampling_secs`** | 1800 | int | **CRITICAL**: Data sampling interval in seconds. Must match equipment's native data cadence. Examples: FD_FAN/GAS_TURBINE=1800 (30 min), ELECTRIC_MOTOR=60 (1 min). Wrong value causes massive data loss during resampling. | **YES - Always override for new equipment** |
-| `timestamp_col` | EntryDateTime | string | Name of timestamp column in historian data. Some assets use "Ts" or other names. | YES if asset uses different column |
-| `min_train_samples` | 200 | int | Minimum training rows for coldstart. Affects how long coldstart takes to accumulate enough data. | YES if equipment has sparse data |
-| `max_rows` | 100000 | int | Maximum rows to process per batch. Prevents memory issues. | Rarely |
-| `train_csv` / `score_csv` | - | string | File paths for file-mode operation (SQL mode ignores these). | Only for file mode |
+### 14.1 Production: sql_batch_runner.py
 
-**Critical Insight**: If you see "Insufficient data: N rows (required: 200)" but the SP returns many more rows, check that `sampling_secs` matches the actual data cadence.
+```powershell
+python scripts/sql_batch_runner.py \
+    --equip FD_FAN GAS_TURBINE \
+    --tick-minutes 1440 \
+    --max-workers 2 \
+    --resume
+```
 
----
+| Argument | Description |
+|----------|-------------|
+| `--equip` | Equipment codes to process |
+| `--tick-minutes` | Batch window size (1440 = 1 day) |
+| `--max-workers` | Parallel equipment processing |
+| `--resume` | Continue from last run |
+| `--start-from-beginning` | Full reset (coldstart) |
+| `--max-batches` | Limit batches (testing) |
 
-### MODEL CATEGORY - Detector Hyperparameters
+### 14.2 Testing: acm_main.py
 
-#### PCA (Principal Component Analysis)
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `pca.n_components` | 5 | Latent dimensions retained. More = captures more variance, less robust to noise. | Rarely |
-| `pca.svd_solver` | randomized | SVD algorithm. "randomized" is faster for large datasets. | No |
+```powershell
+python -m core.acm_main \
+    --equip FD_FAN \
+    --start-time "2024-01-01T00:00:00" \
+    --end-time "2024-01-31T23:59:59" \
+    --mode offline
+```
 
-#### AR1 (Autoregressive Time-Series)
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `ar1.window` | 256 | Lookback window for AR model. Should be > data cadence. | YES if very different cadence |
-| `ar1.alpha` | 0.05 | Significance level for residual threshold. | Rarely |
-| `ar1.z_cap` | 8.0 | Maximum z-score cap to prevent outlier dominance. | Rarely |
+| Argument | Description |
+|----------|-------------|
+| `--equip` | Equipment code |
+| `--start-time` | ISO 8601 start |
+| `--end-time` | ISO 8601 end |
+| `--mode` | offline (train), online (score), auto |
+| `--clear-cache` | Force detector retrain |
 
-#### IsolationForest
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `iforest.n_estimators` | 100 | Number of trees. More = more accurate but slower. | Rarely |
-| `iforest.contamination` | 0.01 | Expected anomaly fraction. Lower = fewer false positives. | YES for very noisy equipment |
-| `iforest.max_samples` | 2048 | Samples per tree. Affects training speed. | No |
+### 14.3 Mode Decision
 
-#### GMM (Gaussian Mixture Model)
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `gmm.k_min` / `gmm.k_max` | 2/3 | Component range for BIC search. | Rarely |
-| `gmm.covariance_type` | diag | Covariance structure. "diag" is faster. | No |
-
-#### Mahalanobis Distance
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| **`mahl.regularization`** | 0.1 | Covariance matrix regularization. **Increase if you see "high condition number" warnings**. | **YES - auto-tuned for ill-conditioned data** |
-
-#### OMR (Overall Model Residual)
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `omr.model_type` | auto | Model type: auto/pca/ae. Auto selects based on data. | Rarely |
-| `omr.n_components` | 5 | Latent components. | Rarely |
-| `omr.min_samples` | 100 | Minimum samples to fit OMR. | Rarely |
-
-#### Continuous Learning
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `auto_retrain.enabled` | True | Enable automatic retraining. | No |
-| `auto_retrain.max_anomaly_rate` | 0.25 | Retrain if anomaly rate exceeds 25%. | YES if expected high anomaly rate |
-| `auto_retrain.max_drift_score` | 2.0 | Retrain if drift exceeds threshold. | Rarely |
-| `auto_retrain.max_model_age_hours` | 720 | Retrain if model older than 30 days. | Rarely |
+| Mode | When Used | Behavior |
+|------|-----------|----------|
+| OFFLINE | First run, cache miss, --clear-cache | Full training of all detectors |
+| ONLINE | Cache hit, models valid | Scoring only, no retraining |
+| AUTO | Default | Check cache, decide automatically |
 
 ---
 
-### FUSION CATEGORY - Detector Weight Blending
+## 15. Codebase Map
 
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `weights.ar1_z` | 0.2 | Weight for AR1 detector (0-1). | Auto-tuned |
-| `weights.iforest_z` | 0.2 | Weight for IsolationForest. | Auto-tuned |
-| `weights.gmm_z` | 0.1 | Weight for GMM density. | Auto-tuned |
-| `weights.pca_spe_z` | 0.2 | Weight for PCA squared prediction error. | Auto-tuned |
-| `weights.mhal_z` | 0.2 | Weight for Mahalanobis distance. | Auto-tuned |
-| `weights.omr_z` | 0.1 | Weight for OMR residual. | Auto-tuned |
-| `auto_tune.enabled` | True | Enable automatic weight tuning based on episode separability. | No |
-| `per_regime` | True | Compute separate fusion weights per regime. | No |
-| `cooldown` | 10 | Samples after episode before new episode can start. | Rarely |
+### 15.1 Core Modules
 
----
+```
+core/
+├── acm_main.py          # Pipeline orchestrator (6000+ lines)
+├── acm.py               # Mode-aware router
+├── output_manager.py    # All SQL/CSV writes
+├── sql_client.py        # pyodbc wrapper
+├── observability.py     # Console, Span, Metrics
+├── pipeline_types.py    # DataContract, PipelineMode
+│
+├── fast_features.py     # Feature engineering (pandas/Polars)
+├── seasonality.py       # FFT pattern detection
+├── smart_coldstart.py   # Historian retry logic
+│
+├── ar1_detector.py      # AR1 detector
+├── correlation.py       # PCA detector (SPE, T2)
+├── outliers.py          # IForest, GMM detectors
+├── omr.py               # OMR detector
+│
+├── regimes.py           # Regime clustering (RAW SENSORS ONLY)
+├── fuse.py              # Weighted fusion, CUSUM episodes
+├── adaptive_thresholds.py # Per-regime thresholds
+├── drift.py             # CUSUM drift detection
+│
+├── model_persistence.py # SQL model registry
+├── model_lifecycle.py   # MaturityState management
+├── confidence.py        # Confidence calculations
+│
+├── forecast_engine.py   # Health/RUL forecasting
+├── degradation_model.py # Holt-Winters, jump detection
+├── rul_estimator.py     # Monte Carlo RUL
+└── health_tracker.py    # Health history management
+```
 
-### EPISODES CATEGORY - Anomaly Event Detection
+### 15.2 Scripts
 
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| **`cpd.k_sigma`** | 2.0 | Episode start threshold (z-score). **Increase if too many episodes detected**. | **YES - often auto-tuned based on anomaly rate** |
-| `cpd.h_sigma` | 12.0 | Episode severity threshold (high severity). | Rarely |
-| `min_len` | 3 | Minimum episode length in samples. | Rarely |
-| `gap_merge` | 5 | Merge episodes separated by fewer than N samples. | Rarely |
-| `cpd.auto_tune.enabled` | True | Auto-adjust thresholds based on anomaly rate. | No |
+```
+scripts/
+├── sql_batch_runner.py      # Production batch runner
+├── sql/
+│   ├── populate_acm_config.py        # Sync config to SQL
+│   ├── verify_acm_connection.py      # Test connectivity
+│   ├── export_comprehensive_schema.py # Schema export
+│   ├── import_csv_to_acm.py          # Import equipment data
+│   └── truncate_run_data.sql         # Clear run data
+```
 
----
+### 15.3 Configuration
 
-### THRESHOLDS CATEGORY - Alert Levels
-
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `q` | 0.98 | Calibration quantile for z-score thresholds. | Rarely |
-| **`self_tune.clip_z`** | 100.0 | Maximum z-score cap. **Reduce if high saturation warnings**. | **YES - auto-tuned for saturating detectors** |
-| `self_tune.target_fp_rate` | 0.001 | Target false positive rate for adaptive thresholds. | Rarely |
-| `alert` | 0.85 | Health fraction triggering ALERT status. | Rarely |
-| `warn` | 0.7 | Health fraction triggering CAUTION status. | Rarely |
-| `adaptive.enabled` | True | Enable per-regime adaptive thresholds. | No |
-| `adaptive.confidence` | 0.997 | Confidence level (99.7% = 3-sigma). | Rarely |
-| `adaptive.fallback_threshold` | 3.0 | Default z-threshold if calculation fails. | Rarely |
-
----
-
-### REGIMES CATEGORY - Operating Mode Clustering
-
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `auto_k.k_min` / `auto_k.k_max` | 2/6 | Range for regime count search. | YES if known modes |
-| `quality.silhouette_min` | 0.3 | Minimum clustering quality. | Rarely |
-| `smoothing.passes` | 3 | Regime smoothing passes. | Rarely |
-| `smoothing.window` | 7 | Smoothing window size. | Rarely |
-| `smoothing.min_dwell_samples` | 10 | Minimum samples to stay in regime. | YES for fast-cycling equipment |
-| `smoothing.min_dwell_seconds` | 900 | Minimum regime duration (15 min). | YES for fast-cycling equipment |
-| `health.fused_warn_z` | 2.5 | Z-score for health warning zone. | Rarely |
-| `health.fused_alert_z` | 4.0 | Z-score for health alert zone. | Rarely |
-
----
-
-### DRIFT CATEGORY - Slow Change Detection
-
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `cusum.threshold` | 2.0 | CUSUM drift detection threshold. | Rarely |
-| `cusum.smoothing_alpha` | 0.3 | EWMA smoothing for drift curves. | Rarely |
-| `cusum.drift` | 0.1 | Drift allowance before detection. | Rarely |
-| `p95_threshold` | 2.0 | P95 threshold for drift vs fault distinction. | Rarely |
-| `multi_feature.enabled` | True | Multi-feature drift detection. | No |
+```
+configs/
+├── config_table.csv         # 238+ parameters
+├── sql_connection.ini       # SQL credentials (gitignored)
+└── sql_connection.example.ini
+```
 
 ---
 
-### FORECASTING CATEGORY - Health & RUL Prediction
+## 16. Troubleshooting
 
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `enhanced_enabled` | True | Enable enhanced forecasting module. | No |
-| `enable_continuous` | True | Enable continuous stateful forecasting. | No |
-| `failure_threshold` | 70.0 | Health % defining failure. | Rarely |
-| `max_forecast_hours` | 168.0 | Maximum forecast horizon (7 days). | Rarely |
-| `forecast_horizons` | [24, 72, 168] | Horizons to compute (hours). | Rarely |
-| `training_window_hours` | 72 | Lookback window for training. | YES if sparse data |
-| `hazard_smoothing_alpha` | 0.3 | Hazard rate smoothing. | Rarely |
-| `hazard_failure_prob` | 0.6 | Probability level for failure time. | Rarely |
-| `multivariate.enabled` | True | VAR-based sensor forecasting. | No |
+### 16.1 Common Issues
 
----
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| NOOP - No data | Wrong sampling_secs | Match data cadence in config |
+| NOOP - Insufficient rows | Coldstart incomplete | Wait for accumulation or reduce min_train_samples |
+| RUL NOT_RELIABLE | Model not converged | Run 5+ batches |
+| Episodes every batch | k_sigma too low | Increase to 3.0-4.0 |
+| Health score flat | Baseline not seeding | Check ACM_BaselineBuffer |
+| SQL timeout | Connection pool exhausted | Increase sql.pool_max |
+| Regime oscillation | Clustering unstable | Increase smoothing.window |
 
-### RUNTIME CATEGORY - Execution Control
+### 16.2 Diagnostic Commands
 
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `storage_backend` | sql | Storage mode: sql or file. | YES if equipment uses file mode |
-| `tick_minutes` | 30 | Batch interval in minutes. | YES if different cadence |
-| `future_grace_minutes` | 1051200 | Allow historian backfill (2 years). | Rarely |
-| `log_level` | INFO | Logging verbosity. | No |
-| `max_fill_ratio` | 0.2 | Maximum missing data ratio to accept. | Rarely |
-| `phases.*` | True | Enable/disable pipeline phases. | Rarely |
+```powershell
+# Test SQL connectivity
+python scripts/sql/verify_acm_connection.py
 
----
+# Check recent runs
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT TOP 10 RunID, EquipID, Status, StartedAt FROM ACM_Runs ORDER BY ID DESC"
 
-### HEALTH CATEGORY - Health Index Calculation
+# Check run logs
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT TOP 20 LoggedAt, Level, Message FROM ACM_RunLogs ORDER BY ID DESC"
 
-| Parameter | Default | Description | Equipment-Specific? |
-|-----------|---------|-------------|---------------------|
-| `smoothing_alpha` | 0.3 | Exponential smoothing (0=smooth, 1=raw). | Rarely |
-| `max_change_per_period` | 20.0 | Max health change % for volatility flag. | Rarely |
-| `extreme_z_threshold` | 10.0 | Z-score for extreme anomaly flag. | Rarely |
-| `z_threshold` | 5.0 | Z-score at ~15% health (sigmoid). | Rarely |
-| `steepness` | 1.5 | Sigmoid steepness. | Rarely |
+# Check coldstart state
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT * FROM ACM_ColdstartState"
 
----
+# Check regime distribution
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT RegimeLabel, COUNT(*) AS N FROM ACM_RegimeTimeline GROUP BY RegimeLabel"
+```
 
-### Equipment-Specific Override Examples
+### 16.3 Cache Invalidation
 
-Current overrides in production:
+```powershell
+# Force retrain all detectors
+python -m core.acm_main --equip FD_FAN --clear-cache
 
-| EquipID | Equipment | Parameter | Value | Reason |
-|---------|-----------|-----------|-------|--------|
-| 1 | FD_FAN | `mahl.regularization` | 1.0 | High condition number fix |
-| 1 | FD_FAN | `self_tune.clip_z` | 100.0 | High saturation |
-| 1 | FD_FAN | `episodes.cpd.k_sigma` | 4.0 | High anomaly rate |
-| 2621 | GAS_TURBINE | `data.timestamp_col` | Ts | Different column name |
-| 2621 | GAS_TURBINE | `self_tune.clip_z` | 43.2 | High saturation |
-| 2621 | GAS_TURBINE | `episodes.cpd.k_sigma` | 4.0 | High anomaly rate |
-| 2621 | GAS_TURBINE | `runtime.tick_minutes` | 1440 | Hourly cadence |
-| 8634 | ELECTRIC_MOTOR | **`data.sampling_secs`** | **60** | **1-minute data cadence** |
+# Reset coldstart state for equipment
+sqlcmd -S "server\instance" -d ACM -E -Q "DELETE FROM ACM_ColdstartState WHERE EquipID = 1"
+
+# Clear all run data (use with caution)
+sqlcmd -S "server\instance" -d ACM -E -i "scripts/sql/truncate_run_data.sql"
+```
 
 ---
 
-### Adding Equipment-Specific Overrides
+## 17. Extending ACM
 
-1. **Find EquipID**: `SELECT EquipID, EquipCode FROM Equipment WHERE EquipCode = 'YOUR_CODE'`
+### 17.1 Adding a New Detector
 
-2. **Add row to config_table.csv**:
-   ```csv
-   8634,data,sampling_secs,60,int,2025-12-13 00:00:00,COPILOT,ELECTRIC_MOTOR has 1-minute data cadence,
-   ```
+1. Create detector class in `core/`:
+```python
+class NewDetector:
+    def fit(self, X: pd.DataFrame) -> None: ...
+    def score(self, X: pd.DataFrame) -> pd.Series: ...
+```
 
-3. **Sync to SQL**:
-   ```powershell
-   python scripts/sql/populate_acm_config.py
-   ```
+2. Register in `acm_main.py` detector fitting section
+3. Add z-column to fusion weights in config
+4. Update `fuse.py` to include in weighted sum
+5. Add to `ACM_Scores_Wide` schema
 
-4. **Reset coldstart** (if needed):
-   ```sql
-   SET QUOTED_IDENTIFIER ON;
-   DELETE FROM ACM_ColdstartState WHERE EquipID = 8634;
-   ```
+### 17.2 Adding New Output Table
+
+1. Add table name to `OutputManager.ALLOWED_TABLES`
+2. Create write method: `write_new_table(df)`
+3. Wire up call in appropriate pipeline phase
+4. Create SQL table with proper schema
+5. Update `COMPREHENSIVE_SCHEMA_REFERENCE.md`
+
+### 17.3 Bumping Regime Model Version
+
+When changing regime clustering logic:
+
+```python
+# In core/regimes.py
+REGIME_MODEL_VERSION = "5.0"  # Increment from 4.0
+```
+
+This invalidates all cached regime models.
 
 ---
 
-### Auto-Tuning Parameters
+## Version History
 
-ACM automatically tunes these parameters based on observed behavior:
-
-| Parameter | Trigger | What Happens |
-|-----------|---------|--------------|
-| `mahl.regularization` | High condition number warning | Increased to stabilize covariance matrix |
-| `self_tune.clip_z` | High z-score saturation (>15%) | Reduced to prevent detector clipping |
-| `episodes.cpd.k_sigma` | High anomaly rate (>10%) | Increased to reduce false episodes |
-| `fusion.weights.*` | Episode separability analysis | Weights adjusted based on detector contribution |
-
-Auto-tuned values are logged in ACM_RunLogs with `[ADAPTIVE]` prefix.
+| Version | Date | Key Changes |
+|---------|------|-------------|
+| v11.4.0 | 2026-01-21 | Regime clustering: raw sensors only (architectural fix) |
+| v11.3.4 | 2026-01-20 | RUL validation guards |
+| v11.3.3 | 2026-01-18 | Contamination filtering for calibration |
+| v11.3.2 | 2026-01-16 | Model compatibility validation |
+| v11.3.0 | 2026-01-13 | Interactive installer, false positive reduction |
+| v11.2.2 | 2026-01-04 | P0 analytical fixes (harmonic mean confidence) |
+| v11.0.0 | 2025-12-15 | Model lifecycle, confidence model |
+| v10.3.0 | 2025-12-01 | Observability stack |
 
 ---
 
-### Configuration Validation Checklist for New Equipment
-
-1. **Data Cadence**: Verify `sampling_secs` matches actual data interval
-   - Check: `SELECT TOP 10 EntryDateTime, DATEDIFF(SECOND, LAG(EntryDateTime) OVER (ORDER BY EntryDateTime), EntryDateTime) AS GapSecs FROM {Equipment}_Data ORDER BY EntryDateTime`
-   
-2. **Timestamp Column**: Verify column name exists
-   - Check: `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{Equipment}_Data' AND COLUMN_NAME LIKE '%time%'`
-
-3. **Tag Mapping**: Verify all sensors are mapped
-   - Check: `SELECT * FROM ACM_TagEquipmentMap WHERE EquipID = N AND IsActive = 1`
-
-4. **Coldstart Requirements**: Verify sufficient data exists
-   - Need: `min_train_samples` (default 200) / (60 / `sampling_secs`) hours of data minimum
-   - Example: 200 samples at 60-second cadence = 200 minutes = 3.3 hours
+**Document Version:** 11.4.0 | **Updated:** January 21, 2026
