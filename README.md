@@ -1,194 +1,795 @@
-# ACM V11.3.0 - Autonomous Asset Condition Monitoring
+# ACM - Automated Condition Monitoring
 
-**Latest Release (January 2026): Health-State Aware Regime Detection**
+[![Version](https://img.shields.io/badge/version-11.4.0-blue)](#) [![Status](https://img.shields.io/badge/status-Production-brightgreen)](#) [![Python](https://img.shields.io/badge/python-3.11+-blue)](#) [![SQL Server](https://img.shields.io/badge/SQL%20Server-2019%2B-blue)](#)
 
-[![Version](https://img.shields.io/badge/version-11.3.0-blue)](#) [![Status](https://img.shields.io/badge/status-Production-brightgreen)](#) [![Python](https://img.shields.io/badge/python-3.11+-blue)](#) [![SQL Server](https://img.shields.io/badge/SQL%20Server-2019%2B-blue)](#)
+**Predictive Maintenance for Industrial Equipment**
+
+ACM is an autonomous condition monitoring system that ingests sensor data from industrial equipment, runs multi-detector anomaly detection, identifies operating regimes, and forecasts Remaining Useful Life (RUL). It transforms raw sensor streams into actionable maintenance intelligence.
+
+---
+
+## Table of Contents
+
+- [What Problem Does ACM Solve?](#what-problem-does-acm-solve)
+- [System Architecture](#system-architecture)
+- [Core Concepts](#core-concepts)
+- [Data Flow Pipeline](#data-flow-pipeline)
+- [Detection Algorithms](#detection-algorithms)
+- [Health Scoring](#health-scoring)
+- [RUL Forecasting](#rul-forecasting)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Running ACM](#running-acm)
+- [Output Tables](#output-tables)
+- [Grafana Dashboards](#grafana-dashboards)
+- [Troubleshooting](#troubleshooting)
+- [Documentation Map](#documentation-map)
+- [Changelog](#changelog)
 
 ---
 
 ## What Problem Does ACM Solve?
 
-Industrial equipment fails without warning. By the time operators notice something is wrong, it's often too late. Maintenance teams are left choosing between:
-- **Reactive maintenance**: Wait for failure (cost: emergency downtime + catastrophic damage)
-- **Preventive maintenance**: Replace parts on a schedule (cost: waste + unnecessary replacements)
-
-**ACM Solves This:**
-- ✅ **Early detection**: Spot equipment degradation 7+ days before failure
-- ✅ **Automatic diagnosis**: Identify which sensors changed and why
-- ✅ **Predictive timing**: Forecast remaining useful life (RUL) with uncertainty bounds
-- ✅ **Context-aware alerts**: Eliminate false positives (70% → 30% in v11.3.0)
-- ✅ **Actionable severity**: Prioritize maintenance by health state, not just alarm magnitude
-
-**Result**: Shift from reactive firefighting to **predictive, cost-optimized maintenance**.
-
----
-
-## Latest Breakthrough: v11.3.0 (January 2026)
-
-### The Problem
-Traditional anomaly detection treats all deviations as equally suspicious:
-- Equipment warming up? → Alarm
-- Equipment degrading? → Alarm  
-- Equipment in different operating mode? → Alarm
-
-**Result**: 70% false positive rate, crying wolf, maintenance fatigue.
-
-### The Solution: Multi-Dimensional Regimes + Health-State Context
-
-v11.3.0 adds **health-state variables** to regime clustering, enabling ACM to distinguish between:
-- **Healthy equipment in unusual mode** (OK, reduce alert priority ×0.9)
-- **Degrading equipment** (URGENT, boost alert priority ×1.2) ← **KEY FIX**
-- **Equipment in mode transition** (AMBIGUOUS, mild boost ×1.1)
-
-### Impact
-| Metric | Before v11.3.0 | After v11.3.0 | Improvement |
-|--------|---|---|---|
-| **False Positive Rate** | ~70% | ~30% | **2.3× reduction** |
-| **Fault Detection Recall** | 100% | 100% | **Maintained** |
-| **Early Detection Window** | 3-5 days | 7+ days | **2-3× earlier** |
-| **Regime Quality (Silhouette)** | 0.15-0.40 | 0.50-0.70 | **Better clustering** |
-
----
-
-## How It Works (60-Second Overview)
-
-ACM monitors equipment through **six independent analytical "heads"** plus **context-aware severity scoring**:
+Industrial equipment fails without warning. Maintenance teams face a costly tradeoff:
 
 ```
-Equipment Data (SQL Server)
-        ↓
-[Feature Engineering] - Rolling stats, FFT, correlations
-        ↓
-[6-Head Detector Ensemble]
-  • AR1: Sensor drift/spike detection
-  • PCA-SPE: Decoupling detection
-  • PCA-T²: Operating point anomaly
-  • IForest: Rarity detection
-  • GMM: Cluster membership
-  • OMR: Overall model residual
-        ↓
-[Multi-Dimensional Regime Detection]
-  • Operating Mode (load, speed, flow, pressure values)
-  • Health State (healthy, degrading, critical) ← NEW v11.3.0
-        ↓
-[Fusion with Context]
-  • Same detector score = different severity in different health states
-  • Degrading equipment gets ×1.2 priority boost
-        ↓
-[Episode Detection] - CUSUM change-point detection
-        ↓
-[Forecasting]
-  • Health trajectory (next 30 days)
-  • RUL with uncertainty (Monte Carlo simulations)
-  • Top-3 culprit sensors (which indicators changed?)
-        ↓
-[SQL Output] - 20+ tables for operations & analytics
-        ↓
-[Grafana Dashboards] - Real-time visualizations
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     THE MAINTENANCE DILEMMA                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  REACTIVE MAINTENANCE          vs          PREVENTIVE MAINTENANCE       │
+│  ────────────────────                      ───────────────────────      │
+│  Wait for failure                          Replace on schedule          │
+│  ↓                                         ↓                            │
+│  Emergency downtime                        Unnecessary replacements     │
+│  Catastrophic damage                       Wasted parts & labor         │
+│  Safety risks                              Over-maintenance costs       │
+│                                                                         │
+│                              ACM SOLUTION                               │
+│                              ────────────                               │
+│                     PREDICTIVE MAINTENANCE                              │
+│                              ↓                                          │
+│                   Detect degradation 7+ days early                      │
+│                   Forecast remaining useful life                        │
+│                   Identify which sensors are degrading                  │
+│                   Prioritize by actual health state                     │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Why Six Detectors Instead of One?**
-Different faults look different:
-- Sensor degradation shows as AR1 residuals
-- Mechanical wear shows as PCA decoupling
-- Control loop issues show as mode confusion (GMM)
-- Rare transients show as IForest anomalies
-
-Together, they catch 99%+ of failures while one algorithm would miss entire classes.
+**ACM delivers:**
+- **Early Detection**: Spot equipment degradation 7+ days before failure
+- **Automatic Diagnosis**: Identify which sensors changed and why
+- **Predictive Timing**: Forecast RUL with uncertainty bounds (P10/P50/P90)
+- **Context-Aware Alerts**: Distinguish operating mode changes from real faults
+- **Actionable Severity**: Prioritize by health state, not just alarm magnitude
 
 ---
 
-## 🚀 Installation (New in v11.3.0)
+## System Architecture
 
-### Interactive Installer Wizard (Recommended)
+### High-Level Overview
 
-ACM now includes a comprehensive **installer wizard** that handles all setup automatically:
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              ACM SYSTEM ARCHITECTURE                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   EQUIPMENT     │     │   SQL SERVER    │     │   OBSERVABILITY │
+│   SENSORS       │────▶│   HISTORIAN     │     │   STACK         │
+│                 │     │                 │     │                 │
+│ • Temperature   │     │ • Raw Data      │     │ • Grafana       │
+│ • Pressure      │     │ • ACM Results   │     │ • Tempo Traces  │
+│ • Vibration     │     │ • Model Cache   │     │ • Loki Logs     │
+│ • Current       │     │                 │     │ • Prometheus    │
+│ • Flow          │     │                 │     │ • Pyroscope     │
+└─────────────────┘     └────────┬────────┘     └────────▲────────┘
+                                 │                       │
+                                 ▼                       │
+                    ┌────────────────────────┐           │
+                    │      ACM PIPELINE      │───────────┘
+                    │                        │
+                    │  ┌──────────────────┐  │
+                    │  │ Feature Engine   │  │
+                    │  └────────┬─────────┘  │
+                    │           ▼            │
+                    │  ┌──────────────────┐  │
+                    │  │ 6-Head Detectors │  │
+                    │  └────────┬─────────┘  │
+                    │           ▼            │
+                    │  ┌──────────────────┐  │
+                    │  │ Regime Clustering│  │
+                    │  └────────┬─────────┘  │
+                    │           ▼            │
+                    │  ┌──────────────────┐  │
+                    │  │ Fusion & Episodes│  │
+                    │  └────────┬─────────┘  │
+                    │           ▼            │
+                    │  ┌──────────────────┐  │
+                    │  │ Forecasting      │  │
+                    │  └──────────────────┘  │
+                    └────────────────────────┘
+```
+
+### Technology Stack
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| **Runtime** | Python 3.11 | Core pipeline execution |
+| **Data Processing** | pandas, NumPy, scikit-learn | Feature engineering, ML models |
+| **Database** | Microsoft SQL Server 2019+ | Historian data, results storage |
+| **Connectivity** | pyodbc, T-SQL | SQL Server integration |
+| **Visualization** | Grafana | Real-time dashboards |
+| **Observability** | OpenTelemetry, Tempo, Loki, Prometheus | Tracing, logging, metrics |
+| **Profiling** | Grafana Pyroscope | Performance analysis |
+
+---
+
+## Core Concepts
+
+### Operating Regimes
+
+Equipment operates in different **modes** (regimes) based on load, speed, and environmental conditions. ACM automatically discovers these regimes using clustering on raw sensor values:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    REGIME CLUSTERING                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Raw Sensor Values                                              │
+│   ─────────────────                                              │
+│   • Load (%)        ──┐                                          │
+│   • Speed (RPM)       │                                          │
+│   • Flow (m³/h)       ├──▶  K-Means / HDBSCAN  ──▶  Regime 0-N   │
+│   • Pressure (bar)    │        Clustering                        │
+│   • Inlet Temp (°C)  ─┘                                          │
+│                                                                  │
+│   WHY THIS MATTERS:                                              │
+│   ─────────────────                                              │
+│   Equipment at 50% load behaves differently than at 100% load.   │
+│   An "anomaly" at startup might be normal, but the same reading  │
+│   during steady-state operation indicates a real problem.        │
+│                                                                  │
+│   ARCHITECTURAL PRINCIPLE (v11.4.0):                             │
+│   ──────────────────────────────────                             │
+│   • Regimes = HOW equipment operates (raw sensors)               │
+│   • Detectors = IF equipment is healthy (z-scores)               │
+│   • These are ORTHOGONAL - never mix detector outputs into       │
+│     regime clustering (causes circular masking)                  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Multi-Detector Fusion
+
+ACM uses **six independent detectors** because different faults manifest differently:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         DETECTOR ENSEMBLE                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                        │
+│   │    AR1      │   │  PCA-SPE    │   │  PCA-T²     │                        │
+│   │  Detector   │   │  Detector   │   │  Detector   │                        │
+│   │             │   │             │   │             │                        │
+│   │ Sensor      │   │ Decoupling  │   │ Operating   │                        │
+│   │ drift/spike │   │ detection   │   │ point shift │                        │
+│   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘                        │
+│          │                 │                 │                               │
+│   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                        │
+│   │  IForest    │   │    GMM      │   │    OMR      │                        │
+│   │  Detector   │   │  Detector   │   │  Detector   │                        │
+│   │             │   │             │   │             │                        │
+│   │ Rare states │   │ Cluster     │   │ Cross-sensor│                        │
+│   │ isolation   │   │ membership  │   │ residuals   │                        │
+│   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘                        │
+│          │                 │                 │                               │
+│          └────────────┬────┴─────────────────┘                               │
+│                       ▼                                                      │
+│              ┌─────────────────┐                                             │
+│              │   WEIGHTED      │                                             │
+│              │   FUSION        │                                             │
+│              │                 │                                             │
+│              │  fused_z =      │                                             │
+│              │  Σ(wᵢ × zᵢ)    │                                             │
+│              └────────┬────────┘                                             │
+│                       ▼                                                      │
+│              ┌─────────────────┐                                             │
+│              │  Single Fused   │                                             │
+│              │  Anomaly Score  │                                             │
+│              └─────────────────┘                                             │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Model Lifecycle
+
+ACM models progress through maturity states:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MODEL LIFECYCLE                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   COLDSTART ──▶ LEARNING ──▶ CONVERGED ──▶ DEPRECATED           │
+│       │            │            │              │                 │
+│       ▼            ▼            ▼              ▼                 │
+│   First run    Building     Stable,       Schema or             │
+│   No history   baselines    reliable      config changed        │
+│                             outputs                              │
+│                                                                  │
+│   Promotion Criteria (LEARNING → CONVERGED):                     │
+│   • Minimum 5 successful runs                                    │
+│   • Silhouette score ≥ 0.40                                      │
+│   • Stability ≥ 0.75                                             │
+│   • 7+ days of history                                           │
+│                                                                  │
+│   RUL Reliability:                                               │
+│   • COLDSTART/LEARNING: "NOT_RELIABLE" flag                      │
+│   • CONVERGED: Full confidence intervals                         │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Data Flow Pipeline
+
+### Complete Pipeline Execution
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         ACM PIPELINE PHASES                                   │
+│                    (Executed per equipment per batch)                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Phase 1: INITIALIZATION
+├── Parse arguments (--equip, --start-time, --end-time, --mode)
+├── Load config from SQL (ACM_Config table)
+├── Determine PipelineMode (ONLINE/OFFLINE)
+├── Initialize OutputManager
+└── Create RunID
+
+Phase 2: DATA CONTRACT VALIDATION
+├── DataContract.validate(raw_data)
+├── Check sensor coverage (min 70% required)
+├── Validate timestamp column and cadence
+└── Write ACM_DataContractValidation
+
+Phase 3: DATA LOADING
+├── Load historian data via stored procedure
+├── Apply coldstart split (60% train / 40% score)
+├── Deduplicate and ensure local timestamps
+└── Output: train_df, score_df
+
+Phase 4: FEATURE ENGINEERING
+├── Compute rolling statistics (mean, std, min, max)
+├── Compute lag features
+├── Compute z-scores per sensor
+├── Impute missing values from training medians
+└── Output: train_features, score_features
+
+Phase 5: MODEL TRAINING (OFFLINE mode only)
+├── Fit AR1 detector (autoregressive residuals)
+├── Fit PCA detector (dimensionality reduction)
+├── Fit IForest detector (isolation forest)
+├── Fit GMM detector (Gaussian mixture)
+├── Fit OMR detector (overall model residual)
+└── Cache models to SQL ModelRegistry
+
+Phase 6: DETECTOR SCORING
+├── Score all detectors on score data
+├── Compute z-scores per detector
+└── Output: ar1_z, pca_spe_z, pca_t2_z, iforest_z, gmm_z, omr_z
+
+Phase 7: REGIME LABELING
+├── Build regime basis (raw sensor values only)
+├── Run clustering (HDBSCAN primary, GMM fallback)
+├── Assign labels and confidence
+└── Write ACM_RegimeTimeline
+
+Phase 8: CALIBRATION
+├── Score TRAIN data for calibration baseline
+├── Compute adaptive thresholds (P99-based)
+├── Self-tune for target false positive rate
+└── Write ACM_Thresholds
+
+Phase 9: FUSION
+├── Auto-tune detector weights
+├── Compute fused_z (weighted combination)
+├── Tune CUSUM parameters
+└── Write ACM_Scores_Wide
+
+Phase 10: EPISODE DETECTION
+├── CUSUM change-point detection
+├── Identify episode start/end times
+├── Compute culprit sensors per episode
+└── Write ACM_Anomaly_Events
+
+Phase 11: ANALYTICS GENERATION
+├── Generate health timeline
+├── Generate sensor defects
+├── Generate hotspot analysis
+└── Write ACM_HealthTimeline, ACM_SensorDefects
+
+Phase 12: FORECASTING
+├── Load health history
+├── Fit degradation model (Holt-Winters)
+├── Generate health forecast (30-day horizon)
+├── Compute RUL with Monte Carlo (P10/P50/P90)
+├── Identify top-3 culprit sensors
+└── Write ACM_RUL, ACM_HealthForecast, ACM_SensorForecast
+
+Phase 13: FINALIZATION
+├── Write PCA loadings
+├── Write run statistics
+├── Update model lifecycle state
+└── Commit all SQL transactions
+```
+
+### Timing Breakdown (Typical 100K-row batch)
+
+| Phase | Duration | Notes |
+|-------|----------|-------|
+| Data Loading | ~2-3s | SQL stored procedure |
+| Feature Engineering | ~2s | Vectorized pandas |
+| Detector Scoring | ~1s | 6 detectors in parallel |
+| Regime Clustering | ~0.5s | K-Means on raw sensors |
+| Fusion + Episodes | ~0.5s | CUSUM change-point |
+| Forecasting | ~0.3s | Monte Carlo simulation |
+| SQL Writes | ~5-10s | 20+ tables |
+| **Total** | **~15-30s** | Per equipment per batch |
+
+---
+
+## Detection Algorithms
+
+### AR1 Detector (Autoregressive Residuals)
+
+Detects sensor drift and sudden spikes by modeling each sensor as an AR(1) process:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      AR1 DETECTOR                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Model:  x(t) = φ × x(t-1) + ε(t)                               │
+│                                                                  │
+│   Where:                                                         │
+│   • x(t) = sensor value at time t                                │
+│   • φ = autoregressive coefficient (fitted from training)        │
+│   • ε(t) = residual (prediction error)                           │
+│                                                                  │
+│   Detection:                                                     │
+│   • z_score = (ε(t) - μ_train) / σ_train                         │
+│   • Large residuals indicate unexpected changes                  │
+│                                                                  │
+│   Good for: Gradual sensor drift, sudden spikes, trend changes   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### PCA Detector (Principal Component Analysis)
+
+Detects multivariate anomalies by projecting data onto principal components:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      PCA DETECTOR                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Training:                                                      │
+│   1. Standardize features (zero mean, unit variance)             │
+│   2. Fit PCA to learn principal components                       │
+│   3. Retain components explaining 95% variance                   │
+│                                                                  │
+│   Two Metrics:                                                   │
+│                                                                  │
+│   SPE (Squared Prediction Error):                                │
+│   ┌─────────────────────────────────────────┐                    │
+│   │ SPE = ||x - x̂||²                        │                    │
+│   │     = Σ(xᵢ - x̂ᵢ)²                       │                    │
+│   │                                         │                    │
+│   │ Measures: Reconstruction error          │                    │
+│   │ Detects: Decoupling, sensor faults      │                    │
+│   └─────────────────────────────────────────┘                    │
+│                                                                  │
+│   T² (Hotelling's T-squared):                                    │
+│   ┌─────────────────────────────────────────┐                    │
+│   │ T² = Σ(tᵢ² / λᵢ)                        │                    │
+│   │                                         │                    │
+│   │ Measures: Distance in PC space          │                    │
+│   │ Detects: Operating point anomalies      │                    │
+│   └─────────────────────────────────────────┘                    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### IForest Detector (Isolation Forest)
+
+Detects anomalies by measuring how easily a point can be isolated:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ISOLATION FOREST                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Concept:                                                       │
+│   • Anomalies are "few and different"                            │
+│   • Easier to isolate than normal points                         │
+│   • Fewer splits needed to separate them                         │
+│                                                                  │
+│   Algorithm:                                                     │
+│   1. Build forest of random isolation trees                      │
+│   2. For each tree, randomly split features                      │
+│   3. Count average path length to isolate point                  │
+│   4. Short path = anomaly, Long path = normal                    │
+│                                                                  │
+│   Score:                                                         │
+│   s(x) = 2^(-E[h(x)] / c(n))                                     │
+│                                                                  │
+│   Where:                                                         │
+│   • E[h(x)] = average path length                                │
+│   • c(n) = average path length in unsuccessful search            │
+│                                                                  │
+│   Good for: Rare transient states, novel operating conditions    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### GMM Detector (Gaussian Mixture Model)
+
+Detects anomalies using probabilistic cluster membership:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   GAUSSIAN MIXTURE MODEL                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Model:                                                         │
+│   p(x) = Σₖ πₖ × N(x | μₖ, Σₖ)                                   │
+│                                                                  │
+│   Where:                                                         │
+│   • πₖ = mixture weight for cluster k                            │
+│   • μₖ = mean of cluster k                                       │
+│   • Σₖ = covariance of cluster k                                 │
+│                                                                  │
+│   Detection:                                                     │
+│   • Compute log-likelihood: log p(x)                             │
+│   • Low likelihood = anomaly                                     │
+│   • z_score = (log_lik - μ_train) / σ_train                      │
+│                                                                  │
+│   Good for: Mode confusion, operating state uncertainty          │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### OMR Detector (Overall Model Residual)
+
+Detects cross-sensor relationship breakdowns:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 OVERALL MODEL RESIDUAL                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Concept:                                                       │
+│   • Train a model to predict each sensor from others             │
+│   • Healthy equipment: sensors are correlated                    │
+│   • Fault: correlations break down                               │
+│                                                                  │
+│   Algorithm:                                                     │
+│   1. For each sensor sᵢ:                                         │
+│      - Train model: ŝᵢ = f(s₁, s₂, ..., sₙ \ sᵢ)                 │
+│      - Compute residual: rᵢ = sᵢ - ŝᵢ                            │
+│   2. Combine residuals: OMR = √(Σrᵢ²)                            │
+│   3. Normalize to z-score                                        │
+│                                                                  │
+│   Good for: Bearing degradation, mechanical wear, coupling       │
+│             failures where sensor relationships change           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Fusion Algorithm
+
+Combines detector outputs with learned weights:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    DETECTOR FUSION                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   fused_z = Σ(wᵢ × zᵢ) / Σwᵢ                                     │
+│                                                                  │
+│   Default Weights:                                               │
+│   ┌────────────┬────────┐                                        │
+│   │ Detector   │ Weight │                                        │
+│   ├────────────┼────────┤                                        │
+│   │ ar1_z      │ 0.25   │                                        │
+│   │ pca_spe_z  │ 0.20   │                                        │
+│   │ pca_t2_z   │ 0.15   │                                        │
+│   │ iforest_z  │ 0.15   │                                        │
+│   │ gmm_z      │ 0.15   │                                        │
+│   │ omr_z      │ 0.10   │                                        │
+│   └────────────┴────────┘                                        │
+│                                                                  │
+│   Weight Tuning:                                                 │
+│   • Primary method: Episode separability (maximize AUROC)        │
+│   • Fallback: Statistical diversity (variance + correlation)    │
+│   • Correlation discount: Reduce weight for correlated pairs     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Health Scoring
+
+### Health Index Calculation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    HEALTH INDEX (0-100%)                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Formula:                                                       │
+│   ──────────                                                     │
+│   health_raw = 100 × exp(-fused_z / scale)                       │
+│                                                                  │
+│   Where:                                                         │
+│   • fused_z = weighted combination of detector z-scores          │
+│   • scale = calibration parameter (default: 3.0)                 │
+│                                                                  │
+│   Smoothing:                                                     │
+│   ───────────                                                    │
+│   health_smoothed = α × health_raw + (1 - α) × health_prev       │
+│                                                                  │
+│   Where:                                                         │
+│   • α = smoothing factor (default: 0.3)                          │
+│   • Higher α = more responsive, noisier                          │
+│   • Lower α = smoother, slower to react                          │
+│                                                                  │
+│   Interpretation:                                                │
+│   ───────────────                                                │
+│   │ 80-100% │ HEALTHY    │ Normal operation              │       │
+│   │ 50-80%  │ DEGRADING  │ Monitor closely               │       │
+│   │ 20-50%  │ CRITICAL   │ Schedule maintenance          │       │
+│   │ 0-20%   │ FAILURE    │ Immediate intervention        │       │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Confidence Calculation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CONFIDENCE MODEL                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Confidence = Harmonic Mean of:                                 │
+│   ─────────────────────────────                                  │
+│   • Model maturity (COLDSTART=0.3, LEARNING=0.6, CONVERGED=1.0)  │
+│   • Data coverage (% of expected sensors present)                │
+│   • Regime confidence (cluster assignment certainty)             │
+│   • Temporal stability (consistency over recent window)          │
+│                                                                  │
+│   Why Harmonic Mean?                                             │
+│   ───────────────────                                            │
+│   • Penalizes imbalanced factors                                 │
+│   • If ANY factor is low, overall confidence is low              │
+│   • Prevents false confidence when one factor is weak            │
+│                                                                  │
+│   Example:                                                       │
+│   • Arithmetic mean: (0.1 + 0.9 + 0.9 + 0.9) / 4 = 0.70          │
+│   • Harmonic mean: 4 / (1/0.1 + 1/0.9 + 1/0.9 + 1/0.9) = 0.31   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## RUL Forecasting
+
+### Remaining Useful Life Calculation
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    RUL FORECASTING                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Step 1: Fit Degradation Model                                  │
+│   ──────────────────────────────                                 │
+│   • Load health history (last 30-90 days)                        │
+│   • Detect maintenance resets (health jumps > 15%)               │
+│   • Use only post-maintenance data for trend                     │
+│   • Fit Holt-Winters exponential smoothing                       │
+│                                                                  │
+│   Step 2: Monte Carlo Simulation                                 │
+│   ───────────────────────────────                                │
+│   • Generate N=1000 random trajectories                          │
+│   • Add noise based on historical variance                       │
+│   • Project forward until health crosses threshold (20%)         │
+│   • Record time-to-failure for each trajectory                   │
+│                                                                  │
+│   Step 3: Confidence Intervals                                   │
+│   ──────────────────────────────                                 │
+│   • P10 = 10th percentile (optimistic)                           │
+│   • P50 = 50th percentile (median estimate)                      │
+│   • P90 = 90th percentile (pessimistic)                          │
+│                                                                  │
+│   Visualization:                                                 │
+│                                                                  │
+│   Health                                                         │
+│     │                                                            │
+│   100├─────╲                                                     │
+│     │      ╲                                                     │
+│    80├───────╲                                                   │
+│     │         ╲╲╲╲╲╲╲╲╲╲  (Monte Carlo trajectories)             │
+│    60├───────────╲╲╲╲╲╲╲                                         │
+│     │              ╲╲╲╲╲                                         │
+│    40├────────────────╲╲                                         │
+│     │                                                            │
+│    20├─────────────────────────  (Failure threshold)             │
+│     │         │    │    │                                        │
+│     └─────────┴────┴────┴──────────▶ Time                        │
+│              P10  P50  P90                                       │
+│                                                                  │
+│   Output:                                                        │
+│   • RUL_Hours: Estimated hours until failure                     │
+│   • P10_LowerBound: Optimistic estimate                          │
+│   • P50_Median: Best estimate                                    │
+│   • P90_UpperBound: Pessimistic estimate                         │
+│   • TopSensor1/2/3: Which sensors are driving degradation        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### RUL Validation Guards
+
+ACM rejects implausible RUL predictions:
+
+| Condition | Action |
+|-----------|--------|
+| RUL < 1h AND Health > 70% | Reject (implausible imminent failure) |
+| FailureProbability = 100% AND RUL > 100h | Reject (inconsistent) |
+| RUL is negative, infinite, or NaN | Reject (invalid) |
+| Model not CONVERGED | Mark as "NOT_RELIABLE" |
+
+---
+
+## Installation
+
+### Prerequisites
+
+| Requirement | Version | Purpose |
+|-------------|---------|---------|
+| Python | 3.11+ | Runtime |
+| SQL Server | 2019+ | Data storage (production) |
+| Docker Desktop | Latest | Observability stack |
+| ODBC Driver | 17 or 18 | SQL connectivity |
+
+### Method 1: Interactive Installer (Recommended)
 
 ```powershell
-# Install prerequisites
+# Install questionary for interactive prompts
 pip install questionary
 
 # Run the installer wizard
 python install/acm_installer.py
 ```
 
-The wizard will guide you through:
-1. ✅ **Prerequisites Check** - Python 3.11+, Docker Desktop, ODBC drivers
-2. 📦 **Docker Download** - Automatic download of Docker Desktop if missing (Windows)
-3. 🔧 **Observability Stack** - Grafana, Tempo, Loki, Prometheus, Pyroscope
-4. 🗄️ **SQL Server Setup** - Database creation and schema installation (optional)
-5. ⚙️ **Configuration** - Generates `configs/sql_connection.ini` automatically
-6. ✓ **Verification** - Tests all endpoints and connectivity
+The wizard guides you through:
+1. **Prerequisites Check** - Python, Docker, ODBC drivers
+2. **Docker Setup** - Automatic download if missing
+3. **Observability Stack** - Grafana, Tempo, Loki, Prometheus, Pyroscope
+4. **SQL Server Setup** - Database creation and schema (optional)
+5. **Configuration** - Generates `sql_connection.ini`
+6. **Verification** - Tests all endpoints
 
-### Supported Operating Systems
-| OS | Version | Status |
-|---|---------|--------|
-| Windows 10 | 1803+ (Build 17134+) | ✅ Fully Supported |
-| Windows 11 | All versions | ✅ Fully Supported |
-| Windows Server 2019 | Build 17763+ | ✅ Fully Supported |
-| Windows Server 2022 | Build 20348+ | ✅ Fully Supported |
+### Method 2: Manual Installation
 
-### Manual Setup (Alternative)
-
-If you prefer manual installation:
-
-1. **Clone and install dependencies**:
-   ```powershell
-   git clone https://github.com/your-org/ACM.git
-   cd ACM
-   pip install -e .
-   ```
-
-2. **Start observability stack** (requires Docker Desktop):
-   ```powershell
-   cd install/observability
-   docker compose up -d
-   ```
-
-3. **Configure SQL connection**:
-   ```powershell
-   copy configs\sql_connection.example.ini configs\sql_connection.ini
-   # Edit with your SQL Server details
-   ```
-
-4. **Run database setup** (if using SQL Server):
-   ```powershell
-   sqlcmd -S "localhost\SQLEXPRESS" -E -i "install/sql/00_create_database.sql"
-   sqlcmd -S "localhost\SQLEXPRESS" -d ACM -E -i "install/sql/14_complete_schema.sql"
-   ```
-
----
-
-## Quick Start (Choose Your Path)
-
-### 1️⃣ Fastest: Analytics-Only Mode (5 minutes)
-
-Single-batch analysis, no SQL setup required:
-
+**Step 1: Clone and install dependencies**
 ```powershell
-python acm_distilled.py --equip FD_FAN \
-    --start-time "2024-01-01T00:00:00" \
-    --end-time "2024-01-31T23:59:59"
+git clone https://github.com/bhadkamkar9snehil/ACM.git
+cd ACM
+pip install -r requirements.txt
 ```
 
-**Output**: CSV files with detector scores, regimes, RUL forecasts  
-**Use case**: Prototyping, investigating historical data, exploration
-
-### 2️⃣ Standard: Production Batch Processing (10 minutes setup)
-
-**Step 1: Configure SQL connection**
+**Step 2: Start observability stack**
 ```powershell
-# Edit configs/sql_connection.ini (copy from .example)
-# Fill in your SQL Server credentials
-code configs/sql_connection.ini
+cd install/observability
+docker compose up -d
+
+# Verify (expect 6 containers)
+docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
 
-**Step 2: Sync configuration**
+Expected containers:
+| Container | Port | Purpose |
+|-----------|------|---------|
+| acm-grafana | 3000 | Dashboards (admin/admin) |
+| acm-alloy | 4317, 4318 | OTLP collector |
+| acm-tempo | 3200 | Distributed traces |
+| acm-loki | 3100 | Log aggregation |
+| acm-prometheus | 9090 | Metrics |
+| acm-pyroscope | 4040 | Profiling |
+
+**Step 3: Configure SQL connection**
+```powershell
+copy configs\sql_connection.example.ini configs\sql_connection.ini
+```
+
+Edit `configs/sql_connection.ini`:
+```ini
+[acm]
+server = localhost\SQLEXPRESS
+database = ACM
+trusted_connection = yes
+driver = ODBC Driver 18 for SQL Server
+TrustServerCertificate = yes
+```
+
+**Step 4: Setup database (if using SQL Server)**
+```powershell
+# Create database and schema
+sqlcmd -S "localhost\SQLEXPRESS" -E -i "install/sql/00_create_database.sql"
+sqlcmd -S "localhost\SQLEXPRESS" -d ACM -E -i "install/sql/14_complete_schema.sql"
+
+# Verify connection
+python scripts/sql/verify_acm_connection.py
+```
+
+**Step 5: Sync configuration**
 ```powershell
 python scripts/sql/populate_acm_config.py
 ```
 
-**Step 3: Start continuous batch processing**
+---
+
+## Configuration
+
+### Configuration File: `configs/config_table.csv`
+
+ACM is configured via a CSV file with 238+ parameters. Key categories:
+
+| Category | Example Parameters | Purpose |
+|----------|-------------------|---------|
+| `data.*` | `sampling_secs`, `min_rows` | Data ingestion |
+| `features.*` | `window_sizes`, `polars_threshold` | Feature engineering |
+| `models.*` | `pca.n_components`, `iforest.contamination` | Detector settings |
+| `regimes.*` | `auto_k.k_min`, `auto_k.k_max` | Regime clustering |
+| `episodes.*` | `cpd.k_sigma`, `min_duration_sec` | Episode detection |
+| `forecasting.*` | `horizon_days`, `mc_samples` | RUL forecasting |
+| `thresholds.*` | `alert_z`, `warn_z` | Alert thresholds |
+| `sql.*` | `pool_min`, `pool_max` | SQL connection |
+
+### Equipment-Specific Overrides
+
+```csv
+EquipID,ParamPath,Value
+0,data.sampling_secs,1800         # Global default (all equipment)
+1,data.sampling_secs,1800         # FD_FAN specific
+2621,data.sampling_secs,3600      # GAS_TURBINE specific (1 hour cadence)
+```
+
+### Syncing Configuration
+
+After editing `config_table.csv`, sync to SQL:
+```powershell
+python scripts/sql/populate_acm_config.py
+```
+
+---
+
+## Running ACM
+
+### Option 1: Production Batch Processing (Recommended)
+
+Continuous monitoring with automatic batching:
+
 ```powershell
 python scripts/sql_batch_runner.py \
     --equip FD_FAN GAS_TURBINE \
@@ -197,375 +798,114 @@ python scripts/sql_batch_runner.py \
     --resume
 ```
 
-**Output**: 
-- SQL tables: `ACM_HealthTimeline`, `ACM_RUL`, `ACM_RegimeTimeline`, `ACM_Anomaly_Events`
-- Grafana dashboards: Automatic visualization
-- Run logs: `ACM_RunLogs` table for debugging
+| Argument | Description |
+|----------|-------------|
+| `--equip` | Equipment codes to process |
+| `--tick-minutes` | Batch window size (1440 = 1 day) |
+| `--max-workers` | Parallel equipment processing |
+| `--resume` | Continue from last run |
+| `--start-from-beginning` | Full reset (coldstart) |
+| `--max-batches` | Limit batches (for testing) |
 
-### 3️⃣ Single Test Run (Verify installation)
+### Option 2: Single Run (Testing)
+
+Process a specific time range:
 
 ```powershell
-python -m core.acm_main --equip FD_FAN \
-    --start-time "2024-12-01T00:00:00" \
-    --end-time "2024-12-05T23:59:59" \
+python -m core.acm_main \
+    --equip FD_FAN \
+    --start-time "2024-01-01T00:00:00" \
+    --end-time "2024-01-31T23:59:59" \
     --mode offline
 ```
 
----
+| Argument | Description |
+|----------|-------------|
+| `--equip` | Equipment code |
+| `--start-time` | ISO 8601 start time |
+| `--end-time` | ISO 8601 end time |
+| `--mode` | `offline` (full training), `online` (scoring only), `auto` |
 
-## Key Features
+### Option 3: Analytics-Only Mode (No SQL)
 
-### 🎯 Multi-Detector Fusion
-Six independent detectors provide complementary fault signals:
-- **AR1**: Autoregressive residuals for sensor drift/spike
-- **PCA-SPE**: Squared prediction error for decoupling
-- **PCA-T²**: Hotelling T-squared for operating point anomaly
-- **IForest**: Isolation forest for rare states
-- **GMM**: Gaussian mixture for cluster membership
-- **OMR**: Overall model residual for cross-sensor interactions
+Quick analysis without SQL setup:
 
-### 🧠 v11.3.0 Smart Regime Detection
-Regimes now capture two dimensions:
-```
-Operating Mode × Health State
-    ↓
-10-20 intelligent regime clusters per equipment
-    ↓
-Context-aware severity multipliers (×0.9 to ×1.2)
-```
-
-### 📊 Health Scoring
-- **0-100% health index** - single metric for operations teams
-- **Confidence/reliability flags** - never report false certainty
-- **Exponential smoothing** - removes noise, shows real trends
-
-### 🔮 Predictive RUL
-- **Monte Carlo simulations** - uncertainty quantification
-- **P10/P50/P90 bounds** - 3-point confidence intervals
-- **Top-3 culprit sensors** - explain why failure is predicted
-- **Degradation model fitting** - handles maintenance resets
-
-### 📈 Continuous Forecasting
-- **Exponential blending** across batches - no per-run duplicates
-- **Hazard-based RUL** - survival probability curves
-- **Sensor forecasts** - predict next week's critical values
-- **State persistence** - forecast evolution tracked across batches
-
-### 📊 Comprehensive Observability
-- **OpenTelemetry tracing** - distributed traces to Tempo
-- **Prometheus metrics** - real-time performance monitoring
-- **Structured logging** - Loki log aggregation
-- **Grafana Pyroscope** - continuous profiling
-- **13 pre-built dashboards** - equipment health, forecasting, fleet overview
-
----
-
-## For Your Role
-
-### 👨‍💼 Operations / Maintenance Teams
-
-**Goal**: Know which equipment to fix and when
-
-**Start here**:
-1. Open Grafana dashboard → http://localhost:3000 (admin/admin)
-2. View **Equipment Overview** dashboard
-3. When health < 50% OR RUL < 7 days → Plan maintenance
-4. After maintenance: Confirm health resets to normal
-
-**Key metrics to watch**:
-- `HealthIndex`: 0-100% condition score
-- `RUL_Hours`: Hours until predicted failure
-- `TopSensor1/2/3`: Which sensors triggered the alert
-
-**SQL queries you'll use**:
-```sql
--- Current health for all equipment
-SELECT EquipCode, HealthIndex, Confidence, CreatedAt
-FROM vw_ACM_CurrentHealth
-ORDER BY HealthIndex ASC;
-
--- Equipment approaching failure
-SELECT TOP 10 EquipCode, RUL_Hours, P50_Median, Confidence
-FROM ACM_RUL
-WHERE RUL_Hours < 168  -- Less than 7 days
-ORDER BY RUL_Hours ASC;
-```
-
-### 👨‍💻 Data Scientists / Analysts
-
-**Goal**: Validate models, tune detection parameters, improve forecasting
-
-**Start here**:
-1. Read [v11.3.0 Implementation Summary](docs/v11_3_0_IMPLEMENTATION_SUMMARY.md)
-2. Review [Analytical Audit](docs/ACM_V11_ANALYTICAL_AUDIT.md) - identifies 12 issues and fixes
-3. Analyze detector correlation: `SELECT * FROM ACM_DetectorCorrelation`
-4. Run Phase 3 of test suite: Measure detection latency vs actual failure
-5. Tune regime parameters in `configs/config_table.csv`
-
-**Key parameters to tune**:
-- `regimes.auto_k.k_min/k_max` - number of clusters
-- `episodes.cpd.k_sigma` - episode detection sensitivity
-- `thresholds.self_tune.clip_z` - detector saturation point
-- `health.smoothing_alpha` - health index smoothing
-
-**SQL queries you'll use**:
-```sql
--- Detector correlation matrix
-SELECT * FROM ACM_DetectorCorrelation
-WHERE RunID = (SELECT TOP 1 RunID FROM ACM_Runs ORDER BY ID DESC);
-
--- Regime assignments (validate clustering quality)
-SELECT RegimeLabel, HealthState, COUNT(*) as Count
-FROM ACM_RegimeTimeline
-GROUP BY RegimeLabel, HealthState
-ORDER BY Count DESC;
-
--- Health-state feature values
-SELECT Timestamp, health_ensemble_z, health_trend, health_quartile
-FROM ACM_Scores_Wide
-WHERE EquipID = @equipment_id
-ORDER BY Timestamp DESC;
-```
-
-### 🔧 DevOps / System Administrators
-
-**Goal**: Keep system running, monitor performance, manage data retention
-
-**Start here**:
-1. Setup observability stack: `cd install/observability && docker compose up -d`
-2. Verify containers: `docker ps` (expect 6 running)
-3. Setup SQL batch runner: See "Quick Start" section above
-4. Configure data retention: `EXEC dbo.usp_ACM_DataRetention @DryRun=1`
-
-**Daily operations**:
 ```powershell
-# Check batch status
-sqlcmd -S "server\instance" -d ACM -E -Q "SELECT TOP 10 * FROM ACM_Runs ORDER BY CreatedAt DESC"
-
-# Run data retention cleanup
-sqlcmd -S "server\instance" -d ACM -E -Q "EXEC dbo.usp_ACM_DataRetention @DryRun=0"
-
-# Monitor SQL table sizes
-sqlcmd -S "server\instance" -d ACM -E -Q "EXEC sp_spaceused 'ACM_Scores_Wide'"
-
-# Restart batch processing if interrupted
-python scripts/sql_batch_runner.py --equip FD_FAN --resume
+python acm_distilled.py \
+    --equip FD_FAN \
+    --start-time "2024-01-01T00:00:00" \
+    --end-time "2024-01-31T23:59:59"
 ```
 
-**Performance tuning**:
-- `configs/config_table.csv` → `sql.pool_min/pool_max` - connection pool size
-- `configs/config_table.csv` → `sql.tvp_chunk_rows` - batch insert size
-- `install/observability/docker-compose.yaml` → Resource limits for containers
+Output: CSV files in `artifacts/` directory.
 
 ---
 
-## Documentation Map
+## Output Tables
 
-Start here based on what you need:
+### Primary Tables
 
-| Need | Document | Audience |
-|------|----------|----------|
-| **System architecture & module map** | [ACM_SYSTEM_OVERVIEW.md](docs/ACM_SYSTEM_OVERVIEW.md) | Developers, Architects |
-| **v11.3.0 implementation details** | [v11_3_0_IMPLEMENTATION_SUMMARY.md](docs/v11_3_0_IMPLEMENTATION_SUMMARY.md) | Developers, Data Scientists |
-| **Comprehensive testing strategy** | [v11_3_0_TESTING_STRATEGY.md](docs/v11_3_0_TESTING_STRATEGY.md) | QA Engineers, Operators |
-| **Known issues & analytical fixes** | [ACM_V11_ANALYTICAL_AUDIT.md](docs/ACM_V11_ANALYTICAL_AUDIT.md) | Data Scientists, Developers |
-| **Grafana dashboard queries** | [GRAFANA_DASHBOARD_QUERIES.md](docs/GRAFANA_DASHBOARD_QUERIES.md) | Dashboard builders, Analysts |
-| **SQL schema reference** | [sql/COMPREHENSIVE_SCHEMA_REFERENCE.md](docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md) | Developers, Data Engineers |
-| **Cold-start strategy** | [COLDSTART_MODE.md](docs/COLDSTART_MODE.md) | Operators, Data Scientists |
-| **Adding new equipment** | [EQUIPMENT_IMPORT_PROCEDURE.md](docs/EQUIPMENT_IMPORT_PROCEDURE.md) | Operations, DevOps |
-| **Observability stack** | [install/observability/README.md](install/observability/README.md) | DevOps, Operators |
-| **Detector details (AR1, PCA, IForest, GMM, OMR)** | [OMR_DETECTOR.md](docs/OMR_DETECTOR.md) | Developers, Data Scientists |
-| **Forecasting architecture** | [FORECASTING_ARCHITECTURE.md](docs/FORECASTING_ARCHITECTURE.md) | Developers, Data Scientists |
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `ACM_Scores_Wide` | Detector z-scores | Timestamp, ar1_z, pca_spe_z, fused_z |
+| `ACM_HealthTimeline` | Health index history | Timestamp, HealthIndex, Confidence |
+| `ACM_RegimeTimeline` | Regime assignments | Timestamp, RegimeLabel, HealthState |
+| `ACM_Anomaly_Events` | Detected episodes | StartTime, EndTime, Severity |
+| `ACM_RUL` | RUL predictions | RUL_Hours, P10/P50/P90, TopSensor1/2/3 |
+| `ACM_HealthForecast` | Health trajectory | ForecastTime, ForecastHealth |
+| `ACM_SensorForecast` | Sensor predictions | SensorName, ForecastValue |
 
----
+### Operational Tables
 
-## Installation & Configuration
+| Table | Purpose |
+|-------|---------|
+| `ACM_Runs` | Run metadata (start, end, status) |
+| `ACM_RunLogs` | Structured log messages |
+| `ACM_Config` | Configuration parameters |
+| `Equipment` | Equipment registry |
+| `ACM_ModelHistory` | Model versions and metadata |
 
-### Prerequisites
-- **Python 3.11+**
-- **SQL Server 2019+** (for production, optional for exploration)
-- **Docker** (for observability stack, optional)
+### Dashboard Views (Pre-built)
 
-### Setup (5 minutes)
-
-**1. Clone and install**
-```powershell
-git clone https://github.com/bhadkamkar9snehil/ACM.git
-cd ACM
-pip install -r requirements.txt
-```
-
-**2. Configure SQL (production only)**
-```powershell
-cp configs/sql_connection.example.ini configs/sql_connection.ini
-# Edit with your SQL Server details
-code configs/sql_connection.ini
-
-# Sync configuration to database
-python scripts/sql/populate_acm_config.py
-```
-
-**3. Start observability stack (optional but recommended)**
-```powershell
-cd install/observability
-docker compose up -d
-# Verify: docker ps (should show 6 containers)
-```
-
-### Configuration Management
-
-ACM is configured via `configs/config_table.csv` (238 parameters):
-
-**Key categories**:
-- `data.*` - Ingestion (timestamp column, cadence, row limits)
-- `features.*` - Feature engineering (window sizes, Polars threshold)
-- `models.*` - Detector settings (PCA components, IForest contamination, etc.)
-- `regimes.*` - Regime detection (k_min/k_max, quality thresholds)
-- `episodes.*` - Episode detection (CUSUM parameters, min length)
-- `forecasting.*` - RUL and health forecasting (horizon, confidence intervals)
-- `sql.*` - SQL connection (driver, pool size, retry logic)
-
-**Equipment overrides**:
-```csv
-EquipID,ParamPath,Value
-0,data.sampling_secs,1800          # Global default
-1,data.sampling_secs,1800          # FD_FAN specific
-2621,data.sampling_secs,3600       # GAS_TURBINE specific
-```
-
-**Sync after changes**:
-```powershell
-python scripts/sql/populate_acm_config.py
-```
+| View | Purpose |
+|------|---------|
+| `vw_ACM_CurrentHealth` | Latest health per equipment |
+| `vw_ACM_HealthHistory` | Health time series |
+| `vw_ACM_ActiveDefects` | Active sensor defects |
+| `vw_ACM_RULSummary` | RUL overview |
+| `vw_ACM_EquipmentOverview` | Fleet summary |
 
 ---
 
-## Architecture at a Glance
+## Grafana Dashboards
 
-### Data Flow (End-to-End)
+### Accessing Grafana
 
 ```
-[SQL Server Historian Data]
-        ↓
-[Data Loading & Validation]
-   → Check timestamps, cadence, duplicates
-   → ACM_DataContractValidation table
-        ↓
-[Feature Engineering]
-   → Rolling stats, FFT, correlations
-   → Baseline normalization
-   → Seasonal adjustment
-        ↓
-[6-Head Detector Ensemble]
-   → Parallel scoring: AR1, PCA-SPE, PCA-T², IForest, GMM, OMR
-   → ACM_Scores_Wide table
-        ↓
-[v11.3.0: Multi-Dimensional Regime Detection]
-   → K-Means on sensor values (operating mode)
-   → Health-state features: ensemble_z, trend, quartile (health state)
-   → ACM_RegimeTimeline table
-        ↓
-[Fusion with Context]
-   → Severity multipliers: ×1.0 stable, ×1.2 degrading, ×0.9 mode switch
-   → Fused anomaly score
-        ↓
-[Episode Detection]
-   → CUSUM change-point detection
-   → Culprit attribution (which sensors changed?)
-   → ACM_Anomaly_Events table
-        ↓
-[Forecasting]
-   → Health trajectory: exponential blending across batches
-   → RUL: Monte Carlo with uncertainty
-   → Sensor forecasts: linear trend + VAR
-   → ACM_RUL, ACM_HealthForecast, ACM_SensorForecast tables
-        ↓
-[Outputs & Persistence]
-   → 20+ SQL tables
-   → Run metadata: ACM_Runs, ACM_RunLogs
-   → Grafana dashboards auto-sync
+URL: http://localhost:3000
+Username: admin
+Password: admin
 ```
 
-### Module Ecosystem
+### Pre-Built Dashboards
 
-**Core pipeline** (`core/`):
-- `acm_main.py` - Orchestrator (14K lines, all phases)
-- `fast_features.py` - Vectorized feature engineering
-- `ar1_detector.py`, `regimes.py`, `fuse.py` - Detector heads
-- `forecast_engine.py` - RUL and health prediction
-- `output_manager.py` - SQL/CSV writing
-- `sql_client.py` - SQL connectivity
+| Dashboard | Purpose |
+|-----------|---------|
+| **Equipment Overview** | Fleet-wide health summary |
+| **Equipment Detail** | Single equipment deep-dive |
+| **RUL Forecast** | Remaining useful life trends |
+| **Detector Analysis** | Individual detector scores |
+| **Regime Analysis** | Operating regime distribution |
+| **ACM Observability** | Pipeline performance metrics |
 
-**Supporting**:
-- `scripts/sql_batch_runner.py` - Production batch orchestrator
-- `scripts/sql/populate_acm_config.py` - Config sync
-- `install/observability/docker-compose.yaml` - Full observability stack
+### Key Panels
 
----
-
-## Release Notes
-
-### v11.3.0 (January 2026) - Health-State Aware Regime Detection
-**Breakthrough release**: Multi-dimensional regimes now include health-state variables alongside operating conditions.
-
-**Changes**:
-- ✅ Added 3 health-state features to regime clustering
-- ✅ Severity multipliers (×0.9 to ×1.2) based on health context
-- ✅ False positive reduction: 70% → 30% (2.3× improvement)
-- ✅ Early detection: 7+ days before failure
-- ✅ Comprehensive testing strategy (8 phases)
-
-**Files changed**: `core/regimes.py`, `core/fuse.py`, `core/acm_main.py`, `core/smart_coldstart.py`
-
-**See**: [v11_3_0_IMPLEMENTATION_SUMMARY.md](docs/v11_3_0_IMPLEMENTATION_SUMMARY.md)
-
-### v11.2.2 (December 2025) - Analytical Correctness Fixes
-**P0 fixes**: Confidence calculation, promotion criteria, circular weight tuning
-
-**Changes**:
-- ✅ Confidence: geometric mean → harmonic mean
-- ✅ Promotion criteria: silhouette 0.15 → 0.40, stability 0.6 → 0.75
-- ✅ Circular weight guard: `require_external_labels` defaults to True
-
-**See**: [ACM_V11_ANALYTICAL_AUDIT.md](docs/ACM_V11_ANALYTICAL_AUDIT.md)
-
-### v11.0.0 (December 2025) - Major Architecture Refactor
-**New features**: DataContract validation, seasonality detection, lifecycle management
-
-**Changes**:
-- ✅ Entry-point data validation before processing
-- ✅ Diurnal/weekly seasonality detection
-- ✅ MaturityState lifecycle (COLDSTART → LEARNING → CONVERGED)
-- ✅ 5 new SQL tables for auditability
-- ✅ 43 helper functions extracted from main
-
-**See**: [ACM_SYSTEM_OVERVIEW.md](docs/ACM_SYSTEM_OVERVIEW.md)
-
-### v10.3.0 (November 2025) - Unified Observability
-**Consolidated stack**: OpenTelemetry traces, metrics, logs, profiling
-
-**Changes**:
-- ✅ Unified `Console` API for logging
-- ✅ Traces to Tempo, metrics to Prometheus, logs to Loki
-- ✅ Continuous profiling via Grafana Pyroscope
-- ✅ Docker Compose stack for full observability
-
-### v10.2.0 (October 2025) - Detector Simplification
-**Removed redundant detector**: Mahalanobis deprecated (redundant with PCA-T²)
-
-**Changes**:
-- ✅ Simplified to 6 active detectors (removed MHAL)
-- ✅ Improved numerical stability with PCA-T²
-
-### v10.0.0 (September 2025) - Continuous Forecasting
-**Major refactor**: Exponential blending, hazard-based RUL, state persistence
-
-**Changes**:
-- ✅ Continuous health forecasts (no per-batch duplication)
-- ✅ Hazard-based RUL with survival probability curves
-- ✅ Monte Carlo uncertainty quantification
-- ✅ Exponential temporal blending across batches
-- ✅ State persistence with version tracking
+- **Health Gauge**: Current health percentage
+- **RUL Countdown**: Days until predicted failure
+- **Detector Scores**: Time series of all 6 detectors
+- **Regime Timeline**: Operating mode over time
+- **Episode Markers**: Anomaly events on timeline
+- **Top Contributors**: Sensors driving anomalies
 
 ---
 
@@ -573,111 +913,163 @@ python scripts/sql/populate_acm_config.py
 
 ### Common Issues
 
-| Symptom | Root Cause | Solution |
-|---------|-----------|----------|
-| "NOOP - No data" | Data cadence mismatch | Check `data.sampling_secs` matches equipment's native cadence |
-| Episodes every batch | Threshold too low | Increase `episodes.cpd.k_sigma` from 2.0 to 4.0 |
-| RUL "NOT_RELIABLE" | Model not converged | Run 5+ batches to reach CONVERGED state |
-| Health score flat | Baseline not seeding | Increase `baseline.seed_size` in config |
-| Regime labels oscillating | Health state unstable | Increase `health.smoothing_alpha` to 0.5 |
-| SQL connection timeout | Pool exhausted | Increase `sql.pool_max` in config |
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| "NOOP - No data" | Data cadence mismatch | Check `data.sampling_secs` in config |
+| "RUL NOT_RELIABLE" | Model not converged | Run 5+ batches to reach CONVERGED |
+| Episodes every batch | Threshold too low | Increase `episodes.cpd.k_sigma` |
+| Health score flat | Baseline not seeding | Increase `baseline.seed_size` |
+| SQL connection timeout | Pool exhausted | Increase `sql.pool_max` |
+| Regime oscillation | Clustering unstable | Increase `regimes.smoothing.window` |
 
-### Debugging
+### Diagnostic Commands
 
-**Check last run**:
-```sql
-SELECT TOP 20 * FROM ACM_RunLogs
-ORDER BY LoggedAt DESC;
-```
-
-**Verify regime assignments**:
-```sql
-SELECT DISTINCT RegimeLabel, HealthState, COUNT(*) as Count
-FROM ACM_RegimeTimeline
-WHERE Timestamp > DATEADD(DAY, -7, GETDATE())
-GROUP BY RegimeLabel, HealthState;
-```
-
-**Test SQL connectivity**:
 ```powershell
+# Test SQL connectivity
 python scripts/sql/verify_acm_connection.py
+
+# Check recent run logs
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT TOP 20 * FROM ACM_RunLogs ORDER BY LoggedAt DESC"
+
+# Check run status
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT TOP 10 * FROM ACM_Runs ORDER BY CreatedAt DESC"
+
+# Verify regime assignments
+sqlcmd -S "server\instance" -d ACM -E -Q "SELECT RegimeLabel, COUNT(*) FROM ACM_RegimeTimeline GROUP BY RegimeLabel"
 ```
 
 ---
 
-## Testing
+## Documentation Map
 
-ACM includes comprehensive 8-phase testing strategy:
+| Topic | Document |
+|-------|----------|
+| System architecture | [docs/ACM_SYSTEM_OVERVIEW.md](docs/ACM_SYSTEM_OVERVIEW.md) |
+| SQL schema reference | [docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md](docs/sql/COMPREHENSIVE_SCHEMA_REFERENCE.md) |
+| Grafana queries | [docs/GRAFANA_DASHBOARD_QUERIES.md](docs/GRAFANA_DASHBOARD_QUERIES.md) |
+| Analytical audit | [docs/ACM_V11_ANALYTICAL_AUDIT.md](docs/ACM_V11_ANALYTICAL_AUDIT.md) |
+| Cold-start strategy | [docs/COLDSTART_MODE.md](docs/COLDSTART_MODE.md) |
+| Adding equipment | [docs/EQUIPMENT_IMPORT_PROCEDURE.md](docs/EQUIPMENT_IMPORT_PROCEDURE.md) |
+| Observability stack | [install/observability/README.md](install/observability/README.md) |
+| OMR detector | [docs/OMR_DETECTOR.md](docs/OMR_DETECTOR.md) |
+| Forecasting | [docs/FORECASTING_ARCHITECTURE.md](docs/FORECASTING_ARCHITECTURE.md) |
 
-1. **Phase 1**: Basic functionality (ONLINE mode, 30 min)
-2. **Phase 2**: Repeatability (two runs, identical results)
-3. **Phase 3**: Fault detection timing (latency vs actual failure)
-4. **Phase 4**: False positive analysis (70%→30% improvement)
-5. **Phase 5**: Daily trend analysis (regime stability)
-6. **Phase 6**: Cross-equipment validation (4 equipment types)
-7. **Phase 7**: RUL uncertainty (P10/P50/P90 spread)
-8. **Phase 8**: Integration (all tables written correctly)
+---
 
-**Run quick test**:
-```powershell
-. .\scripts\test_v11_3_0_comprehensive.ps1
+## Project Structure
+
 ```
-
-**See**: [v11_3_0_TESTING_STRATEGY.md](docs/v11_3_0_TESTING_STRATEGY.md)
-
----
-
-## Performance Benchmarks
-
-| Operation | Time | Scale |
-|-----------|------|-------|
-| Feature engineering | ~2s | 100K rows |
-| Detector scoring | ~1s | 100K rows, 6 detectors |
-| Regime clustering | ~0.5s | 100K rows |
-| RUL forecasting | ~0.3s | 30-day horizon |
-| Full batch (load→output) | ~15-30s | Daily batch (100K rows) |
-| SQL writes | ~5-10s | 20+ tables |
-
-**Total time per 1-day batch**: ~30-45 seconds (all phases)
-
----
-
-## Contributing
-
-Contributions welcome! Follow these principles:
-
-1. **Test first**: Phase 1-8 of test suite must pass
-2. **Document changes**: Update relevant docs/ files
-3. **Commit messages**: Clear, imperative ("Add health-state features")
-4. **Code style**: Type hints, 100-char lines, follow existing patterns
-5. **No breaking changes**: Maintain backward compatibility
-
-**Development workflow**:
-```powershell
-git checkout -b feature/your-feature
-# ... make changes ...
-. .\scripts\test_v11_3_0_comprehensive.ps1  # Run tests
-git commit -m "Add feature: description"
-git push origin feature/your-feature
-# Open PR on GitHub
+ACM/
+├── core/                    # Main pipeline code
+│   ├── acm_main.py         # Pipeline orchestrator
+│   ├── ar1_detector.py     # AR1 detector
+│   ├── regimes.py          # Regime clustering
+│   ├── fuse.py             # Detector fusion
+│   ├── forecast_engine.py  # RUL forecasting
+│   ├── output_manager.py   # SQL/CSV writing
+│   └── sql_client.py       # SQL connectivity
+├── scripts/
+│   ├── sql_batch_runner.py # Production batch runner
+│   └── sql/                # SQL utilities
+├── configs/
+│   ├── config_table.csv    # Configuration parameters
+│   └── sql_connection.ini  # SQL credentials (gitignored)
+├── install/
+│   ├── acm_installer.py    # Interactive installer
+│   ├── observability/      # Docker Compose stack
+│   └── sql/                # Database setup scripts
+├── grafana_dashboards/     # Dashboard JSON exports
+├── docs/                   # Documentation
+├── tests/                  # Test suites
+└── utils/                  # Utilities (config, version)
 ```
 
 ---
 
-## Support & Community
+## Changelog
 
-- **Issues**: GitHub Issues (search before posting)
-- **Documentation**: See [Documentation Map](#documentation-map)
-- **Questions**: Check [docs/QUICK_START.md](docs/QUICK_START.md)
+### v11.4.0 (2026-01-21) - Regime Clustering Architectural Fix
+**BREAKING CHANGE**: Regime clustering now uses **RAW SENSOR VALUES ONLY**
+
+- **REMOVED**: `_add_health_state_features()` function from `core/regimes.py`
+- **REMOVED**: `health_ensemble_z`, `health_trend`, `health_quartile` from regime basis
+- **REMOVED**: `HEALTH_STATE_KEYWORDS` constant
+- **BUMP**: `REGIME_MODEL_VERSION` 3.1 → 4.0 (forces model retraining)
+
+**Rationale**: Using detector z-scores in regime clustering created circular masking:
+1. Equipment degrades → detector z-scores rise
+2. Health-state features cause point to cluster into "new regime"
+3. New regime gets fresh baseline → degradation masked
+4. Equipment appears "healthy in its current regime"
+
+**Correct Architecture**:
+- **Regimes** = HOW equipment operates (load, speed, flow, pressure)
+- **Detectors** = IF equipment is healthy within that operating mode
+- These are **ORTHOGONAL** concerns that must not be mixed
+
+### v11.3.4 (2026-01-20) - RUL Validation Guard
+- **NEW**: RUL validation logic prevents implausible predictions
+  - Rejects RUL < 1h when health > 70%
+  - Rejects FailureProbability=100% when RUL > 100h
+  - Rejects negative, infinite, or NaN values
+
+### v11.3.3 (2026-01-18) - Contamination Filtering
+- **NEW**: `CalibrationContaminationFilter` class filters anomalous samples before calibration
+- **METHODS**: iterative_mad (default), iqr, z_trim, hybrid
+- **IMPACT**: More sensitive detection, ~25% reduction in false negatives
+
+### v11.3.2 (2026-01-16) - Model Compatibility Validation
+- **NEW**: `validate_model_feature_compatibility()` validates columns before model loading
+- **NEW**: `reconcile_detector_flags_with_loaded_models()` syncs flags with availability
+- Models with mismatched features are discarded and retrained
+
+### v11.3.1 (2026-01-15) - Regime Labeling Conceptual Fix
+- **BREAKING**: `predict_regime_with_confidence()` returns 3-tuple (labels, confidence, is_novel)
+- **CONCEPTUAL FIX**: Equipment is ALWAYS in some operating state, never "unknown"
+- **NEW**: `is_novel` flag replaces UNKNOWN_REGIME_LABEL (-1)
+
+### v11.3.0 (2026-01-13) - Interactive Installer & False Positive Reduction
+- **NEW**: Interactive installer wizard: `python install/acm_installer.py`
+- **NEW**: Windows 10/11 and Server 2019/2022 officially supported
+- **IMPROVED**: False positive reduction: 70% → 30% (2.3× improvement)
+- **TESTS**: 102 installer tests added
+
+### v11.2.2 (2026-01-04) - P0 Analytical Fixes
+- **P0 FIX #1**: Circular weight tuning guard defaults to True
+- **P0 FIX #4**: Confidence calculation changed from geometric to harmonic mean
+- **P0 FIX #10**: Tightened promotion criteria (silhouette 0.15→0.40, stability 0.6→0.75)
+- **AUDIT**: Comprehensive analytical review in `docs/ACM_V11_ANALYTICAL_AUDIT.md`
+
+### v11.1.6 (2025-12-28) - Regime Analytical Correctness
+- **REGIME_MODEL_VERSION**: Bumped to 3.0
+- **FIX #1**: Created tag taxonomy separating operating variables from condition indicators
+- **FIX #2**: Uniform scaling of entire basis (PCA + raw)
+- **FIX #3**: Calibrated UNKNOWN threshold using P95 distance
+- **FIX #4**: Label mapping for stable regime labels
+
+### v11.1.5 (2025-12-26) - Database Integrity
+- All 92 ACM tables have IDENTITY columns
+- Relationship columns use implicit references (not FK constraints)
+
+### v11.1.4 (2025-12-24) - Analytical Correctness Fixes
+- **FIX**: Generalized correlation adjustment for ALL detector pairs
+- **FIX**: Maintenance reset detection in degradation model
+- **FIX**: Seasonal adjustment data flow bug
+
+### v11.0.0 (2025-12-15) - Model Lifecycle & Confidence
+- **NEW**: ONLINE/OFFLINE pipeline mode separation
+- **NEW**: MaturityState lifecycle (COLDSTART → LEARNING → CONVERGED → DEPRECATED)
+- **NEW**: Unified confidence model with ReliabilityStatus
+- **NEW**: RUL reliability gating
+- **NEW**: UNKNOWN regime (label=-1) for low-confidence assignments
+
+### v10.3.0 (2025-12-01) - Observability Stack
+- **NEW**: Docker-based observability (Grafana, Tempo, Loki, Prometheus, Pyroscope)
+- **NEW**: `Console` class for unified logging
+- **REMOVED**: Legacy loggers (`utils/logger.py`, `utils/acm_logger.py`)
 
 ---
 
-## License
+**Version**: 11.4.0 | **Updated**: January 21, 2026
 
-[Your License Here]
-
----
-
-**Last Updated**: January 13, 2026 | **v11.3.0** | Health-State Aware Regime Detection
-
-*For implementation-level details, see [ACM_SYSTEM_OVERVIEW.md](docs/ACM_SYSTEM_OVERVIEW.md)*
+*For implementation details, see [docs/ACM_SYSTEM_OVERVIEW.md](docs/ACM_SYSTEM_OVERVIEW.md)*
