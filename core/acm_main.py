@@ -1242,6 +1242,7 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         regime_model_was_trained = False
         
         # v11.4.0: Load model maturity state BEFORE regimes to control discovery
+        # v11.5.0: Override maturity to LEARNING if refit was requested (models just retrained)
         current_model_maturity: Optional[str] = None
         if sql_client and equip_id:
             try:
@@ -1251,6 +1252,15 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
                     Console.info(f"Model maturity: {current_model_maturity}", component="LIFECYCLE")
             except Exception as e:
                 Console.warn(f"Could not load model state for maturity check: {e}", component="LIFECYCLE")
+        
+        # v11.5.0 FIX: If refit was requested, detectors were retrained - must allow regime rediscovery
+        # Otherwise CONVERGED state blocks regime discovery but cached regime model is stale/missing
+        if refit_requested and current_model_maturity == "CONVERGED":
+            Console.info(
+                "Refit requested with CONVERGED state - overriding to LEARNING to allow regime rediscovery",
+                component="LIFECYCLE"
+            )
+            current_model_maturity = "LEARNING"
         
         with T.section("regimes.label"):
             # Reconstruct model from loaded state when available.

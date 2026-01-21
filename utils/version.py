@@ -59,6 +59,13 @@ __version_author__ = "ACM Development Team"
 # - model_evaluation.py reads this to decide whether to write refit requests
 # - IMPACT: Consistent mode awareness across all pipeline components
 #
+# FIX #6: REFIT MATURITY OVERRIDE (core/acm_main.py)
+# - When refit_requested=True AND current_model_maturity=CONVERGED, override to LEARNING
+# - Prevents RuntimeError: "[CONVERGED MODEL] Regime model not found"
+# - Scenario: Leftover refit request from previous runs triggers detector retrain
+# - But CONVERGED state blocks regime rediscovery -> missing/stale regime model -> crash
+# - IMPACT: Refit requests are properly honored without state inconsistency
+#
 # ARCHITECTURE CLARIFICATION:
 # - OFFLINE mode: Full discovery - train detectors, discover regimes, calibrate thresholds
 # - ONLINE mode: Score-only - use cached models, no retraining, just score incoming data

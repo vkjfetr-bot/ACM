@@ -44,6 +44,12 @@ Root cause analysis of historical batch processing failures identified three int
 - model_evaluation.py reads this to decide whether to write refit requests
 - **Impact**: Consistent mode awareness across all pipeline components
 
+#### Refit Maturity Override (core/acm_main.py)
+- When `refit_requested=True` AND `current_model_maturity=CONVERGED`, override to `LEARNING`
+- Prevents RuntimeError: "[CONVERGED MODEL] Regime model not found"
+- Scenario: Leftover refit request from previous runs triggers detector retrain, but CONVERGED state blocks regime rediscovery causing missing/stale regime model crash
+- **Impact**: Refit requests are properly honored without state inconsistency
+
 ### Architecture Clarification
 - **OFFLINE mode**: Full discovery - train detectors, discover regimes, calibrate thresholds
 - **ONLINE mode**: Score-only - use cached models, no retraining, just score incoming data
