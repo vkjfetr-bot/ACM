@@ -17,9 +17,57 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.4.0"
+__version__ = "11.5.0"
 __version_date__ = "2026-01-21"
 __version_author__ = "ACM Development Team"
+# v11.5.0: CRITICAL BATCH MODE FIXES - Pipeline Stability
+#
+# ROOT CAUSE ANALYSIS (January 2026):
+# Historical batch processing was exhibiting three interrelated failure modes:
+#   1. 10x Data Inflation - sampling_secs=60 on 600s native cadence caused upsampling
+#   2. Perpetual Refit Loop - all batches ran in OFFLINE mode, retraining every batch
+#   3. Model Instability - refit requests written in ONLINE mode triggered next-batch refit
+#
+# FIXES IMPLEMENTED:
+#
+# FIX #1: ANTI-UPSAMPLE GUARD (core/data_loader.py)
+# - Strengthened upsampling prevention: if requested < native cadence * 0.9, skip resample
+# - Checks BOTH train and score native cadence (min of both)
+# - Sets cadence_ok=True when using native data (no resampling needed)
+# - Clear logging: "ANTI-UPSAMPLE: Requested resample (60s) < native cadence (600.0s)"
+# - IMPACT: Prevents 10x row inflation that corrupted all downstream analytics
+#
+# FIX #2: CONFIG DEFAULT (configs/config_table.csv)
+# - Changed data.sampling_secs from 60 (fixed int) to "auto" (string)
+# - "auto" means: use native cadence, don't resample unless irregular
+# - IMPACT: New deployments won't accidentally trigger upsampling
+#
+# FIX #3: BATCH MODE SELECTION (scripts/sql_batch_runner.py)
+# - Coldstart batches (batch_num=0, is_post_coldstart=False): OFFLINE mode (train models)
+# - Post-coldstart batches (is_post_coldstart=True): ONLINE mode (score only)
+# - Explicit --mode CLI arg still takes precedence if provided
+# - IMPACT: Models train once during coldstart, then remain stable for scoring
+#
+# FIX #4: REFIT REQUEST GUARD (core/model_evaluation.py)
+# - auto_tune_parameters() now checks pipeline_mode before writing refit requests
+# - ONLINE mode: Quality assessment only, NO refit request written
+# - OFFLINE mode: Can write refit requests if quality truly degraded
+# - IMPACT: Breaks the refit feedback loop during historical batch processing
+#
+# FIX #5: PIPELINE MODE PROPAGATION (core/acm_main.py)
+# - Stores pipeline_mode in cfg["runtime"]["pipeline_mode"] for downstream access
+# - model_evaluation.py reads this to decide whether to write refit requests
+# - IMPACT: Consistent mode awareness across all pipeline components
+#
+# ARCHITECTURE CLARIFICATION:
+# - OFFLINE mode: Full discovery - train detectors, discover regimes, calibrate thresholds
+# - ONLINE mode: Score-only - use cached models, no retraining, just score incoming data
+# - Model lifecycle: COLDSTART (offline) -> LEARNING (offline) -> CONVERGED (online)
+# - After CONVERGED, only scheduled refresh or severe drift should trigger retraining
+#
+# TESTING: Run full historical batch with --start-from-beginning
+# EXPECTED: First batch trains models, subsequent batches score without refit
+
 # v11.4.0: REGIME CLUSTERING ARCHITECTURAL FIX - Raw Sensors Only
 # - BREAKING: Regime clustering now uses RAW SENSOR VALUES ONLY
 # - REMOVED: _add_health_state_features() function from core/regimes.py

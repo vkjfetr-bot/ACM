@@ -416,18 +416,38 @@ class DataLoader:
         cadence_ok = bool(cad_ok_train and cad_ok_score)
         Console.status(f"  Cadence check complete: train={cad_ok_train}, score={cad_ok_score}")
         
+        # v11.5.0: CRITICAL ANTI-UPSAMPLE GUARD
+        # Upsampling (creating more rows than exist natively) is NEVER allowed.
+        # It creates fake data via interpolation, inflates row counts 10x, and
+        # corrupts all downstream calibration and anomaly detection.
         native_train = native_cadence_secs(cast(pd.DatetimeIndex, train.index))
-        if sampling_secs and math.isfinite(native_train) and sampling_secs < native_train:
-            Console.warn(
-                f"Requested resample ({sampling_secs}s) < native cadence ({native_train:.1f}s) - skipping to avoid upsample.",
-                component="DATA", requested_secs=sampling_secs, native_secs=native_train, equipment=equipment_name
-            )
-            sampling_secs = None
+        native_score = native_cadence_secs(cast(pd.DatetimeIndex, score.index))
+        native_cadence = min(
+            native_train if math.isfinite(native_train) else float('inf'),
+            native_score if math.isfinite(native_score) else float('inf')
+        )
+        
+        if sampling_secs is not None and math.isfinite(native_cadence):
+            if sampling_secs < native_cadence * 0.9:  # 10% tolerance
+                # NEVER upsample - use native cadence instead
+                Console.warn(
+                    f"ANTI-UPSAMPLE: Requested resample ({sampling_secs}s) < native cadence ({native_cadence:.1f}s). "
+                    f"Using native cadence to prevent data inflation.",
+                    component="DATA", requested_secs=sampling_secs, native_secs=native_cadence, equipment=equipment_name
+                )
+                # Set to None to skip resampling entirely (preserve native data)
+                sampling_secs = None
+                cadence_ok = True  # Native data is always considered valid cadence
+        
+        Console.info(
+            f"Cadence: native={native_cadence:.1f}s, requested={sampling_secs or 'auto'}, will_resample={sampling_secs is not None and not cadence_ok}",
+            component="DATA", native_cadence=native_cadence, equipment=equipment_name
+        )
 
         if sampling_secs is not None:
             base_secs = float(sampling_secs)
         else:
-            base_secs = native_train if math.isfinite(native_train) else 1.0
+            base_secs = native_cadence if math.isfinite(native_cadence) else 1.0
         max_gap_secs = int(_cfg_get(data_cfg, "max_gap_secs", base_secs * 3))
         
         explode_guard_factor = float(_cfg_get(data_cfg, "explode_guard_factor", 2.0))

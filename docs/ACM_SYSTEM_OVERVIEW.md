@@ -1283,7 +1283,63 @@ docker ps --format "table {{.Names}}\t{{.Status}}"
 
 ## 14. Entry Points and Runtime Modes
 
-### 14.1 Production: sql_batch_runner.py
+### 14.1 Pipeline Mode Architecture (v11.5.0)
+
+ACM operates in two pipeline modes that determine model behavior:
+
+```
+PIPELINE MODE SELECTION
+=======================
+
+OFFLINE MODE (Training)              ONLINE MODE (Scoring)
+-----------------------              --------------------
+Train all detector models            Use cached models only
+Discover operating regimes           Apply existing regimes
+Calibrate thresholds from data       Use cached thresholds
+Full feature engineering             Score incoming data
+Write refit requests if needed       NO refit requests allowed
+
+BATCH MODE AUTOMATIC SELECTION (sql_batch_runner.py)
+----------------------------------------------------
+Coldstart batch (batch=0, no models)  -->  OFFLINE (train once)
+Post-coldstart batches                -->  ONLINE (score only)
+Explicit --mode CLI override          -->  Uses specified mode
+
+CRITICAL (v11.5.0 FIX):
+Previous versions used OFFLINE for ALL batches, causing:
+  1. Models retrained every batch (never stabilize)
+  2. Refit requests created perpetual refit loop
+  3. Models never promoted from LEARNING to CONVERGED
+
+Current behavior:
+  1. First batch trains models in OFFLINE mode
+  2. Subsequent batches score in ONLINE mode
+  3. Refit requests only written in OFFLINE mode
+  4. Models stabilize and can promote to CONVERGED
+```
+
+### 14.2 Anti-Upsample Guard (v11.5.0)
+
+```
+DATA RESAMPLING PROTECTION
+==========================
+
+ACM NEVER upsamples data. If requested cadence < native cadence:
+  - Native data preserved (no interpolation)
+  - Log: "ANTI-UPSAMPLE: Requested (60s) < native (600s)"
+  - cadence_ok = True (native is valid)
+
+WHY THIS MATTERS:
+  - Upsampling creates synthetic data via interpolation
+  - 10x row inflation corrupts all calibration
+  - False detection rates increase dramatically
+  - Model convergence becomes impossible
+
+CONFIG RECOMMENDATION:
+  data.sampling_secs = auto   # Always use native cadence
+```
+
+### 14.3 Production: sql_batch_runner.py
 
 ```powershell
 python scripts/sql_batch_runner.py \
@@ -1301,8 +1357,9 @@ python scripts/sql_batch_runner.py \
 | `--resume` | Continue from last run |
 | `--start-from-beginning` | Full reset (coldstart) |
 | `--max-batches` | Limit batches (testing) |
+| `--mode` | Force mode: offline (train), online (score) |
 
-### 14.2 Testing: acm_main.py
+### 14.4 Testing: acm_main.py
 
 ```powershell
 python -m core.acm_main \
@@ -1320,13 +1377,13 @@ python -m core.acm_main \
 | `--mode` | offline (train), online (score), auto |
 | `--clear-cache` | Force detector retrain |
 
-### 14.3 Mode Decision
+### 14.5 Mode Decision
 
 | Mode | When Used | Behavior |
 |------|-----------|----------|
-| OFFLINE | First run, cache miss, --clear-cache | Full training of all detectors |
-| ONLINE | Cache hit, models valid | Scoring only, no retraining |
-| AUTO | Default | Check cache, decide automatically |
+| OFFLINE | Coldstart, cache miss, --clear-cache | Full training of all detectors |
+| ONLINE | Post-coldstart batches, cache hit | Scoring only, no retraining |
+| AUTO | Default for acm_main.py | Check cache, decide automatically |
 
 ---
 

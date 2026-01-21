@@ -729,6 +729,8 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     if "runtime" not in cfg:
         cfg["runtime"] = {}
     cfg["runtime"]["run_count"] = run_count
+    # v11.5.0: Store pipeline mode in config for downstream access (e.g., model_evaluation)
+    cfg["runtime"]["pipeline_mode"] = pipeline_mode_str
 
     # Consolidated startup log.
     pipeline_info = f"mode={pipeline_mode_str.upper()} | refit={ALLOWS_MODEL_REFIT} | discovery={ALLOWS_REGIME_DISCOVERY}"

@@ -6,6 +6,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [11.5.0] - 2026-01-21
+
+### Fixed - CRITICAL BATCH MODE STABILITY
+
+Root cause analysis of historical batch processing failures identified three interrelated bugs:
+1. **10x Data Inflation** - sampling_secs=60 on 600s native cadence caused upsampling
+2. **Perpetual Refit Loop** - all batches ran in OFFLINE mode, retraining every batch
+3. **Model Instability** - refit requests written in ONLINE mode triggered next-batch refit
+
+#### Anti-Upsample Guard (core/data_loader.py)
+- Strengthened upsampling prevention: if requested < native cadence * 0.9, skip resample
+- Checks BOTH train and score native cadence (min of both)
+- Sets cadence_ok=True when using native data (no resampling needed)
+- Clear logging: "ANTI-UPSAMPLE: Requested resample (60s) < native cadence (600.0s)"
+- **Impact**: Prevents 10x row inflation that corrupted all downstream analytics
+
+#### Config Default Fix (configs/config_table.csv)
+- Changed `data.sampling_secs` from `60` (fixed int) to `auto` (string)
+- "auto" means: use native cadence, don't resample unless irregular
+- **Impact**: New deployments won't accidentally trigger upsampling
+
+#### Batch Mode Selection (scripts/sql_batch_runner.py)
+- Coldstart batches (batch_num=0, is_post_coldstart=False): OFFLINE mode (train models)
+- Post-coldstart batches (is_post_coldstart=True): ONLINE mode (score only)
+- Explicit --mode CLI arg still takes precedence if provided
+- **Impact**: Models train once during coldstart, then remain stable for scoring
+
+#### Refit Request Guard (core/model_evaluation.py)
+- `auto_tune_parameters()` now checks pipeline_mode before writing refit requests
+- ONLINE mode: Quality assessment only, NO refit request written
+- OFFLINE mode: Can write refit requests if quality truly degraded
+- **Impact**: Breaks the refit feedback loop during historical batch processing
+
+#### Pipeline Mode Propagation (core/acm_main.py)
+- Stores pipeline_mode in `cfg["runtime"]["pipeline_mode"]` for downstream access
+- model_evaluation.py reads this to decide whether to write refit requests
+- **Impact**: Consistent mode awareness across all pipeline components
+
+### Architecture Clarification
+- **OFFLINE mode**: Full discovery - train detectors, discover regimes, calibrate thresholds
+- **ONLINE mode**: Score-only - use cached models, no retraining, just score incoming data
+- **Model lifecycle**: COLDSTART (offline) -> LEARNING (offline) -> CONVERGED (online)
+- After CONVERGED, only scheduled refresh or severe drift should trigger retraining
+
+---
+
+## [11.4.0] - 2026-01-21
+
+### Fixed - REGIME CLUSTERING ARCHITECTURAL FIX
+- **BREAKING**: Regime clustering now uses RAW SENSOR VALUES ONLY
+- **REMOVED**: `_add_health_state_features()` function from core/regimes.py
+- **REMOVED**: health_ensemble_z, health_trend, health_quartile from regime basis
+- **BUMP**: REGIME_MODEL_VERSION 3.1 -> 4.0 (forces model retraining)
+
+**Rationale (Circular Masking Fix)**:
+Using detector z-scores in regime clustering created a CIRCULAR DEPENDENCY:
+1. Equipment degrades -> detector z-scores rise
+2. Health-state features cause point to cluster into "new regime"
+3. New regime gets fresh baseline -> degradation masked
+4. Equipment appears "healthy in its current regime"
+
+**Correct Architecture**:
+- Regimes = HOW equipment operates (load, speed, flow, pressure)
+- Detectors = IF equipment is HEALTHY within that operating mode
+- These are ORTHOGONAL concerns and MUST NOT be mixed
+
+---
+
 ## [11.3.3] - 2026-01-19
 
 ### Added

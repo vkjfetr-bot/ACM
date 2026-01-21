@@ -674,10 +674,25 @@ class SQLBatchRunner:
             end_time: Optional end time override
             dry_run: If True, print command without running
             batch_num: Current batch number (for frequency control)
-            is_post_coldstart: If True, coldstart already completed (don't show coldstart messages)
+            is_post_coldstart: If True, coldstart already completed (use online/score-only mode)
             
         Returns:
             Tuple of (success, outcome) where outcome is 'OK', 'NOOP', or 'FAIL'
+            
+        v11.5.0: CRITICAL FIX - Mode Selection
+        ======================================
+        The pipeline mode controls whether models are retrained or just used for scoring:
+        - OFFLINE mode: Full refit - trains new detector/regime models
+        - ONLINE mode: Score-only - uses cached models, no retraining
+        
+        Previous bug: self.mode was None by default, causing acm_main.py to default
+        to 'offline' mode for ALL batches. This caused models to retrain every batch,
+        preventing convergence and creating the refit feedback loop.
+        
+        Correct behavior:
+        - Coldstart batches (first batch when no models exist): OFFLINE (train models)
+        - Post-coldstart batches (historical replay after models exist): ONLINE (score only)
+        - Explicit --mode override from CLI takes precedence
         """
         cmd = [
             sys.executable, "-m", "core.acm_main",
@@ -689,9 +704,22 @@ class SQLBatchRunner:
         if end_time:
             cmd.extend(["--end-time", end_time.isoformat()])
         
-        # V11: Pass pipeline mode if specified
-        if self.mode is not None:
-            cmd.extend(["--mode", self.mode])
+        # v11.5.0: Determine correct pipeline mode based on batch context
+        # Priority: 1) Explicit CLI override, 2) Context-based selection
+        effective_mode: Optional[str] = self.mode
+        
+        if effective_mode is None:
+            # No explicit override - determine mode from batch context
+            is_coldstart_batch = not is_post_coldstart and batch_num == 0
+            if is_coldstart_batch:
+                # Coldstart: Use offline mode to train initial models
+                effective_mode = "offline"
+            else:
+                # Post-coldstart scoring: Use online mode (score-only, no refit)
+                effective_mode = "online"
+        
+        if effective_mode is not None:
+            cmd.extend(["--mode", effective_mode])
         
         printable = " ".join(cmd)
         if dry_run:
