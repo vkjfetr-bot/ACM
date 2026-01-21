@@ -423,6 +423,17 @@ def auto_tune_parameters(
     if not cfg.get("models", {}).get("auto_tune", True):
         return
     
+    # v11.6.0 FIX #3: Skip refit evaluation entirely for CONVERGED models
+    # CONVERGED models are stable and should NOT trigger refit requests.
+    # This prevents 170+ spurious refit requests for stable equipment.
+    model_maturity = cfg.get("runtime", {}).get("model_maturity_state", "LEARNING")
+    if model_maturity == "CONVERGED":
+        Console.info(
+            "Auto-tune: Skipping refit evaluation - model is CONVERGED (stable)",
+            component="AUTO-TUNE", equip=equip, maturity=model_maturity
+        )
+        return
+    
     # v11.5.0: Check pipeline mode - do NOT write refit requests in ONLINE mode
     # Refit requests during historical batch processing cause infinite refit loops
     pipeline_mode = cfg.get("runtime", {}).get("pipeline_mode", "offline")

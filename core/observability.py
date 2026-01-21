@@ -565,6 +565,36 @@ def init(
         atexit.register(shutdown)
 
 
+def enable_sql_logging(sql_client: Any, run_id: str, equip_id: int) -> None:
+    """
+    Enable SQL log persistence after SQL connection is established.
+    
+    v11.6.0 FIX #4: Late-binding SQL sink
+    =====================================
+    The observability stack is initialized BEFORE SQL connection for early
+    logging. This function enables SQL log persistence AFTER the connection
+    is established.
+    
+    Args:
+        sql_client: SQLClient instance with active connection
+        run_id: Current run identifier
+        equip_id: Equipment ID
+    """
+    global _sql_sink
+    
+    if _sql_sink is not None:
+        return  # Already enabled
+    
+    try:
+        _sql_sink = _SqlLogSink(sql_client, run_id, equip_id)
+        Console.ok("SQL log persistence enabled -> ACM_RunLogs", component="OTEL")
+    except Exception as e:
+        Console.warn(
+            f"Failed to enable SQL log persistence: {e}",
+            component="OTEL", error_type=type(e).__name__
+        )
+
+
 def shutdown() -> None:
     """Flush and shutdown all providers."""
     global _sql_sink, _loki_pusher, _shutdown_called, _pyroscope_enabled, _pyroscope_pusher

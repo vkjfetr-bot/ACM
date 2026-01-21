@@ -683,6 +683,66 @@ class ModelVersionManager:
             except Exception:
                 pass
             raise
+        
+        # v11.6.0 FIX #2: Cleanup old model versions to prevent accumulation
+        # WFA_TURBINE_22 had 171 copies of each model type due to no retention
+        self._cleanup_old_versions(keep_n=5)
+
+    def _cleanup_old_versions(self, keep_n: int = 5) -> int:
+        """
+        Delete old model versions to prevent unbounded accumulation.
+        
+        v11.6.0 FIX #2: Model Accumulation Prevention
+        =============================================
+        Without cleanup, each run creates a new version and models accumulate:
+        - Run 1 → Version 1 (saves 6 models)
+        - Run 171 → Version 171 (171 × 6 = 1026 rows per equipment!)
+        
+        This method keeps only the latest N versions, deleting older ones.
+        
+        Args:
+            keep_n: Number of recent versions to keep (default: 5)
+            
+        Returns:
+            Number of rows deleted
+        """
+        if not self.sql_client or not self.sql_client.conn:
+            return 0
+        
+        try:
+            cur = self.sql_client.cursor()
+            
+            # Delete all versions except the latest N
+            # Uses a subquery to find versions to keep
+            delete_sql = """
+            DELETE FROM ModelRegistry 
+            WHERE EquipID = ? 
+            AND Version NOT IN (
+                SELECT DISTINCT TOP (?) Version 
+                FROM ModelRegistry 
+                WHERE EquipID = ?
+                ORDER BY Version DESC
+            )
+            """
+            cur.execute(delete_sql, (self.equip_id, keep_n, self.equip_id))
+            deleted_count = cur.rowcount
+            self.sql_client.conn.commit()
+            cur.close()
+            
+            if deleted_count > 0:
+                Console.info(
+                    f"Cleaned up {deleted_count} old model rows (keeping latest {keep_n} versions)",
+                    component="MODEL-SQL", equip_id=self.equip_id, deleted=deleted_count, keep_n=keep_n
+                )
+            
+            return deleted_count
+            
+        except Exception as e:
+            Console.warn(
+                f"Failed to cleanup old model versions: {e}",
+                component="MODEL-SQL", equip_id=self.equip_id, error_type=type(e).__name__
+            )
+            return 0
 
     def _get_latest_version_from_sql(self) -> Optional[int]:
         """Fetch the latest Version for this EquipID from ModelRegistry."""

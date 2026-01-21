@@ -121,6 +121,7 @@ try:
         log_timer,
         start_profiling,
         stop_profiling,
+        enable_sql_logging,  # v11.6.0: Late-bind SQL log persistence
     )
     _OBSERVABILITY_AVAILABLE = True
 except ImportError:
@@ -128,6 +129,7 @@ except ImportError:
     OTEL_AVAILABLE = False
     obs_log = None
     def init_observability(*args, **kwargs): pass
+    def enable_sql_logging(*args, **kwargs): pass  # v11.6.0
     def get_tracer(): return None
     def get_meter(): return None
     def set_acm_context(*args, **kwargs): pass
@@ -678,6 +680,14 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
     equip_id = _get_equipment_id(equip, sql_client)
     if not hasattr(cfg, '_equip_id') or cfg._equip_id == 0:
         cfg._equip_id = equip_id
+    
+    # v11.6.0 FIX #4: Enable SQL log persistence AFTER connection established
+    # This allows early logging to console/Loki while still capturing to ACM_RunLogs
+    if _OBSERVABILITY_AVAILABLE:
+        try:
+            enable_sql_logging(sql_client, run_id="pending", equip_id=equip_id)
+        except Exception as e:
+            Console.warn(f"SQL logging init failed (non-fatal): {e}", component="OTEL")
     
     # Compute and store config signature for cache validation.
     config_signature = compute_config_signature(cfg)

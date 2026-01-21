@@ -17,9 +17,62 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.5.0"
+__version__ = "11.6.0"
 __version_date__ = "2026-01-21"
 __version_author__ = "ACM Development Team"
+
+# v11.6.0: COMPREHENSIVE STABILITY REFACTORING - 6 Critical Fixes
+#
+# CONTEXT: SQL analysis of 200+ runs revealed 6 critical issues:
+#   - 4 failed runs due to NoneType transform error
+#   - 171 model copies per equipment (should be 1)
+#   - 170+ spurious refit requests for CONVERGED models
+#   - Empty ACM_RunLogs table (no log persistence)
+#   - 2+ hour runs with 26K training rows
+#   - 88% false positive ALERT rate
+#
+# FIX #1: TRANSFORM ERROR - None Guard (P0)
+# - Location: core/regimes.py predict_regime() and label()
+# - Issue: Models loaded from corrupted SQL ModelRegistry have None scaler
+# - Fix: Add explicit None-guard before scaler.transform() with clear error message
+# - Impact: Crash -> Clear error message pointing to corrupt model
+#
+# FIX #2: MODEL ACCUMULATION - Version Retention (P1)
+# - Location: core/model_persistence.py _save_models_to_sql()
+# - Issue: Every run creates new version (171 × 6 = 1026 rows per equipment)
+# - Fix: Add _cleanup_old_versions(keep_n=5) after save, deletes old versions
+# - Impact: ModelRegistry stays bounded, DB size under control
+#
+# FIX #3: EXCESSIVE REFIT REQUESTS - Maturity Check (P1)
+# - Location: core/model_evaluation.py auto_tune_parameters()
+# - Issue: CONVERGED models still evaluated for refit (170+ requests)
+# - Fix: Skip refit evaluation entirely when model_maturity == "CONVERGED"
+# - Impact: Stable models stay stable, no spurious refit requests
+#
+# FIX #4: SQL LOG PERSISTENCE - Late Binding (P2)
+# - Location: core/observability.py enable_sql_logging(), core/acm_main.py
+# - Issue: Observability initialized BEFORE SQL connection, no sql_client passed
+# - Fix: Add enable_sql_logging() function, call after SQL connection established
+# - Impact: Logs now persist to ACM_RunLogs for debugging
+#
+# FIX #5: TRAINING SUBSAMPLING - Performance (P1)
+# - Location: core/detector_orchestrator.py fit_all_detectors()
+# - Config: models.max_train_samples = 10000 (new config)
+# - Issue: 26K training rows cause 2+ hour runs (O(n²) PCA/HDBSCAN)
+# - Fix: Stratified subsampling to max_train_samples using evenly-spaced indices
+# - Impact: 2+ hours -> ~10 minutes for large datasets
+#
+# FIX #6: FALSE POSITIVE THRESHOLDS - Config Fix (P0)
+# - Location: configs/config_table.csv
+# - Issue: thresholds.alert=0.85, thresholds.warn=0.7 interpreted as percentiles
+# - Fix: Changed to 3.0 / 1.5 (z-scores) for proper 3-sigma alerting
+# - Impact: 88% ALERT rate -> ~3% (proper 3-sigma)
+#
+# MIGRATION:
+# 1. Run: python scripts/sql/populate_acm_config.py (sync config to SQL)
+# 2. Optional: Run one-time cleanup: DELETE FROM ModelRegistry WHERE Version NOT IN (...)
+# 3. Restart batch processing - old models will be cleaned up automatically
+
 # v11.5.0: CRITICAL BATCH MODE FIXES - Pipeline Stability
 #
 # ROOT CAUSE ANALYSIS (January 2026):
