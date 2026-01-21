@@ -46,7 +46,7 @@ try:
 except Exception:  # pragma: no cover - scipy optional in some deployments
     _median_filter = None
 
-REGIME_MODEL_VERSION = "3.1"  # v11.3.1: Removed UNKNOWN regime concept
+REGIME_MODEL_VERSION = "4.0"  # v11.4.0: RAW SENSORS ONLY - removed health-state features
 
 # v11.3.1: DEPRECATED - UNKNOWN_REGIME_LABEL (-1) is no longer produced
 # Equipment is ALWAYS in some physical operating state. Instead of UNKNOWN:
@@ -105,15 +105,24 @@ CONDITION_TAG_KEYWORDS = [
     "acoustic", "ultrasonic", "noise",
 ]
 
-# v11.3.0: HEALTH-STATE VARIABLES FOR REGIME DEFINITION
-# Rule R3: Pre-fault and post-fault equipment are DISTINCT regimes
-# Health degradation is now tracked as part of regime structure, not filtered out
-HEALTH_STATE_KEYWORDS = [
-    # Synthetic health indicators (computed from detectors)
-    "health_ensemble_z", "health_trend", "health_quartile",
-    # Degradation markers
-    "degradation", "fatigue", "wear",
-]
+# v11.4.0: HEALTH-STATE FEATURES REMOVED FROM REGIME CLUSTERING
+# Regime clustering now uses RAW SENSOR VALUES ONLY.
+#
+# RATIONALE (v11.4.0 Architectural Fix):
+# Using detector z-scores (health indicators) in regime clustering creates
+# a CIRCULAR DEPENDENCY that masks degradation:
+#   1. Equipment degrades → detector z-scores rise
+#   2. Health-state features cause point to cluster into "new regime"
+#   3. New regime gets fresh baseline → degradation masked
+#   4. Equipment appears "healthy in its current regime"
+#
+# CORRECT ARCHITECTURE:
+# - Regimes = HOW equipment operates (load, speed, flow, pressure)
+# - Detectors = IF equipment is HEALTHY within that operating mode
+# - These are orthogonal concerns and MUST NOT be mixed
+#
+# Detector z-scores are OUTPUTS of the anomaly detection pipeline,
+# not INPUTS to regime clustering.
 
 
 class ModelVersionMismatch(Exception):
@@ -262,84 +271,12 @@ def _stable_int_hash(arr: np.ndarray) -> int:
     return int.from_bytes(digest[:8], byteorder="little", signed=False)
 
 
-def _add_health_state_features(
-    features_df: pd.DataFrame,
-    detector_scores: Dict[str, np.ndarray]
-) -> pd.DataFrame:
-    """
-    Add health-state variables to regime clustering input.
-    
-    v11.3.0: Health state is now part of regime definition, not excluded.
-    This allows clustering to distinguish:
-    - Same operating mode but different health state (pre-fault vs degraded)
-    - Normal transitions vs fault-driven transitions
-    
-    Rule R3 (v11.3.0): Pre-fault and post-fault equipment are DISTINCT regimes.
-    Equipment at Health=95% is fundamentally different from Health=20%, even
-    at identical load/speed. These are separate operating regimes.
-    
-    Args:
-        features_df: DataFrame with operating variables (load, speed, etc.)
-        detector_scores: Dict mapping detector names to z-score arrays
-        
-    Returns:
-        DataFrame with both operating and health-state variables
-    """
-    features_with_health = features_df.copy()
-    
-    # HEALTH-STATE VARIABLES (v11.3.0)
-    # These capture equipment degradation state and are now integral to regimes
-    
-    # 1. Ensemble Anomaly Score (normalized health indicator)
-    # Combines AR1, PCA-SPE, PCA-T2 for robust health assessment
-    ensemble_components = []
-    for col in ['ar1_z', 'pca_spe_z', 'pca_t2_z']:
-        if col in detector_scores:
-            arr = np.asarray(detector_scores[col], dtype=float)
-            ensemble_components.append(arr)
-    
-    if ensemble_components:
-        ensemble_z = np.nanmean(ensemble_components, axis=0)
-        # Clamp to [-3, 3] to avoid outliers distorting clustering
-        ensemble_z_clipped = np.clip(ensemble_z, -3.0, 3.0)
-        features_with_health['health_ensemble_z'] = ensemble_z_clipped
-        
-        # 2. Health Degradation Trend (20-point rolling mean of ensemble)
-        # Captures sustained degradation (not transient spikes)
-        trend_series = pd.Series(ensemble_z_clipped)
-        trend = trend_series.rolling(window=20, min_periods=5, center=False).mean()
-        trend_filled = trend.bfill().ffill().fillna(0)
-        trend_clipped = np.clip(np.asarray(trend_filled.values, dtype=np.float64), -3.0, 3.0)
-        features_with_health['health_trend'] = trend_clipped
-        
-        # 3. Health State Quartile (binned health level: 0=healthy, 3=critical)
-        # Assigns each point to a health quartile based on ensemble score distribution
-        try:
-            quartiles = pd.qcut(
-                ensemble_z_clipped,
-                q=4,
-                labels=[0, 1, 2, 3],
-                duplicates='drop'
-            )
-            health_quartile = quartiles.astype(float).fillna(0)
-        except Exception:
-            # If qcut fails (e.g., all same value), use simple binning
-            health_quartile = np.clip(ensemble_z_clipped / 3.0 + 1.5, 0, 3).astype(float)
-        
-        features_with_health['health_quartile'] = health_quartile
-        
-        Console.info(
-            f"Added health-state features: ensemble_z, trend, quartile (v11.3.0)",
-            component="REGIME",
-            n_samples=len(features_with_health)
-        )
-    else:
-        Console.warn(
-            "Could not compute health-state features: missing detector scores",
-            component="REGIME"
-        )
-    
-    return features_with_health
+# v11.4.0: _add_health_state_features() REMOVED
+# This function was deleted because it created circular masking:
+#   - Detector z-scores were injected into regime clustering
+#   - Degrading equipment clustered into "new regimes"
+#   - New regimes got fresh baselines, hiding the degradation
+# Regime clustering now uses RAW SENSOR VALUES ONLY (as it should).
 
 
 def _finite_impute_inplace(X: np.ndarray) -> np.ndarray:

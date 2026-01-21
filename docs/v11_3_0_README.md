@@ -24,12 +24,21 @@ Equipment at Load=50%, Health=95% is recognized as a **different regime** from L
 ## What's New in v11.3.0
 
 ### Feature 1: Health-State Variables
-Three new regime features that capture equipment degradation:
+
+> **⚠️ DEPRECATED in v11.4.0**: Health-state features were REMOVED from regime clustering.
+> Using detector z-scores in regime clustering created circular masking where degrading
+> equipment would cluster into "new regimes" with fresh baselines, hiding faults.
+> 
+> **v11.4.0 Architecture**: Regime clustering uses RAW SENSOR VALUES ONLY (load, speed, flow, pressure).
+> Detector z-scores are OUTPUTS of anomaly detection, not INPUTS to regime clustering.
+
+~~Three new regime features that capture equipment degradation:~~
 
 ```
-health_ensemble_z   → Consensus anomaly score (AR1+PCA-SPE+PCA-T2 mean)
-health_trend        → Sustained degradation (20-point rolling mean)
-health_quartile     → Health state bucket (0=healthy, 3=critical)
+# REMOVED in v11.4.0:
+# health_ensemble_z   → Consensus anomaly score (AR1+PCA-SPE+PCA-T2 mean)
+# health_trend        → Sustained degradation (20-point rolling mean)
+# health_quartile     → Health state bucket (0=healthy, 3=critical)
 ```
 
 ### Feature 2: Episode Context Classification
@@ -118,11 +127,12 @@ python scripts/sql_batch_runner.py --equip FD_FAN --tick-minutes 1440 --start-fr
 
 ### 5. Validate Output
 ```sql
--- Check that regime basis includes new health columns
+-- Check that regime basis uses raw operational sensors only (v11.4.0+)
 SELECT TOP 1 feature_columns FROM ACM_ModelHistory
 WHERE ModelType = 'REGIME' ORDER BY CreatedAt DESC;
 
--- Expected: ['load', 'speed', 'flow', 'pressure', 'health_ensemble_z', 'health_trend', 'health_quartile']
+-- Expected (v11.4.0): ['load', 'speed', 'flow', 'pressure'] - raw sensors only
+-- Note: health_ensemble_z, health_trend, health_quartile are NO LONGER included
 ```
 
 ---

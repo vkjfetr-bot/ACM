@@ -1183,37 +1183,15 @@ Note: For automated batch processing, use sql_batch_runner.py instead:
         regime_basis_hash = None
         
         try:
+            # v11.4.0: Regime clustering uses RAW SENSOR VALUES ONLY
+            # Regimes represent HOW equipment operates (load, speed, flow, pressure)
+            # Detectors determine IF equipment is healthy within that operating mode
+            # These are orthogonal concerns - detector z-scores are OUTPUTS, not inputs
             basis_train, basis_score, basis_meta = regimes.build_feature_basis(
                 train_features=train, score_features=score,
                 raw_train=raw_train, raw_score=raw_score,
                 pca_detector=pca_detector, cfg=cfg,
             )
-            
-            # Add health-state features for regime clustering so pre/post-fault
-            # behavior can be separated into distinct regimes.
-            try:
-                if basis_train is not None and basis_score is not None:
-                    # Prepare detector scores for health-state computation.
-                    detector_cols = {}
-                    if 'ar1_z' in train.columns:
-                        detector_cols['ar1_z'] = train['ar1_z'].values
-                    if 'pca_spe_z' in train.columns:
-                        detector_cols['pca_spe_z'] = train['pca_spe_z'].values
-                    if 'pca_t2_z' in train.columns:
-                        detector_cols['pca_t2_z'] = train['pca_t2_z'].values
-                    
-                    # Only add health features if detector scores are available.
-                    if detector_cols:
-                        basis_train = regimes._add_health_state_features(basis_train, detector_cols)
-                        basis_score = regimes._add_health_state_features(basis_score, detector_cols)
-                        basis_meta["health_state_features_added"] = True
-                        Console.ok("Health-state features integrated into regime basis", component="REGIME")
-                    else:
-                        basis_meta["health_state_features_added"] = False
-            except Exception as health_e:
-                Console.warn(f"Health-state features failed (continuing with operating-only basis): {health_e}", 
-                           component="REGIME", error=str(health_e)[:100])
-                basis_meta["health_state_features_added"] = False
             
             # Schema hash keeps regimes stable once discovered unless inputs change.
             regime_cfg_str = str(cfg.get("regimes", {}))

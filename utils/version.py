@@ -17,9 +17,33 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.3.4"
-__version_date__ = "2026-01-19"
+__version__ = "11.4.0"
+__version_date__ = "2026-01-21"
 __version_author__ = "ACM Development Team"
+# v11.4.0: REGIME CLUSTERING ARCHITECTURAL FIX - Raw Sensors Only
+# - BREAKING: Regime clustering now uses RAW SENSOR VALUES ONLY
+# - REMOVED: _add_health_state_features() function from core/regimes.py
+# - REMOVED: health_ensemble_z, health_trend, health_quartile from regime basis
+# - REMOVED: HEALTH_STATE_KEYWORDS constant (no longer needed)
+# - REMOVED: health-state injection call site from core/acm_main.py
+# - BUMP: REGIME_MODEL_VERSION 3.1 -> 4.0 (forces model retraining)
+#
+# RATIONALE (Circular Masking Fix):
+# Using detector z-scores in regime clustering created a CIRCULAR DEPENDENCY:
+#   1. Equipment degrades -> detector z-scores rise
+#   2. Health-state features cause point to cluster into "new regime"
+#   3. New regime gets fresh baseline -> degradation masked
+#   4. Equipment appears "healthy in its current regime"
+#
+# CORRECT ARCHITECTURE:
+# - Regimes = HOW equipment operates (load, speed, flow, pressure)
+# - Detectors = IF equipment is HEALTHY within that operating mode
+# - These are ORTHOGONAL concerns and MUST NOT be mixed
+# - Detector z-scores are OUTPUTS of anomaly detection, not INPUTS to regime clustering
+#
+# MIGRATION: Existing regime models will be invalidated and retrained automatically
+# Building on v11.3.4 RUL validation guard
+
 # v11.3.4: RUL VALIDATION GUARD - Prevent Implausible Predictions
 # - NEW: RUL validation logic in core/forecast_engine.py before writing to ACM_RUL
 #   - Rejects RUL < 1h when health > 70% (implausible imminent failure)

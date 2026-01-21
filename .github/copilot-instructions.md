@@ -37,11 +37,20 @@ ACM is a predictive maintenance and equipment health monitoring system. It inges
 
 **Key Features**: Multi-detector fusion (AR1, PCA, IForest, GMM, OMR), regime detection, episode diagnostics, RUL forecasting with Monte Carlo simulations, SQL-only persistence, full observability stack (OpenTelemetry traces/metrics, Loki logs, Pyroscope profiling).
 
+**v11.4.0 Release** (2026-01-21):
+- **ARCHITECTURAL FIX: Regime clustering now uses RAW SENSOR VALUES ONLY**
+  - Removed `_add_health_state_features()` - caused circular masking of degradation
+  - Removed health_ensemble_z, health_trend, health_quartile from regime basis
+  - REGIME_MODEL_VERSION bumped to 4.0 (forces retraining)
+- **Correct architecture enforced**:
+  - Regimes = HOW equipment operates (load, speed, flow, pressure)
+  - Detectors = IF equipment is HEALTHY within that operating mode
+  - These are ORTHOGONAL concerns - detector z-scores are OUTPUTS, not inputs to clustering
+
 **v11.3.0 Release** (2026-01-13):
 - **Interactive Installer Wizard**: `python install/acm_installer.py` - handles all setup
 - **Windows OS Support**: Windows 10/11 and Server 2019/2022 officially supported
 - **102 installer tests**: Comprehensive test coverage for installation process
-- **Multi-dimensional regimes**: Health-state aware regime detection (×1.2 boost for degrading equipment)
 - **False positive reduction**: 70% → 30% (2.3× improvement)
 
 **v11.2.2 Analytical Fixes** (2026-01-04):
@@ -714,6 +723,26 @@ pytest tests/test_observability.py
 ---
 
 ## Regime Detection (v11.4.0)
+
+### CRITICAL ARCHITECTURE: Raw Sensors Only
+**Regime clustering uses RAW SENSOR VALUES ONLY - NEVER detector z-scores**
+
+| Data Type | Purpose | Used By |
+|-----------|---------|---------|
+| Raw sensors (load, speed, flow, pressure) | Equipment operating state | Regime clustering ONLY |
+| Engineered features (rolling stats, lags, z-scores) | Temporal patterns, trends | Detector training/scoring |
+| Detector z-scores (ar1_z, pca_spe_z, etc.) | Anomaly signals | Fusion, Episode detection |
+
+**Why this matters**: Using detector z-scores in regime clustering creates circular masking:
+1. Equipment degrades → detector z-scores rise
+2. Health features cause point to cluster into "new regime"
+3. New regime gets fresh baseline → degradation masked
+4. Equipment appears "healthy in its current regime"
+
+**Correct separation**:
+- **Regimes** = HOW equipment operates (controllable/environmental)
+- **Detectors** = IF equipment is healthy in that operating mode
+- These are orthogonal concerns that MUST NOT be mixed
 
 ### Regime Discovery Logic (MaturityState-based)
 Regime discovery is controlled by **ModelMaturityState**, not a flag:
