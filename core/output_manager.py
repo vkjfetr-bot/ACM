@@ -1992,7 +1992,12 @@ class OutputManager:
             List containing ONE summary record (for compatibility with existing write logic)
         """
         interp_method = str((cfg.get("data", {}) or {}).get("interp_method", "linear"))
-        sampling_secs = (cfg.get("data", {}) or {}).get("sampling_secs", None)
+        sampling_secs_raw = (cfg.get("data", {}) or {}).get("sampling_secs", None)
+        # v11.5.0: sampling_secs can be "auto" (string) - convert to None for SQL float column
+        try:
+            sampling_secs = float(sampling_secs_raw) if sampling_secs_raw not in (None, "auto", "") else None
+        except (ValueError, TypeError):
+            sampling_secs = None
         
         # Find common columns
         common_cols = []
