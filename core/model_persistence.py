@@ -543,7 +543,7 @@ class ModelVersionManager:
         try:
             if not self.sql_client or self.equip_id is None:
                 Console.error("Cannot save models - SQL client/equip_id missing", component="MODEL", equipment=self.equip, equip_id=self.equip_id)
-                if span_context:
+                if span_context and hasattr(span_context, '_span') and span_context._span:
                     span_context._span.set_attribute("acm.error", True)
                 raise ValueError("SQL client and equip_id required for model persistence")
             
@@ -551,7 +551,7 @@ class ModelVersionManager:
             if version is None:
                 version = self.get_next_version()
             
-            if span_context:
+            if span_context and hasattr(span_context, '_span') and span_context._span:
                 span_context._span.set_attribute("acm.model_version", version)
             
             Console.info(f"Saving models to SQL ModelRegistry v{version}", component="MODEL")
@@ -569,12 +569,12 @@ class ModelVersionManager:
             try:
                 self._save_models_to_sql(models, metadata, version)
                 Console.info(f"Saved {len(models)} models to SQL ModelRegistry v{version}", component="MODEL")
-                if span_context:
+                if span_context and hasattr(span_context, '_span') and span_context._span:
                     span_context._span.set_attribute("acm.models_saved", len(models))
                 return version
             except Exception as e:
                 Console.error(f"Failed to save models to SQL: {e}", component="MODEL-SQL", equip_id=self.equip_id, version=version, error_type=type(e).__name__, error=str(e)[:200])
-                if span_context:
+                if span_context and hasattr(span_context, '_span') and span_context._span:
                     span_context._span.set_attribute("acm.error", True)
                 raise
         finally:
@@ -683,6 +683,66 @@ class ModelVersionManager:
             except Exception:
                 pass
             raise
+        
+        # v11.6.0 FIX #2: Cleanup old model versions to prevent accumulation
+        # WFA_TURBINE_22 had 171 copies of each model type due to no retention
+        self._cleanup_old_versions(keep_n=5)
+
+    def _cleanup_old_versions(self, keep_n: int = 5) -> int:
+        """
+        Delete old model versions to prevent unbounded accumulation.
+        
+        v11.6.0 FIX #2: Model Accumulation Prevention
+        =============================================
+        Without cleanup, each run creates a new version and models accumulate:
+        - Run 1 → Version 1 (saves 6 models)
+        - Run 171 → Version 171 (171 × 6 = 1026 rows per equipment!)
+        
+        This method keeps only the latest N versions, deleting older ones.
+        
+        Args:
+            keep_n: Number of recent versions to keep (default: 5)
+            
+        Returns:
+            Number of rows deleted
+        """
+        if not self.sql_client or not self.sql_client.conn:
+            return 0
+        
+        try:
+            cur = self.sql_client.cursor()
+            
+            # Delete all versions except the latest N
+            # Uses a subquery to find versions to keep
+            delete_sql = """
+            DELETE FROM ModelRegistry 
+            WHERE EquipID = ? 
+            AND Version NOT IN (
+                SELECT DISTINCT TOP (?) Version 
+                FROM ModelRegistry 
+                WHERE EquipID = ?
+                ORDER BY Version DESC
+            )
+            """
+            cur.execute(delete_sql, (self.equip_id, keep_n, self.equip_id))
+            deleted_count = cur.rowcount
+            self.sql_client.conn.commit()
+            cur.close()
+            
+            if deleted_count > 0:
+                Console.info(
+                    f"Cleaned up {deleted_count} old model rows (keeping latest {keep_n} versions)",
+                    component="MODEL-SQL", equip_id=self.equip_id, deleted=deleted_count, keep_n=keep_n
+                )
+            
+            return deleted_count
+            
+        except Exception as e:
+            Console.warn(
+                f"Failed to cleanup old model versions: {e}",
+                component="MODEL-SQL", equip_id=self.equip_id, error_type=type(e).__name__
+            )
+            return 0
 
     def _get_latest_version_from_sql(self) -> Optional[int]:
         """Fetch the latest Version for this EquipID from ModelRegistry."""
@@ -838,30 +898,30 @@ class ModelVersionManager:
                 version = self.get_latest_version()
                 if version is None:
                     Console.info("No cached models found - will train from scratch", component="MODEL")
-                    if span_context:
+                    if span_context and hasattr(span_context, '_span') and span_context._span:
                         span_context._span.set_attribute("acm.models_loaded", 0)
                     return None, None
             
-            if span_context:
+            if span_context and hasattr(span_context, '_span') and span_context._span:
                 span_context._span.set_attribute("acm.model_version", version)
             
             # SQL-ONLY MODE: Load from SQL ModelRegistry only
             if not self.sql_client or self.equip_id is None:
                 Console.warn("Cannot load models - SQL client/equip_id missing", component="MODEL", equipment=self.equip, equip_id=self.equip_id)
-                if span_context:
+                if span_context and hasattr(span_context, '_span') and span_context._span:
                     span_context._span.set_attribute("acm.error", True)
                 return None, None
             
             result = self._load_models_from_sql(version)
             if result:
                 sql_models, sql_manifest = result
-                if span_context:
+                if span_context and hasattr(span_context, '_span') and span_context._span:
                     span_context._span.set_attribute("acm.models_loaded", len(sql_models))
                 Console.info(f"[OK] Loaded from SQL ModelRegistry successfully", component="MODEL")
                 return sql_models, sql_manifest
             else:
                 Console.warn(f"Failed to load models from SQL ModelRegistry", component="MODEL", equipment=self.equip, equip_id=self.equip_id, version=version)
-                if span_context:
+                if span_context and hasattr(span_context, '_span') and span_context._span:
                     span_context._span.set_attribute("acm.error", True)
                 return None, None
         finally:
@@ -974,16 +1034,39 @@ class ModelVersionManager:
             Tuple of (is_valid, reasons_for_invalidity)
         """
         reasons = []
+        warnings = []  # Soft issues - logged but don't cause rejection
         
-        # Check config signature
+        # Check config signature - ONLY reject if signatures are known and different
         cached_sig = manifest.get("config_signature", "")
-        if cached_sig != current_config_signature:
-            reasons.append(f"Config changed (cached: {cached_sig[:8]}, current: {current_config_signature[:8]})")
+        if cached_sig and current_config_signature and current_config_signature != "unknown":
+            if cached_sig != current_config_signature:
+                reasons.append(f"Config changed (cached: {cached_sig[:8]}, current: {current_config_signature[:8]})")
         
-        # Check sensors
-        cached_sensors = manifest.get("train_sensors", [])
-        if set(cached_sensors) != set(current_sensors):
-            reasons.append(f"Sensor list changed (cached: {len(cached_sensors)}, current: {len(current_sensors)})")
+        # v11.6.1 FIX: Check sensor overlap, not exact match
+        # Feature engineering can drop different low-variance columns run-to-run,
+        # so exact match is too strict. Use 70% overlap threshold instead.
+        cached_sensors = set(manifest.get("train_sensors", []))
+        current_sensors_set = set(current_sensors)
+        
+        if cached_sensors and current_sensors_set:
+            # Calculate overlap percentage
+            common = cached_sensors & current_sensors_set
+            overlap_ratio = len(common) / len(cached_sensors) if cached_sensors else 0
+            
+            if overlap_ratio < 0.7:
+                # Less than 70% of cached features are present - major mismatch
+                reasons.append(f"Sensor overlap too low: {overlap_ratio:.1%} (need 70%+), cached={len(cached_sensors)}, current={len(current_sensors_set)}")
+            elif overlap_ratio < 1.0:
+                # Partial mismatch - warn but don't reject
+                missing_count = len(cached_sensors) - len(common)
+                warnings.append(f"Minor sensor mismatch: {missing_count} of {len(cached_sensors)} cached features not in current data ({overlap_ratio:.1%} overlap)")
+        elif cached_sensors and not current_sensors_set:
+            # No current sensors passed - skip validation (legacy compatibility)
+            warnings.append("Sensor validation skipped (no current sensors provided)")
+        
+        # Log warnings without failing
+        for warn in warnings:
+            Console.warn(warn, component="MODEL-CACHE")
         
         # Task 5: Temporal validation - reject models exceeding max_model_age_days
         from datetime import datetime, timedelta
@@ -1261,12 +1344,14 @@ def load_cached_models_with_validation(
         Tuple of (cached_models dict, cached_manifest dict) or (None, None) if invalid
     """
     try:
+        Console.info(f"Loading cached models for equip={equip}, equip_id={equip_id}", component="MODEL-LOAD")
         model_manager = ModelVersionManager(
             equip=equip, 
             sql_client=sql_client,
             equip_id=equip_id
         )
         cached_models, cached_manifest = model_manager.load_models()
+        Console.info(f"Load result: models={bool(cached_models)}, manifest={bool(cached_manifest)}", component="MODEL-LOAD")
         
         if cached_models and cached_manifest:
             # Validate cache
@@ -1362,13 +1447,15 @@ def save_trained_models(
         )
         
         # Collect all models for persistence
+        # v11.6.1 FIX: Save the FULL RegimeModel object, not just regime_model.model
+        # RegimeModel contains feature_columns, scaler, etc. which are needed for scoring
         models_to_save = {
             "ar1_params": {"phimap": ar1_detector.phimap, "sdmap": ar1_detector.sdmap} if hasattr(ar1_detector, 'phimap') else None,
             "pca_model": pca_detector.pca if hasattr(pca_detector, 'pca') else None,
             "iforest_model": iforest_detector.model if hasattr(iforest_detector, 'model') else None,
             "gmm_model": gmm_detector.model if hasattr(gmm_detector, 'model') else None,
             "omr_model": omr_detector.to_dict() if omr_detector and omr_detector._is_fitted else None,
-            "regime_model": regime_model.model if regime_model and hasattr(regime_model, 'model') else None,
+            "regime_model": regime_model,  # Full RegimeModel object, not just .model
             "feature_medians": col_meds,
         }
         

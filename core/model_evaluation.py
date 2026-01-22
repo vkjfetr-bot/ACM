@@ -403,9 +403,47 @@ def auto_tune_parameters(
         equip: Equipment name for logging
         output_manager: Optional OutputManager for refit request persistence
         cached_manifest: Optional cached model manifest for age checks
+        
+    v11.5.0: CRITICAL FIX - Refit Request Guard
+    ============================================
+    In ONLINE mode (score-only), do NOT write refit requests. These requests
+    created a feedback loop during historical batch processing:
+    
+    1. Batch N scores data, metrics look poor (expected during calibration)
+    2. auto_tune writes refit request
+    3. Batch N+1 checks refit_request, triggers full refit
+    4. Models change, thresholds shift
+    5. Repeat - models never stabilize
+    
+    Correct behavior:
+    - ONLINE mode: Score only, log quality metrics, but never trigger refit
+    - OFFLINE mode: Can request refit if quality truly degraded
+    - Scheduled refresh: Use separate mechanism (model age, scheduled jobs)
     """
     if not cfg.get("models", {}).get("auto_tune", True):
         return
+    
+    # v11.6.0 FIX #3: Skip refit evaluation entirely for CONVERGED models
+    # CONVERGED models are stable and should NOT trigger refit requests.
+    # This prevents 170+ spurious refit requests for stable equipment.
+    model_maturity = cfg.get("runtime", {}).get("model_maturity_state", "LEARNING")
+    if model_maturity == "CONVERGED":
+        Console.info(
+            "Auto-tune: Skipping refit evaluation - model is CONVERGED (stable)",
+            component="AUTO-TUNE", equip=equip, maturity=model_maturity
+        )
+        return
+    
+    # v11.5.0: Check pipeline mode - do NOT write refit requests in ONLINE mode
+    # Refit requests during historical batch processing cause infinite refit loops
+    pipeline_mode = cfg.get("runtime", {}).get("pipeline_mode", "offline")
+    allow_refit_requests = (pipeline_mode != "online")
+    
+    if not allow_refit_requests:
+        Console.info(
+            "Auto-tune: ONLINE mode - quality assessment only (no refit requests)",
+            component="AUTO-TUNE", equip=equip, pipeline_mode=pipeline_mode
+        )
     
     try:
         from core.config_history_writer import log_auto_tune_changes
@@ -518,7 +556,8 @@ def auto_tune_parameters(
             refit_triggered = False
             try:
                 if sql_client and run_id:
-                    trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False)
+                    # v11.5.0: Only trigger refit if allowed by pipeline mode
+                    trigger_refit_on_tune = auto_retrain_cfg.get("on_tuning_change", False) and allow_refit_requests
                     log_auto_tune_changes(
                         sql_client=sql_client,
                         equip_id=int(equip_id),
@@ -532,10 +571,12 @@ def auto_tune_parameters(
                             equip=equip, error=str(log_err)[:200])
             
             # Consolidated auto-tune log
-            Console.info(f"Auto-tune: {len(tuning_actions)} adjustments ({', '.join(tuning_actions)}) | refit={'triggered' if refit_triggered else 'next_run'}", component="AUTO-TUNE")
+            mode_note = " (ONLINE - refit blocked)" if not allow_refit_requests else ""
+            Console.info(f"Auto-tune: {len(tuning_actions)} adjustments ({', '.join(tuning_actions)}) | refit={'triggered' if refit_triggered else 'next_run'}{mode_note}", component="AUTO-TUNE")
         
-        # Persist refit request for next run via output_manager
-        if output_manager:
+        # v11.5.0: Only persist refit request if pipeline mode allows it
+        # In ONLINE mode, we assess quality but do NOT request refit to prevent loops
+        if output_manager and allow_refit_requests and needs_retraining:
             output_manager.write_refit_request(
                 reasons=reasons,
                 anomaly_rate=current_anomaly_rate if anomaly_rate_trigger else None,

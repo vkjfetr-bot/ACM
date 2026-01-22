@@ -193,7 +193,27 @@ def fit_all_detectors(
             - ar1_detector, pca_detector, iforest_detector, gmm_detector, omr_detector
             - pca_train_spe, pca_train_t2 (cached PCA scores)
             - fit_time_sec (total fitting time)
+    
+    v11.6.0 FIX #5: Training data subsampling
+    ==========================================
+    Large training datasets (26K+ rows) cause 2+ hour runs due to O(n²) operations
+    in PCA/HDBSCAN. This function now subsamples to max_train_samples (default 10K)
+    using stratified sampling that preserves time distribution.
     """
+    # v11.6.0 FIX #5: Subsample training data to prevent 2+ hour runs
+    max_train_samples = cfg.get("models", {}).get("max_train_samples", 10000)
+    original_train_size = len(train)
+    
+    if len(train) > max_train_samples:
+        # Use stratified sampling that preserves temporal distribution
+        # Take evenly spaced samples to maintain time coverage
+        sample_indices = np.linspace(0, len(train) - 1, max_train_samples, dtype=int)
+        train = train.iloc[sample_indices].copy()
+        Console.info(
+            f"Subsampled training data: {original_train_size:,} -> {len(train):,} rows (max_train_samples={max_train_samples:,})",
+            component="TRAIN", original=original_train_size, sampled=len(train)
+        )
+    
     result = {
         "ar1_detector": ar1_detector,
         "pca_detector": pca_detector,
@@ -603,22 +623,22 @@ def rebuild_detectors_from_cache(
             result["omr_detector"] = omr_detector
         
         # Regime model - AUDIT FIX: Enhanced validation
+        # v11.6.1 FIX: cached_models["regime_model"] is already a serialized RegimeModel instance
+        # Don't try to create a new one - just use the deserialized object directly
         if "regime_model" in cached_models and cached_models["regime_model"]:
-            regime_model = RegimeModel()
-            regime_model.model = cached_models["regime_model"]
+            regime_model = cached_models["regime_model"]  # Already a RegimeModel (joblib deserialized)
             
             if cached_manifest:
                 result["regime_quality_ok"] = cached_manifest.get("models", {}).get("regimes", {}).get("quality", {}).get("quality_ok", True)
             
             # AUDIT FIX: Validate regime model is not None
-            if regime_model.model is None:
+            if regime_model is None:
                 Console.warn("Cached regime model is None; discarding.", component="REGIME", equip=equip)
-                regime_model = None
             
             # AUDIT FIX: Validate regime model feature compatibility
             # Regime models use cluster centers which have n_features dimensions
-            elif current_columns and hasattr(regime_model.model, 'cluster_centers_'):
-                n_features_cached = regime_model.model.cluster_centers_.shape[1]
+            elif current_columns and hasattr(regime_model, 'cluster_centers_'):
+                n_features_cached = regime_model.cluster_centers_.shape[1]
                 # Regime basis might be a subset of all columns - get from manifest
                 regime_n_features = cached_manifest.get("models", {}).get("regimes", {}).get("n_features")
                 

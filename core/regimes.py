@@ -1630,6 +1630,16 @@ def predict_regime(model: RegimeModel, basis_df: pd.DataFrame) -> np.ndarray:
     
     aligned = basis_df.reindex(columns=model.feature_columns, fill_value=0.0)
     aligned_arr = aligned.to_numpy(dtype=np.float64, copy=False, na_value=0.0)
+    
+    # v11.6.0 FIX #1: None-guard for scaler.transform()
+    # Models loaded from corrupted SQL ModelRegistry may have None scaler
+    if model.scaler is None:
+        raise ValueError(
+            f"[REGIME] Cannot predict: model.scaler is None. "
+            f"Model may be corrupted - delete and retrain. "
+            f"Features: {model.feature_columns[:3]}..."
+        )
+    
     X_scaled = model.scaler.transform(aligned_arr)
     X_scaled = np.asarray(X_scaled, dtype=np.float64, order="C")
     
@@ -3160,6 +3170,14 @@ def label(score_df, ctx: Dict[str, Any], score_out: Dict[str, Any], cfg: Dict[st
         # Compute training distances for establishing threshold
         aligned_train = basis_train.reindex(columns=regime_model.feature_columns, fill_value=0.0)
         train_arr = aligned_train.to_numpy(dtype=np.float64, copy=False, na_value=0.0)
+        
+        # v11.6.0 FIX #1: Validate scaler before transform
+        if regime_model.scaler is None:
+            raise ValueError(
+                f"[REGIME] Cannot compute distances: regime_model.scaler is None. "
+                f"Cached model may be corrupted - delete from ModelRegistry and retrain."
+            )
+        
         train_scaled = regime_model.scaler.transform(train_arr)
         centers = regime_model.cluster_centers_  # v11.1.0: Property works for HDBSCAN/GMM
         # V11 FIX: Vectorized distance computation (50-100x faster than list comprehension)

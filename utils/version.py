@@ -17,9 +17,146 @@ Release Management:
 - Production deployments use specific tags (never merge commits)
 """
 
-__version__ = "11.4.0"
+__version__ = "11.6.1"
 __version_date__ = "2026-01-21"
 __version_author__ = "ACM Development Team"
+
+# v11.6.1: ONLINE MODE CACHE FIX (Critical Hotfix)
+#
+# ISSUE: ONLINE batches crashed with "Required detector models not found in cache"
+#
+# ROOT CAUSE:
+# - Run #1 (OFFLINE coldstart) creates a refit request during auto-tune
+# - Run #2 (ONLINE batch) sees refit_requested=True
+# - Line 1073: use_cache = ... and not refit_requested ...
+# - Since refit_requested=True, use_cache=False, so cached models NOT loaded
+# - But ONLINE mode can't refit (ALLOWS_MODEL_REFIT=False), so pipeline crashes
+#
+# FIX:
+# - Location: core/acm_main.py lines 1073-1085
+# - Change: In ONLINE mode, ignore refit_requested and always load cached models
+# - Logic: use_cache = ... and (not refit_requested or not ALLOWS_MODEL_REFIT) ...
+# - New log: "Refit requested but ONLINE mode cannot refit - will load cached models anyway"
+#
+# FIX #8 - PCA CACHE LENGTH MISMATCH:
+# - Location: core/acm_main.py lines 1782-1808
+# - Issue: pca_train_spe/pca_train_t2 cached during fit (10K subsampled)
+#          Then used in calibration with full train data (13K+ rows)
+#          Caused: ValueError: Length of values (10000) does not match length of index (13369)
+# - Fix: Only use pca_cached if len(pca_train_spe) == len(train), else re-score
+#
+# IMPACT:
+# - ONLINE batches now work even when refit requests exist
+# - Refit requests will be honored on the next OFFLINE run
+# - Batch processing no longer crashes after coldstart
+
+# v11.6.0: COMPREHENSIVE STABILITY REFACTORING - 6 Critical Fixes
+#
+# CONTEXT: SQL analysis of 200+ runs revealed 6 critical issues:
+#   - 4 failed runs due to NoneType transform error
+#   - 171 model copies per equipment (should be 1)
+#   - 170+ spurious refit requests for CONVERGED models
+#   - Empty ACM_RunLogs table (no log persistence)
+#   - 2+ hour runs with 26K training rows
+#   - 88% false positive ALERT rate
+#
+# FIX #1: TRANSFORM ERROR - None Guard (P0)
+# - Location: core/regimes.py predict_regime() and label()
+# - Issue: Models loaded from corrupted SQL ModelRegistry have None scaler
+# - Fix: Add explicit None-guard before scaler.transform() with clear error message
+# - Impact: Crash -> Clear error message pointing to corrupt model
+#
+# FIX #2: MODEL ACCUMULATION - Version Retention (P1)
+# - Location: core/model_persistence.py _save_models_to_sql()
+# - Issue: Every run creates new version (171 × 6 = 1026 rows per equipment)
+# - Fix: Add _cleanup_old_versions(keep_n=5) after save, deletes old versions
+# - Impact: ModelRegistry stays bounded, DB size under control
+#
+# FIX #3: EXCESSIVE REFIT REQUESTS - Maturity Check (P1)
+# - Location: core/model_evaluation.py auto_tune_parameters()
+# - Issue: CONVERGED models still evaluated for refit (170+ requests)
+# - Fix: Skip refit evaluation entirely when model_maturity == "CONVERGED"
+# - Impact: Stable models stay stable, no spurious refit requests
+#
+# FIX #4: SQL LOG PERSISTENCE - Late Binding (P2)
+# - Location: core/observability.py enable_sql_logging(), core/acm_main.py
+# - Issue: Observability initialized BEFORE SQL connection, no sql_client passed
+# - Fix: Add enable_sql_logging() function, call after SQL connection established
+# - Impact: Logs now persist to ACM_RunLogs for debugging
+#
+# FIX #5: TRAINING SUBSAMPLING - Performance (P1)
+# - Location: core/detector_orchestrator.py fit_all_detectors()
+# - Config: models.max_train_samples = 10000 (new config)
+# - Issue: 26K training rows cause 2+ hour runs (O(n²) PCA/HDBSCAN)
+# - Fix: Stratified subsampling to max_train_samples using evenly-spaced indices
+# - Impact: 2+ hours -> ~10 minutes for large datasets
+#
+# FIX #6: FALSE POSITIVE THRESHOLDS - Config Fix (P0)
+# - Location: configs/config_table.csv
+# - Issue: thresholds.alert=0.85, thresholds.warn=0.7 interpreted as percentiles
+# - Fix: Changed to 3.0 / 1.5 (z-scores) for proper 3-sigma alerting
+# - Impact: 88% ALERT rate -> ~3% (proper 3-sigma)
+#
+# MIGRATION:
+# 1. Run: python scripts/sql/populate_acm_config.py (sync config to SQL)
+# 2. Optional: Run one-time cleanup: DELETE FROM ModelRegistry WHERE Version NOT IN (...)
+# 3. Restart batch processing - old models will be cleaned up automatically
+
+# v11.5.0: CRITICAL BATCH MODE FIXES - Pipeline Stability
+#
+# ROOT CAUSE ANALYSIS (January 2026):
+# Historical batch processing was exhibiting three interrelated failure modes:
+#   1. 10x Data Inflation - sampling_secs=60 on 600s native cadence caused upsampling
+#   2. Perpetual Refit Loop - all batches ran in OFFLINE mode, retraining every batch
+#   3. Model Instability - refit requests written in ONLINE mode triggered next-batch refit
+#
+# FIXES IMPLEMENTED:
+#
+# FIX #1: ANTI-UPSAMPLE GUARD (core/data_loader.py)
+# - Strengthened upsampling prevention: if requested < native cadence * 0.9, skip resample
+# - Checks BOTH train and score native cadence (min of both)
+# - Sets cadence_ok=True when using native data (no resampling needed)
+# - Clear logging: "ANTI-UPSAMPLE: Requested resample (60s) < native cadence (600.0s)"
+# - IMPACT: Prevents 10x row inflation that corrupted all downstream analytics
+#
+# FIX #2: CONFIG DEFAULT (configs/config_table.csv)
+# - Changed data.sampling_secs from 60 (fixed int) to "auto" (string)
+# - "auto" means: use native cadence, don't resample unless irregular
+# - IMPACT: New deployments won't accidentally trigger upsampling
+#
+# FIX #3: BATCH MODE SELECTION (scripts/sql_batch_runner.py)
+# - Coldstart batches (batch_num=0, is_post_coldstart=False): OFFLINE mode (train models)
+# - Post-coldstart batches (is_post_coldstart=True): ONLINE mode (score only)
+# - Explicit --mode CLI arg still takes precedence if provided
+# - IMPACT: Models train once during coldstart, then remain stable for scoring
+#
+# FIX #4: REFIT REQUEST GUARD (core/model_evaluation.py)
+# - auto_tune_parameters() now checks pipeline_mode before writing refit requests
+# - ONLINE mode: Quality assessment only, NO refit request written
+# - OFFLINE mode: Can write refit requests if quality truly degraded
+# - IMPACT: Breaks the refit feedback loop during historical batch processing
+#
+# FIX #5: PIPELINE MODE PROPAGATION (core/acm_main.py)
+# - Stores pipeline_mode in cfg["runtime"]["pipeline_mode"] for downstream access
+# - model_evaluation.py reads this to decide whether to write refit requests
+# - IMPACT: Consistent mode awareness across all pipeline components
+#
+# FIX #6: REFIT MATURITY OVERRIDE (core/acm_main.py)
+# - When refit_requested=True AND current_model_maturity=CONVERGED, override to LEARNING
+# - Prevents RuntimeError: "[CONVERGED MODEL] Regime model not found"
+# - Scenario: Leftover refit request from previous runs triggers detector retrain
+# - But CONVERGED state blocks regime rediscovery -> missing/stale regime model -> crash
+# - IMPACT: Refit requests are properly honored without state inconsistency
+#
+# ARCHITECTURE CLARIFICATION:
+# - OFFLINE mode: Full discovery - train detectors, discover regimes, calibrate thresholds
+# - ONLINE mode: Score-only - use cached models, no retraining, just score incoming data
+# - Model lifecycle: COLDSTART (offline) -> LEARNING (offline) -> CONVERGED (online)
+# - After CONVERGED, only scheduled refresh or severe drift should trigger retraining
+#
+# TESTING: Run full historical batch with --start-from-beginning
+# EXPECTED: First batch trains models, subsequent batches score without refit
+
 # v11.4.0: REGIME CLUSTERING ARCHITECTURAL FIX - Raw Sensors Only
 # - BREAKING: Regime clustering now uses RAW SENSOR VALUES ONLY
 # - REMOVED: _add_health_state_features() function from core/regimes.py

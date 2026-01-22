@@ -1,6 +1,6 @@
 # ACM - Automated Condition Monitoring
 
-[![Version](https://img.shields.io/badge/version-11.4.0-blue)](#) [![Status](https://img.shields.io/badge/status-Production-brightgreen)](#) [![Python](https://img.shields.io/badge/python-3.11+-blue)](#) [![SQL Server](https://img.shields.io/badge/SQL%20Server-2019%2B-blue)](#)
+[![Version](https://img.shields.io/badge/version-11.5.0-blue)](#) [![Status](https://img.shields.io/badge/status-Production-brightgreen)](#) [![Python](https://img.shields.io/badge/python-3.11+-blue)](#) [![SQL Server](https://img.shields.io/badge/SQL%20Server-2019%2B-blue)](#)
 
 **Predictive Maintenance for Industrial Equipment**
 
@@ -786,6 +786,56 @@ python scripts/sql/populate_acm_config.py
 ---
 
 ## Running ACM
+
+### Pipeline Modes (v11.5.0)
+
+ACM operates in two distinct pipeline modes that control model behavior:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PIPELINE MODE SELECTION                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  OFFLINE MODE (Training)              ONLINE MODE (Scoring)                 │
+│  ─────────────────────                ────────────────────                  │
+│  • Train detector models              • Use cached models only              │
+│  • Discover operating regimes         • No regime discovery                 │
+│  • Calibrate thresholds               • Score incoming data                 │
+│  • Full feature engineering           • Apply existing thresholds           │
+│                                                                             │
+│  Use for:                             Use for:                              │
+│  • Coldstart (first run)              • Production scoring                  │
+│  • Historical backfill                • Real-time monitoring                │
+│  • Scheduled model refresh            • After models CONVERGED              │
+│  • After config changes               • Normal batch processing             │
+│                                                                             │
+│  BATCH MODE SELECTION (sql_batch_runner.py):                                │
+│  ───────────────────────────────────────────                                │
+│  Coldstart batch (no models exist)   → OFFLINE (train once)                 │
+│  Post-coldstart batches              → ONLINE (score only)                  │
+│  Explicit --mode override            → Uses specified mode                  │
+│                                                                             │
+│  IMPORTANT: Models must stabilize before reliable RUL predictions.          │
+│  The batch runner automatically handles mode selection.                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Resampling (v11.5.0 Anti-Upsample Guard)
+
+ACM NEVER upsamples data. If `data.sampling_secs` is set to a value smaller than the native data cadence, ACM will use the native cadence instead:
+
+```
+Native cadence: 600 seconds (10-minute intervals)
+Config sampling_secs: 60 seconds (requested)
+
+Result: ACM uses 600 seconds (native) - NO UPSAMPLING
+Log: "ANTI-UPSAMPLE: Requested resample (60s) < native cadence (600.0s)"
+```
+
+**Why this matters**: Upsampling creates synthetic data via interpolation, inflating row counts 10x and corrupting calibration, anomaly detection, and all downstream analytics.
+
+**Recommended config**: Set `data.sampling_secs` to `auto` (string) to always use native cadence.
 
 ### Option 1: Production Batch Processing (Recommended)
 
