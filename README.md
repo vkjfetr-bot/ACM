@@ -124,7 +124,6 @@ Industrial equipment fails without warning. Maintenance teams face a costly trad
 | **Observability** | OpenTelemetry, Tempo, Loki, Prometheus | Tracing, logging, metrics |
 | **Profiling** | Grafana Pyroscope | Performance analysis |
 
-# VJ : Comments from VJ
 ---
 
 ## Core Concepts
